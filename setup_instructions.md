@@ -2,12 +2,12 @@
 
 ## CMSSW
 
-I'm picking a very high version of CMSSW to include Phase-II stuff:
+For 2024, I'm picking `CMSSW_14_0_24_patch1`. For Phase-II, replace with something like `CMSSW_20_1_0_pre1`
 
 ```bash
 source /cvmfs/cms.cern.ch/cmsset_default.sh
-cmsrel CMSSW_20_1_0_pre1
-cd CMSSW_20_1_0_pre1/src/
+cmsrel CMSSW_14_0_24_patch1
+cd CMSSW_14_0_24_patch1/src/
 cmsenv
 git config --global user.github jniedzie
 git cms-init
@@ -17,7 +17,7 @@ Then, I create a branch for my modifications:
 
 ```bash
 git checkout -b shift/fixed-target-gen
-git checkout shift/fixed-target-gen 2>/dev/null || git checkout -b shift/fixed-target-gen from-CMSSW_20_1_0_pre1
+git checkout shift/fixed-target-gen 2>/dev/null || git checkout -b shift/fixed-target-gen from-CMSSW_14_0_24_patch1
 ```
 
 I add the Configuration module:
