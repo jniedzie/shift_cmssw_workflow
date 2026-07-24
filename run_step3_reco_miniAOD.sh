@@ -1,25 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PWD0=$(pwd)
-if [[ -n "${CMSSW_BASE:-}" ]]; then
-	DEFAULT_WORKDIR="$CMSSW_BASE/../shift_runs/test_run4d126"
-else
-	DEFAULT_WORKDIR="$PWD0/../shift_runs/test_run4d126"
-fi
-WORKDIR="${WORKDIR:-$DEFAULT_WORKDIR}"
-N_EVENTS="${N_EVENTS:-10}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
+CHUNK="${1:-0}"
+source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
+N_EVENTS="${2:-$N_EVENTS}"
+WORKDIR="${WORKDIR:-$SAMPLE_DIR/step3}"
 
 GEOMETRY="DB:Extended"
 ERA="Run3_2024"
 CONDITIONS="auto:phase1_2024_realistic"
 
-trap 'cd "$PWD0"' EXIT
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-if [[ ! -s step2.root ]]; then
-	echo "ERROR: $WORKDIR/step2.root is missing or empty" >&2
+INPUT="../step2/events_step2_part${PART}.root"
+if [[ ! -s "$INPUT" ]]; then
+	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
 	exit 1
 fi
 
@@ -31,10 +29,10 @@ cmsDriver.py step3 \
 	--eventcontent MINIAODSIM \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
-	--filein file:step2.roo \
-	--fileout file:step3.root \
-	--python_filename step3_cfg.py \
+	--filein "file:$INPUT" \
+	--fileout "file:events_step3_part${PART}.root" \
+	--python_filename "events_step3_part${PART}_cfg.py" \
 	--no_exec \
 	-n "$N_EVENTS"
 
-cmsRun step3_cfg.py 2>&1 | tee step3.log
+cmsRun "events_step3_part${PART}_cfg.py" 2>&1 | tee "events_step3_part${PART}.log"

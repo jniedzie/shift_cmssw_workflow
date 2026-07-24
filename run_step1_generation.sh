@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${CMSSW_BASE:?Run cmsenv first so CMSSW_BASE is defined}"
-PWD0=$(pwd)
-WORKDIR="${SHIFT_RUN_DIR:-${CMSSW_BASE}/../shift_runs/test_run4d126}"
-N_EVENTS="${N_EVENTS:-10}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
+CHUNK="${1:-0}"
+source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
+N_EVENTS="${2:-$N_EVENTS}"
+WORKDIR="${WORKDIR:-$SAMPLE_DIR/step1}"
 
 GEOMETRY="DB:Extended"
 ERA="Run3_2024"
@@ -12,7 +14,6 @@ CONDITIONS="auto:phase1_2024_realistic"
 BEAMSPOT="Realistic25ns13p6TeVEarly2023Collision"
 FRAGMENT="Configuration/GenProduction/QCD_pThat_15to30_13p6TeV_pythia8_cff.py"
 
-trap 'cd "$PWD0"' EXIT
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
@@ -24,9 +25,9 @@ cmsDriver.py "$FRAGMENT" \
 	--eventcontent FEVTDEBUG \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
-	--fileout file:step1.root \
-	--python_filename step1_cfg.py \
+	--fileout "file:events_step1_part${PART}.root" \
+	--python_filename "events_step1_part${PART}_cfg.py" \
 	--no_exec \
 	-n "$N_EVENTS"
 
-cmsRun step1_cfg.py 2>&1 | tee step1.log
+cmsRun "events_step1_part${PART}_cfg.py" 2>&1 | tee "events_step1_part${PART}.log"

@@ -1,0 +1,12 @@
+universe              = vanilla
+executable            = scripts/run_condor_job.sh
+should_transfer_files = NO
+getenv                = True
+request_cpus          = 1
+request_memory        = 2500 MB
+CHUNK                 = $(Process)
+arguments             = $(CHUNK)
+output                = condor/logs/$(ClusterId).$(Process).out
+error                 = condor/logs/$(ClusterId).$(Process).err
+log                   = condor/logs/$(ClusterId).log
+queue 10
