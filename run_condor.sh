@@ -13,5 +13,6 @@ fi
 
 submit_file="$(mktemp "$SCRIPT_DIR/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
-sed "s/<n_jobs>/$N_JOBS/g" "$SCRIPT_DIR/condor/shift_cmssw.sub" > "$submit_file"
+sed "s|<n_jobs>|$N_JOBS|g; s|<sample_dir>|$SAMPLE_DIR|g" \
+	"$SCRIPT_DIR/condor/shift_cmssw.sub" > "$submit_file"
 condor_submit "$submit_file"
