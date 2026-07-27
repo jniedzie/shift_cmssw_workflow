@@ -17,8 +17,8 @@ cmsenv
 cd "$WORKFLOW_ROOT"
 
 mkdir -p "$SAMPLE_DIR/samples/step1" "$SAMPLE_DIR/samples/step2" "$SAMPLE_DIR/samples/step3" "$SAMPLE_DIR/samples/step4" \
-	"$SAMPLE_DIR/logs/step1" "$SAMPLE_DIR/logs/step2" "$SAMPLE_DIR/logs/step3" "$SAMPLE_DIR/logs/step4" \
-	"$SAMPLE_DIR/configs/step1" "$SAMPLE_DIR/configs/step2" "$SAMPLE_DIR/configs/step3" "$SAMPLE_DIR/configs/step4" \
-	"$SAMPLE_DIR/condor/logs" "$WORKFLOW_ROOT/condor/logs"
+	"$SAMPLE_DIR/logs" \
+	"$SAMPLE_DIR/configs/step1" "$SAMPLE_DIR/configs/step2" "$SAMPLE_DIR/configs/step3" "$SAMPLE_DIR/configs/step4"
+
 
 export WORKFLOW_ROOT CMSSW_SRC SAMPLE_BASE SAMPLE_NAME CAMPAIGN_NAME SAMPLE_DIR PART

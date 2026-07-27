@@ -9,7 +9,7 @@ N_EVENTS="${2:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$SAMPLE_DIR/samples/step2"
 CONFIG_DIR="$SAMPLE_DIR/configs/step2"
-LOG_DIR="$SAMPLE_DIR/logs/step2"
+LOG_DIR="$SAMPLE_DIR/logs"
 GEOMETRY="DB:Extended"
 ERA="Run3_2024"
 CONDITIONS="auto:phase1_2024_realistic"
@@ -37,4 +37,4 @@ cmsDriver.py step2 \
 	--no_exec \
 	-n "$N_EVENTS"
 
-cmsRun "$CONFIG_DIR/events_step2_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/events_step2_part${PART}.log"
+cmsRun "$CONFIG_DIR/events_step2_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step2_events_part${PART}.log"

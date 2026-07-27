@@ -43,7 +43,7 @@ To override the part (first argument) or event count (second argument) without e
 ./run_step1_generation.sh 1 10
 ```
 
-Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for generated configs, and `$SAMPLE_DIR/logs/stepN/` for logs.
+Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for generated configs, and `$SAMPLE_DIR/logs/` for all logs.
 
 ## Condor execution
 
@@ -57,7 +57,7 @@ To inspect jobs and logs:
 
 ```bash
 condor_q
-ls condor/logs/
+ls "$SAMPLE_DIR/logs/"
 source config/workflow.env
 find "$SAMPLE_DIR" -mindepth 2 -maxdepth 2 -type f -name '*part*.root'
 ```
