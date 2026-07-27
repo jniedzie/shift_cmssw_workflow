@@ -10,32 +10,34 @@ OUTPUT_FILE="$2"
 SAMPLE="$3"
 LOCK_FILE="${OUTPUT_FILE}.lock"
 
-# Pythia8's statistics summary contains, depending on the CMSSW/Pythia
-# version, either "sigmaGen = ..." or "sigmaGen ..." followed by sigmaErr.
-line=$(rg -i 'sigmaGen' "$LOG_FILE" | tail -n 1 || true)
-if [[ -z "$line" ]]; then
-	echo "Could not find Pythia sigmaGen in $LOG_FILE" >&2
+before_line=$(grep -i 'Before Filter: total cross section' "$LOG_FILE" | tail -n 1 || true)
+after_line=$(grep -i 'After filter: final cross section' "$LOG_FILE" | tail -n 1 || true)
+if [[ -z "$before_line" || -z "$after_line" ]]; then
+	echo "Could not find GenXsecAnalyzer cross sections in $LOG_FILE" >&2
 	exit 1
 fi
 
-if [[ "$line" =~ sigmaGen[[:space:]]*=?[[:space:]]*([0-9.eE+-]+)[[:space:]]*(GeV|mb|pb|fb)? ]]; then
-	sigma="${BASH_REMATCH[1]}"
-	unit="${BASH_REMATCH[2]:-mb}"
-	error=""
-[[ "$line" =~ (sigmaErr|error)[[:space:]]*=?[[:space:]]*([0-9.eE+-]+) ]] && error="${BASH_REMATCH[2]}"
-else
-	echo "Could not parse Pythia sigmaGen line: $line" >&2
+parse_cross_section() {
+	local line="$1"
+	printf '%s\n' "$line" | sed -nE 's/.*=[[:space:]]*([0-9.eE+-]+)[[:space:]]*\+[-][[:space:]]*([0-9.eE+-]+)[[:space:]]*(GeV|mb|pb|fb).*/\1 \2 \3/p'
+}
+
+read -r before before_error unit < <(parse_cross_section "$before_line") || {
+	echo "Could not parse Before Filter cross section: $before_line" >&2
 	exit 1
-fi
+}
+read -r after after_error after_unit < <(parse_cross_section "$after_line") || {
+	echo "Could not parse After filter cross section: $after_line" >&2
+	exit 1
+}
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 exec 9>"$LOCK_FILE"
 flock 9
 tmp_file="${OUTPUT_FILE}.tmp.$$"
 {
-	printf '# Latest Pythia generator cross sections (updated atomically; unit is %s)\n' "$unit"
-	printf '%s sigmaGen=%s' "$SAMPLE" "$sigma"
-[[ -n "$error" ]] && printf ' sigmaErr=%s' "$error"
-	printf '\n'
+	printf '# Latest GenXsecAnalyzer cross sections (updated atomically)\n'
+	printf '%s before_filter=%s +- %s %s after_filter=%s +- %s %s\n' \
+		"$SAMPLE" "$before" "$before_error" "$unit" "$after" "$after_error" "$after_unit"
 } > "$tmp_file"
 mv -f "$tmp_file" "$OUTPUT_FILE"
