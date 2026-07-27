@@ -42,3 +42,10 @@ cmsDriver.py "$FRAGMENT" \
 	-n "$N_EVENTS"
 
 cmsRun "$CONFIG_DIR/events_step1_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step1_events_part${PART}.log"
+
+# Pythia prints the generated cross section and its statistical uncertainty in
+# the end-of-job summary.  Keep one shared, latest value for this sample.
+"$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
+	"$LOG_DIR/step1_events_part${PART}.log" \
+	"$SAMPLE_DIR/cross_sections.txt" \
+	"$(basename "$FRAGMENT" .py)"
