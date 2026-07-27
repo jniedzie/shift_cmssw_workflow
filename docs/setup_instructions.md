@@ -7,7 +7,7 @@ Edit only `config/workflow.env` before a run:
 | Variable | Set to |
 | --- | --- |
 | `CMSSW_SRC` | Absolute path to the CMSSW `src` directory containing the installed release. |
-| `PNFS_BASE` | Base directory where workflow data may be written. |
+| `SAMPLE_BASE` | Base directory where workflow data may be written. |
 | `SAMPLE_NAME` | Sample identifier used in the output directory. |
 | `CAMPAIGN_NAME` | Campaign identifier used in the output directory. |
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
@@ -20,10 +20,10 @@ From the workflow repository, inspect the resolved values with:
 
 ```bash
 source config/workflow.env
-printf 'CMSSW_SRC=%s\nPNFS_BASE=%s\nSAMPLE_DIR=%s\n' "$CMSSW_SRC" "$PNFS_BASE" "$SAMPLE_DIR"
+printf 'CMSSW_SRC=%s\nSAMPLE_BASE=%s\nSAMPLE_DIR=%s\n' "$CMSSW_SRC" "$SAMPLE_BASE" "$SAMPLE_DIR"
 ```
 
-`CMSSW_SRC` must exist and be a CMSSW `src` directory. `PNFS_BASE` must be writable on the execution site.
+`CMSSW_SRC` must exist and be a CMSSW `src` directory. `SAMPLE_BASE` must be writable on the execution site.
 
 ## Bootstrap behavior
 
