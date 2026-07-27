@@ -11,6 +11,7 @@ Edit only `config/workflow.env` before a run:
 | `SAMPLE_NAME` | Sample identifier used in the output directory. |
 | `CAMPAIGN_NAME` | Campaign identifier used in the output directory. |
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
+| `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
 
 `SAMPLE_DIR` is derived automatically from the other four path/name variables. Do not hardcode `SAMPLE_DIR` elsewhere.
 
@@ -46,7 +47,7 @@ Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for
 
 ## Condor execution
 
-Configure the workflow as described above. Then, set the number of jobs in the `queue` variable of `condor/submit_cmssw.sub` script. Then run:
+Configure the workflow as described above, including `N_JOBS`. Then run:
 
 ```bash
 ./run_condor.sh
