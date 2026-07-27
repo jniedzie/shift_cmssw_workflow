@@ -15,7 +15,6 @@ GEOMETRY="DB:Extended"
 ERA="Run3_2024"
 CONDITIONS="auto:phase1_2024_realistic"
 BEAMSPOT="Realistic25ns13p6TeVEarly2023Collision"
-FRAGMENT="Configuration/GenProduction/QCD_pThat_15to30_13p6TeV_pythia8_cff.py"
 
 # Generate a fresh CMSSW-compatible seed for every generation invocation.
 # Reading from /dev/urandom avoids reusing cmsDriver's default seed.
@@ -27,7 +26,7 @@ cd "$WORKDIR"
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED"
-cmsDriver.py "$FRAGMENT" \
+cmsDriver.py "$PYTHIA_CONFIG" \
 	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
 	--beamspot "$BEAMSPOT" \
@@ -48,4 +47,4 @@ cmsRun "$CONFIG_DIR/events_step1_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step1_
 "$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
 	"$LOG_DIR/step1_events_part${PART}.log" \
 	"$SAMPLE_DIR/cross_sections.txt" \
-	"$(basename "$FRAGMENT" .py)"
+	"$(basename "$PYTHIA_CONFIG" .py)"

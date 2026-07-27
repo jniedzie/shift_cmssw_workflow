@@ -12,8 +12,9 @@ Edit only `config/workflow.env` before a run:
 | `CAMPAIGN_NAME` | Campaign identifier used in the output directory. |
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
+| `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
 
-`SAMPLE_DIR` is derived automatically from the other four path/name variables. Do not hardcode `SAMPLE_DIR` elsewhere.
+`SAMPLE_DIR` is derived automatically from the path/name variables. Do not hardcode `SAMPLE_DIR` elsewhere.
 
 ## Check the configuration
 

@@ -1,7 +1,10 @@
 #!/bin/bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/config/workflow.env"
+
 echo "Running cmsDriver.py to prepare the generation config"
 
-cmsDriver.py Configuration/GenProduction/QCD_pThat_15to30_13p6TeV_pythia8_cff.py \
+cmsDriver.py "$PYTHIA_CONFIG" \
   --python_filename qcd_gen_test.py \
   --eventcontent RAWSIM \
   --datatier GEN \
