@@ -37,8 +37,7 @@ The Condor submit file passes `$(Process)` as the wrapper's first argument. The 
 Before submitting, verify `config/workflow.env` and run:
 
 ```bash
-./scripts/prepare_condor.sh
-condor_submit condor/shift_cmssw.sub
+./run_condor.sh
 ```
 
 The submit file controls the job count through its `queue` line. Change that line when changing the number of chunks. Do not put sample, campaign, PNFS, or CMSSW paths in the submit file; those belong in `config/workflow.env`.
