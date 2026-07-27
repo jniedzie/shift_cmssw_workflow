@@ -9,4 +9,4 @@ arguments             = $(CHUNK)
 output                = condor/logs/$(ClusterId).$(Process).out
 error                 = condor/logs/$(ClusterId).$(Process).err
 log                   = condor/logs/$(ClusterId).log
-queue 10
+queue 100
