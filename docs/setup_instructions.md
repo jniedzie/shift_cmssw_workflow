@@ -31,10 +31,10 @@ Every step sources `scripts/setup_cmssw.sh`. It loads the configuration, enters 
 
 ```text
 SAMPLE_DIR/
-  step1/events_step1_partNNNN.root
-  step2/events_step2_partNNNN.root
-  step3/events_step3_partNNNN.root
-  step4/events_NanoAOD_part_NNNN.root
+  samples/step1/events_step1_partNNNN.root
+  samples/step2/events_step2_partNNNN.root
+  samples/step3/events_step3_partNNNN.root
+  samples/step4/events_NanoAOD_part_NNNN.root
   condor/logs/
 ```
 

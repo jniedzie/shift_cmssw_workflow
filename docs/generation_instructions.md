@@ -3,10 +3,10 @@
 The four steps run in order. All chunks share the campaign directory, and their files are distinguished by a zero-padded part number:
 
 ```text
-$SAMPLE_DIR/step1/events_step1_partNNNN.root
-$SAMPLE_DIR/step2/events_step2_partNNNN.root
-$SAMPLE_DIR/step3/events_step3_partNNNN.root
-$SAMPLE_DIR/step4/events_NanoAOD_part_NNNN.root
+$SAMPLE_DIR/samples/step1/events_step1_partNNNN.root
+$SAMPLE_DIR/samples/step2/events_step2_partNNNN.root
+$SAMPLE_DIR/samples/step3/events_step3_partNNNN.root
+$SAMPLE_DIR/samples/step4/events_NanoAOD_part_NNNN.root
 ```
 
 `SAMPLE_DIR` comes from `config/workflow.env`. Each local step takes `PART_NUMBER [EVENT_COUNT]`; the part defaults to `0` and the event count defaults to `N_EVENTS` from the config. Part `1` becomes `PART=0001`.
@@ -28,11 +28,11 @@ To override the part (first argument) or event count (second argument) without e
 ./run_step1_generation.sh 1 10
 ```
 
-Check the corresponding `$SAMPLE_DIR/stepN/` directory after each step. For part `1`, the expected inputs are `step1/events_step1_part0001.root`, `step2/events_step2_part0001.root`, and `step3/events_step3_part0001.root`; Step 4 produces `step4/events_NanoAOD_part_0001.root`.
+Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for generated configs, and `$SAMPLE_DIR/logs/stepN/` for logs. For part `1`, the expected inputs are `samples/step1/events_step1_part0001.root`, `samples/step2/events_step2_part0001.root`, and `samples/step3/events_step3_part0001.root`; Step 4 produces `samples/step4/events_NanoAOD_part_0001.root`.
 
 ## Condor execution
 
-The Condor submit file passes `$(Process)` as the wrapper's first argument. The wrapper reads `N_EVENTS` from `config/workflow.env` and passes both values explicitly to all four steps. No per-job `CHUNK` or `N_EVENTS` environment variable is used. All jobs write into the same `$SAMPLE_DIR`, using distinct filenames. Condor's submit logs are kept in the repository's `condor/logs/`; the workflow's step logs use the same part-qualified filenames under `$SAMPLE_DIR`.
+The Condor submit file passes `$(Process)` as the wrapper's first argument. The wrapper reads `N_EVENTS` from `config/workflow.env` and passes both values explicitly to all four steps. No per-job `CHUNK` or `N_EVENTS` environment variable is used. All jobs write into the same `$SAMPLE_DIR`, using distinct filenames. Condor's submit logs are kept in the repository's `condor/logs/`; the workflow's step logs use the same part-qualified filenames under `$SAMPLE_DIR/logs/stepN/`.
 
 Before submitting, verify `config/workflow.env` and run:
 
