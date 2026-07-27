@@ -19,6 +19,7 @@ cd "$WORKDIR"
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 cmsDriver.py "$FRAGMENT" \
+	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
 	--beamspot "$BEAMSPOT" \
 	--datatier GEN-SIM \
