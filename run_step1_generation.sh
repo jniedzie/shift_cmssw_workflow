@@ -17,10 +17,16 @@ CONDITIONS="auto:phase1_2024_realistic"
 BEAMSPOT="Realistic25ns13p6TeVEarly2023Collision"
 FRAGMENT="Configuration/GenProduction/QCD_pThat_15to30_13p6TeV_pythia8_cff.py"
 
+# Generate a fresh CMSSW-compatible seed for every generation invocation.
+# Reading from /dev/urandom avoids reusing cmsDriver's default seed.
+GENERATOR_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+GENERATOR_SEED=$((GENERATOR_SEED % 900000000 + 1))
+
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
+echo "Generator random seed: $GENERATOR_SEED"
 cmsDriver.py "$FRAGMENT" \
 	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
@@ -31,6 +37,7 @@ cmsDriver.py "$FRAGMENT" \
 	--era "$ERA" \
 	--fileout "file:$OUTPUT_DIR/events_step1_part${PART}.root" \
 	--python_filename "$CONFIG_DIR/events_step1_part${PART}_cfg.py" \
+	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED})" \
 	--no_exec \
 	-n "$N_EVENTS"
 
