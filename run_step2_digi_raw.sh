@@ -17,6 +17,12 @@ CONDITIONS="auto:phase1_2024_realistic"
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
+OUTPUT="$OUTPUT_DIR/events_step2_part${PART}.root"
+if output_is_valid "$OUTPUT"; then
+	echo "Step 2 output already exists and is valid: $OUTPUT"
+	exit 0
+fi
+
 INPUT="$SAMPLE_DIR/samples/step1/events_step1_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
@@ -32,7 +38,7 @@ cmsDriver.py step2 \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
-	--fileout "file:$OUTPUT_DIR/events_step2_part${PART}.root" \
+	--fileout "file:$OUTPUT" \
 	--python_filename "$CONFIG_DIR/events_step2_part${PART}_cfg.py" \
 	--no_exec \
 	-n "$N_EVENTS"

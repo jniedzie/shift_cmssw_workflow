@@ -24,6 +24,12 @@ GENERATOR_SEED=$((GENERATOR_SEED % 900000000 + 1))
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
+OUTPUT="$OUTPUT_DIR/events_step1_part${PART}.root"
+if output_is_valid "$OUTPUT"; then
+	echo "Step 1 output already exists and is valid: $OUTPUT"
+	exit 0
+fi
+
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED"
 cmsDriver.py "$PYTHIA_CONFIG" \
@@ -34,7 +40,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--eventcontent FEVTDEBUG \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
-	--fileout "file:$OUTPUT_DIR/events_step1_part${PART}.root" \
+	--fileout "file:$OUTPUT" \
 	--python_filename "$CONFIG_DIR/events_step1_part${PART}_cfg.py" \
 	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED})" \
 	--no_exec \

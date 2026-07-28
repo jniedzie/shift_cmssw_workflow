@@ -11,8 +11,13 @@ fi
 
 "$SCRIPT_DIR/scripts/prepare_condor.sh"
 
-submit_file="$(mktemp "$SCRIPT_DIR/condor/shift_cmssw.XXXXXX.sub")"
+# Build and register the CMSSW fragment once.  Condor jobs inherit this flag
+# and only run cmsenv; they must not rebuild the shared release concurrently.
+source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
+export CMSSW_PREPARED=1
+
+submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
 sed "s|<n_jobs>|$N_JOBS|g; s|<sample_dir>|$SAMPLE_DIR|g" \
-	"$SCRIPT_DIR/condor/shift_cmssw.sub" > "$submit_file"
+	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
 condor_submit "$submit_file"

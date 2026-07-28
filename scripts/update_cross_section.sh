@@ -10,6 +10,12 @@ OUTPUT_FILE="$2"
 SAMPLE="$3"
 LOCK_FILE="${OUTPUT_FILE}.lock"
 
+# This is aggregate bookkeeping, not a per-job output.  Keep the first
+# successful value and do not require PNFS lock-file creation for every job.
+if [[ -s "$OUTPUT_FILE" ]]; then
+	exit 0
+fi
+
 before_line=$(grep -i 'Before Filter: total cross section' "$LOG_FILE" | tail -n 1 || true)
 after_line=$(grep -i 'After filter: final cross section' "$LOG_FILE" | tail -n 1 || true)
 if [[ -z "$before_line" || -z "$after_line" ]]; then
@@ -32,12 +38,14 @@ read -r after after_error after_unit < <(parse_cross_section "$after_line") || {
 }
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
-exec 9>"$LOCK_FILE"
-flock 9
 tmp_file="${OUTPUT_FILE}.tmp.$$"
 {
 	printf '# Latest GenXsecAnalyzer cross sections (updated atomically)\n'
 	printf '%s before_filter=%s +- %s %s after_filter=%s +- %s %s\n' \
 		"$SAMPLE" "$before" "$before_error" "$unit" "$after" "$after_error" "$after_unit"
 } > "$tmp_file"
-mv -f "$tmp_file" "$OUTPUT_FILE"
+if [[ ! -e "$OUTPUT_FILE" ]]; then
+	mv -f "$tmp_file" "$OUTPUT_FILE"
+else
+	rm -f "$tmp_file"
+fi

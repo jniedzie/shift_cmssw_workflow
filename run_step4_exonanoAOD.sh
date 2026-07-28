@@ -22,6 +22,12 @@ N_THREADS="${N_THREADS:-4}"
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
+OUTPUT="$OUTPUT_DIR/events_EXONanoAOD_part_${PART}.root"
+if output_is_valid "$OUTPUT"; then
+	echo "Step 4 output already exists and is valid: $OUTPUT"
+	exit 0
+fi
+
 INPUT="$SAMPLE_DIR/samples/step3/events_AOD_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
@@ -39,7 +45,7 @@ cmsDriver.py step4 \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
-	--fileout "file:$OUTPUT_DIR/events_EXONanoAOD_part_${PART}.root" \
+	--fileout "file:$OUTPUT" \
 	--python_filename "$CONFIG_DIR/events_EXONanoAOD_part_${PART}_cfg.py" \
 	--nThreads "$N_THREADS" \
 	--no_exec "${CUSTOMISE_ARGS[@]}" \

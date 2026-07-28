@@ -41,21 +41,25 @@ LINK_TARGET="$CMSSW_SRC/$PYTHIA_CONFIG"
 LINK_DIR="$(dirname "$LINK_TARGET")"
 PACKAGE_DIR="$(dirname "$LINK_DIR")"
 [[ -f "$FRAGMENT" ]] || { setup_error "workflow fragment is missing: $FRAGMENT"; return 1 2>/dev/null || exit 1; }
-if ! mkdir -p "$LINK_DIR"; then
+if [[ "${CMSSW_PREPARED:-0}" != 1 ]] && ! mkdir -p "$LINK_DIR"; then
 	setup_error "cannot create CMSSW fragment directory: $LINK_DIR"; return 1 2>/dev/null || exit 1
 fi
-if [[ ! -f "$PACKAGE_DIR/BuildFile.xml" ]]; then
+if [[ "${CMSSW_PREPARED:-0}" != 1 && ! -f "$PACKAGE_DIR/BuildFile.xml" ]]; then
 	if ! cp "$WORKFLOW_ROOT/Configuration/GenProduction/BuildFile.xml" "$PACKAGE_DIR/BuildFile.xml"; then
 		setup_error "cannot install the CMSSW BuildFile: $PACKAGE_DIR/BuildFile.xml"; return 1 2>/dev/null || exit 1
 	fi
 fi
-if ! ln -sfn "$FRAGMENT" "$LINK_TARGET"
+if [[ "${CMSSW_PREPARED:-0}" != 1 ]] && ! ln -sfn "$FRAGMENT" "$LINK_TARGET"
 then
 	setup_error "cannot create the Pythia fragment symlink: $LINK_TARGET"; return 1 2>/dev/null || exit 1
 fi
 echo "[setup_cmssw] Linked $PYTHIA_CONFIG"
-if ! scram b -j 1 >/dev/null; then
-	setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
+if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
+	if ! scram b -j 1 >/dev/null; then
+		setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
+	fi
+else
+	echo "[setup_cmssw] Using prebuilt CMSSW release"
 fi
 cd "$WORKFLOW_ROOT"
 
@@ -66,3 +70,11 @@ mkdir -p "$SAMPLE_DIR/samples/step1" "$SAMPLE_DIR/samples/step2" "$SAMPLE_DIR/sa
 
 export WORKFLOW_ROOT CMSSW_SRC SAMPLE_BASE SAMPLE_NAME CAMPAIGN_NAME SAMPLE_DIR PART
 echo "[setup_cmssw] Environment ready (PART=$PART)"
+
+output_is_valid() {
+	local output="$1"
+	[[ -s "$output" ]] || return 1
+	if command -v edmFileUtil >/dev/null 2>&1; then
+		edmFileUtil "$output" >/dev/null 2>&1
+	fi
+}
