@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CHUNK="${1:-0}"
 source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
 N_EVENTS="${2:-$N_EVENTS}"
 OUTPUT_DIR="$SAMPLE_DIR/samples/step3"
