@@ -39,15 +39,24 @@ PYTHIA_FRAGMENT_DIR="$(dirname "$PYTHIA_CONFIG")"
 FRAGMENT="$WORKFLOW_ROOT/fragments/$PYTHIA_FRAGMENT_NAME"
 LINK_TARGET="$CMSSW_SRC/$PYTHIA_CONFIG"
 LINK_DIR="$(dirname "$LINK_TARGET")"
+PACKAGE_DIR="$(dirname "$LINK_DIR")"
 [[ -f "$FRAGMENT" ]] || { setup_error "workflow fragment is missing: $FRAGMENT"; return 1 2>/dev/null || exit 1; }
 if ! mkdir -p "$LINK_DIR"; then
 	setup_error "cannot create CMSSW fragment directory: $LINK_DIR"; return 1 2>/dev/null || exit 1
+fi
+if [[ ! -f "$PACKAGE_DIR/BuildFile.xml" ]]; then
+	if ! cp "$WORKFLOW_ROOT/Configuration/GenProduction/BuildFile.xml" "$PACKAGE_DIR/BuildFile.xml"; then
+		setup_error "cannot install the CMSSW BuildFile: $PACKAGE_DIR/BuildFile.xml"; return 1 2>/dev/null || exit 1
+	fi
 fi
 if ! ln -sfn "$FRAGMENT" "$LINK_TARGET"
 then
 	setup_error "cannot create the Pythia fragment symlink: $LINK_TARGET"; return 1 2>/dev/null || exit 1
 fi
 echo "[setup_cmssw] Linked $PYTHIA_CONFIG"
+if ! scram b -j 1 >/dev/null; then
+	setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
+fi
 cd "$WORKFLOW_ROOT"
 
 mkdir -p "$SAMPLE_DIR/samples/step1" "$SAMPLE_DIR/samples/step2" "$SAMPLE_DIR/samples/step3" "$SAMPLE_DIR/samples/step4" \
