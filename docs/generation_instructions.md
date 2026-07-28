@@ -40,8 +40,16 @@ Once the configuration above is done, run from the workflow repository:
 ```
 
 For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD.
-Set `AOD_TO_EXONANO_CUSTOMISE` to the EXONanoAOD `module:function` customizer
-when the package is available in the CMSSW release environment.
+The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`,
+`Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set
+`AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise`
+`module:function` hook when needed.
+
+The final-stage thread count can be overridden with `N_THREADS`, for example:
+
+```bash
+N_THREADS=8 ./run_step4_exonanoAOD.sh 0 10
+```
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 

@@ -12,8 +12,12 @@ CONFIG_DIR="$SAMPLE_DIR/configs/step4"
 LOG_DIR="$SAMPLE_DIR/logs"
 
 GEOMETRY="DB:Extended"
-ERA="Run3_2024"
-CONDITIONS="auto:phase1_2024_realistic"
+# EXONanoAOD is provided by the standard EXO NanoAOD customization.  Keep
+# these settings local to this stage: the preceding stages produce the AOD
+# input, while this stage follows the EXONanoAOD Run 3 / 2025 recipe.
+ERA="Run3,Run3_2025"
+CONDITIONS="auto:phase1_2025_realistic"
+N_THREADS="${N_THREADS:-4}"
 
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
@@ -28,7 +32,7 @@ CUSTOMISE_ARGS=()
 [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]] && CUSTOMISE_ARGS+=(--customise "$AOD_TO_EXONANO_CUSTOMISE")
 echo "=== Step 4: AODSIM -> EXONanoAOD (Run 3) ==="
 cmsDriver.py step4 \
-	--step NANO \
+	--step PAT,NANO:@EXO \
 	--conditions "$CONDITIONS" \
 	--datatier NANOAODSIM \
 	--eventcontent NANOAODSIM \
@@ -37,6 +41,7 @@ cmsDriver.py step4 \
 	--filein "file:$INPUT" \
 	--fileout "file:$OUTPUT_DIR/events_EXONanoAOD_part_${PART}.root" \
 	--python_filename "$CONFIG_DIR/events_EXONanoAOD_part_${PART}_cfg.py" \
+	--nThreads "$N_THREADS" \
 	--no_exec "${CUSTOMISE_ARGS[@]}" \
 	-n "$N_EVENTS"
 
