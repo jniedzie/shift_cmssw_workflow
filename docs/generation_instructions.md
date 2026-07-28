@@ -13,6 +13,7 @@ Edit only `config/workflow.env` before a run:
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
 | `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
+| `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook for the EXONanoAOD content and branches. |
 
 `SAMPLE_DIR` is derived automatically from the path/name variables. Do not hardcode `SAMPLE_DIR` elsewhere.
 
@@ -34,9 +35,13 @@ Once the configuration above is done, run from the workflow repository:
 ```bash
 ./run_step1_generation.sh
 ./run_step2_digi_raw.sh
-./run_step3_reco_miniAOD.sh
-./run_step4_nanoAOD.sh
+./run_step3_aod.sh
+./run_step4_exonanoAOD.sh
 ```
+
+For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD.
+Set `AOD_TO_EXONANO_CUSTOMISE` to the EXONanoAOD `module:function` customizer
+when the package is available in the CMSSW release environment.
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 
