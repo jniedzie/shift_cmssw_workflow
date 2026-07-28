@@ -39,17 +39,7 @@ Once the configuration above is done, run from the workflow repository:
 ./run_step4_exonanoAOD.sh
 ```
 
-For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD.
-The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`,
-`Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set
-`AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise`
-`module:function` hook when needed.
-
-The final-stage thread count can be overridden with `N_THREADS`, for example:
-
-```bash
-N_THREADS=8 ./run_step4_exonanoAOD.sh 0 10
-```
+For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD. The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise module:function` hook when needed.
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 
@@ -58,6 +48,57 @@ To override the part (first argument) or event count (second argument) without e
 ```
 
 Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for generated configs, and `$SAMPLE_DIR/logs/` for all logs.
+
+## Enable DT and CSC segment tables
+
+The checked-in `config/workflow.env` enables the reusable customization:
+
+```bash
+AOD_TO_EXONANO_CUSTOMISE="PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise.customise"
+```
+
+With that setting, Step 4 adds the `ShiftMuonSegmentsCounter` analyzer and
+the `ShiftMuonSegmentsTableProducer` to the EXONanoAOD path. The producer
+writes one row per reconstructed segment in the `ShiftDT` and `ShiftCSC`
+FlatTables. Run the usual Step 4 command after Step 3:
+
+```bash
+./run_step4_exonanoAOD.sh 0 10
+```
+
+The customization consumes the DT and CSC InputTags configured in
+`PhysicsTools/ShiftMuonSegments/shiftMuonSegments_cfi.py`. Verify those
+labels with `edmDumpEventContent` on the actual Step 3 AOD before production;
+the test must use an AOD that contains both reconstructed segment collections.
+The counter log distinguishes a missing/invalid collection from a valid
+collection containing zero segments.
+
+## Run the standalone segment producer test
+
+From the CMSSW `src` directory, run the test against a representative Step 3
+AOD. The input file is supplied on the command line:
+
+```bash
+cd "$CMSSW_SRC"
+cmsenv
+scram b -j 4
+cmsRun PhysicsTools/ShiftMuonSegments/python/test_shiftMuonSegments_cfg.py \
+  inputFile=file:/path/to/events_AOD.root maxEvents=10 \
+  outputFile=shiftMuonSegments_test.root
+```
+
+The test processes at most 10 events, runs both the counter and table
+producer, and writes `shiftMuonSegments_test.root`. Inspect the output with:
+
+```bash
+edmDumpEventContent shiftMuonSegments_test_numEvent10.root
+python "$CMSSW_SRC/bin/$SCRAM_ARCH/inspectNanoFile.py" shiftMuonSegments_test_numEvent10.root
+```
+
+Look for the `ShiftDT` and `ShiftCSC` tables and compare their row counts with
+the per-event counter messages. If either collection is absent from the AOD,
+stop and add the required segment products to the upstream AOD event content;
+do not substitute another collection or infer a label.
 
 ## Condor execution
 
