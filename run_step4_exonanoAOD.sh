@@ -18,13 +18,15 @@ CONDITIONS="auto:phase1_2024_realistic"
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
-INPUT="$SAMPLE_DIR/samples/step3/events_step3_part${PART}.root"
+INPUT="$SAMPLE_DIR/samples/step3/events_AOD_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
 	exit 1
 fi
 
-echo "=== Step 4: MiniAODSIM -> NanoAODSIM (Run 3) ==="
+CUSTOMISE_ARGS=()
+[[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]] && CUSTOMISE_ARGS+=(--customise "$AOD_TO_EXONANO_CUSTOMISE")
+echo "=== Step 4: AODSIM -> EXONanoAOD (Run 3) ==="
 cmsDriver.py step4 \
 	--step NANO \
 	--conditions "$CONDITIONS" \
@@ -33,9 +35,9 @@ cmsDriver.py step4 \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
-	--fileout "file:$OUTPUT_DIR/events_NanoAOD_part_${PART}.root" \
-	--python_filename "$CONFIG_DIR/events_NanoAOD_part_${PART}_cfg.py" \
-	--no_exec \
+	--fileout "file:$OUTPUT_DIR/events_EXONanoAOD_part_${PART}.root" \
+	--python_filename "$CONFIG_DIR/events_EXONanoAOD_part_${PART}_cfg.py" \
+	--no_exec "${CUSTOMISE_ARGS[@]}" \
 	-n "$N_EVENTS"
 
-cmsRun "$CONFIG_DIR/events_NanoAOD_part_${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step4_events_NanoAOD_part_${PART}.log"
+cmsRun "$CONFIG_DIR/events_EXONanoAOD_part_${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step4_events_EXONanoAOD_part_${PART}.log"

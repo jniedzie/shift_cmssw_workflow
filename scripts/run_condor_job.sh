@@ -10,5 +10,5 @@ mkdir -p "$SAMPLE_DIR/samples/step1" "$SAMPLE_DIR/samples/step2" "$SAMPLE_DIR/sa
 	"$SAMPLE_DIR/configs/step1" "$SAMPLE_DIR/configs/step2" "$SAMPLE_DIR/configs/step3" "$SAMPLE_DIR/configs/step4"
 "$WORKFLOW_ROOT/run_step1_generation.sh" "$CHUNK" "$N_EVENTS"
 "$WORKFLOW_ROOT/run_step2_digi_raw.sh" "$CHUNK" "$N_EVENTS"
-"$WORKFLOW_ROOT/run_step3_reco_miniAOD.sh" "$CHUNK" "$N_EVENTS"
-"$WORKFLOW_ROOT/run_step4_nanoAOD.sh" "$CHUNK" "$N_EVENTS"
+"$WORKFLOW_ROOT/run_step3_aod.sh" "$CHUNK" "$N_EVENTS"
+"$WORKFLOW_ROOT/run_step4_exonanoAOD.sh" "$CHUNK" "$N_EVENTS"
