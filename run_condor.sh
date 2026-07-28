@@ -11,8 +11,10 @@ fi
 
 "$SCRIPT_DIR/scripts/prepare_condor.sh"
 
-# Build and register the CMSSW fragment once.  Condor jobs inherit this flag
-# and only run cmsenv; they must not rebuild the shared release concurrently.
+# Build and register the CMSSW packages once.  Do not inherit a stale
+# CMSSW_PREPARED value from the caller: this submission-side setup must verify
+# the release before Condor jobs are allowed to skip the build.
+unset CMSSW_PREPARED
 source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
 export CMSSW_PREPARED=1
 

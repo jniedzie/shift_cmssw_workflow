@@ -39,7 +39,7 @@ Once the configuration above is done, run from the workflow repository:
 ./run_step4_exonanoAOD.sh
 ```
 
-For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD. The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise module:function` hook when needed.
+For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD. The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise package/path.module.function` hook when needed.
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 
@@ -54,7 +54,7 @@ Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for
 The checked-in `config/workflow.env` enables the reusable customization:
 
 ```bash
-AOD_TO_EXONANO_CUSTOMISE="PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise.customise"
+AOD_TO_EXONANO_CUSTOMISE="PhysicsTools/ShiftMuonSegments/shiftMuonSegments_customise.customise"
 ```
 
 With that setting, Step 4 adds the `ShiftMuonSegmentsCounter` analyzer and

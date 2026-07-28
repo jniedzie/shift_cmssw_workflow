@@ -58,6 +58,29 @@ if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
 	if ! scram b -j 1 >/dev/null; then
 		setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
 	fi
+	if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
+		# cmsDriver imports the customization during configuration generation.
+		# Check that the one-time build exposed it to Python before Condor jobs
+		# inherit CMSSW_PREPARED=1 and skip rebuilding.
+		CUSTOMISE_MODULE="${AOD_TO_EXONANO_CUSTOMISE%%.*}"
+		CUSTOMISE_MODULE="${CUSTOMISE_MODULE//\//.}"
+		if ! python3 -c "import ${CUSTOMISE_MODULE}" >/dev/null 2>&1; then
+			# Some prebuilt releases do not regenerate the Python package links for
+			# source packages added after the release was created. Install the
+			# standard CMSSW package links explicitly, then recheck the import.
+			PYTHON_PACKAGE_DIR="$CMSSW_SRC/PhysicsTools/ShiftMuonSegments/python"
+			PYTHON_INSTALL_DIR="$CMSSW_BASE/python/PhysicsTools/ShiftMuonSegments"
+			if [[ -d "$PYTHON_PACKAGE_DIR" ]] && mkdir -p "$PYTHON_INSTALL_DIR"; then
+				for python_file in "$PYTHON_PACKAGE_DIR"/*.py; do
+					[[ -f "$python_file" ]] || continue
+					ln -sfn "$python_file" "$PYTHON_INSTALL_DIR/$(basename "$python_file")"
+				done
+			fi
+			if ! python3 -c "import ${CUSTOMISE_MODULE}" >/dev/null 2>&1; then
+				setup_error "configured customization is not importable after SCRAM build: $AOD_TO_EXONANO_CUSTOMISE"; return 1 2>/dev/null || exit 1
+			fi
+		fi
+	fi
 else
 	echo "[setup_cmssw] Using prebuilt CMSSW release"
 fi
