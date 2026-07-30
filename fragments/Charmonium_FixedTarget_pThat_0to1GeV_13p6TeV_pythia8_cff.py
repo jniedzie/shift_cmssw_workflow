@@ -23,11 +23,29 @@ generator = cms.EDFilter(
             'Beams:allowVertexSpread = on',
             'Beams:offsetVertexZ = 148000.',  # 148 m, Pythia units are mm
             'Beams:sigmaVertexZ = 500.',       # 0.5 m z smearing (Gaussian width)
-            'Charmonium:all = on',
+            # Produce direct J/psi (the first entry in the 3S1 state vectors)
+            # through every available colour-singlet and colour-octet channel.
+            # Do not use "Charmonium:all": it also enables psi(2S), chi_c and
+            # other charmonium states, so many generated events have no J/psi.
+            'Charmonium:gg2ccbar(3S1)[3S1(1)]g = {on,off}',
+            'Charmonium:gg2ccbar(3S1)[3S1(1)]gm = {on,off}',
+            'Charmonium:gg2ccbar(3S1)[3S1(8)]g = {on,off}',
+            'Charmonium:qg2ccbar(3S1)[3S1(8)]q = {on,off}',
+            'Charmonium:qqbar2ccbar(3S1)[3S1(8)]g = {on,off}',
+            'Charmonium:gg2ccbar(3S1)[1S0(8)]g = {on,off}',
+            'Charmonium:qg2ccbar(3S1)[1S0(8)]q = {on,off}',
+            'Charmonium:qqbar2ccbar(3S1)[1S0(8)]g = {on,off}',
+            'Charmonium:gg2ccbar(3S1)[3PJ(8)]g = {on,off}',
+            'Charmonium:qg2ccbar(3S1)[3PJ(8)]q = {on,off}',
+            'Charmonium:qqbar2ccbar(3S1)[3PJ(8)]g = {on,off}',
             'PhaseSpace:pTHatMin = 0.',
             'PhaseSpace:pTHatMax = 1.',
             '443:onMode = off',
             '443:onIfMatch = 13 -13',
+            # Hand both J/psi daughter muons to Geant4.  This is required
+            # because limitTau0=off above would otherwise allow Pythia to
+            # decay muons before detector simulation.
+            '13:mayDecay = off',
         ),
         parameterSets=cms.vstring(
             'pythia8CommonSettings',
