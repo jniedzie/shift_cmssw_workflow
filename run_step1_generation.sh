@@ -16,6 +16,12 @@ ERA="Run3_2024"
 CONDITIONS="auto:phase1_2024_realistic"
 BEAMSPOT="Realistic25ns13p6TeVEarly2023Collision"
 
+case "${DEBUG_MUON_PRIMARIES:-0}" in
+	0|false|False) DEBUG_MUON_PRIMARIES_CMS="False" ;;
+	1|true|True) DEBUG_MUON_PRIMARIES_CMS="True" ;;
+	*) echo "ERROR: DEBUG_MUON_PRIMARIES must be 0/1 or false/true" >&2; exit 1 ;;
+esac
+
 # Generate a fresh CMSSW-compatible seed for every generation invocation.
 # Reading from /dev/urandom avoids reusing cmsDriver's default seed.
 GENERATOR_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
@@ -23,6 +29,22 @@ GENERATOR_SEED=$((GENERATOR_SEED % 900000000 + 1))
 
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
+
+# dCache/PNFS permits creating files but may reject truncating an existing
+# file in place.  Generate and run the configuration locally, then archive a
+# new snapshot in the campaign directory.
+LOCAL_STEP1_DIR="$(mktemp -d /tmp/shift_cmssw_step1_XXXXXX)"
+cleanup_step1_tmp() {
+	local status=$?
+	if [[ "$status" -eq 0 && "${KEEP_STEP1_TMP:-0}" != 1 ]]; then
+		rm -rf "$LOCAL_STEP1_DIR"
+	else
+		echo "Step 1 temporary files retained in $LOCAL_STEP1_DIR" >&2
+	fi
+}
+trap cleanup_step1_tmp EXIT
+LOCAL_CONFIG="$LOCAL_STEP1_DIR/events_step1_part${PART}_cfg.py"
+LOCAL_LOG="$LOCAL_STEP1_DIR/step1_events_part${PART}.log"
 
 OUTPUT="$OUTPUT_DIR/events_step1_part${PART}.root"
 if output_is_valid "$OUTPUT"; then
@@ -41,16 +63,26 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--fileout "file:$OUTPUT" \
-	--python_filename "$CONFIG_DIR/events_step1_part${PART}_cfg.py" \
-	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED})" \
+	--python_filename "$LOCAL_CONFIG" \
+	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS})" \
 	--no_exec \
 	-n "$N_EVENTS"
 
-cmsRun "$CONFIG_DIR/events_step1_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step1_events_part${PART}.log"
+CONFIG_SNAPSHOT="$CONFIG_DIR/events_step1_part${PART}_seed${GENERATOR_SEED}_cfg.py"
+if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
+	echo "WARNING: could not archive Step 1 config at $CONFIG_SNAPSHOT; continuing with local config" >&2
+fi
+
+cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
+
+LOG_SNAPSHOT="$LOG_DIR/step1_events_part${PART}_seed${GENERATOR_SEED}.log"
+if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
+	echo "WARNING: could not archive Step 1 log at $LOG_SNAPSHOT" >&2
+fi
 
 # Pythia prints the generated cross section and its statistical uncertainty in
 # the end-of-job summary.  Keep one shared, latest value for this sample.
 "$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
-	"$LOG_DIR/step1_events_part${PART}.log" \
+	"$LOCAL_LOG" \
 	"$SAMPLE_DIR/cross_sections.txt" \
 	"$(basename "$PYTHIA_CONFIG" .py)"
