@@ -50,9 +50,13 @@ fi
 PYTHIA_FRAGMENT_NAME="$(basename "$PYTHIA_CONFIG")"
 PYTHIA_FRAGMENT_DIR="$(dirname "$PYTHIA_CONFIG")"
 FRAGMENT="$WORKFLOW_ROOT/fragments/$PYTHIA_FRAGMENT_NAME"
-LINK_TARGET="$CMSSW_SRC/$PYTHIA_CONFIG"
-LINK_DIR="$(dirname "$LINK_TARGET")"
-PACKAGE_DIR="$(dirname "$LINK_DIR")"
+# PYTHIA_CONFIG is the logical CMSSW package path consumed by cmsDriver, e.g.
+# Configuration/GenProduction/fragment_cff.py.  Python sources in a CMSSW
+# package must physically live below its python/ directory for SCRAM to expose
+# them as Configuration.GenProduction.fragment_cff.
+LINK_DIR="$CMSSW_SRC/$PYTHIA_FRAGMENT_DIR/python"
+LINK_TARGET="$LINK_DIR/$PYTHIA_FRAGMENT_NAME"
+PACKAGE_DIR="$CMSSW_SRC/$PYTHIA_FRAGMENT_DIR"
 [[ -f "$FRAGMENT" ]] || { setup_error "workflow fragment is missing: $FRAGMENT"; return 1 2>/dev/null || exit 1; }
 if [[ "${CMSSW_PREPARED:-0}" != 1 ]] && ! mkdir -p "$LINK_DIR"; then
 	setup_error "cannot create CMSSW fragment directory: $LINK_DIR"; return 1 2>/dev/null || exit 1
@@ -77,6 +81,12 @@ if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
 	fi
 	if ! scram b -j "$CMSSW_BUILD_JOBS" >/dev/null; then
 		setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
+	fi
+	PYTHIA_MODULE="${PYTHIA_CONFIG%.py}"
+	PYTHIA_MODULE="${PYTHIA_MODULE//\//.}"
+	if ! python3 -c "import ${PYTHIA_MODULE}" >/dev/null 2>&1; then
+		python3 -c "import ${PYTHIA_MODULE}" || true
+		setup_error "generator fragment is not importable after incremental SCRAM build: $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
 	fi
 	if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		# cmsDriver imports the customization during configuration generation.
