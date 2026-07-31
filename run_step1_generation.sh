@@ -7,9 +7,8 @@ CHUNK="${1:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${2:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
-OUTPUT_DIR="$SAMPLE_DIR/samples/step1"
-CONFIG_DIR="$SAMPLE_DIR/configs/step1"
-LOG_DIR="$SAMPLE_DIR/logs"
+OUTPUT_DIR="$STEP1_DIR"
+CONFIG_DIR="$STEP1_CONFIG_DIR"
 
 GEOMETRY="DB:Extended"
 ERA="Run3_2024"
@@ -84,5 +83,5 @@ fi
 # the end-of-job summary.  Keep one shared, latest value for this sample.
 "$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
 	"$LOCAL_LOG" \
-	"$SAMPLE_DIR/cross_sections.txt" \
+	"$CROSS_SECTION_FILE" \
 	"$(basename "$PYTHIA_CONFIG" .py)"

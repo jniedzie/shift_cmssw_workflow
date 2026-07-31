@@ -5,9 +5,8 @@ CHUNK="$1"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$WORKFLOW_ROOT/config/workflow.env"
-mkdir -p "$SAMPLE_DIR/samples/step1" "$SAMPLE_DIR/samples/step2" "$SAMPLE_DIR/samples/step3" "$SAMPLE_DIR/samples/step4" \
-	"$SAMPLE_DIR/logs" \
-	"$SAMPLE_DIR/configs/step1" "$SAMPLE_DIR/configs/step2" "$SAMPLE_DIR/configs/step3" "$SAMPLE_DIR/configs/step4"
+mkdir -p "$STEP1_DIR" "$STEP2_DIR" "$STEP3_DIR" "$STEP4_DIR" "$LOG_DIR" \
+	"$STEP1_CONFIG_DIR" "$STEP2_CONFIG_DIR" "$STEP3_CONFIG_DIR" "$STEP4_CONFIG_DIR"
 "$WORKFLOW_ROOT/run_step1_generation.sh" "$CHUNK" "$N_EVENTS"
 "$WORKFLOW_ROOT/run_step2_digi_raw.sh" "$CHUNK" "$N_EVENTS"
 "$WORKFLOW_ROOT/run_step3_aod.sh" "$CHUNK" "$N_EVENTS"

@@ -20,6 +20,6 @@ export CMSSW_PREPARED=1
 
 submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
-sed "s|<n_jobs>|$N_JOBS|g; s|<sample_dir>|$SAMPLE_DIR|g" \
+sed "s|<n_jobs>|$N_JOBS|g; s|<log_dir>|$LOG_DIR|g" \
 	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
 condor_submit "$submit_file"

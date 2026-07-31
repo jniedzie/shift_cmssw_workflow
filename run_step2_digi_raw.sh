@@ -7,9 +7,8 @@ CHUNK="${1:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${2:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
-OUTPUT_DIR="$SAMPLE_DIR/samples/step2"
-CONFIG_DIR="$SAMPLE_DIR/configs/step2"
-LOG_DIR="$SAMPLE_DIR/logs"
+OUTPUT_DIR="$STEP2_DIR"
+CONFIG_DIR="$STEP2_CONFIG_DIR"
 GEOMETRY="DB:Extended"
 ERA="Run3_2024"
 CONDITIONS="auto:phase1_2024_realistic"
@@ -23,7 +22,7 @@ if output_is_valid "$OUTPUT"; then
 	exit 0
 fi
 
-INPUT="$SAMPLE_DIR/samples/step1/events_step1_part${PART}.root"
+INPUT="$STEP1_DIR/events_step1_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
 	exit 1

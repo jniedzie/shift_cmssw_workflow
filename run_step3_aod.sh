@@ -4,9 +4,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CHUNK="${1:-0}"
 source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
 N_EVENTS="${2:-$N_EVENTS}"
-OUTPUT_DIR="$SAMPLE_DIR/samples/step3"
-CONFIG_DIR="$SAMPLE_DIR/configs/step3"
-LOG_DIR="$SAMPLE_DIR/logs"
+OUTPUT_DIR="$STEP3_DIR"
+CONFIG_DIR="$STEP3_CONFIG_DIR"
 GEOMETRY="DB:Extended"; ERA="Run3_2024"; CONDITIONS="auto:phase1_2024_realistic"
 mkdir -p "$SAMPLE_DIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "${WORKDIR:-$SAMPLE_DIR}"
@@ -15,7 +14,7 @@ if output_is_valid "$OUTPUT"; then
 	echo "Step 3 output already exists and is valid: $OUTPUT"
 	exit 0
 fi
-INPUT="$SAMPLE_DIR/samples/step2/events_step2_part${PART}.root"
+INPUT="$STEP2_DIR/events_step2_part${PART}.root"
 [[ -s "$INPUT" ]] || { echo "ERROR: $INPUT is missing or empty" >&2; exit 1; }
 echo "=== Step 3: RAW2DIGI,L1Reco,RECO,RECOSIM -> AODSIM ==="
 cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO,RECOSIM --conditions "$CONDITIONS" \

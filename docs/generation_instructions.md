@@ -6,16 +6,28 @@ Edit only `config/workflow.env` before a run:
 
 | Variable | Set to |
 | --- | --- |
-| `CMSSW_SRC` | Absolute path to the CMSSW `src` directory containing the installed release. |
-| `SAMPLE_BASE` | Base directory where workflow data may be written. |
+| `WORKFLOW_HOST` | Optional hostname override, primarily for testing site detection. |
+| `CMSSW_SRC` | Optional override of the site-detected CMSSW `src` directory. |
+| `SAMPLE_BASE` | Optional override of the site-detected production base directory. |
 | `SAMPLE_NAME` | Sample identifier used in the output directory. |
 | `CAMPAIGN_NAME` | Campaign identifier used in the output directory. |
+| `SAMPLE_DIR` | Campaign root; defaults to `$SAMPLE_BASE/$SAMPLE_NAME/$CAMPAIGN_NAME`. |
+| `STEP1_DIR` ... `STEP4_DIR` | Per-stage ROOT output directories. |
+| `STEP1_CONFIG_DIR` ... `STEP4_CONFIG_DIR` | Per-stage generated configuration directories. |
+| `LOG_DIR` | CMSSW and Condor log directory. |
+| `CROSS_SECTION_FILE` | Shared generated cross-section summary file. |
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
 | `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
 | `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook for the EXONanoAOD content and branches. |
 
-`SAMPLE_DIR` is derived automatically from the path/name variables. Do not hardcode `SAMPLE_DIR` elsewhere.
+All production paths are derived in `workflow.env` and may be overridden there
+for PNFS/dCache or local execution. The scripts contain no site-specific
+storage path.
+
+Hosts containing `lxplus` select the CERN AFS/EOS roots; hosts containing
+`iihe` select the T2B `/user` and PNFS roots. An unrecognized hostname requires
+explicit `CMSSW_SRC` and `SAMPLE_BASE` values and otherwise stops with an error.
 
 ## Check the configuration
 
@@ -23,7 +35,8 @@ From the workflow repository, inspect the resolved values with:
 
 ```bash
 source config/workflow.env
-printf 'CMSSW_SRC=%s\nSAMPLE_BASE=%s\nSAMPLE_DIR=%s\n' "$CMSSW_SRC" "$SAMPLE_BASE" "$SAMPLE_DIR"
+printf 'WORKFLOW_SITE=%s\nCMSSW_SRC=%s\nSAMPLE_BASE=%s\nSAMPLE_DIR=%s\nLOG_DIR=%s\n' \
+  "$WORKFLOW_SITE" "$CMSSW_SRC" "$SAMPLE_BASE" "$SAMPLE_DIR" "$LOG_DIR"
 ```
 
 `CMSSW_SRC` must exist and be a CMSSW `src` directory. `SAMPLE_BASE` must be writable on the execution site.
@@ -47,7 +60,8 @@ To override the part (first argument) or event count (second argument) without e
 ./run_step1_generation.sh 1 10
 ```
 
-Check `$SAMPLE_DIR/samples/stepN/` for outputs, `$SAMPLE_DIR/configs/stepN/` for generated configs, and `$SAMPLE_DIR/logs/` for all logs.
+Check `$STEP1_DIR` ... `$STEP4_DIR` for outputs, the corresponding
+`$STEP*_CONFIG_DIR` directories for generated configs, and `$LOG_DIR` for logs.
 
 ## Enable DT and CSC segment tables
 
@@ -112,7 +126,7 @@ To inspect jobs and logs:
 
 ```bash
 condor_q
-ls "$SAMPLE_DIR/logs/"
+ls "$LOG_DIR/"
 source config/workflow.env
-find "$SAMPLE_DIR" -mindepth 2 -maxdepth 2 -type f -name '*part*.root'
+find "$SAMPLES_DIR" -mindepth 2 -maxdepth 2 -type f -name '*part*.root'
 ```

@@ -7,9 +7,8 @@ CHUNK="${1:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${2:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
-OUTPUT_DIR="$SAMPLE_DIR/samples/step4"
-CONFIG_DIR="$SAMPLE_DIR/configs/step4"
-LOG_DIR="$SAMPLE_DIR/logs"
+OUTPUT_DIR="$STEP4_DIR"
+CONFIG_DIR="$STEP4_CONFIG_DIR"
 
 GEOMETRY="DB:Extended"
 # EXONanoAOD is provided by the standard EXO NanoAOD customization.  Keep
@@ -28,7 +27,7 @@ if output_is_valid "$OUTPUT"; then
 	exit 0
 fi
 
-INPUT="$SAMPLE_DIR/samples/step3/events_AOD_part${PART}.root"
+INPUT="$STEP3_DIR/events_AOD_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
 	exit 1
