@@ -18,6 +18,7 @@ Edit only `config/workflow.env` before a run:
 | `CROSS_SECTION_FILE` | Shared generated cross-section summary file. |
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
+| `GENERATOR_SEED` | `random` for a fresh Step 1 seed on each invocation, or an integer from 1 through 900000000 for reproducible generation. |
 | `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
 | `ENABLE_EXONANOAOD` | `1` for EXONanoAOD content or `0` for standard NanoAOD content in Step 4. |
 | `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook applied to Step 4 in either output mode. |

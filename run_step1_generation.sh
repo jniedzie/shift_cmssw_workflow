@@ -21,10 +21,24 @@ case "${DEBUG_MUON_PRIMARIES:-0}" in
 	*) echo "ERROR: DEBUG_MUON_PRIMARIES must be 0/1 or false/true" >&2; exit 1 ;;
 esac
 
-# Generate a fresh CMSSW-compatible seed for every generation invocation.
-# Reading from /dev/urandom avoids reusing cmsDriver's default seed.
-GENERATOR_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
-GENERATOR_SEED=$((GENERATOR_SEED % 900000000 + 1))
+case "$GENERATOR_SEED" in
+	random)
+		# Reading from /dev/urandom avoids reusing cmsDriver's default seed.
+		GENERATOR_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+		GENERATOR_SEED=$((GENERATOR_SEED % 900000000 + 1))
+		;;
+	''|*[!0-9]*)
+		echo "ERROR: GENERATOR_SEED must be 'random' or an integer from 1 through 900000000" >&2
+		exit 1
+		;;
+	*)
+		if (( ${#GENERATOR_SEED} > 9 )) || (( 10#$GENERATOR_SEED < 1 || 10#$GENERATOR_SEED > 900000000 )); then
+			echo "ERROR: GENERATOR_SEED must be 'random' or an integer from 1 through 900000000" >&2
+			exit 1
+		fi
+		GENERATOR_SEED=$((10#$GENERATOR_SEED))
+		;;
+esac
 
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
