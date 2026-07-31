@@ -62,8 +62,20 @@ if [[ ! -s "$INPUT" ]]; then
 	exit 1
 fi
 
-CUSTOMISE_ARGS=()
-[[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]] && CUSTOMISE_ARGS+=(--customise "$AOD_TO_EXONANO_CUSTOMISE")
+# --customise runs before cmsDriver's built-in NanoAOD customisations.  Those
+# customisations can replace the Nano sequence, dropping modules added by our
+# hook.  Run it as a command instead: cmsDriver places these commands at the
+# end of the generated configuration, after the final EXO/Nano setup.
+CUSTOMISE_COMMAND_ARGS=()
+if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
+	CUSTOMISE_MODULE="${AOD_TO_EXONANO_CUSTOMISE%%.*}"
+	CUSTOMISE_FUNCTION="${AOD_TO_EXONANO_CUSTOMISE##*.}"
+	CUSTOMISE_MODULE="${CUSTOMISE_MODULE//\//.}"
+	CUSTOMISE_COMMAND_ARGS+=(
+		--customise_commands
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process)"
+	)
+fi
 echo "=== Step 4: AODSIM -> ${OUTPUT_LABEL} (Run 3) ==="
 DRIVER_ARGS=(
 	--step "$NANO_STEP"
@@ -79,7 +91,7 @@ DRIVER_ARGS=(
 	--no_exec
 	-n "$N_EVENTS"
 )
-DRIVER_ARGS+=("${CUSTOMISE_ARGS[@]}")
+DRIVER_ARGS+=("${CUSTOMISE_COMMAND_ARGS[@]}")
 cmsDriver.py step4 "${DRIVER_ARGS[@]}"
 
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_${OUTPUT_LABEL}_part_${PART}_cfg.py"

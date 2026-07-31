@@ -73,9 +73,12 @@ AOD_TO_EXONANO_CUSTOMISE="PhysicsTools/ShiftMuonSegments/shiftMuonSegments_custo
 ```
 
 With that setting, Step 4 adds the `ShiftMuonSegmentsCounter` analyzer and
-the `ShiftMuonSegmentsTableProducer` to the EXONanoAOD path. The producer
+the `ShiftMuonSegmentsTableProducer` to the final NanoAOD path. The producer
 writes one row per reconstructed segment in the `ShiftDT` and `ShiftCSC`
-FlatTables. Run the usual Step 4 command after Step 3:
+FlatTables; these are the NanoAOD output tree names. Their EDM products are
+`nanoaodFlatTable_shiftMuonSegments_ShiftDT` and
+`nanoaodFlatTable_shiftMuonSegments_ShiftCSC`. Run the usual Step 4 command
+after Step 3:
 
 ```bash
 ./run_step4_exonanoAOD.sh 0 10
