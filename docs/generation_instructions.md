@@ -19,7 +19,8 @@ Edit only `config/workflow.env` before a run:
 | `N_EVENTS` | Default event count; keep the `${N_EVENTS:-10}` form to allow command-line overrides. |
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
 | `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
-| `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook for the EXONanoAOD content and branches. |
+| `ENABLE_EXONANOAOD` | `1` for EXONanoAOD content or `0` for standard NanoAOD content in Step 4. |
+| `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook applied to Step 4 in either output mode. |
 
 All production paths are derived in `workflow.env` and may be overridden there
 for PNFS/dCache or local execution. The scripts contain no site-specific
@@ -52,7 +53,7 @@ Once the configuration above is done, run from the workflow repository:
 ./run_step4_exonanoAOD.sh
 ```
 
-For Run 3, the production chain is AODSIM → EXONanoAOD, skipping MiniAOD. The final stage runs `PAT,NANO:@EXO` with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `AOD_TO_EXONANO_CUSTOMISE` only for an additional `cmsDriver --customise package/path.module.function` hook when needed.
+For Run 3, the production chain is AODSIM → NanoAOD, skipping MiniAOD. Step 4 runs `PAT,NANO:@EXO` by default, with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `ENABLE_EXONANOAOD=0` in `config/workflow.env` to run standard `PAT,NANO` instead. `AOD_TO_EXONANO_CUSTOMISE` is applied in either mode, so the muon-segment tables can be retained without enabling the full EXONanoAOD content.
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 

@@ -16,6 +16,21 @@ CONDITIONS="auto:phase1_2024_realistic"
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
+# dCache/PNFS can reject cmsDriver's in-place configuration-file creation.
+# Generate and run locally, then retain a campaign snapshot when possible.
+LOCAL_STEP2_DIR="$(mktemp -d /tmp/shift_cmssw_step2_XXXXXX)"
+cleanup_step2_tmp() {
+	local status=$?
+	if [[ "$status" -eq 0 && "${KEEP_STEP2_TMP:-0}" != 1 ]]; then
+		rm -rf "$LOCAL_STEP2_DIR"
+	else
+		echo "Step 2 temporary files retained in $LOCAL_STEP2_DIR" >&2
+	fi
+}
+trap cleanup_step2_tmp EXIT
+LOCAL_CONFIG="$LOCAL_STEP2_DIR/events_step2_part${PART}_cfg.py"
+LOCAL_LOG="$LOCAL_STEP2_DIR/step2_events_part${PART}.log"
+
 OUTPUT="$OUTPUT_DIR/events_step2_part${PART}.root"
 if output_is_valid "$OUTPUT"; then
 	echo "Step 2 output already exists and is valid: $OUTPUT"
@@ -38,8 +53,18 @@ cmsDriver.py step2 \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
 	--fileout "file:$OUTPUT" \
-	--python_filename "$CONFIG_DIR/events_step2_part${PART}_cfg.py" \
+	--python_filename "$LOCAL_CONFIG" \
 	--no_exec \
 	-n "$N_EVENTS"
 
-cmsRun "$CONFIG_DIR/events_step2_part${PART}_cfg.py" 2>&1 | tee "$LOG_DIR/step2_events_part${PART}.log"
+CONFIG_SNAPSHOT="$CONFIG_DIR/events_step2_part${PART}_cfg.py"
+if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
+	echo "WARNING: could not archive Step 2 config at $CONFIG_SNAPSHOT; continuing with local config" >&2
+fi
+
+cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
+
+LOG_SNAPSHOT="$LOG_DIR/step2_events_part${PART}.log"
+if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
+	echo "WARNING: could not archive Step 2 log at $LOG_SNAPSHOT" >&2
+fi
