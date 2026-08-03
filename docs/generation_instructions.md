@@ -148,6 +148,13 @@ directions, GEM use, and refitting remain unchanged. `NMinRecHits` has no
 effect while `DoSeedRefit=False`; likewise, `MaxFractionOfLostHits` has no
 effect while `DoRefit=False`.
 
+The second trial did not change the four-track yield, although the looser hit
+chi2 admitted six additional hits to the event-1 track. The current third
+trial retains those two tested relaxations and changes only `SeedPosition`
+from `in` to `out`. This makes the first filter propagate event 9's ME2 seed
+toward its aligned ME3/ME4 segments; the backward filter still builds the
+opposite leg.
+
 ## Condor execution
 
 Configure the workflow as described above, including `N_JOBS`. Then run:
