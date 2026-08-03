@@ -21,6 +21,18 @@ case "${DEBUG_MUON_PRIMARIES:-0}" in
 	*) echo "ERROR: DEBUG_MUON_PRIMARIES must be 0/1 or false/true" >&2; exit 1 ;;
 esac
 
+case "${DEBUG_MUON_HITS:-0}" in
+	0|false|False) DEBUG_MUON_HITS_CMS="False" ;;
+	1|true|True) DEBUG_MUON_HITS_CMS="True" ;;
+	*) echo "ERROR: DEBUG_MUON_HITS must be 0/1 or false/true" >&2; exit 1 ;;
+esac
+
+case "${DEBUG_MUON_TRACKING:-0}" in
+	0|false|False) DEBUG_MUON_TRACKING_CMS="False" ;;
+	1|true|True) DEBUG_MUON_TRACKING_CMS="True" ;;
+	*) echo "ERROR: DEBUG_MUON_TRACKING must be 0/1 or false/true" >&2; exit 1 ;;
+esac
+
 case "$GENERATOR_SEED" in
 	random)
 		# Reading from /dev/urandom avoids reusing cmsDriver's default seed.
@@ -77,7 +89,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--era "$ERA" \
 	--fileout "file:$OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS})" \
+	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS})" \
 	--no_exec \
 	-n "$N_EVENTS"
 
