@@ -55,7 +55,7 @@ cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO,RECOSIM --conditions "$CONDITIONS
   --datatier AODSIM --eventcontent AODSIM --geometry "$GEOMETRY" --era "$ERA" \
   --filein "file:$INPUT" --fileout "file:$OUTPUT" \
   --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS" \
-  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseRecoForShiftMuons, customiseRecoDebug; process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='Direct'); process = customiseRecoDebug(process)"
+  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseRecoForShiftMuons, customiseRecoDebug; process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='Standard', pcaPropagator='SteppingHelixPropagatorAny'); process = customiseRecoDebug(process)"
 
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_AOD_part${PART}_cfg.py"
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
