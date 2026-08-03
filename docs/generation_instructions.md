@@ -140,6 +140,13 @@ If a collection is absent from the AOD,
 stop and add the required segment products to the upstream AOD event content;
 do not substitute another collection or infer a label.
 
+The current first reconstruction trial changes only the forward and backward
+DSA measurement compatibility windows from 3 to 5 sigma. It deliberately
+leaves hit chi2, fit directions, GEM use, seed requirements, and refitting
+unchanged, so its efficiency effect can be measured independently. Note that
+`MaxFractionOfLostHits` has no effect while the standard DSA configuration has
+`DoRefit=False`.
+
 ## Condor execution
 
 Configure the workflow as described above, including `N_JOBS`. Then run:
