@@ -62,6 +62,18 @@ To override the part (first argument) or event count (second argument) without e
 ./run_step1_generation.sh 1 10
 ```
 
+Each stage normally exits without running when its output is already valid.
+Pass `--force` (or `-f`) to remove that stage's existing output and recreate it:
+
+```bash
+./run_step1_generation.sh --force 1 10
+./run_step4_exonanoAOD.sh --force 1 10
+```
+
+The option can appear before or after the positional arguments. It removes
+only the selected stage and chunk output; input files from earlier stages are
+left untouched.
+
 Check `$STEP1_DIR` ... `$STEP4_DIR` for outputs, the corresponding
 `$STEP*_CONFIG_DIR` directories for generated configs, and `$LOG_DIR` for logs.
 
