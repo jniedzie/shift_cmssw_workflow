@@ -54,7 +54,8 @@ echo "=== Step 3: RAW2DIGI,L1Reco,RECO,RECOSIM -> AODSIM ==="
 cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO,RECOSIM --conditions "$CONDITIONS" \
   --datatier AODSIM --eventcontent AODSIM --geometry "$GEOMETRY" --era "$ERA" \
   --filein "file:$INPUT" --fileout "file:$OUTPUT" \
-  --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS"
+  --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS" \
+  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseRecoDebug; process = customiseRecoDebug(process)"
 
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_AOD_part${PART}_cfg.py"
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then

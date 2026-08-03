@@ -77,7 +77,7 @@ left untouched.
 Check `$STEP1_DIR` ... `$STEP4_DIR` for outputs, the corresponding
 `$STEP*_CONFIG_DIR` directories for generated configs, and `$LOG_DIR` for logs.
 
-## Enable DT and CSC segment tables
+## Muon reconstruction diagnostics and segment tables
 
 The checked-in `config/workflow.env` enables the reusable customization:
 
@@ -87,10 +87,11 @@ AOD_TO_EXONANO_CUSTOMISE="PhysicsTools/ShiftMuonSegments/shiftMuonSegments_custo
 
 With that setting, Step 4 adds the `ShiftMuonSegmentsCounter` analyzer and
 the `ShiftMuonSegmentsTableProducer` to the final NanoAOD path. The producer
-writes one row per reconstructed segment in the `ShiftDT` and `ShiftCSC`
-FlatTables; these are the NanoAOD output tree names. Their EDM products are
-`nanoaodFlatTable_shiftMuonSegments_ShiftDT` and
-`nanoaodFlatTable_shiftMuonSegments_ShiftCSC`. Run the usual Step 4 command
+writes one row per reconstructed segment in `ShiftDT`, `ShiftCSC`, and
+`ShiftGEM`. Since RPC reconstruction produces hits rather than segments,
+`ShiftRPC` contains one row per `RPCRecHit` (including BX and time).
+These are the NanoAOD output tree names. Their EDM products use the
+`nanoaodFlatTable_shiftMuonSegmentsTable_*` module label. Run the usual Step 4 command
 after Step 3:
 
 ```bash
@@ -126,8 +127,16 @@ edmDumpEventContent shiftMuonSegments_test_numEvent10.root
 python "$CMSSW_SRC/bin/$SCRAM_ARCH/inspectNanoFile.py" shiftMuonSegments_test_numEvent10.root
 ```
 
-Look for the `ShiftDT` and `ShiftCSC` tables and compare their row counts with
-the per-event counter messages. If either collection is absent from the AOD,
+Look for the four `ShiftDT`, `ShiftCSC`, `ShiftRPC`, and `ShiftGEM` tables.
+
+Step 3 also appends `ShiftMuonSegmentsCounter` after reconstruction. Search its
+log for `[ShiftMuonRecoDebug]`. Each event has a `summary` line containing the
+DT/CSC/RPC/GEM reconstructed-hit counts, DT/CSC/GEM segment counts, displaced
+standalone seed count, and final DSA track count. Detail lines show segment
+direction, hit multiplicity and chi2, followed by DSA track endpoints, valid
+and lost hit counts, and fit quality. A zero first appears at the stage where
+reconstruction loses the muon. Compare table row counts with these messages.
+If a collection is absent from the AOD,
 stop and add the required segment products to the upstream AOD event content;
 do not substitute another collection or infer a label.
 
