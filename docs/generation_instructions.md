@@ -155,6 +155,19 @@ from `in` to `out`. This makes the first filter propagate event 9's ME2 seed
 toward its aligned ME3/ME4 segments; the backward filter still builds the
 opposite leg.
 
+That direction trial regressed the DSA yield from four events to event 1 only
+and has been reverted. The current fourth trial restores `SeedPosition="in"`
+and changes only `DoBackwardFilter` from true to false relative to the
+four-track configuration. This tests whether the return leg invalidates an
+otherwise usable forward trajectory.
+
+Disabling the backward filter regressed the yield from four tracks to three
+and has been reverted. The current fifth trial keeps the established fitter
+settings and disables only the cosmic seed generator's global-y correlation
+pruning. Every DT/CSC segment passing the existing validity and chi2 checks is
+allowed to seed. This targets event 9, where the standard cosmic pruning made
+seeds only from ME2 despite clean aligned ME1--ME4 segments.
+
 ## Condor execution
 
 Configure the workflow as described above, including `N_JOBS`. Then run:
