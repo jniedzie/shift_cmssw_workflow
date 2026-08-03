@@ -3,9 +3,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
-CHUNK="${1:-0}"
+FORCE=0
+POSITIONAL_ARGS=()
+for argument in "$@"; do
+	case "$argument" in
+		-f|--force) FORCE=1 ;;
+		-h|--help) echo "Usage: $(basename "$0") [--force] [chunk [events]]"; exit 0 ;;
+		-*) echo "ERROR: unknown option: $argument" >&2; exit 2 ;;
+		*) POSITIONAL_ARGS+=("$argument") ;;
+	esac
+done
+if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
+	echo "ERROR: expected at most chunk and event-count arguments" >&2
+	exit 2
+fi
+CHUNK="${POSITIONAL_ARGS[0]:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
-N_EVENTS="${2:-$N_EVENTS}"
+N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$STEP1_DIR"
 CONFIG_DIR="$STEP1_CONFIG_DIR"
@@ -72,6 +86,10 @@ LOCAL_CONFIG="$LOCAL_STEP1_DIR/events_step1_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP1_DIR/step1_events_part${PART}.log"
 
 OUTPUT="$OUTPUT_DIR/events_step1_part${PART}.root"
+if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
+	echo "Force rerun requested; removing existing Step 1 output: $OUTPUT"
+	rm -f -- "$OUTPUT"
+fi
 if output_is_valid "$OUTPUT"; then
 	echo "Step 1 output already exists and is valid: $OUTPUT"
 	exit 0
@@ -111,3 +129,10 @@ fi
 	"$LOCAL_LOG" \
 	"$CROSS_SECTION_FILE" \
 	"$(basename "$PYTHIA_CONFIG" .py)"
+
+echo
+echo "=== Step 1 muon debug summary ==="
+if ! "$WORKFLOW_ROOT/scripts/format_muon_debug.py" "$LOCAL_LOG"; then
+	echo "No FixedTargetMuonDebug records were found in the Step 1 log."
+fi
+echo "Full Step 1 log: $LOG_SNAPSHOT"

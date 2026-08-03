@@ -3,9 +3,23 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_ROOT="$(cd "$SCRIPT_DIR" && pwd)"
-CHUNK="${1:-0}"
+FORCE=0
+POSITIONAL_ARGS=()
+for argument in "$@"; do
+	case "$argument" in
+		-f|--force) FORCE=1 ;;
+		-h|--help) echo "Usage: $(basename "$0") [--force] [chunk [events]]"; exit 0 ;;
+		-*) echo "ERROR: unknown option: $argument" >&2; exit 2 ;;
+		*) POSITIONAL_ARGS+=("$argument") ;;
+	esac
+done
+if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
+	echo "ERROR: expected at most chunk and event-count arguments" >&2
+	exit 2
+fi
+CHUNK="${POSITIONAL_ARGS[0]:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
-N_EVENTS="${2:-$N_EVENTS}"
+N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$STEP2_DIR"
 CONFIG_DIR="$STEP2_CONFIG_DIR"
@@ -32,6 +46,10 @@ LOCAL_CONFIG="$LOCAL_STEP2_DIR/events_step2_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP2_DIR/step2_events_part${PART}.log"
 
 OUTPUT="$OUTPUT_DIR/events_step2_part${PART}.root"
+if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
+	echo "Force rerun requested; removing existing Step 2 output: $OUTPUT"
+	rm -f -- "$OUTPUT"
+fi
 if output_is_valid "$OUTPUT"; then
 	echo "Step 2 output already exists and is valid: $OUTPUT"
 	exit 0
