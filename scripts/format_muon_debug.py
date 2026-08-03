@@ -108,6 +108,11 @@ def render_track(track: Record, by_track: dict[str, list[Record]]) -> list[str]:
         if record.source == "G4Step":
             if d.get("stage") == "volume-transition":
                 detail = compact(d, ("step", "pre_volume", "post_volume", "position_mm", "process"))
+            elif d.get("stage") == "dead-region-bypass":
+                detail = compact(
+                    d,
+                    ("stage", "decision", "step", "volume", "region", "reason", "vertex_z_mm", "momentum_direction_z"),
+                )
             else:
                 detail = compact(
                     d,
@@ -122,6 +127,10 @@ def render_track(track: Record, by_track: dict[str, list[Record]]) -> list[str]:
                         "cmstozdc_transport",
                         "cmstozdc_volume_match",
                         "zdc_particle_eligible",
+                        "shifttocms_transport",
+                        "shift_particle_eligible",
+                        "vertex_z_mm",
+                        "momentum_direction_z",
                         "global_time_ns",
                     ),
                 )
@@ -131,7 +140,9 @@ def render_track(track: Record, by_track: dict[str, list[Record]]) -> list[str]:
         else:
             details.append(f"end: {compact(d, ('position_mm', 'kinetic_energy_GeV', 'global_time_ns', 'g4_status', 'last_process'))}")
     if radius is not None:
-        details.append(f"straight-line diagnostic: projected r(z=0)={radius / 1000:.1f} m")
+        was_killed = any(record.source == "G4Step" and record.data.get("stage") == "cmssw-kill" for record in related)
+        qualifier = "hypothetical; track killed before z=0" if was_killed else "ignores field and interactions"
+        details.append(f"straight-line projection: r(z=0)={radius / 1000:.1f} m ({qualifier})")
     children = [("└─ " if index == len(details) - 1 else "├─ ") + detail for index, detail in enumerate(details)]
     return [f"G4 track #{track_id} ({particle_name(data.get('pdg_id', '?'))}, parent={data.get('parent_id', '?')})"] + ["   " + item for item in children]
 
