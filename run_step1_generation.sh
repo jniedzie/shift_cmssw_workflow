@@ -113,7 +113,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--era "$ERA" \
 	--fileout "file:$OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS})" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)" \
 	--no_exec \
 	-n "$N_EVENTS"
 

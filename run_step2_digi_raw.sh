@@ -72,6 +72,7 @@ cmsDriver.py step2 \
 	--filein "file:$INPUT" \
 	--fileout "file:$OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process)" \
 	--no_exec \
 	-n "$N_EVENTS"
 
