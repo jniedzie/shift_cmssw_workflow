@@ -94,6 +94,32 @@ These are the NanoAOD output tree names. Their EDM products use the
 `nanoaodFlatTable_shiftMuonSegmentsTable_*` module label. Run the usual Step 4 command
 after Step 3:
 
+The same customization also writes the cleaned `ShiftMuon` NanoAOD
+collection.  It combines `displacedStandAloneMuons`, `shiftTraversingMuons`,
+and `shiftCosmicMuons`, removes overlaps using shared reconstructed detector
+hits (with a conservative track-line fallback), and never consumes generator
+or simulation truth.  The `source` column records `0` for DSA, `1` for the
+traversing fit, and `2` for the cosmic fit.  DSA has precedence because the MC
+comparison gives it the best momentum estimate; the traversing fit precedes
+the ordinary cosmic fit because it gives better direction and production-line
+precision when those two overlap.  Other columns retain the source index,
+track fit quality, hit counts, inner/outer states, and the straight-line PCA.
+Rows also carry `genPartIdx`, a one-to-one directional match to the NanoAOD
+`GenPart` collection made only after reconstruction and cleaning.  It is `-1`
+for unmatched tracks and whenever `finalGenParticles` is absent, including
+collision data.  Momentum components and their track uncertainties, impact
+parameters, raw chi2/ndof, valid muon-hit count, and station count are stored
+directly in `ShiftMuon`; offline analysis therefore does not depend on the
+cosmic or traversing AOD track collections being retained.
+
+The MC-only study which established this ordering can be repeated with:
+
+```bash
+python3 scripts/analyze_shift_muon_quality.py "$LOG_DIR"/step3_events_AOD_part\*.log
+```
+
+Truth is used only by this diagnostic script, not by the `ShiftMuon` producer.
+
 ```bash
 ./run_step4_exonanoAOD.sh 0 10
 ```
@@ -175,6 +201,20 @@ Configure the workflow as described above, including `N_JOBS`. Then run:
 ```bash
 ./run_condor.sh
 ```
+
+By default every step is considered and an already-valid output is reused.
+To submit only selected stages, pass a comma-separated list.  Add `--force`
+to recreate the selected outputs, or use the `--force-steps` shorthand:
+
+```bash
+./run_condor.sh --steps 3,4
+./run_condor.sh --force-steps 4
+```
+
+The selector accepts `1,2,3,4` or `step1,step2,step3,step4`.  Steps always
+execute in workflow order, irrespective of the order in the list.  Inputs of
+an isolated downstream step must already exist; for example, a Step-4-only
+submission requires the corresponding Step-3 AOD file.
 
 To inspect jobs and logs:
 

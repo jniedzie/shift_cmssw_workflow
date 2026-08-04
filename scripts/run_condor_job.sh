@@ -4,6 +4,10 @@ set -euo pipefail
 CHUNK="$1"
 : "${2:?absolute workflow root must be passed as the second argument}"
 WORKFLOW_ROOT="$2"
+: "${3:?comma-separated workflow steps must be passed as the third argument}"
+SELECTED_STEPS="$3"
+: "${4:?force flag must be passed as the fourth argument}"
+FORCE_SELECTED="$4"
 if [[ "$WORKFLOW_ROOT" != /* ]]; then
 	echo "ERROR [run_condor_job]: workflow root is not absolute: $WORKFLOW_ROOT" >&2
 	exit 1
@@ -15,7 +19,33 @@ fi
 source "$WORKFLOW_ROOT/config/workflow.env"
 mkdir -p "$STEP1_DIR" "$STEP2_DIR" "$STEP3_DIR" "$STEP4_DIR" "$LOG_DIR" \
 	"$STEP1_CONFIG_DIR" "$STEP2_CONFIG_DIR" "$STEP3_CONFIG_DIR" "$STEP4_CONFIG_DIR"
-"$WORKFLOW_ROOT/run_step1_generation.sh" "$CHUNK" "$N_EVENTS"
-"$WORKFLOW_ROOT/run_step2_digi_raw.sh" "$CHUNK" "$N_EVENTS"
-"$WORKFLOW_ROOT/run_step3_aod.sh" "$CHUNK" "$N_EVENTS"
-"$WORKFLOW_ROOT/run_step4_exonanoAOD.sh" "$CHUNK" "$N_EVENTS"
+
+[[ "$FORCE_SELECTED" == 0 || "$FORCE_SELECTED" == 1 ]] || {
+	echo "ERROR [run_condor_job]: force flag must be 0 or 1 (got '$FORCE_SELECTED')" >&2
+	exit 2
+}
+declare -A RUN_STEP=()
+IFS=',' read -r -a requested_steps <<< "$SELECTED_STEPS"
+for step in "${requested_steps[@]}"; do
+	[[ "$step" =~ ^[1-4]$ ]] || {
+		echo "ERROR [run_condor_job]: invalid selected step '$step'" >&2
+		exit 2
+	}
+	RUN_STEP["$step"]=1
+done
+
+run_step() {
+	local step="$1"
+	local script="$2"
+	[[ -n "${RUN_STEP[$step]:-}" ]] || return 0
+	local arguments=()
+	[[ "$FORCE_SELECTED" == 1 ]] && arguments+=(--force)
+	arguments+=("$CHUNK" "$N_EVENTS")
+	echo "=== Condor chunk $CHUNK: running step $step (force=$FORCE_SELECTED) ==="
+	"$WORKFLOW_ROOT/$script" "${arguments[@]}"
+}
+
+run_step 1 run_step1_generation.sh
+run_step 2 run_step2_digi_raw.sh
+run_step 3 run_step3_aod.sh
+run_step 4 run_step4_exonanoAOD.sh
