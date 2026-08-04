@@ -64,6 +64,11 @@ fi
 
 cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
 
+if ! output_is_valid "$OUTPUT"; then
+	echo "ERROR: Step 3 cmsRun returned successfully but did not produce a valid output: $OUTPUT" >&2
+	exit 1
+fi
+
 LOG_SNAPSHOT="$LOG_DIR/step3_events_AOD_part${PART}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
   echo "WARNING: could not archive Step 3 log at $LOG_SNAPSHOT" >&2
