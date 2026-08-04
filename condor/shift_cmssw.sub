@@ -1,11 +1,11 @@
 universe              = vanilla
-executable            = scripts/run_condor_job.sh
+executable            = <workflow_root>/scripts/run_condor_job.sh
 should_transfer_files = NO
 getenv                = True
 request_cpus          = 4
 request_memory        = 2500 MB
 CHUNK                 = $(Process)
-arguments             = $(CHUNK)
+arguments             = "$(CHUNK) '<workflow_root>'"
 output                = <log_dir>/condor_$(ClusterId).$(Process).out
 error                 = <log_dir>/condor_$(ClusterId).$(Process).err
 log                   = <log_dir>/condor_$(ClusterId).log
