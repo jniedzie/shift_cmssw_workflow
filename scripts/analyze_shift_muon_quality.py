@@ -220,7 +220,8 @@ def main() -> None:
         print(
             f"{kind}: n={count} median angle={statistics.median(metrics[kind]['angle']):.4g} rad "
             f"|dp/p|={statistics.median(metrics[kind]['momentum']):.4g} "
-            f"originDCA={statistics.median(metrics[kind]['origin']):.4g} cm"
+            f"originDCA={statistics.median(metrics[kind]['origin']):.4g} cm "
+            f"(q95={quantile(metrics[kind]['origin'], .95):.4g} cm)"
         )
     for pair, rows in overlaps.items():
         if not rows:
