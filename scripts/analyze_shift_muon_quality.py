@@ -86,6 +86,17 @@ def direction_delta_r(a: Particle, b: Particle) -> float:
     return min(direct, reverse)
 
 
+def oriented_eta(track: Particle, truth: Particle) -> float:
+    """Resolve the no-timing line direction using truth for this diagnostic only."""
+    def delta_phi(first: float, second: float) -> float:
+        value = abs(first - second)
+        return min(value, 2.0 * math.pi - value)
+
+    direct = math.hypot(track.eta - truth.eta, delta_phi(track.phi, truth.phi))
+    reverse = math.hypot(track.eta + truth.eta, delta_phi(track.phi + math.pi, truth.phi))
+    return track.eta if direct <= reverse else -track.eta
+
+
 def point_line_distance(point, track: Particle) -> float:
     return norm(cross(sub(point, track.position), track.direction))
 
@@ -115,7 +126,7 @@ def main() -> None:
     if not paths:
         parser.error("no logs matched")
 
-    metrics = {kind: {name: [] for name in ("angle", "momentum", "origin")} for kind in KINDS}
+    metrics = {kind: {name: [] for name in ("angle", "eta", "momentum", "origin")} for kind in KINDS}
     overlaps = {(a, b): [] for i, a in enumerate(KINDS) for b in KINDS[i + 1 :]}
     selections = {
         name: {metric: [] for metric in ("angle", "momentum", "origin")}
@@ -137,6 +148,7 @@ def main() -> None:
                 angle = direction_error(muon, track)
                 candidates[kind] = track
                 metrics[kind]["angle"].append(angle)
+                metrics[kind]["eta"].append(oriented_eta(track, muon) - muon.eta)
                 metrics[kind]["momentum"].append(abs(track.momentum / muon.momentum - 1.0))
                 metrics[kind]["origin"].append(point_line_distance(muon.position, track))
             if candidates:
@@ -219,6 +231,7 @@ def main() -> None:
         count = len(metrics[kind]["angle"])
         print(
             f"{kind}: n={count} median angle={statistics.median(metrics[kind]['angle']):.4g} rad "
+            f"deltaEta={statistics.median(metrics[kind]['eta']):.4g} "
             f"|dp/p|={statistics.median(metrics[kind]['momentum']):.4g} "
             f"originDCA={statistics.median(metrics[kind]['origin']):.4g} cm "
             f"(q95={quantile(metrics[kind]['origin'], .95):.4g} cm)"
