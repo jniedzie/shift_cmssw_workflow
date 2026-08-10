@@ -29,7 +29,18 @@ GEOMETRY="DB:Extended"
 # AOD input, while this stage follows the Run 3 / 2025 NanoAOD recipe.
 ERA="Run3,Run3_2025"
 CONDITIONS="auto:phase1_2025_realistic"
-N_THREADS="${N_THREADS:-4}"
+# The improved momentum refit uses Geant4e, whose propagator manager and
+# tracking state are process-global.  cmsDriver writes its --nThreads setting
+# after the NanoAOD customisation, so a value larger than one overrides the
+# customisation's attempted single-thread safeguard and can crash inside
+# G4ErrorPropagator::MakeOneStep.  Keep this stage explicitly single-threaded
+# while the detailed-material refit is enabled.
+N_THREADS="${N_THREADS:-1}"
+if [[ "$N_THREADS" != 1 ]]; then
+	echo "ERROR: Step 4 improved momentum refit requires N_THREADS=1 (got '$N_THREADS')" >&2
+	exit 1
+fi
+N_STREAMS=1
 
 case "${ENABLE_EXONANOAOD:-1}" in
 	1|true|True)
@@ -73,6 +84,10 @@ if output_is_valid "$OUTPUT"; then
 	echo "Step 4 output already exists and is valid: $OUTPUT"
 	exit 0
 fi
+if [[ -e "$OUTPUT" ]]; then
+	echo "Removing invalid Step 4 output before retry: $OUTPUT"
+	rm -f -- "$OUTPUT"
+fi
 
 INPUT="$STEP3_DIR/events_AOD_part${PART}.root"
 if [[ ! -s "$INPUT" ]]; then
@@ -106,6 +121,7 @@ DRIVER_ARGS=(
 	--fileout "file:$OUTPUT"
 	--python_filename "$LOCAL_CONFIG"
 	--nThreads "$N_THREADS"
+	--nStreams "$N_STREAMS"
 	--no_exec
 	-n "$N_EVENTS"
 )
