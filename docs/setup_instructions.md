@@ -139,12 +139,13 @@ Keep these workflow settings unless you intentionally need different content:
 ```bash
 PYTHIA_CONFIG="Configuration/GenProduction/Charmonium_FixedTarget_pThat_0to1GeV_13p6TeV_pythia8_cff.py"
 AOD_TO_EXONANO_CUSTOMISE="PhysicsTools/ShiftMuonSegments/shiftMuonSegments_customise.customise"
-ENABLE_EXONANOAOD="${ENABLE_EXONANOAOD:-1}"
+ENABLE_EXONANOAOD="${ENABLE_EXONANOAOD:-0}"
 ```
 
-`ENABLE_EXONANOAOD=1` produces EXONanoAOD (`PAT,NANO:@EXO`); set it to `0`
-for standard NanoAOD (`PAT,NANO`). The Shift DT/CSC segment customization is
-applied in either case.
+`ENABLE_EXONANOAOD=0` produces standard NanoAOD (`PAT,NANO`) plus the focused
+SHIFT tables and required generator columns. Set it to `1` only for an
+EXONanoAOD (`PAT,NANO:@EXO`) comparison. The Shift customization is applied in
+either case.
 
 ## 6. Verify the integration before production
 

@@ -20,7 +20,7 @@ Edit only `config/workflow.env` before a run:
 | `N_JOBS` | Number of Condor jobs to submit; keep the `${N_JOBS:-100}` form to allow command-line overrides. |
 | `GENERATOR_SEED` | `random` for a fresh Step 1 seed on each invocation, or an integer from 1 through 900000000 for reproducible generation. |
 | `PYTHIA_CONFIG` | CMSSW generator configuration fragment used for event generation. |
-| `ENABLE_EXONANOAOD` | `1` for EXONanoAOD content or `0` for standard NanoAOD content in Step 4. |
+| `ENABLE_EXONANOAOD` | `0` (default) for standard NanoAOD plus SHIFT content or `1` for an EXONanoAOD comparison in Step 4. |
 | `AOD_TO_EXONANO_CUSTOMISE` | Optional `cmsDriver --customise` hook applied to Step 4 in either output mode. |
 
 All production paths are derived in `workflow.env` and may be overridden there
@@ -54,7 +54,9 @@ Once the configuration above is done, run from the workflow repository:
 ./run_step4_exonanoAOD.sh
 ```
 
-For Run 3, the production chain is AODSIM → NanoAOD, skipping MiniAOD. Step 4 runs `PAT,NANO:@EXO` by default, with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and four threads, matching the EXONanoAOD recipe. Set `ENABLE_EXONANOAOD=0` in `config/workflow.env` to run standard `PAT,NANO` instead. `AOD_TO_EXONANO_CUSTOMISE` is applied in either mode, so the muon-segment tables can be retained without enabling the full EXONanoAOD content.
+For Run 3, the production chain is AODSIM → NanoAOD, skipping MiniAOD. Step 4 runs standard `PAT,NANO` by default, with `auto:phase1_2025_realistic`, `Run3,Run3_2025`, and one thread. The SHIFT customization adds the custom reconstruction tables and the four generator columns used by TEA but absent from standard NanoAOD: `GenPart_pz`, `GenPart_vx`, `GenPart_vy`, and `GenPart_vz`. Set `ENABLE_EXONANOAOD=1` only for an explicit `PAT,NANO:@EXO` comparison job.
+
+Step-4 standard NanoAOD files are named `events_NanoAOD_part_*.root`. The TEA NanoAOD merge configuration selects that pattern explicitly, so legacy `events_EXONanoAOD_part_*.root` files left in the same directory are not mixed into a new merge.
 
 To override the part (first argument) or event count (second argument) without editing configuration:
 
