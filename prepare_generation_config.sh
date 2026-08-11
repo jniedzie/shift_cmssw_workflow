@@ -8,8 +8,10 @@ cmsDriver.py "$PYTHIA_CONFIG" \
   --python_filename qcd_gen_test.py \
   --eventcontent RAWSIM \
   --datatier GEN \
-  --conditions auto:phase2_realistic_T38 \
-  --beamspot NoSmear \
+  --conditions "$CONDITIONS" \
+  --beamspot "$BEAMSPOT" \
+  --geometry "$GEOMETRY" \
+  --era "$ERA" \
   --step GEN \
   --nThreads 2 -n 100 --no_exec
 

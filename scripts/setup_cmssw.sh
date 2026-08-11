@@ -18,6 +18,12 @@ source "$WORKFLOW_ROOT/config/workflow.env"
 
 [[ -n "${CMSSW_SRC:-}" ]] || { setup_error "CMSSW_SRC is not set in config/workflow.env"; return 1 2>/dev/null || exit 1; }
 [[ -d "$CMSSW_SRC" ]] || { setup_error "CMSSW_SRC does not exist: $CMSSW_SRC"; return 1 2>/dev/null || exit 1; }
+for campaign_setting in GEOMETRY ERA CONDITIONS BEAMSPOT; do
+	[[ -n "${!campaign_setting:-}" ]] || {
+		setup_error "$campaign_setting is not set in config/workflow.env"
+		return 1 2>/dev/null || exit 1
+	}
+done
 
 : "${CHUNK:=0}"
 if [[ ! "$CHUNK" =~ ^[0-9]+$ ]]; then
@@ -114,7 +120,7 @@ mkdir -p "$STEP1_DIR" "$STEP2_DIR" "$STEP3_DIR" "$STEP4_DIR" "$LOG_DIR" \
 export WORKFLOW_ROOT CMSSW_SRC SAMPLE_BASE SAMPLE_NAME CAMPAIGN_NAME SAMPLE_DIR PART \
 	SAMPLES_DIR STEP1_DIR STEP2_DIR STEP3_DIR STEP4_DIR CONFIG_BASE_DIR \
 	STEP1_CONFIG_DIR STEP2_CONFIG_DIR STEP3_CONFIG_DIR STEP4_CONFIG_DIR LOG_DIR \
-	CROSS_SECTION_FILE
+	CROSS_SECTION_FILE GEOMETRY ERA CONDITIONS BEAMSPOT
 echo "[setup_cmssw] Environment ready (PART=$PART)"
 
 output_is_valid() {

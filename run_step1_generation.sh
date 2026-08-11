@@ -24,11 +24,6 @@ WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$STEP1_DIR"
 CONFIG_DIR="$STEP1_CONFIG_DIR"
 
-GEOMETRY="DB:Extended"
-ERA="Run3_2024"
-CONDITIONS="auto:phase1_2024_realistic"
-BEAMSPOT="Realistic25ns13p6TeVEarly2023Collision"
-
 case "${DEBUG_MUON_PRIMARIES:-0}" in
 	0|false|False) DEBUG_MUON_PRIMARIES_CMS="False" ;;
 	1|true|True) DEBUG_MUON_PRIMARIES_CMS="True" ;;

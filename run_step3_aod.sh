@@ -20,7 +20,6 @@ source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 OUTPUT_DIR="$STEP3_DIR"
 CONFIG_DIR="$STEP3_CONFIG_DIR"
-GEOMETRY="DB:Extended"; ERA="Run3_2024"; CONDITIONS="auto:phase1_2024_realistic"
 mkdir -p "$SAMPLE_DIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "${WORKDIR:-$SAMPLE_DIR}"
 

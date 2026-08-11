@@ -23,12 +23,6 @@ N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$STEP4_DIR"
 CONFIG_DIR="$STEP4_CONFIG_DIR"
-
-GEOMETRY="DB:Extended"
-# Keep these settings local to this stage: the preceding stages produce the
-# AOD input, while this stage follows the Run 3 / 2025 NanoAOD recipe.
-ERA="Run3,Run3_2025"
-CONDITIONS="auto:phase1_2025_realistic"
 # The improved momentum refit uses Geant4e, whose propagator manager and
 # tracking state are process-global.  cmsDriver writes its --nThreads setting
 # after the NanoAOD customisation, so a value larger than one overrides the
