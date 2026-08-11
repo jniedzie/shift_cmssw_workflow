@@ -2,6 +2,7 @@ universe              = vanilla
 executable            = <workflow_root>/scripts/run_condor_job.sh
 should_transfer_files = NO
 getenv                = True
+environment           = "SHIFT_REFIT_SEED_MOMENTUM_SCALE=<seed_momentum_scale> SHIFT_REFIT_ENERGY_LOSS_SCALE=<energy_loss_scale> SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS=<detailed_material_effects> SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS=<geometry_material_effects> SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER=<geometry_material_fitter> SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER=<geometry_material_smoother> SHIFT_REFIT_LOG_GEOMETRY_COMPARISON=<log_geometry_comparison> STEP4_INPUTS_PER_JOB=<step4_inputs_per_job>"
 request_cpus          = <request_cpus>
 request_memory        = <request_memory_mb> MB
 max_materialize       = <max_materialize>

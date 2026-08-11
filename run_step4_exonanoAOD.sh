@@ -83,27 +83,96 @@ if [[ -e "$OUTPUT" ]]; then
 	rm -f -- "$OUTPUT"
 fi
 
-INPUT="$STEP3_DIR/events_AOD_part${PART}.root"
-if [[ ! -s "$INPUT" ]]; then
-	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
+if [[ ! "$STEP4_INPUTS_PER_JOB" =~ ^[1-9][0-9]*$ ]]; then
+	echo "ERROR: STEP4_INPUTS_PER_JOB must be a positive integer (got '$STEP4_INPUTS_PER_JOB')" >&2
 	exit 1
 fi
+INPUT_START=$((10#$CHUNK * STEP4_INPUTS_PER_JOB))
+INPUTS=()
+for ((input_offset = 0; input_offset < STEP4_INPUTS_PER_JOB; ++input_offset)); do
+	input_part="$(printf '%04d' "$((INPUT_START + input_offset))")"
+	input="$STEP3_DIR/events_AOD_part${input_part}.root"
+	if [[ ! -s "$input" ]]; then
+		echo "ERROR: Step-4 grouped input is missing or empty: $input" >&2
+		exit 1
+	fi
+	INPUTS+=("file:$input")
+done
+FILEIN="$(IFS=,; echo "${INPUTS[*]}")"
+STEP4_N_EVENTS=$((N_EVENTS * STEP4_INPUTS_PER_JOB))
 
 # --customise runs before cmsDriver's built-in NanoAOD customisations.  Those
 # customisations can replace the Nano sequence, dropping modules added by our
 # hook.  Run it as a command instead: cmsDriver places these commands at the
 # end of the generated configuration, after the final EXO/Nano setup.
 CUSTOMISE_COMMAND_ARGS=()
+GROUPED_SOURCE_COMMAND=""
+if [[ "$STEP4_INPUTS_PER_JOB" != 1 ]]; then
+	# Independently generated chunks restart their EDM event numbering. They are
+	# distinct events despite equal run/lumi/event IDs, so grouped test inputs
+	# must not be discarded by PoolSource's cross-file duplicate check.
+	GROUPED_SOURCE_COMMAND="; process.source.duplicateCheckMode = cms.untracked.string('noDuplicateCheck')"
+fi
 if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	CUSTOMISE_MODULE="${AOD_TO_EXONANO_CUSTOMISE%%.*}"
 	CUSTOMISE_FUNCTION="${AOD_TO_EXONANO_CUSTOMISE##*.}"
 	CUSTOMISE_MODULE="${CUSTOMISE_MODULE//\//.}"
+	if [[ ! "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+	   [[ "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" =~ ^0+([.]0+)?$ ]]; then
+		echo "ERROR: SHIFT_REFIT_SEED_MOMENTUM_SCALE must be a positive decimal (got '$SHIFT_REFIT_SEED_MOMENTUM_SCALE')" >&2
+		exit 1
+	fi
+	if [[ ! "$SHIFT_REFIT_ENERGY_LOSS_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+	   [[ "$SHIFT_REFIT_ENERGY_LOSS_SCALE" =~ ^0+([.]0+)?$ ]]; then
+		echo "ERROR: SHIFT_REFIT_ENERGY_LOSS_SCALE must be a positive decimal (got '$SHIFT_REFIT_ENERGY_LOSS_SCALE')" >&2
+		exit 1
+	fi
+	case "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" in
+		0) DETAILED_REFIT_MATERIAL_CMSSW=False ;;
+		1) DETAILED_REFIT_MATERIAL_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS must be 0 or 1 (got '$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS')" >&2; exit 1 ;;
+	esac
+	case "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" in
+		0) GEOMETRY_REFIT_MATERIAL_CMSSW=False ;;
+		1) GEOMETRY_REFIT_MATERIAL_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS')" >&2; exit 1 ;;
+	esac
+	case "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" in
+		0) GEOMETRY_REFIT_FITTER_CMSSW=False ;;
+		1) GEOMETRY_REFIT_FITTER_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER')" >&2; exit 1 ;;
+	esac
+	case "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" in
+		0) GEOMETRY_REFIT_SMOOTHER_CMSSW=False ;;
+		1) GEOMETRY_REFIT_SMOOTHER_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER')" >&2; exit 1 ;;
+	esac
+	case "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" in
+		0) LOG_GEOMETRY_COMPARISON_CMSSW=False ;;
+		1) LOG_GEOMETRY_COMPARISON_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_LOG_GEOMETRY_COMPARISON must be 0 or 1 (got '$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON')" >&2; exit 1 ;;
+	esac
+	if [[ "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" == 1 &&
+	      ( "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" == 1 || "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" == 1 || "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" == 1 ) ]]; then
+		echo "ERROR: detailed and geometry-sampled refit material modes are mutually exclusive" >&2
+		exit 1
+	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process)"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
 	)
+elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
+	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
 fi
 echo "=== Step 4: AODSIM -> ${OUTPUT_LABEL} (Run 3) ==="
+echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"
+echo "Directional refit energy-loss scale: $SHIFT_REFIT_ENERGY_LOSS_SCALE"
+echo "Directional refit detailed material effects: $SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS"
+echo "Directional refit geometry mean-loss material effects: $SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS"
+echo "Directional refit geometry material in fitter: $SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER"
+echo "Directional refit geometry material in smoother: $SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER"
+echo "Directional refit log geometry comparison: $SHIFT_REFIT_LOG_GEOMETRY_COMPARISON"
+echo "Step-4 grouped inputs: $STEP4_INPUTS_PER_JOB (parts $INPUT_START through $((INPUT_START + STEP4_INPUTS_PER_JOB - 1)))"
 DRIVER_ARGS=(
 	--step "$NANO_STEP"
 	--conditions "$CONDITIONS"
@@ -111,13 +180,13 @@ DRIVER_ARGS=(
 	--eventcontent NANOAODSIM
 	--geometry "$GEOMETRY"
 	--era "$ERA"
-	--filein "file:$INPUT"
+	--filein "$FILEIN"
 	--fileout "file:$OUTPUT"
 	--python_filename "$LOCAL_CONFIG"
 	--nThreads "$N_THREADS"
 	--nStreams "$N_STREAMS"
 	--no_exec
-	-n "$N_EVENTS"
+	-n "$STEP4_N_EVENTS"
 )
 DRIVER_ARGS+=("${CUSTOMISE_COMMAND_ARGS[@]}")
 cmsDriver.py step4 "${DRIVER_ARGS[@]}"
