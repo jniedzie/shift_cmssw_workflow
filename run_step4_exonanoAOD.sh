@@ -127,6 +127,16 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		echo "ERROR: SHIFT_REFIT_ENERGY_LOSS_SCALE must be a positive decimal (got '$SHIFT_REFIT_ENERGY_LOSS_SCALE')" >&2
 		exit 1
 	fi
+	if [[ ! "$SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
+	   [[ "$SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE" =~ ^0+([.]0+)?$ ]]; then
+		echo "ERROR: SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE must be a positive decimal (got '$SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE')" >&2
+		exit 1
+	fi
+	case "$SHIFT_REFIT_USE_SECOND_ITERATION" in
+		0) USE_SECOND_ITERATION_CMSSW=False ;;
+		1) USE_SECOND_ITERATION_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_USE_SECOND_ITERATION must be 0 or 1 (got '$SHIFT_REFIT_USE_SECOND_ITERATION')" >&2; exit 1 ;;
+	esac
 	case "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" in
 		0) DETAILED_REFIT_MATERIAL_CMSSW=False ;;
 		1) DETAILED_REFIT_MATERIAL_CMSSW=True ;;
@@ -147,6 +157,11 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		1) GEOMETRY_REFIT_SMOOTHER_CMSSW=True ;;
 		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER')" >&2; exit 1 ;;
 	esac
+	case "$SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL" in
+		0) GEOMETRY_TARGET_MATERIAL_CMSSW=False ;;
+		1) GEOMETRY_TARGET_MATERIAL_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL')" >&2; exit 1 ;;
+	esac
 	case "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" in
 		0) LOG_GEOMETRY_COMPARISON_CMSSW=False ;;
 		1) LOG_GEOMETRY_COMPARISON_CMSSW=True ;;
@@ -159,18 +174,21 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
 fi
 echo "=== Step 4: AODSIM -> ${OUTPUT_LABEL} (Run 3) ==="
 echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"
+echo "Directional refit second-pass seed error rescale: $SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE"
+echo "Directional refit use second iteration: $SHIFT_REFIT_USE_SECOND_ITERATION"
 echo "Directional refit energy-loss scale: $SHIFT_REFIT_ENERGY_LOSS_SCALE"
 echo "Directional refit detailed material effects: $SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS"
 echo "Directional refit geometry mean-loss material effects: $SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS"
 echo "Directional refit geometry material in fitter: $SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER"
 echo "Directional refit geometry material in smoother: $SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER"
+echo "Directional refit geometry material on target leg: $SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL"
 echo "Directional refit log geometry comparison: $SHIFT_REFIT_LOG_GEOMETRY_COMPARISON"
 echo "Step-4 grouped inputs: $STEP4_INPUTS_PER_JOB (parts $INPUT_START through $((INPUT_START + STEP4_INPUTS_PER_JOB - 1)))"
 DRIVER_ARGS=(
@@ -197,6 +215,11 @@ if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
 fi
 
 cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
+
+# AFS libraries are shared directly with workers.  Detect an overlapping
+# relink even when cmsRun happened to finish, rather than accepting an output
+# produced against a runtime that changed during the job.
+validate_cmssw_runtime
 
 if ! output_is_valid "$OUTPUT"; then
 	echo "ERROR: Step 4 cmsRun returned successfully but did not produce a valid output: $OUTPUT" >&2

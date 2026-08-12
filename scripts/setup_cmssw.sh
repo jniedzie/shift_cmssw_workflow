@@ -12,6 +12,26 @@ setup_error() {
 	exit 1
 }
 
+cmssw_runtime_fingerprint() {
+	local library_dir="$CMSSW_SRC/../lib/${SCRAM_ARCH}"
+	[[ -d "$library_dir" ]] || return 1
+	find "$library_dir" -maxdepth 1 -type f \( -name '*.so' -o -name '*.edmplugincache' \) \
+		-printf '%f %s %T@\n' | sort | sha256sum | awk '{print $1}'
+}
+
+validate_cmssw_runtime() {
+	[[ -n "${CMSSW_RUNTIME_FINGERPRINT:-}" ]] || return 0
+	local observed
+	observed="$(cmssw_runtime_fingerprint)" || {
+		setup_error "could not fingerprint the CMSSW runtime libraries"
+		return 1
+	}
+	if [[ "$observed" != "$CMSSW_RUNTIME_FINGERPRINT" ]]; then
+		setup_error "CMSSW runtime libraries changed after submission (expected $CMSSW_RUNTIME_FINGERPRINT, observed $observed). Do not run scram b against a release used by active jobs."
+		return 1
+	fi
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKFLOW_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 source "$WORKFLOW_ROOT/config/workflow.env"
@@ -39,6 +59,7 @@ fi
 if ! cmsenv; then
 	setup_error "cmsenv failed in $CMSSW_SRC; the remote shell was left intact"; return 1 2>/dev/null || exit 1
 fi
+validate_cmssw_runtime || { return 1 2>/dev/null || exit 1; }
 
 if [[ "${CMSSW_USE_BIGLIB:-0}" == 0 ]]; then
 	# BigProducts bundle many packages into one large library.  A source edit
