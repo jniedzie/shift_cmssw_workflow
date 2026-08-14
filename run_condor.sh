@@ -5,8 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt]
-       $(basename "$0") --force-steps LIST [--prebuilt]
+Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt] [--keep-logs]
+       $(basename "$0") --force-steps LIST [--prebuilt] [--keep-logs]
 
 Submit all configured jobs, running only the selected workflow steps.
 LIST is a comma-separated subset of 1,2,3,4 ("step1" ... "step4" are also
@@ -15,6 +15,9 @@ reused.  --force removes and recreates outputs for every selected step;
 --force-steps LIST is shorthand for --steps LIST --force.
 --prebuilt skips the submission-side SCRAM build after one explicit successful
 build, allowing several configuration-only scans to share the same libraries.
+Before submitting, logs from completed older jobs are removed from the local
+Condor log directory and, when no older workflow jobs are active, from EOS.
+--keep-logs disables this automatic cleanup.
 
 Examples:
   $(basename "$0") --steps 3,4
@@ -25,6 +28,7 @@ EOF
 SELECTED_STEPS="1,2,3,4"
 FORCE_SELECTED=0
 USE_PREBUILT=0
+KEEP_LOGS=0
 while (( $# )); do
 	case "$1" in
 		--steps)
@@ -44,6 +48,10 @@ while (( $# )); do
 			;;
 		--prebuilt)
 			USE_PREBUILT=1
+			shift
+			;;
+		--keep-logs)
+			KEEP_LOGS=1
 			shift
 			;;
 		-h|--help)
@@ -158,4 +166,10 @@ sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_m
 printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB, max materialized=%s)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
 	"$CONDOR_REQUEST_MEMORY_MB" "$CONDOR_MAX_MATERIALIZE"
+if [[ "$KEEP_LOGS" == 0 ]]; then
+	"$SCRIPT_DIR/scripts/cleanup_condor_logs.sh" \
+		"$CONDOR_LOG_DIR" "$LOG_DIR" "$SCRIPT_DIR/scripts/run_condor_job.sh"
+else
+	echo "Keeping logs from older jobs (--keep-logs)"
+fi
 condor_submit "$submit_file"
