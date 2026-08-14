@@ -18,6 +18,36 @@ fi
 CHUNK="${POSITIONAL_ARGS[0]:-0}"
 source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
+
+case "$SHIFT_DT_MODE" in
+	off) DT_ENABLED_CMSSW=False; DT_NAVIGATION=Standard; DT_NAVIGATION_CODE=0 ;;
+	standard) DT_ENABLED_CMSSW=True; DT_NAVIGATION=Standard; DT_NAVIGATION_CODE=1 ;;
+	direct) DT_ENABLED_CMSSW=True; DT_NAVIGATION=Direct; DT_NAVIGATION_CODE=2 ;;
+	*) echo "ERROR: SHIFT_DT_MODE must be off, standard, or direct (got '$SHIFT_DT_MODE')" >&2; exit 1 ;;
+esac
+case "$SHIFT_TRACKER_MODE" in
+	none|general|p5) ;;
+	*) echo "ERROR: SHIFT_TRACKER_MODE must be none, general, or p5 (got '$SHIFT_TRACKER_MODE')" >&2; exit 1 ;;
+esac
+case "$SHIFT_ENABLE_GEM" in
+	0) GEM_ENABLED_CMSSW=False ;;
+	1) GEM_ENABLED_CMSSW=True ;;
+	*) echo "ERROR: SHIFT_ENABLE_GEM must be 0 or 1 (got '$SHIFT_ENABLE_GEM')" >&2; exit 1 ;;
+esac
+case "$SHIFT_ENABLE_HCAL_DIAGNOSTICS" in
+	0) HCAL_DIAGNOSTICS_CMSSW=False ;;
+	1) HCAL_DIAGNOSTICS_CMSSW=True ;;
+	*) echo "ERROR: SHIFT_ENABLE_HCAL_DIAGNOSTICS must be 0 or 1 (got '$SHIFT_ENABLE_HCAL_DIAGNOSTICS')" >&2; exit 1 ;;
+esac
+case "$SHIFT_ENABLE_ZDC_DIAGNOSTICS" in
+	0) ZDC_DIAGNOSTICS_CMSSW=False ;;
+	1) ZDC_DIAGNOSTICS_CMSSW=True ;;
+	*) echo "ERROR: SHIFT_ENABLE_ZDC_DIAGNOSTICS must be 0 or 1 (got '$SHIFT_ENABLE_ZDC_DIAGNOSTICS')" >&2; exit 1 ;;
+esac
+if [[ ! "$SHIFT_RECO_VARIANT_CODE" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: SHIFT_RECO_VARIANT_CODE must be a non-negative integer (got '$SHIFT_RECO_VARIANT_CODE')" >&2
+	exit 1
+fi
 OUTPUT_DIR="$STEP3_DIR"
 CONFIG_DIR="$STEP3_CONFIG_DIR"
 mkdir -p "$SAMPLE_DIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
@@ -54,11 +84,13 @@ fi
 INPUT="$STEP2_DIR/events_step2_part${PART}.root"
 [[ -s "$INPUT" ]] || { echo "ERROR: $INPUT is missing or empty" >&2; exit 1; }
 echo "=== Step 3: RAW2DIGI,L1Reco,RECO,RECOSIM -> AODSIM ==="
+echo "SHIFT reconstruction variant: $SHIFT_RECO_VARIANT (code $SHIFT_RECO_VARIANT_CODE)"
+echo "Detector modes: DT=$SHIFT_DT_MODE tracker=$SHIFT_TRACKER_MODE GEM=$SHIFT_ENABLE_GEM HCALdiag=$SHIFT_ENABLE_HCAL_DIAGNOSTICS ZDCdiag=$SHIFT_ENABLE_ZDC_DIAGNOSTICS"
 cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO,RECOSIM --conditions "$CONDITIONS" \
   --datatier AODSIM --eventcontent AODSIM --geometry "$GEOMETRY" --era "$ERA" \
   --filein "file:$INPUT" --fileout "file:$OUTPUT" \
   --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS" \
-  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth, customiseRecoForShiftMuons, customiseTraversingShiftMuonReco, customiseRecoDebug; process = customiseKeepShiftTruth(process); process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='Standard', pcaPropagator='SteppingHelixPropagatorAny'); process = customiseTraversingShiftMuonReco(process); process = customiseRecoDebug(process)"
+  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth, customiseRecoForShiftMuons, customiseTraversingShiftMuonReco, customiseRecoDebug; process = customiseKeepShiftTruth(process, keepHcalSimHits=${HCAL_DIAGNOSTICS_CMSSW}, keepZDCSimHits=${ZDC_DIAGNOSTICS_CMSSW}); process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='${DT_NAVIGATION}', pcaPropagator='SteppingHelixPropagatorAny', enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}); process = customiseTraversingShiftMuonReco(process, trackerMode='${SHIFT_TRACKER_MODE}', enableDTMeasurement=${DT_ENABLED_CMSSW}); process = customiseRecoDebug(process, enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}, trackerMode='${SHIFT_TRACKER_MODE}', enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, dtNavigationMode=${DT_NAVIGATION_CODE}, recoVariantCode=${SHIFT_RECO_VARIANT_CODE})"
 
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_AOD_part${PART}_cfg.py"
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
