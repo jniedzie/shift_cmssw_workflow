@@ -47,6 +47,10 @@ if output_is_valid "$OUTPUT"; then
 	echo "Step 3 output already exists and is valid: $OUTPUT"
 	exit 0
 fi
+if [[ -e "$OUTPUT" ]]; then
+	echo "Removing invalid Step 3 output before retry: $OUTPUT"
+	rm -f -- "$OUTPUT"
+fi
 INPUT="$STEP2_DIR/events_step2_part${PART}.root"
 [[ -s "$INPUT" ]] || { echo "ERROR: $INPUT is missing or empty" >&2; exit 1; }
 echo "=== Step 3: RAW2DIGI,L1Reco,RECO,RECOSIM -> AODSIM ==="

@@ -148,6 +148,15 @@ output_is_valid() {
 	local output="$1"
 	[[ -s "$output" ]] || return 1
 	if command -v edmFileUtil >/dev/null 2>&1; then
-		edmFileUtil "$output" >/dev/null 2>&1
+		# A job evicted while ROOT is closing can leave a non-empty file whose
+		# metadata are readable but whose event trees are incomplete.  On EOS,
+		# edmFileUtil can block indefinitely on such a file and prevent the retry
+		# from reaching the existing invalid-output cleanup below.
+		local validation_timeout="${OUTPUT_VALIDATION_TIMEOUT_SECONDS:-60}"
+		if [[ ! "$validation_timeout" =~ ^[1-9][0-9]*$ ]]; then
+			echo "ERROR: OUTPUT_VALIDATION_TIMEOUT_SECONDS must be a positive integer (got '$validation_timeout')" >&2
+			return 1
+		fi
+		timeout "${validation_timeout}s" edmFileUtil "$output" >/dev/null 2>&1
 	fi
 }
