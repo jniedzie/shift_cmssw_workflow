@@ -167,8 +167,9 @@ printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed 
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
 	"$CONDOR_REQUEST_MEMORY_MB" "$CONDOR_MAX_MATERIALIZE"
 if [[ "$KEEP_LOGS" == 0 ]]; then
-	"$SCRIPT_DIR/scripts/cleanup_condor_logs.sh" \
-		"$CONDOR_LOG_DIR" "$LOG_DIR" "$SCRIPT_DIR/scripts/run_condor_job.sh"
+	echo "Cleaning old Condor and payload logs before submission..."
+	"$WORKFLOW_ROOT/scripts/cleanup_condor_logs.sh" \
+		"$CONDOR_LOG_DIR" "$LOG_DIR" "$WORKFLOW_ROOT/scripts/run_condor_job.sh"
 else
 	echo "Keeping logs from older jobs (--keep-logs)"
 fi
