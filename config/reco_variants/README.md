@@ -12,6 +12,15 @@ The controlled comparisons are:
 - `reference` versus `hcal` or `zdc` for truth-attributed calorimeter
   diagnostics;
 - `all` as an integration test, not as the automatic production choice.
+- `detector_integration_v2` is the guarded second-generation integration test:
+  extended timing, covariance-aware DT/tracker RecHit augmentation, full
+  calorimeter/ZDC association diagnostics, and a dedicated early-ZDC Step-2
+  digitization stream. It never changes the baseline precision refit unless a
+  tracker measurement is actually accepted.
+- `detector_integration_v3` is the validated successor: it explicitly enables
+  the Phase-I ZDC digitizer, uses covariance-selected DT augmentation, carries
+  per-muon tracker truth, and adds propagated calorimeter/ZDC diagnostics. It
+  uses a new Step-2 identity so the older empty-ZDC digi files cannot be reused.
 
 CSC and RPC remain enabled in every preset.  HCAL and ZDC are diagnostic
 associations in this iteration and do not enter the precision Kalman fit.
