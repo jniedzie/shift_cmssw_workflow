@@ -68,6 +68,7 @@ cleanup_step4_tmp() {
 trap cleanup_step4_tmp EXIT
 LOCAL_CONFIG="$LOCAL_STEP4_DIR/events_${OUTPUT_LABEL}_part_${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP4_DIR/step4_events_${OUTPUT_LABEL}_part_${PART}.log"
+LOCAL_OUTPUT="$LOCAL_STEP4_DIR/events_${OUTPUT_LABEL}_part_${PART}.root"
 
 OUTPUT="$OUTPUT_DIR/events_${OUTPUT_LABEL}_part_${PART}.root"
 if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
@@ -215,7 +216,7 @@ DRIVER_ARGS=(
 	--geometry "$GEOMETRY"
 	--era "$ERA"
 	--filein "$FILEIN"
-	--fileout "file:$OUTPUT"
+	--fileout "file:$LOCAL_OUTPUT"
 	--python_filename "$LOCAL_CONFIG"
 	--nThreads "$N_THREADS"
 	--nStreams "$N_STREAMS"
@@ -237,10 +238,11 @@ cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
 # produced against a runtime that changed during the job.
 validate_cmssw_runtime
 
-if ! output_is_valid "$OUTPUT"; then
-	echo "ERROR: Step 4 cmsRun returned successfully but did not produce a valid output: $OUTPUT" >&2
+if ! output_is_valid "$LOCAL_OUTPUT"; then
+	echo "ERROR: Step 4 cmsRun returned successfully but did not produce a valid local output: $LOCAL_OUTPUT" >&2
 	exit 1
 fi
+stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
 
 LOG_SNAPSHOT="$LOG_DIR/step4_events_${OUTPUT_LABEL}_part_${PART}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then

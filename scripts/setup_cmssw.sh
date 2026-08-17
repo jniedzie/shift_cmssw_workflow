@@ -160,3 +160,36 @@ output_is_valid() {
 		timeout "${validation_timeout}s" edmFileUtil "$output" >/dev/null 2>&1
 	fi
 }
+
+stage_cmssw_output() {
+	local local_output="$1"
+	local final_output="$2"
+	[[ -s "$local_output" ]] || {
+		echo "ERROR: cannot stage missing or empty local output: $local_output" >&2
+		return 1
+	}
+	local staged_output="${final_output}.partial.${PART}.$$"
+	local local_size staged_size
+	local_size="$(stat -c %s "$local_output")" || return 1
+	echo "Staging validated output to $final_output ($local_size bytes)..."
+	if ! cp -- "$local_output" "$staged_output"; then
+		echo "ERROR: failed to copy output to EOS staging path: $staged_output" >&2
+		rm -f -- "$staged_output" 2>/dev/null || true
+		return 1
+	fi
+	staged_size="$(stat -c %s "$staged_output")" || {
+		rm -f -- "$staged_output" 2>/dev/null || true
+		return 1
+	}
+	if [[ "$staged_size" != "$local_size" ]]; then
+		echo "ERROR: staged output size mismatch (local=$local_size, staged=$staged_size)" >&2
+		rm -f -- "$staged_output" 2>/dev/null || true
+		return 1
+	fi
+	if ! mv -f -- "$staged_output" "$final_output"; then
+		echo "ERROR: failed to publish staged output: $final_output" >&2
+		rm -f -- "$staged_output" 2>/dev/null || true
+		return 1
+	fi
+	echo "Published output: $final_output"
+}

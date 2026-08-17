@@ -67,6 +67,7 @@ cleanup_step3_tmp() {
 trap cleanup_step3_tmp EXIT
 LOCAL_CONFIG="$LOCAL_STEP3_DIR/events_AOD_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP3_DIR/step3_events_AOD_part${PART}.log"
+LOCAL_OUTPUT="$LOCAL_STEP3_DIR/events_AOD_part${PART}.root"
 
 OUTPUT="$OUTPUT_DIR/events_AOD_part${PART}.root"
 if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
@@ -88,7 +89,7 @@ echo "SHIFT reconstruction variant: $SHIFT_RECO_VARIANT (code $SHIFT_RECO_VARIAN
 echo "Detector modes: DT=$SHIFT_DT_MODE tracker=$SHIFT_TRACKER_MODE GEM=$SHIFT_ENABLE_GEM HCALdiag=$SHIFT_ENABLE_HCAL_DIAGNOSTICS ZDCdiag=$SHIFT_ENABLE_ZDC_DIAGNOSTICS"
 cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO,RECOSIM --conditions "$CONDITIONS" \
   --datatier AODSIM --eventcontent AODSIM --geometry "$GEOMETRY" --era "$ERA" \
-  --filein "file:$INPUT" --fileout "file:$OUTPUT" \
+  --filein "file:$INPUT" --fileout "file:$LOCAL_OUTPUT" \
   --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS" \
   --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth, customiseRecoForShiftMuons, customiseTraversingShiftMuonReco, customiseRecoDebug; process = customiseKeepShiftTruth(process, keepHcalSimHits=${HCAL_DIAGNOSTICS_CMSSW}, keepZDCSimHits=${ZDC_DIAGNOSTICS_CMSSW}); process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='${DT_NAVIGATION}', pcaPropagator='SteppingHelixPropagatorAny', enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}); process = customiseTraversingShiftMuonReco(process, trackerMode='${SHIFT_TRACKER_MODE}', enableDTMeasurement=${DT_ENABLED_CMSSW}); process = customiseRecoDebug(process, enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}, trackerMode='${SHIFT_TRACKER_MODE}', enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, dtNavigationMode=${DT_NAVIGATION_CODE}, recoVariantCode=${SHIFT_RECO_VARIANT_CODE})"
 
@@ -99,10 +100,11 @@ fi
 
 cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
 
-if ! output_is_valid "$OUTPUT"; then
-	echo "ERROR: Step 3 cmsRun returned successfully but did not produce a valid output: $OUTPUT" >&2
+if ! output_is_valid "$LOCAL_OUTPUT"; then
+	echo "ERROR: Step 3 cmsRun returned successfully but did not produce a valid local output: $LOCAL_OUTPUT" >&2
 	exit 1
 fi
+stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
 
 LOG_SNAPSHOT="$LOG_DIR/step3_events_AOD_part${PART}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then

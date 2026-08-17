@@ -41,6 +41,7 @@ cleanup_step2_tmp() {
 trap cleanup_step2_tmp EXIT
 LOCAL_CONFIG="$LOCAL_STEP2_DIR/events_step2_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP2_DIR/step2_events_part${PART}.log"
+LOCAL_OUTPUT="$LOCAL_STEP2_DIR/events_step2_part${PART}.root"
 
 OUTPUT="$OUTPUT_DIR/events_step2_part${PART}.root"
 if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
@@ -50,6 +51,10 @@ fi
 if output_is_valid "$OUTPUT"; then
 	echo "Step 2 output already exists and is valid: $OUTPUT"
 	exit 0
+fi
+if [[ -e "$OUTPUT" ]]; then
+	echo "Removing invalid Step 2 output before retry: $OUTPUT"
+	rm -f -- "$OUTPUT"
 fi
 
 INPUT="$STEP1_DIR/events_step1_part${PART}.root"
@@ -67,7 +72,7 @@ cmsDriver.py step2 \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
-	--fileout "file:$OUTPUT" \
+	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
 	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, zdcDigiTimePhaseOffset=${SHIFT_ZDC_DIGI_TIME_PHASE_OFFSET_NS})" \
 	--no_exec \
@@ -79,6 +84,12 @@ if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
 fi
 
 cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
+
+if ! output_is_valid "$LOCAL_OUTPUT"; then
+	echo "ERROR: Step 2 cmsRun returned successfully but did not produce a valid local output: $LOCAL_OUTPUT" >&2
+	exit 1
+fi
+stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
 
 LOG_SNAPSHOT="$LOG_DIR/step2_events_part${PART}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then

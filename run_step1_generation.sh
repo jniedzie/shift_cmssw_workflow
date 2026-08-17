@@ -85,6 +85,7 @@ cleanup_step1_tmp() {
 trap cleanup_step1_tmp EXIT
 LOCAL_CONFIG="$LOCAL_STEP1_DIR/events_step1_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP1_DIR/step1_events_part${PART}.log"
+LOCAL_OUTPUT="$LOCAL_STEP1_DIR/events_step1_part${PART}.root"
 
 OUTPUT="$OUTPUT_DIR/events_step1_part${PART}.root"
 if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
@@ -94,6 +95,10 @@ fi
 if output_is_valid "$OUTPUT"; then
 	echo "Step 1 output already exists and is valid: $OUTPUT"
 	exit 0
+fi
+if [[ -e "$OUTPUT" ]]; then
+	echo "Removing invalid Step 1 output before retry: $OUTPUT"
+	rm -f -- "$OUTPUT"
 fi
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
@@ -106,7 +111,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--eventcontent FEVTDEBUG \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
-	--fileout "file:$OUTPUT" \
+	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
 	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)" \
 	--no_exec \
@@ -118,6 +123,12 @@ if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
 fi
 
 cmsRun "$LOCAL_CONFIG" 2>&1 | tee "$LOCAL_LOG"
+
+if ! output_is_valid "$LOCAL_OUTPUT"; then
+	echo "ERROR: Step 1 cmsRun returned successfully but did not produce a valid local output: $LOCAL_OUTPUT" >&2
+	exit 1
+fi
+stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
 
 LOG_SNAPSHOT="$LOG_DIR/step1_events_part${PART}_seed${GENERATOR_SEED}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
