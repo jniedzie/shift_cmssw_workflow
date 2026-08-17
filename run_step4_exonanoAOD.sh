@@ -127,6 +127,9 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		1) ZDC_DIAGNOSTICS_CMSSW=True ;;
 		*) echo "ERROR: SHIFT_ENABLE_ZDC_DIAGNOSTICS must be 0 or 1 (got '$SHIFT_ENABLE_ZDC_DIAGNOSTICS')" >&2; exit 1 ;;
 	esac
+	case "$SHIFT_AUGMENT_DT_HITS" in 0) AUGMENT_DT_CMSSW=False ;; 1) AUGMENT_DT_CMSSW=True ;; *) echo "ERROR: SHIFT_AUGMENT_DT_HITS must be 0 or 1" >&2; exit 1 ;; esac
+	case "$SHIFT_AUGMENT_TRACKER_HITS" in 0) AUGMENT_TRACKER_CMSSW=False ;; 1) AUGMENT_TRACKER_CMSSW=True ;; *) echo "ERROR: SHIFT_AUGMENT_TRACKER_HITS must be 0 or 1" >&2; exit 1 ;; esac
+	case "$SHIFT_USE_EXTENDED_TIMING" in 0) EXTENDED_TIMING_CMSSW=False ;; 1) EXTENDED_TIMING_CMSSW=True ;; *) echo "ERROR: SHIFT_USE_EXTENDED_TIMING must be 0 or 1" >&2; exit 1 ;; esac
 	if [[ ! "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" =~ ^[0-9]+([.][0-9]+)?$ ]] ||
 	   [[ "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" =~ ^0+([.]0+)?$ ]]; then
 		echo "ERROR: SHIFT_REFIT_SEED_MOMENTUM_SCALE must be a positive decimal (got '$SHIFT_REFIT_SEED_MOMENTUM_SCALE')" >&2
@@ -184,7 +187,7 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
@@ -192,6 +195,7 @@ fi
 echo "=== Step 4: AODSIM -> ${OUTPUT_LABEL} (Run 3) ==="
 echo "SHIFT reconstruction variant: $SHIFT_RECO_VARIANT (code $SHIFT_RECO_VARIANT_CODE)"
 echo "Detector modes: DT=$SHIFT_DT_MODE tracker=$SHIFT_TRACKER_MODE GEM=$SHIFT_ENABLE_GEM HCALdiag=$SHIFT_ENABLE_HCAL_DIAGNOSTICS ZDCdiag=$SHIFT_ENABLE_ZDC_DIAGNOSTICS"
+echo "Augmented measurements: DT=$SHIFT_AUGMENT_DT_HITS tracker=$SHIFT_AUGMENT_TRACKER_HITS extendedTiming=$SHIFT_USE_EXTENDED_TIMING"
 echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"
 echo "Directional refit second-pass seed error rescale: $SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE"
 echo "Directional refit use second iteration: $SHIFT_REFIT_USE_SECOND_ITERATION"
