@@ -67,6 +67,50 @@ case "$GENERATOR_SEED" in
 		;;
 esac
 
+case "$SIMULATION_SEED" in
+	random)
+		SIMULATION_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+		SIMULATION_SEED=$((SIMULATION_SEED % 900000000 + 1))
+		;;
+	''|*[!0-9]*)
+		echo "ERROR: SIMULATION_SEED must be 'random' or an integer from 1 through 900000000" >&2
+		exit 1
+		;;
+	*)
+		if (( ${#SIMULATION_SEED} > 9 )) || (( 10#$SIMULATION_SEED < 1 || 10#$SIMULATION_SEED > 900000000 )); then
+			echo "ERROR: SIMULATION_SEED must be 'random' or an integer from 1 through 900000000" >&2
+			exit 1
+		fi
+		SIMULATION_SEED=$((10#$SIMULATION_SEED))
+		;;
+esac
+
+case "$SHIFT_TIMING_MODE" in
+	nominal|legacy|fixed) ;;
+	*) echo "ERROR: SHIFT_TIMING_MODE must be nominal, legacy, or fixed" >&2; exit 1 ;;
+esac
+case "$SHIFT_TIMING_BEAM_DIRECTION_Z" in
+	-1|1) ;;
+	*) echo "ERROR: SHIFT_TIMING_BEAM_DIRECTION_Z must be -1 or 1" >&2; exit 1 ;;
+esac
+if [[ ! "$SHIFT_TIMING_BX_OFFSET" =~ ^-?[0-9]+$ ]]; then
+	echo "ERROR: SHIFT_TIMING_BX_OFFSET must be an integer" >&2
+	exit 1
+fi
+FLOAT_PATTERN='^-?([0-9]+([.][0-9]*)?|[.][0-9]+)([eE][+-]?[0-9]+)?$'
+for timing_float in SHIFT_TIMING_PHASE_NS SHIFT_TIMING_FIXED_OFFSET_NS \
+	SHIFT_TIMING_CMS_REFERENCE_Z_MM SHIFT_TIMING_BUNCH_SPACING_NS SHIFT_TIMING_LEGACY_OFFSET_CT_MM \
+	SHIFT_G4_MAX_TRACK_TIME_NS SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS; do
+	if [[ ! "${!timing_float}" =~ $FLOAT_PATTERN ]]; then
+		echo "ERROR: $timing_float must be a finite decimal number (got '${!timing_float}')" >&2
+		exit 1
+	fi
+done
+if [[ ! "$SHIFT_TIMING_MODEL_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
+	echo "ERROR: SHIFT_TIMING_MODEL_VERSION may contain only letters, digits, '.', '_' and '-'" >&2
+	exit 1
+fi
+
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
@@ -103,6 +147,9 @@ fi
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED"
+echo "Geant4 random seed: $SIMULATION_SEED"
+echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DIRECTION_Z bxOffset=$SHIFT_TIMING_BX_OFFSET phaseNs=$SHIFT_TIMING_PHASE_NS fixedOffsetNs=$SHIFT_TIMING_FIXED_OFFSET_NS modelVersion=$SHIFT_TIMING_MODEL_VERSION"
+echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
 cmsDriver.py "$PYTHIA_CONFIG" \
 	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
@@ -113,7 +160,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--era "$ERA" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)" \
+	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)" \
 	--no_exec \
 	-n "$N_EVENTS"
 

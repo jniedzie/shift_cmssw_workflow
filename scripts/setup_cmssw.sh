@@ -109,6 +109,12 @@ if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
 	if ! scram b -j "$CMSSW_BUILD_JOBS" >/dev/null; then
 		setup_error "SCRAM failed while registering $PYTHIA_CONFIG"; return 1 2>/dev/null || exit 1
 	fi
+	# A newly built plugin library can exist before the local cache knows its
+	# module names.  Refresh now, before cmsDriver creates a configuration that
+	# will fail only when cmsRun constructs the process.
+	if ! edmPluginRefresh "$CMSSW_SRC/../lib/$SCRAM_ARCH"; then
+		setup_error "failed to refresh the local CMSSW plugin cache"; return 1 2>/dev/null || exit 1
+	fi
 	PYTHIA_MODULE="${PYTHIA_CONFIG%.py}"
 	PYTHIA_MODULE="${PYTHIA_MODULE//\//.}"
 	if ! python3 -c "import ${PYTHIA_MODULE}" >/dev/null 2>&1; then

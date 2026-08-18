@@ -11,6 +11,14 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SAMPLE_NAME`, `CAMPAIGN_NAME` | Components of the campaign output path. |
 | `N_EVENTS`, `N_JOBS` | Events per chunk and number of Condor jobs. |
 | `GENERATOR_SEED` | `random` or a fixed integer from 1 through 900000000. |
+| `SIMULATION_SEED` | Geant4 seed; fix it with `GENERATOR_SEED` for paired timing scans. |
+| `SHIFT_TIMING_MODE` | `nominal`, exact `legacy` regression, or a `fixed` test shift. |
+| `SHIFT_TIMING_BEAM_DIRECTION_Z` | Longitudinal beam direction, `-1` or `1`. |
+| `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns BX offset. |
+| `SHIFT_TIMING_PHASE_NS` | Additive fractional timing phase in ns. |
+| `SHIFT_TIMING_FIXED_OFFSET_NS` | Common ns shift used in `fixed` mode. |
+| `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
+| `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
 
 The supported production layout is deliberately canonical:
@@ -32,6 +40,12 @@ segments added to the precision refit. Tracker seeding/attachment, GEM
 measurements, HCAL/ZDC association studies, extended timing, detailed-material
 experiments, and the momentum-continuity guard are disabled. These values are
 kept together in `workflow.env`; there are no reconstruction-variant presets.
+
+Step 1 applies SHIFT timing after standard vertex smearing and before Geant4.
+The 5000 ns transport guards deliberately replace CMSSW's stock 500 ns central
+track cutoff for this workflow: a time-zero particle from 148 m reaches CMS at
+about 494 ns and would otherwise be killed before detector response can decide
+whether it is accepted.  These guards are not electronics readout windows.
 
 Check the resolved configuration with:
 

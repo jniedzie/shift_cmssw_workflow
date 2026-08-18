@@ -22,7 +22,6 @@ generator = cms.EDFilter(
             'Beams:eB = 6800.',
             'Beams:allowVertexSpread = on',
             'Beams:offsetVertexZ = 148000.',  # 148 m, Pythia units are mm
-            'Beams:offsetTime = -148000.',  # offset the time accordingly, units are mm/c
             'Beams:sigmaVertexZ = 500.',       # 0.5 m z smearing (Gaussian width)
             # Produce direct J/psi (the first entry in the 3S1 state vectors)
             # through every available colour-singlet and colour-octet channel.
