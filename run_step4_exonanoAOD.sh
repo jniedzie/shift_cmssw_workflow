@@ -194,7 +194,6 @@ elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
 fi
 echo "=== Step 4: AODSIM -> ${OUTPUT_LABEL} (Run 3) ==="
-echo "SHIFT reconstruction variant: $SHIFT_RECO_VARIANT (code $SHIFT_RECO_VARIANT_CODE)"
 echo "Detector modes: DT=$SHIFT_DT_MODE tracker=$SHIFT_TRACKER_MODE GEM=$SHIFT_ENABLE_GEM HCALdiag=$SHIFT_ENABLE_HCAL_DIAGNOSTICS ZDCdiag=$SHIFT_ENABLE_ZDC_DIAGNOSTICS"
 echo "Augmented measurements: DT=$SHIFT_AUGMENT_DT_HITS tracker=$SHIFT_AUGMENT_TRACKER_HITS extendedTiming=$SHIFT_USE_EXTENDED_TIMING"
 echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"

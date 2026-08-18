@@ -74,7 +74,7 @@ cmsDriver.py step2 \
 	--filein "file:$INPUT" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, zdcDigiTimePhaseOffset=${SHIFT_ZDC_DIGI_TIME_PHASE_OFFSET_NS})" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process)" \
 	--no_exec \
 	-n "$N_EVENTS"
 

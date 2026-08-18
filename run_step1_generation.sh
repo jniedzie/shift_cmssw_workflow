@@ -142,9 +142,11 @@ fi
 	"$CROSS_SECTION_FILE" \
 	"$(basename "$PYTHIA_CONFIG" .py)"
 
-echo
-echo "=== Step 1 muon debug summary ==="
-if ! "$WORKFLOW_ROOT/scripts/format_muon_debug.py" "$LOCAL_LOG"; then
-	echo "No FixedTargetMuonDebug records were found in the Step 1 log."
+if [[ "$DEBUG_MUON_PRIMARIES_CMS" == True || "$DEBUG_MUON_HITS_CMS" == True || "$DEBUG_MUON_TRACKING_CMS" == True ]]; then
+	echo
+	echo "=== Step 1 muon debug summary ==="
+	if ! "$WORKFLOW_ROOT/scripts/format_muon_debug.py" "$LOCAL_LOG"; then
+		echo "No FixedTargetMuonDebug records were found in the Step 1 log."
+	fi
 fi
 echo "Full Step 1 log: $LOG_SNAPSHOT"

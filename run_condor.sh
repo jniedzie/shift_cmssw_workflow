@@ -84,14 +84,9 @@ done
 
 source "$SCRIPT_DIR/config/workflow.env"
 
-# The submit description has an explicit `environment` attribute, so detector
-# variant settings must be serialized there instead of relying on `getenv`.
-# Export defaults as well as preset overrides for HTCondor's $ENV(...) macros.
-SUBMISSION_VARIANT_VARIABLES=(
-	SHIFT_RECO_VARIANT
-	SHIFT_RECO_VARIANT_CODE
-	SHIFT_STEP2_VARIANT
-	SHIFT_ZDC_DIGI_TIME_PHASE_OFFSET_NS
+# The submit description has an explicit `environment` attribute, so the
+# canonical reconstruction settings must be serialized rather than inherited.
+SUBMISSION_RECO_VARIABLES=(
 	SHIFT_DT_MODE
 	SHIFT_TRACKER_MODE
 	SHIFT_ENABLE_GEM
@@ -104,7 +99,7 @@ SUBMISSION_VARIANT_VARIABLES=(
 	SHIFT_REFIT_USE_SECOND_ITERATION
 	SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL
 )
-for variable_name in "${SUBMISSION_VARIANT_VARIABLES[@]}"; do
+for variable_name in "${SUBMISSION_RECO_VARIABLES[@]}"; do
 	export "$variable_name"
 done
 
@@ -190,8 +185,7 @@ sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_m
 printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB, max materialized=%s)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
 	"$CONDOR_REQUEST_MEMORY_MB" "$CONDOR_MAX_MATERIALIZE"
-printf 'Reco identity: variant=%s (code=%s), Step-2 stream=%s, ZDC phase=%s ns, DT=%s, tracker=%s, GEM/HCAL/ZDC=%s/%s/%s, augment DT/tracker=%s/%s, extended timing=%s\n' \
-	"$SHIFT_RECO_VARIANT" "$SHIFT_RECO_VARIANT_CODE" "${SHIFT_STEP2_VARIANT:-shared}" "$SHIFT_ZDC_DIGI_TIME_PHASE_OFFSET_NS" \
+printf 'Reconstruction: DT=%s, tracker=%s, GEM/HCAL/ZDC=%s/%s/%s, augment DT/tracker=%s/%s, extended timing=%s\n' \
 	"$SHIFT_DT_MODE" "$SHIFT_TRACKER_MODE" "$SHIFT_ENABLE_GEM" "$SHIFT_ENABLE_HCAL_DIAGNOSTICS" "$SHIFT_ENABLE_ZDC_DIAGNOSTICS" \
 	"$SHIFT_AUGMENT_DT_HITS" "$SHIFT_AUGMENT_TRACKER_HITS" "$SHIFT_USE_EXTENDED_TIMING"
 if [[ "$KEEP_LOGS" == 0 ]]; then
