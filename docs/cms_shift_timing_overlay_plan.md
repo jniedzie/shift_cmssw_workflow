@@ -2,6 +2,18 @@
 
 Last updated: 2026-08-18
 
+## Fixed Run 3 constraints
+
+The purpose of this study is to determine SHIFT-muon acceptance and
+reconstruction performance under the detector and trigger system that CMS
+actually operated in Run 3. Electronics integration windows, BX assignment,
+buffers/readout, trigger rules, prescales, deadtime, and rate limits are fixed
+constraints. They must be taken from authoritative configurations,
+documentation, or data and reproduced unchanged. They must never be retimed,
+loosened, or tuned to improve SHIFT performance. The variables in this workflow
+control the physical SHIFT timing, simulation transport completeness, pileup
+occupancy, and empirical sampling—not the CMS hardware or trigger rules.
+
 ## Scope and verified starting point
 
 This plan treats detector acceptance as a complete timing funnel, not only as
@@ -62,8 +74,8 @@ The ordinary CMS environment is not represented by one minimum-bias event per
    mask, orbit/BX anchor and per-bunch means are versioned campaign inputs.
 3. **Trigger timeline:** construct a sequence of candidate CMS readout BXs,
    run the L1/HLT emulation on the combined detector content for each candidate
-   reference, and then apply trigger deadtime/rate rules to the ordered
-   decisions.  This layer answers whether an ordinary CMS trigger reads a
+   reference, and then reproduce the authoritative Run 3 trigger deadtime/rate
+   rules unchanged on the ordered decisions. This layer answers whether an ordinary CMS trigger reads a
    fraction of a delayed SHIFT signal and whether accepted CMS and SHIFT
    triggers block one another.
 

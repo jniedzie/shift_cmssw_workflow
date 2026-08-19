@@ -264,7 +264,7 @@ Proceed in this order.
 5. Validate closure by resampling held-out ZeroBias data and comparing both
    marginal rates and joint trigger correlations.
 
-### 4. Implement the ordered bunch-crossing and deadtime timeline
+### 4. Reproduce the ordered bunch-crossing and fixed Run 3 deadtime timeline
 
 1. Introduce a versioned filling-scheme mask and an explicit SHIFT collision
    anchor.  Derive the approximately 20-BX SHIFT-to-CMS separation from source
@@ -272,10 +272,10 @@ Proceed in this order.
 2. Generate the required BX window before and after CMS, including relevant
    post-CMS bunches and empty/noncolliding slots.
 3. Apply the sampled candidate decisions in increasing orbit/BX order.
-4. Implement trigger-rule/deadtime behavior separately from the empirical
-   collision decision.  Rule parameters need authoritative CMS configuration
-   or trigger-expert input; do not infer them solely from sparse recorded
-   events.
+4. Encode the authoritative Run 3 trigger-rule/deadtime behavior unchanged and
+   apply it separately from the empirical collision decision. Rule parameters
+   require authoritative CMS configuration or trigger-expert input; do not
+   infer them solely from sparse recorded events and never tune them for SHIFT.
 5. Produce an auditable per-BX state table explaining every accepted or
    blocked CMS/SHIFT readout and which earlier accept caused a block.
 

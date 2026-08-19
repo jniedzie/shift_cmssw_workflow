@@ -184,10 +184,14 @@ fi
 
 # Pythia prints the generated cross section and its statistical uncertainty in
 # the end-of-job summary.  Keep one shared, latest value for this sample.
-"$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
+if ! "$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
 	"$LOCAL_LOG" \
 	"$CROSS_SECTION_FILE" \
-	"$(basename "$PYTHIA_CONFIG" .py)"
+	"$(basename "$PYTHIA_CONFIG" .py)"; then
+	# The validated GEN-SIM file is already published.  Shared aggregate
+	# bookkeeping must not prevent later stages from consuming it.
+	echo "WARNING: could not update aggregate cross-section bookkeeping; continuing with the published Step 1 output" >&2
+fi
 
 if [[ "$DEBUG_MUON_PRIMARIES_CMS" == True || "$DEBUG_MUON_HITS_CMS" == True || "$DEBUG_MUON_TRACKING_CMS" == True ]]; then
 	echo

@@ -176,6 +176,13 @@ LOCAL_CONFIG="$LOCAL_STEP2_DIR/events_step2_part${PART}_cfg.py"
 LOCAL_LOG="$LOCAL_STEP2_DIR/step2_events_part${PART}.log"
 LOCAL_OUTPUT="$LOCAL_STEP2_DIR/events_step2_part${PART}.root"
 
+# CMSSW's standard pileup MixingModule creates/opens histProbFunction.root
+# relative to the process working directory.  Running many jobs from the shared
+# campaign directory makes them race on that file (and can expose a partially
+# written ROOT file over EOS).  Keep all such runtime artifacts in this job's
+# private local scratch directory.
+cd "$LOCAL_STEP2_DIR"
+
 OUTPUT="$OUTPUT_DIR/events_step2_part${PART}.root"
 if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
 	echo "Force rerun requested; removing existing Step 2 output: $OUTPUT"

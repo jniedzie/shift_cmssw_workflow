@@ -1,5 +1,11 @@
 # Generation instructions
 
+> **Fixed-constraint principle:** this project evaluates SHIFT reconstruction
+> under the real Run 3 CMS detector and trigger system. Never change electronics
+> integration windows, BX assignment, buffering/readout behavior, trigger
+> rules, prescales, or deadtime to improve SHIFT acceptance. Select and model
+> the authoritative settings for the chosen year unchanged. See `AGENTS.md`.
+
 ## Configure the workflow
 
 Edit `config/workflow.env` before a run. The main controls are:
@@ -18,6 +24,7 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `PILEUP_DATASET` | Central CMS minimum-bias GEN-SIM dataset queried through DAS. |
 | `PILEUP_INPUT` | `filelist:/absolute/path`, `das:...`, or explicit pileup ROOT PFNs. |
 | `PILEUP_SEED` | Mixing seed; fix it for reproducible occupancy comparisons. |
+| `PILEUP_RSE` | Disk RSE used to prepare production manifests; defaults to `T2_CH_CERN`. |
 | `SHIFT_TIMING_MODE` | `nominal`, exact `legacy` regression, or a `fixed` test shift. |
 | `SHIFT_TIMING_BEAM_DIRECTION_Z` | Longitudinal beam direction, `-1` or `1`. |
 | `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns BX offset. |
@@ -139,8 +146,9 @@ printf 'STEP1=%s\nSTEP2=%s\nSTEP3=%s\nSTEP4=%s\n' \
 ## Run locally
 
 Prepare a stable pileup input manifest on a submit host with a valid CMS
-proxy.  A zero max-files value keeps the complete central dataset; a small
-positive value is useful only for focused tests:
+proxy. By default this keeps all currently available replicas at
+`PILEUP_RSE=T2_CH_CERN`; a small positive max-files value is useful only for
+focused tests:
 
 ```bash
 source config/workflow.env
@@ -160,9 +168,9 @@ small smoke-test manifest for production because excessive event reuse would
 distort occupancy correlations.
 
 As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
-in 27,774 files. Its blocks have active disk replicas at `T2_CH_CERN`,
-`T1_US_FNAL_Disk`, and `T2_US_Nebraska`; a representative 7.04 GB file was
-confirmed at CERN at file level. The 2022 preset also has CERN disk replicas.
+in 27,774 DBS files, but some blocks have no current file replicas. Do not use
+that unfiltered inventory for production. The current `T2_CH_CERN` manifest
+contains 3,713 available disk PFNs. The 2022 preset also has CERN disk replicas.
 The 2024 dataset remains tape-only: temporary one-file rule
 `bcd7943660744e5abec93117af3c920e` was still `WAITING_APPROVAL` when last
 checked. `COLLISION_YEAR=2023` therefore changes the CMSSW era, GlobalTag,

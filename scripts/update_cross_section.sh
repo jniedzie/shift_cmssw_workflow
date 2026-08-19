@@ -38,14 +38,21 @@ read -r after after_error after_unit < <(parse_cross_section "$after_line") || {
 }
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
-tmp_file="${OUTPUT_FILE}.tmp.$$"
+# Worker containers commonly reuse the same small PID, so ${OUTPUT_FILE}.tmp.$$
+# is not unique across a Condor cluster.  Let the destination filesystem
+# reserve a genuinely unique name before concurrent jobs start writing.
+tmp_file=$(mktemp "${OUTPUT_FILE}.tmp.XXXXXXXX")
+cleanup_tmp() {
+	rm -f -- "$tmp_file"
+}
+trap cleanup_tmp EXIT
 {
 	printf '# Latest GenXsecAnalyzer cross sections (updated atomically)\n'
 	printf '%s before_filter=%s +- %s %s after_filter=%s +- %s %s\n' \
 		"$SAMPLE" "$before" "$before_error" "$unit" "$after" "$after_error" "$after_unit"
 } > "$tmp_file"
 if [[ ! -e "$OUTPUT_FILE" ]]; then
-	mv -f "$tmp_file" "$OUTPUT_FILE"
-else
-	rm -f "$tmp_file"
+	# Another worker may win between the test and rename.  Never overwrite its
+	# already valid bookkeeping result.
+	mv -n "$tmp_file" "$OUTPUT_FILE"
 fi
