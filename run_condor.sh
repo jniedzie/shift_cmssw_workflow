@@ -84,9 +84,40 @@ done
 
 source "$SCRIPT_DIR/config/workflow.env"
 
-# The submit description has an explicit `environment` attribute, so the
-# canonical reconstruction settings must be serialized rather than inherited.
-SUBMISSION_RECO_VARIABLES=(
+# The submit description has an explicit `environment` attribute, so campaign
+# identity, pileup, and reconstruction settings must be serialized rather than
+# inherited.
+SUBMISSION_VARIABLES=(
+	COLLISION_YEAR
+	GEOMETRY
+	ERA
+	CONDITIONS
+	BEAMSPOT
+	PILEUP_MODE
+	PILEUP_SCENARIO
+	PILEUP_DATASET
+	PILEUP_INPUT
+	PILEUP_SEED
+	SHIFT_TIMING_MODE
+	SHIFT_TIMING_BEAM_DIRECTION_Z
+	SHIFT_TIMING_BX_OFFSET
+	SHIFT_TIMING_PHASE_NS
+	SHIFT_TIMING_FIXED_OFFSET_NS
+	SHIFT_TIMING_CMS_REFERENCE_Z_MM
+	SHIFT_TIMING_BUNCH_SPACING_NS
+	SHIFT_TIMING_LEGACY_OFFSET_CT_MM
+	SHIFT_TIMING_MODEL_VERSION
+	SHIFT_G4_MAX_TRACK_TIME_NS
+	SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS
+	TRIGGER_TIMELINE_MODE
+	TRIGGER_LIBRARY_JSONL
+	TRIGGER_L1_MENU_JSON
+	TRIGGER_GROUP_ID
+	TRIGGER_TIMELINE_START_BX
+	TRIGGER_TIMELINE_END_BX
+	TRIGGER_TIMELINE_SEED
+	TRIGGER_COLLIDING_BX_FILE
+	TRIGGER_TIMELINE_DIR
 	SHIFT_DT_MODE
 	SHIFT_TRACKER_MODE
 	SHIFT_ENABLE_GEM
@@ -99,7 +130,7 @@ SUBMISSION_RECO_VARIABLES=(
 	SHIFT_REFIT_USE_SECOND_ITERATION
 	SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL
 )
-for variable_name in "${SUBMISSION_RECO_VARIABLES[@]}"; do
+for variable_name in "${SUBMISSION_VARIABLES[@]}"; do
 	export "$variable_name"
 done
 
@@ -180,7 +211,7 @@ CMSSW_RUNTIME_FINGERPRINT="$(cmssw_runtime_fingerprint)"
 
 submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
-sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<max_materialize>|$CONDOR_MAX_MATERIALIZE|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$WORKFLOW_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g" \
+sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<max_materialize>|$CONDOR_MAX_MATERIALIZE|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$WORKFLOW_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
 	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
 printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB, max materialized=%s)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
@@ -188,6 +219,12 @@ printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed 
 printf 'Reconstruction: DT=%s, tracker=%s, GEM/HCAL/ZDC=%s/%s/%s, augment DT/tracker=%s/%s, extended timing=%s\n' \
 	"$SHIFT_DT_MODE" "$SHIFT_TRACKER_MODE" "$SHIFT_ENABLE_GEM" "$SHIFT_ENABLE_HCAL_DIAGNOSTICS" "$SHIFT_ENABLE_ZDC_DIAGNOSTICS" \
 	"$SHIFT_AUGMENT_DT_HITS" "$SHIFT_AUGMENT_TRACKER_HITS" "$SHIFT_USE_EXTENDED_TIMING"
+printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s\n' \
+	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED"
+printf 'Timing: mode=%s, BX/phase=%s/%s ns, Geant4 central/forward limits=%s/%s ns\n' \
+	"$SHIFT_TIMING_MODE" "$SHIFT_TIMING_BX_OFFSET" "$SHIFT_TIMING_PHASE_NS" "$SHIFT_G4_MAX_TRACK_TIME_NS" "$SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS"
+printf 'Trigger timeline: mode=%s, BX range=%s..%s, seed=%s\n' \
+	"$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" "$TRIGGER_TIMELINE_SEED"
 if [[ "$KEEP_LOGS" == 0 ]]; then
 	echo "Cleaning old Condor and payload logs before submission..."
 	"$WORKFLOW_ROOT/scripts/cleanup_condor_logs.sh" \

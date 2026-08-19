@@ -10,8 +10,14 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SAMPLE_BASE` | Site-detected production base directory, or an explicit override. |
 | `SAMPLE_NAME`, `CAMPAIGN_NAME` | Components of the campaign output path. |
 | `N_EVENTS`, `N_JOBS` | Events per chunk and number of Condor jobs. |
+| `COLLISION_YEAR` | Coherent `2022`, `2023`, or `2024` era/GlobalTag/pileup preset; currently defaults to `2023`. |
 | `GENERATOR_SEED` | `random` or a fixed integer from 1 through 900000000. |
 | `SIMULATION_SEED` | Geant4 seed; fix it with `GENERATOR_SEED` for paired timing scans. |
+| `PILEUP_MODE` | `none` or opt-in `standard` central pileup in Step 2. |
+| `PILEUP_SCENARIO` | CMSSW pileup profile selected by `COLLISION_YEAR`. |
+| `PILEUP_DATASET` | Central CMS minimum-bias GEN-SIM dataset queried through DAS. |
+| `PILEUP_INPUT` | `filelist:/absolute/path`, `das:...`, or explicit pileup ROOT PFNs. |
+| `PILEUP_SEED` | Mixing seed; fix it for reproducible occupancy comparisons. |
 | `SHIFT_TIMING_MODE` | `nominal`, exact `legacy` regression, or a `fixed` test shift. |
 | `SHIFT_TIMING_BEAM_DIRECTION_Z` | Longitudinal beam direction, `-1` or `1`. |
 | `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns BX offset. |
@@ -19,6 +25,11 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SHIFT_TIMING_FIXED_OFFSET_NS` | Common ns shift used in `fixed` mode. |
 | `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
+| `TRIGGER_TIMELINE_MODE` | `none` or `zero_bias_proxy` for a correlated candidate-trigger sidecar. |
+| `TRIGGER_LIBRARY_JSONL`, `TRIGGER_L1_MENU_JSON` | Validated ZeroBias inputs used by the proxy. |
+| `TRIGGER_TIMELINE_START_BX`, `TRIGGER_TIMELINE_END_BX` | Relative BX interval sampled around every SHIFT event. |
+| `TRIGGER_TIMELINE_SEED` | Trigger sampler seed; fixed seeds are offset by Condor chunk. |
+| `TRIGGER_COLLIDING_BX_FILE` | Optional filling-scheme-derived list of colliding relative BXs. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
 
 The supported production layout is deliberately canonical:
@@ -47,6 +58,74 @@ track cutoff for this workflow: a time-zero particle from 148 m reaches CMS at
 about 494 ns and would otherwise be killed before detector response can decide
 whether it is accepted.  These guards are not electronics readout windows.
 
+### Three campaign configurations
+
+Keep a distinct `CAMPAIGN_NAME` for every row. The recommended sequence is
+cumulative, so the difference between adjacent campaigns isolates one new
+mechanism:
+
+| Campaign | `SHIFT_TIMING_MODE` | `PILEUP_MODE` | `TRIGGER_TIMELINE_MODE` | Interpretation |
+| --- | --- | --- | --- | --- |
+| timing | `nominal` | `none` | `none` | Clean source-derived timing and configurable Geant4 transport guard. |
+| occupancy | `nominal` | `standard` | `none` | Timing plus central CMS pileup mixed through standard CMSSW mixing. |
+| trigger proxy | `nominal` | `standard` | `zero_bias_proxy` | Adds a correlated candidate-trigger timeline sidecar for every SHIFT event. |
+
+For example, the first campaign needs only:
+
+```bash
+COLLISION_YEAR=2023
+CAMPAIGN_NAME="${PROCESS}_timing_2023"
+SHIFT_TIMING_MODE=nominal
+SHIFT_G4_MAX_TRACK_TIME_NS=5000.0
+SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS=5000.0
+PILEUP_MODE=none
+TRIGGER_TIMELINE_MODE=none
+```
+
+For the occupancy campaign, give it a new name and change:
+
+```bash
+CAMPAIGN_NAME="${PROCESS}_occupancy_2023"
+PILEUP_MODE=standard
+PILEUP_SEED=86420
+TRIGGER_TIMELINE_MODE=none
+```
+
+On lxplus, the 2023 preset already resolves `PILEUP_INPUT` to the complete
+27,774-file manifest under `$SAMPLE_BASE/pileup_inputs`. Override it only when
+using another site or a deliberately bounded pilot manifest.
+
+For the trigger-proxy campaign, retain the occupancy settings, use another
+name, and add durable files visible on every worker:
+
+```bash
+CAMPAIGN_NAME="${PROCESS}_trigger_proxy_2023"
+TRIGGER_TIMELINE_MODE=zero_bias_proxy
+TRIGGER_TIMELINE_START_BX=-24
+TRIGGER_TIMELINE_END_BX=5
+TRIGGER_TIMELINE_SEED=24680
+# TRIGGER_COLLIDING_BX_FILE="/absolute/shared/path/colliding_relative_bx.txt"
+```
+
+The 2023 preset already resolves the validated Run-369943 library and L1 menu
+under `$SAMPLE_BASE/trigger_inputs/2023/run369943`. Explicit
+`TRIGGER_LIBRARY_JSONL` and `TRIGGER_L1_MENU_JSON` overrides remain available
+for another site, run, or year; non-2023 presets intentionally leave them
+unset until a year-matched library is prepared.
+
+The third campaign currently tests trigger-proxy orchestration and preserves
+real L1/HLT correlations. It does **not** yet change detector electronics
+integration windows, decide final L1A after trigger rules, or alter which
+CMSSW event is stored. Its per-chunk JSONL is written under
+`$SAMPLE_DIR/trigger_timelines`; those missing links are the next electronics
+timing implementation step, not something the sidecar silently approximates.
+
+`run_condor.sh` pins the process, campaign/sample paths, event count, collision
+year, timing controls, pileup controls, and trigger controls into the submitted
+jobs. It is therefore safe to edit `CAMPAIGN_NAME` and submit the next campaign
+without queued jobs silently switching to the new output directory. Do not edit
+or rebuild the shared CMSSW release itself while jobs are running.
+
 Check the resolved configuration with:
 
 ```bash
@@ -58,6 +137,91 @@ printf 'STEP1=%s\nSTEP2=%s\nSTEP3=%s\nSTEP4=%s\n' \
 ```
 
 ## Run locally
+
+Prepare a stable pileup input manifest on a submit host with a valid CMS
+proxy.  A zero max-files value keeps the complete central dataset; a small
+positive value is useful only for focused tests:
+
+```bash
+source config/workflow.env
+./scripts/prepare_pileup_file_list.sh "${PILEUP_INPUT#filelist:}" 0
+```
+
+Enable standard CMSSW pileup mixing explicitly:
+
+```bash
+PILEUP_MODE=standard \
+PILEUP_SEED=86420 ./run_step2_digi_raw.sh 0 1
+```
+
+`PILEUP_MODE=none` remains the default no-pileup control.  The manifest avoids
+requiring a DAS query and user proxy on every Condor worker.  Do not use a
+small smoke-test manifest for production because excessive event reuse would
+distort occupancy correlations.
+
+As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
+in 27,774 files. Its blocks have active disk replicas at `T2_CH_CERN`,
+`T1_US_FNAL_Disk`, and `T2_US_Nebraska`; a representative 7.04 GB file was
+confirmed at CERN at file level. The 2022 preset also has CERN disk replicas.
+The 2024 dataset remains tape-only: temporary one-file rule
+`bcd7943660744e5abec93117af3c920e` was still `WAITING_APPROVAL` when last
+checked. `COLLISION_YEAR=2023` therefore changes the CMSSW era, GlobalTag,
+pileup profile, and dataset together rather than mixing a 2023 library into a
+nominal 2024 campaign.
+
+Extract a correlated trigger-decision seed from certified collider ZeroBias
+RAW data separately from pileup mixing.  Enter the CMSSW runtime, then run:
+
+```bash
+./scripts/run_zero_bias_trigger_extract.sh \
+  root://eoscms.cern.ch//store/data/Run2023D/ZeroBias/RAW/v1/000/369/943/00000/37bc5780-a374-4104-87a4-3169e9efe16b.root \
+  /tmp/zero_bias_run369943.jsonl 100 \
+  /ZeroBias/Run2023D-v1/RAW 2023
+```
+
+The JSONL keeps complete L1 bit vectors and the accepted HLT-path set per
+event, so correlations are preserved.  It is not yet a trigger timeline or a
+rate model.  Do not sample paths independently, and do not treat an L1
+algorithm bit, final L1A, HLT acceptance and storage as interchangeable.
+
+Resolve the exact L1 bit names through the run-dependent conditions and
+validate the empirical library:
+
+```bash
+cmsRun ./scripts/zero_bias_l1_menu_cfg.py \
+  inputFiles=root://eoscms.cern.ch//store/data/Run2023D/ZeroBias/RAW/v1/000/369/943/00000/37bc5780-a374-4104-87a4-3169e9efe16b.root \
+  outputFile=/tmp/zero_bias_l1_menu_run369943.root \
+  globalTag=auto:run3_data_prompt collisionYear=2023
+
+python3 ./scripts/extract_zero_bias_l1_menu.py \
+  /tmp/zero_bias_l1_menu_run369943.root \
+  --output /tmp/zero_bias_l1_menu_run369943.json \
+  --global-tag auto:run3_data_prompt
+
+./scripts/validate_zero_bias_trigger_library.py \
+  /tmp/zero_bias_run369943.jsonl \
+  --l1-menu /tmp/zero_bias_l1_menu_run369943.json \
+  --min-events-per-group 100 \
+  --output /tmp/zero_bias_run369943_summary.json
+```
+
+The validator prints the exact trigger-group ID.  If an input contains more
+than one group, pass that ID explicitly to the sampler.  A focused candidate
+BX timeline can then be produced with:
+
+```bash
+./scripts/sample_zero_bias_trigger_timeline.py \
+  /tmp/zero_bias_run369943.jsonl \
+  --l1-menu /tmp/zero_bias_l1_menu_run369943.json \
+  --output /tmp/zero_bias_timeline_seed24680.jsonl \
+  --start-bx -24 --end-bx 5 --signal-events 10 --seed 24680
+```
+
+This output is deliberately pre-deadtime.  `readout_after_trigger_rules` is
+null until a separately validated trigger-rule engine is applied.  Use
+`--colliding-bx-file` with a versioned filling-scheme-derived list to leave
+empty/noncolliding slots unsampled; without it, every requested BX is treated
+as colliding for software tests only.
 
 Run the stages in order from the workflow repository:
 

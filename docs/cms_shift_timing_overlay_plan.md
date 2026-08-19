@@ -47,6 +47,40 @@ Milestone 1 explicitly raises this CPU-protection transport guard to a
 configurable 5000 ns by default.  This is not an electronics/readout window;
 later milestones must retain the real subsystem timing selections.
 
+## Central-collision and trigger-timeline architecture
+
+The ordinary CMS environment is not represented by one minimum-bias event per
+25 ns.  The implementation is split into three explicit layers:
+
+1. **Interaction library:** use the centrally produced CMS inclusive-inelastic
+   13.6 TeV pp GEN-SIM dataset rather than generating it locally.  Its events
+   are reusable interaction primitives.
+2. **Detector-time window:** for every filled, colliding BX in the selected
+   window, draw a luminosity-dependent Poisson number of library interactions
+   and mix their SimHits with the SHIFT signal before digitization.  Empty and
+   non-colliding slots contribute no pp interactions.  The filling-scheme
+   mask, orbit/BX anchor and per-bunch means are versioned campaign inputs.
+3. **Trigger timeline:** construct a sequence of candidate CMS readout BXs,
+   run the L1/HLT emulation on the combined detector content for each candidate
+   reference, and then apply trigger deadtime/rate rules to the ordered
+   decisions.  This layer answers whether an ordinary CMS trigger reads a
+   fraction of a delayed SHIFT signal and whether accepted CMS and SHIFT
+   triggers block one another.
+
+CMSSW `MixingModule` supplies the second layer's SimHit/digitizer integration
+and robust `EncodedEventId` separation, but its stock Poisson OOT mode uses the
+same distribution at every BX in `minBunch..maxBunch`.  It neither represents
+an arbitrary filling mask nor makes an independent L1/HLT decision for every
+overlaid collision.  Therefore a uniform OOT pileup configuration is only a
+controlled occupancy test, not the final physical or trigger-rate model.
+
+The reference convention is that the nominal SHIFT collision occurs about
+490 ns before the same bunch reaches CMS.  Thus a central pp collision at
+mixing BX 0 is near the nominal SHIFT-muon arrival at CMS, while central BXs
+near -20 occur around the target collision.  The exact phase and integer BX
+anchor must be derived from the source location, beam direction and selected
+filling scheme rather than hardcoded as 20.
+
 ## Timing definitions
 
 - `nominal` is the deterministic fixed-target baseline.  For source coordinate
@@ -236,15 +270,16 @@ campaign documentation.
 **Implementation outline:** Define the bunch passage at each source from LHC
 beam direction and orbit/filling data; combine it with the generated source and
 decay positions, particle beta and path length; choose and record the reference
-CMS BX; sample only after the deterministic interface from Milestone 1 is
-validated.  Use separate versioned parameterizations for fixed target and
-collimator/halo.
+CMS BX.  Materialize the corresponding central-collision window as orbit BX,
+beam-1/beam-2 occupancy, collision mask and per-BX mean interactions.  Use
+separate versioned parameterizations for fixed target and collimator/halo.
 
 **Required inputs:** surveyed source coordinates, beam/orbit convention,
 filling schemes, trigger-reference definition and generator truth.
 
 **Outputs and diagnostics:** sampled time and all terms entering it, model
-version, source class, reference BX and distribution-comparison plots.
+version, source class, reference BX, versioned BX-window manifest and
+distribution-comparison plots.
 
 **Validation criteria:** analytic limiting cases and deterministic seeds agree;
 generated distributions reproduce independently computed bunch-arrival times;
@@ -283,7 +318,7 @@ and convolution with Milestone 2.
 
 ## Milestone 4 - central pp and out-of-time pileup before digitization
 
-**Status:** not started
+**Status:** in progress
 
 **Objective:** Overlay central pp collisions, including out-of-time pileup,
 before detector digitization without losing SHIFT truth identity.
@@ -292,10 +327,15 @@ before detector digitization without losing SHIFT truth identity.
 pileup dataset/configuration and campaign metadata in the workflow; CMSSW
 mixing/truth customizations only if standard facilities are insufficient.
 
-**Implementation outline:** Select a conditions-compatible Run-3 minimum-bias
-sample and validated pileup profile; configure standard MixingModule bunch
-range and playback before DIGI; keep a zero-pileup control and paired seeds;
-record pileup provenance and `EncodedEventId` assignments.
+**Implementation outline:** Begin with the conditions-compatible central CMS
+interaction library and standard RunIII2024Summer24 `MixingModule` profile
+before DIGI.  Keep the no-pileup control and paired seeds, and record pileup
+provenance and `EncodedEventId` assignments.  After the standard path is
+validated, use Milestone 2's BX-window manifest to determine whether any
+fill-aware extension is actually required; do not replace standard mixing
+facilities speculatively.  Generate one combined detector event for each
+candidate readout BX needed by the later trigger timeline, with the SHIFT
+signal shifted consistently relative to that reference.
 
 **Required inputs:** compatible minimum-bias GEN-SIM, pileup profile, in/out-of-
 time BX range, GlobalTag/geometry and storage/CPU estimates.
@@ -309,6 +349,113 @@ output is a stable control.
 
 **Dependencies on later work:** Required for occupancy conclusions in
 Milestones 5-10, but not for Milestone 1 timing validation.
+
+**Current implementation:** DAS identifies the production dataset
+`/MinBias_TuneCP5_13p6TeV-pythia8/RunIII2024Summer24GS-140X_mcRun3_2024_realistic_v20-v1/GEN-SIM`
+(2,499,014,000 events in 43,087 files).  Step 2 now has an opt-in
+`run3_2024` mode using CMSSW scenario
+`2024_25ns_RunIII2024Summer24_PoissonOOTPU`, an explicit mixing seed and a
+submit-host-generated file manifest.  The no-pileup mode remains the default.
+The production dataset is currently catalogued but tape-only: DAS/Rucio found
+no active file replicas, and a representative file failed through the CERN,
+Italian and global XRootD fallbacks.  Rucio rule
+`bcd7943660744e5abec93117af3c920e` now requests one 11.374 GB file at
+`T2_CH_CERN` with a 14-day lifetime (expiry 2026-09-01).  The rule is
+`WAITING_APPROVAL`, with zero locks transferring, so a physics-valid pilot
+must wait for approval and successful staging.
+
+A mechanism-only one-event test therefore used one disk-resident official
+13.6 TeV Run-3 minimum-bias file from
+`Run3Winter25GS-Winter25PU_correctBS_142X_mcRun3_2025_realistic_v4-v1` while
+retaining the 2024 pileup profile.  This is not a physics-production input.
+With mixing seed 86420, Step 2 ran DIGI, L1, DIGI2RAW and
+`HLT:@relval2024`, producing a readable 25,549,795-byte one-event file.  The
+realized OOT window was BX -12 through +3 with 40-69 interactions per BX and
+61 interactions at BX 0 (`trueNumInteractions=54.8763`).  The output contains
+`PileupSummaryInfo`, `CrossingFramePlaybackInfoNew`, L1 products and HLT
+`TriggerResults`; six of eight scheduled paths accepted, including the
+digitization/L1/RAW paths and Physics, Random and ZeroBias HLT paths.
+
+The original SHIFT `SimTrack`s remain identifiable as encoded event `(0,0)`;
+pileup truth uses nonzero event numbers across all mixed BXs.  Standard
+`mix:MergedTrackTruth` contained 172,388 pileup `TrackingParticle`s but no
+SHIFT `(0,0)` particle, so dedicated SHIFT truth association is still needed
+before efficiency claims.  Step 3 consumed the mixed output successfully and
+published a readable 22,127,081-byte one-event AODSIM file.  These results
+validate the workflow mechanism and downstream compatibility only, not the
+2024 physics sample, trigger rates, electronics acceptance or reconstruction
+efficiency.
+
+### ZeroBias trigger-proxy seed
+
+The first trigger-proxy component is implemented in
+`scripts/zero_bias_unpack_cfg.py`,
+`scripts/extract_zero_bias_trigger_bits.py` and
+`scripts/run_zero_bias_trigger_extract.sh`.  The first script runs only the
+standard Stage-2 uGT RAW unpacker; it does not re-emulate L1.  The extractor
+writes streaming JSON Lines with complete correlated uGT algorithm decision
+sets before prescales, after prescales and after masks for every stored uGT BX,
+plus external bits, final-OR flags, prescale column, menu/firmware UUIDs,
+run/lumi/event/orbit/BX, the HLT menu and all accepted HLT paths.  It stores one
+HLT menu record per distinct ordered path list instead of repeating hundreds
+of path names in every event.
+
+An end-to-end 100-event test used the disk-resident Run2024G file
+`/store/data/Run2024G/ZeroBias/RAW/v1/000/383/812/00000/a6d74641-5c7f-46f6-ae57-e8e7e4416ee1.root`
+from run 383812, lumi 161.  Its collider menu has 837 HLT paths.  The sample
+contained 48 distinct BX-0 initial/post-prescale L1 vectors, six distinct final
+vectors and 91 events with final OR; the JSONL output was 412930 bytes.  This
+validates extraction and preservation of correlations, not trigger
+probabilities: 100 events from one lumi are far too few for rate estimates.
+
+A previous technical test on run 386472 was rejected as a probability input
+because it exposed only a small cosmics/random menu.  Campaign preparation
+must select certified collision runs/lumis, group samples by compatible menu
+and prescale column, and retain luminosity/pileup and bunch-slot metadata.
+Events in an EDM file are not assumed to be time ordered.
+
+This component deliberately stops before stochastic timeline generation.  The
+next layer will draw one whole correlated decision record for each simulated
+colliding BX, conditioned on the relevant run/lumi state, then apply an
+explicit prescale/deadtime model in increasing orbit/BX order.  It must not
+sample individual trigger paths independently, and it must keep a distinction
+between a raw algorithm condition, an L1A/readout, an HLT acceptance and final
+dataset storage.
+
+On 2026-08-19 the next trigger-proxy layer was implemented.  The shared
+`zero_bias_trigger_library.py` module and
+`validate_zero_bias_trigger_library.py` now reject duplicate events,
+inconsistent HLT menu references, malformed bit sets, and violations of the
+expected initial -> post-prescale -> final subset relation.  Events are grouped
+by the complete currently available conditions key: HLT menu hash, L1 menu
+UUID, L1 firmware UUID and prescale column.  Summaries include marginal L1/HLT
+counts and correlated HLT accept pairs.  They warn that fill,
+luminosity/pileup and colliding-bunch metadata are not yet present.
+
+`sample_zero_bias_trigger_timeline.py` samples complete event records with a
+fixed seed onto an inclusive relative-BX range.  An optional colliding-BX file
+leaves empty/noncolliding slots unsampled.  Every sampled record retains its
+source file/line and run/lumi/event/orbit/BX.  The output explicitly sets
+`deadtime_applied=false` and `readout_after_trigger_rules=null`; this is a
+candidate-decision timeline, not yet a trigger-rule result.
+
+The standard conditions-resolved `L1uGTTreeProducer` is used by
+`zero_bias_l1_menu_cfg.py`; `extract_zero_bias_l1_menu.py` converts its ROOT
+aliases into a bit-to-name JSON mapping.  For run 383812 with
+`auto:run3_data_prompt`, 408 algorithm names were resolved.  The data payload
+UUIDs (`d10cf9fc`, firmware `e4cb66da`) exactly match the only group in the
+100-event library.  Named final counts were 53 `L1_ZeroBias`, 53
+`L1_ZeroBias_copy`, 11 `L1_FirstBunchAfterTrain`, eight
+`L1_LastCollisionInTrain`, eight `L1_FirstCollisionInTrain`, and 11
+`L1_FirstCollisionInOrbit`.  Supplying a mapping with nonmatching UUIDs is a
+validation error.
+
+The real-data validator reported 100 events, one HLT menu, one trigger group,
+zero errors and one expected conditioning-metadata warning.  A fixed-seed
+test sampled 30 complete records onto BX -24 through +5.  Four unit/integration
+tests cover duplicates, invalid L1 stage nesting, deterministic whole-record
+sampling, menu-name propagation and colliding/empty BX handling.  These tests
+do not establish trigger probabilities or implement deadtime.
 
 ## Milestone 5 - SimHit-to-digi signal survival
 
@@ -531,9 +678,18 @@ use the release.
 **Dependencies on later work:** Final scaling milestone; conclusions remain
 versioned to the exact timing, mixing, electronics and reconstruction setup.
 
-## Immediate next milestone after Milestone 1
+## Immediate next work after Milestone 1
 
-Milestone 2 is next for the physical distribution, while the small uniform
-BX/phase matrix of Milestone 3 should be designed in parallel at review time.
-No broad pileup production should begin until both the deterministic timing
-transport and truth-identity design have passed focused review.
+Milestone 4 begins with the centrally produced CMS pp interaction library and
+standard CMSSW RunIII2024Summer24 pileup mixing.  The mechanism-only smoke
+test has passed through reconstruction.  Next, obtain a disk replica of the
+exact 2024 input and run paired no-pileup/pileup pilots; resolve the missing
+SHIFT entries in standard merged tracking truth before making efficiency
+claims.  Milestone 2's filling-scheme/BX-window manifest is still needed for
+the later physical timeline.
+
+The controlled BX/phase response grid remains distinct.  Trigger probability
+and deadtime will not be inferred from the pileup mixture alone: the same
+physical window must be evaluated as an ordered set of candidate reference
+BXs with per-BX L1/HLT decisions and an explicit trigger-rule model.  No broad
+minimum-bias or mixed production should begin before these focused tests pass.

@@ -8,6 +8,19 @@ WORKFLOW_ROOT="$2"
 SELECTED_STEPS="$3"
 : "${4:?force flag must be passed as the fourth argument}"
 FORCE_SELECTED="$4"
+: "${5:?process name must be passed as the fifth argument}"
+PROCESS="$5"
+: "${6:?sample name must be passed as the sixth argument}"
+SAMPLE_NAME="$6"
+: "${7:?campaign name must be passed as the seventh argument}"
+CAMPAIGN_NAME="$7"
+: "${8:?sample base must be passed as the eighth argument}"
+SAMPLE_BASE="$8"
+: "${9:?sample directory must be passed as the ninth argument}"
+SAMPLE_DIR="$9"
+: "${10:?event count must be passed as the tenth argument}"
+N_EVENTS="${10}"
+export PROCESS SAMPLE_NAME CAMPAIGN_NAME SAMPLE_BASE SAMPLE_DIR N_EVENTS
 if [[ "$WORKFLOW_ROOT" != /* ]]; then
 	echo "ERROR [run_condor_job]: workflow root is not absolute: $WORKFLOW_ROOT" >&2
 	exit 1
