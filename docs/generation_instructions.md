@@ -167,6 +167,16 @@ requiring a DAS query and user proxy on every Condor worker.  Do not use a
 small smoke-test manifest for production because excessive event reuse would
 distort occupancy correlations.
 
+Step 2 uses the slim transient `GENRAW` event content. It retains packed RAW,
+HLT `TriggerResults`, pileup summaries and exact pileup-playback provenance,
+plus the signal HepMC, SimTracks, SimVertices and PSimHits needed by the SHIFT
+analysis. The Run-3 simulated RPC digis are retained explicitly because the
+Step-3 `muonRPCDigis` merger consumes them outside `rawDataCollector`.
+`mix:MergedTrackTruth` is deliberately dropped: canonical Step 3 does not run
+`RECOSIM`, and SHIFT truth association uses the signal `g4SimHits` products
+directly. This changes persisted intermediate content only; DIGI, L1,
+DIGI2RAW, HLT and detector/electronics configuration remain unchanged.
+
 As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
 in 27,774 DBS files, but some blocks have no current file replicas. Do not use
 that unfiltered inventory for production. The current `T2_CH_CERN` manifest

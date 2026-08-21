@@ -209,14 +209,14 @@ echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP
 cmsDriver.py step2 \
 	--step "DIGI:pdigi_valid,L1,DIGI2RAW,HLT:${HLT_MENU},ENDJOB" \
 	--conditions "$CONDITIONS" \
-	--datatier GEN-SIM-DIGI-RAW \
-	--eventcontent FEVTDEBUGHLT \
+	--datatier GEN-SIM-RAW \
+	--eventcontent GENRAW \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--filein "file:$INPUT" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process)${PILEUP_CUSTOMISE}" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, keepMergedTrackTruth=False, keepSimMuonRPCDigis=True, keepPileupPlayback=True)${PILEUP_CUSTOMISE}" \
 	"${PILEUP_ARGS[@]}" \
 	--no_exec \
 	-n "$N_EVENTS"
