@@ -170,8 +170,10 @@ fixed-seed sample.
 
 - The authoritative organization and model family have been identified:
   CMS BRIL RadSim's CMS/LSS5 FLUKA model.
-- The public record establishes the required content, but the frozen Run-3
-  LSS5 source deck and its exact version were not found in public repositories.
+- Read access to the CERNBox/EOS `lhc-mib` project was obtained and its
+  contents were inspected on 2026-08-27. The public record and this project
+  establish the required model family and interface convention, but the frozen
+  Run-3 LSS5 source deck and its exact version were not found.
 - Public FACET and legacy FLUKA LineBuilder resources provide implementation
   clues, not an acceptable Run-3 source model.
 - Implementation is intentionally blocked on obtaining the exact asset bundle
@@ -183,6 +185,123 @@ Once the bundle is available, the first executable deliverable will be a
 native-FLUKA fixed-seed transport to a declared interface surface, plus a
 lossless converter and CMSSW source test for one event before any geometry
 translation is attempted.
+
+## CERNBox/EOS inventory (2026-08-27)
+
+The reader group `cernbox-project-lhc-mib-readers` exposes the project at
+`/eos/project/l/lhc-mib`. The accessible material is useful, but it does not
+contain the required Run-3 CMS/IP5 source model.
+
+### Assets found
+
+1. `/eos/project/l/lhc-mib/public/HL-LHC/CMS/local-beam-gas/FLUKA`
+   contains compressed FLUKA particle-crossing records from CMS local
+   beam-gas simulations. They are scored at the CMS cavern interface, 21.5 m
+   from IP5. Their text schema includes FLUKA run and primary-event IDs,
+   particle ID, kinetic energy, statistical weight, transverse position,
+   transverse direction cosines, particle age, and the original collision
+   position. The directory contains output records and normalization notes,
+   not the geometry/source deck that produced them.
+2. `/eos/project/l/lhc-mib/public/HL-LHC/CMS/beam-halo` contains analogous
+   CMS interface records for horizontal and vertical TCT losses with two jaw
+   material choices. These are also HL-LHC output products, not a source
+   model for arbitrary particles produced at the SHIFT target.
+3. `/eos/project/l/lhc-mib/public/HL-LHC/CMS/local-beam-gas/pressure_profile`
+   contains an HL-LHC LSS5 ramp-up gas-pressure profile spanning approximately
+   -256 m to +256 m. It covers the 148 m longitudinal region but supplies no
+   tunnel geometry or magnetic field.
+4. `/eos/project/l/lhc-mib/press148m_4/secTest` is a complete-looking legacy
+   FLUKA working area: LineBuilder-generated input, magnet data, `bmagfld.f`,
+   beam-gas source and scoring routines, Makefiles, executable, and example
+   outputs. The deck explicitly identifies `LHC/IR1`, its production names are
+   `lhc_ir1_exp_b2`, and its header identifies LineBuilder revision 432 from
+   `trunk`. It is the old ATLAS/IP1 148 m pressure-bump setup, not CMS/IP5.
+5. The remaining `press148m*`, `press58m*`, `bbgen`, and `offmom` areas are
+   predominantly IR1 or older Run-1/Run-2 production results. The accessible
+   `public/LHC-Run3` directory contains ALICE and LHCb material only; there is
+   no CMS subdirectory.
+
+The project's historical pressure-bump log and stored job scripts refer to
+`/afs/cern.ch/project/lhc_mib` for source inputs. That legacy AFS project exists
+but was not readable with the EOS reader entitlement. It may contain additional
+source material or may only be the old IR1 production area; this must be
+confirmed by its owners.
+
+### What the accessible assets cannot establish
+
+None of the inspected assets establishes a Run-3 SHIFT transport efficiency.
+In particular:
+
+- the HL-LHC CMS files contain already-transported MIB particles, so they
+  cannot transport arbitrary SHIFT particles starting near 148 m;
+- the HL-LHC pressure profile is not a material or field description;
+- IR1 and IR5 have different machine layouts, fields, experiment interfaces,
+  and coordinate conventions, so the IR1 deck is not a physical proxy or a
+  conservative uncertainty bound for CMS;
+- joining the IR1 deck to the CMS HL-LHC records would not represent any real
+  LHC configuration.
+
+## Best bounded work with the available assets
+
+Until an IR5 source deck is obtained, use the CMS output and the IR1 source
+deck as two independent software fixtures:
+
+1. **Downstream interface prototype from CMS records.** Implement and test a
+   strict parser and lossless intermediate representation for the CMS
+   particle-crossing schema. Preserve event grouping, FLUKA identity,
+   statistical weight, position, direction, time, and provenance through a
+   HepMC3 or EDM conversion. Coordinate transforms, the fixed scoring-plane
+   position, longitudinal direction, and particle-ID mapping must remain
+   explicit and unconfirmed until documented by the model owner. Synthetic
+   records can test the CMSSW source without presenting an HL-LHC sample as a
+   Run-3 SHIFT sample.
+2. **Upstream FLUKA harness from the IR1 deck.** Use the legacy complete deck
+   only to learn/reproduce the build, mono-particle source, magnetic-field
+   callback, boundary scoring, fixed-seed execution, and output bookkeeping.
+   A useful test injects both muon charges at several momenta and verifies that
+   event IDs, times, weights, and crossings survive the scoring pipeline. Its
+   trajectories and survival fractions have no CMS/SHIFT physics meaning.
+3. **Keep the current CMSSW-only transport as a declared no-machine-material
+   reference.** It is not a realistic upper bound once fields, apertures, and
+   secondary production matter, and it must not be combined with the IR1
+   result as an uncertainty envelope.
+
+If an exact Run-3 deck remains unavailable, fallback source models should be
+requested in this order: a dated pre-HL Run-3 IR5 deck; the closest documented
+Run-2 IR5 deck; then an HL-LHC IR5 deck. An HL-LHC IR5 source model has the
+correct interaction region and is therefore a better provisional engineering
+fixture than IR1, but any transport result from it must be labelled as a model
+sensitivity study, not Run-3 detector acceptance. Before using any fallback,
+inventory the Run-3 differences in magnets, apertures, absorbers/shielding,
+optics, crossing setup, cavern interface, and coordinate conventions.
+
+## Short request to colleagues
+
+**Subject: Missing Run-3 CMS/LSS5 FLUKA source model for SHIFT simulation**
+
+> Hi,
+>
+> We now have access to `/eos/project/l/lhc-mib` and have inventoried its
+> contents. We found HL-LHC CMS/IP5 FLUKA particle-crossing outputs for local
+> beam-gas and beam-halo simulations at the CMS cavern interface (21.5 m from
+> IP5), plus an HL-LHC LSS5 pressure profile. These are output products; the
+> underlying geometry/source deck is not included. We also found a complete
+> legacy 148 m FLUKA bundle with LineBuilder geometry, magnetic-field and
+> source/scoring routines, but it is explicitly the IR1/ATLAS Beam-2 model.
+> The public Run-3 area contains only ALICE and LHCb material.
+>
+> For SHIFT we need the frozen as-installed Run-3 IR5/LSS5 FLUKA model for the
+> physical side connecting our target around 148 m to CMS: master deck and
+> includes, LineBuilder/FEDB inputs, field maps/routines, Run-3 optics and
+> magnet settings, coordinate conventions, matching CMS cavern revision and
+> interface definition, and reference validation scans.
+>
+> Does this source bundle exist under the legacy
+> `/afs/cern.ch/project/lhc_mib` area or elsewhere? If the exact Run-3 model is
+> unavailable, a dated Run-2 IR5 or HL-LHC IR5 source deck would also help as
+> an explicitly provisional engineering model.
+>
+> Thanks!
 
 ## Public references
 
