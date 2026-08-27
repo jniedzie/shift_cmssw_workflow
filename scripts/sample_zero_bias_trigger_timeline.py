@@ -15,6 +15,7 @@ from zero_bias_trigger_library import (
     sample_loaded_events,
     validate_trigger_library,
 )
+from run3_trigger_rules import REQUIRED_HISTORY_BX, TriggerRuleEngine, ruleset_metadata
 
 
 def parse_args():
@@ -37,6 +38,17 @@ def parse_args():
     )
     parser.add_argument("--without-replacement", action="store_true")
     parser.add_argument("--l1-menu", help="matching bit-to-name JSON for timeline provenance")
+    parser.add_argument(
+        "--trigger-rule-mode",
+        choices=("none", "run3"),
+        default="none",
+        help="apply the versioned Run-3 L1A spacing rules (default: none)",
+    )
+    parser.add_argument(
+        "--trigger-rule-history-start-bx",
+        type=int,
+        help="first warm-up BX processed before --start-bx when rules are enabled",
+    )
     return parser.parse_args()
 
 
@@ -69,6 +81,21 @@ def main():
     if args.signal_events < 1:
         print("ERROR: --signal-events must be positive", file=sys.stderr)
         return 2
+    if args.trigger_rule_mode == "run3":
+        if args.trigger_rule_history_start_bx is None:
+            print(
+                "ERROR: --trigger-rule-history-start-bx is required with "
+                "--trigger-rule-mode run3",
+                file=sys.stderr,
+            )
+            return 2
+        if args.start_bx - args.trigger_rule_history_start_bx < REQUIRED_HISTORY_BX:
+            print(
+                f"ERROR: Run-3 rules require at least {REQUIRED_HISTORY_BX} warm-up BX "
+                f"before --start-bx (got {args.start_bx - args.trigger_rule_history_start_bx})",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         library = load_trigger_library(args.inputs)
@@ -98,7 +125,12 @@ def main():
                 f"supplied L1 menu does not match group UUIDs in {key.group_id}"
             )
 
-        timeline_bxs = list(range(args.start_bx, args.end_bx + 1))
+        timeline_start_bx = (
+            args.trigger_rule_history_start_bx
+            if args.trigger_rule_mode == "run3"
+            else args.start_bx
+        )
+        timeline_bxs = list(range(timeline_start_bx, args.end_bx + 1))
         colliding_bxs = load_colliding_bxs(args.colliding_bx_file, timeline_bxs)
         sampled = iter(
             sample_loaded_events(
@@ -129,11 +161,18 @@ def main():
                     "signal_events": args.signal_events,
                     "start_bx": args.start_bx,
                     "end_bx": args.end_bx,
+                    "timeline_start_bx": timeline_start_bx,
                     "colliding_bx_file": args.colliding_bx_file or "",
                     "sampling": (
                         "without_replacement" if args.without_replacement else "with_replacement"
                     ),
-                    "deadtime_applied": False,
+                    "deadtime_applied": args.trigger_rule_mode == "run3",
+                    "trigger_rules_applied": args.trigger_rule_mode == "run3",
+                    "trigger_rule_mode": args.trigger_rule_mode,
+                    "trigger_rule_history_start_bx": args.trigger_rule_history_start_bx,
+                    "trigger_rules": (
+                        ruleset_metadata() if args.trigger_rule_mode == "run3" else None
+                    ),
                     "l1_menu": (
                         {
                             "source_file": l1_menu["source_file"],
@@ -156,16 +195,21 @@ def main():
 
             sample_index = 0
             for signal_event_index in range(args.signal_events):
+                rule_engine = (
+                    TriggerRuleEngine() if args.trigger_rule_mode == "run3" else None
+                )
                 for timeline_bx in timeline_bxs:
                     record = {
                         "record_type": "timeline_bx",
                         "signal_event_index": signal_event_index,
                         "timeline_bx": timeline_bx,
+                        "analysis_window": args.start_bx <= timeline_bx <= args.end_bx,
                         "colliding": timeline_bx in colliding_bxs,
                         "sample_index": None,
                         "source": None,
                         "candidate_decisions": None,
                         "readout_after_trigger_rules": None,
+                        "trigger_rule_decision": None,
                     }
                     if timeline_bx in colliding_bxs:
                         loaded = next(sampled)
@@ -189,6 +233,14 @@ def main():
                             "hlt_errors": event["hlt_errors"],
                         }
                         sample_index += 1
+                    if rule_engine is not None:
+                        candidate_l1a = bool(
+                            record["candidate_decisions"]
+                            and record["candidate_decisions"]["l1_by_bx"]["0"][0]["final_or"]
+                        )
+                        rule_decision = rule_engine.evaluate(timeline_bx, candidate_l1a)
+                        record["trigger_rule_decision"] = rule_decision
+                        record["readout_after_trigger_rules"] = rule_decision["accepted"]
                     output.write(json.dumps(record, sort_keys=True) + "\n")
         os.replace(temporary_path, output_path)
     except OSError as error:

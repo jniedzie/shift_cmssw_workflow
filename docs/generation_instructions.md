@@ -37,6 +37,8 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `TRIGGER_TIMELINE_START_BX`, `TRIGGER_TIMELINE_END_BX` | Relative BX interval sampled around every SHIFT event. |
 | `TRIGGER_TIMELINE_SEED` | Trigger sampler seed; fixed seeds are offset by Condor chunk. |
 | `TRIGGER_COLLIDING_BX_FILE` | Optional filling-scheme-derived list of colliding relative BXs. |
+| `TRIGGER_RULE_MODE` | `none` for the pre-rule control or `run3` for the versioned L1A spacing-rule proxy. |
+| `TRIGGER_RULE_HISTORY_START_BX` | First warm-up BX; `run3` requires at least 240 BX before the analysis start. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
 
 The supported production layout is deliberately canonical:
@@ -111,6 +113,7 @@ TRIGGER_TIMELINE_MODE=zero_bias_proxy
 TRIGGER_TIMELINE_START_BX=-24
 TRIGGER_TIMELINE_END_BX=5
 TRIGGER_TIMELINE_SEED=24680
+TRIGGER_RULE_MODE=none
 # TRIGGER_COLLIDING_BX_FILE="/absolute/shared/path/colliding_relative_bx.txt"
 ```
 
@@ -240,6 +243,23 @@ null until a separately validated trigger-rule engine is applied.  Use
 `--colliding-bx-file` with a versioned filling-scheme-derived list to leave
 empty/noncolliding slots unsampled; without it, every requested BX is treated
 as colliding for software tests only.
+
+For a rule-enabled validation timeline, retain the same analysis range but add
+a complete causal warm-up:
+
+```bash
+TRIGGER_RULE_MODE=run3
+TRIGGER_RULE_HISTORY_START_BX=-264  # 240 BX before analysis start -24
+```
+
+The `run3` preset reproduces the four spacing constraints encoded by CMSSW's
+`TriggerRulePrefireVetoFilter`, but remains marked as requiring run-period TCDS
+validation. It must not be used for a final Run-3 result until that validation
+is complete.
+
+The corrected physical timing, Run-3 trigger-rule warm-up, TCDS validation and
+detector-response implementation sequence is specified in
+`docs/run3_shift_trigger_readout_handoff_2026-08-27.md`.
 
 Run the stages in order from the workflow repository:
 

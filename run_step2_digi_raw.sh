@@ -95,6 +95,24 @@ case "$TRIGGER_TIMELINE_MODE" in
 			echo "ERROR: TRIGGER_TIMELINE_END_BX must not precede TRIGGER_TIMELINE_START_BX" >&2
 			exit 1
 		fi
+		case "$TRIGGER_RULE_MODE" in
+			none)
+				;;
+			run3)
+				if [[ ! "$TRIGGER_RULE_HISTORY_START_BX" =~ ^-?[0-9]+$ ]]; then
+					echo "ERROR: TRIGGER_RULE_HISTORY_START_BX must be an integer" >&2
+					exit 1
+				fi
+				TRIGGER_TIMELINE_ARGS+=(
+					--trigger-rule-mode run3
+					--trigger-rule-history-start-bx "$TRIGGER_RULE_HISTORY_START_BX"
+				)
+				;;
+			*)
+				echo "ERROR: TRIGGER_RULE_MODE must be none or run3 (got '$TRIGGER_RULE_MODE')" >&2
+				exit 1
+				;;
+		esac
 		case "$TRIGGER_TIMELINE_SEED" in
 			random)
 				TRIGGER_TIMELINE_EFFECTIVE_SEED="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"

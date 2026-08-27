@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-"""Unpack only the uGT decision record needed by the SHIFT trigger study."""
+"""Unpack the uGT decisions and TCDS L1A history needed by the SHIFT study."""
 
 import FWCore.ParameterSet.Config as cms
 from FWCore.ParameterSet.VarParsing import VarParsing
@@ -63,7 +63,8 @@ process.source = cms.Source(
 # central cfi.  No L1 re-emulation is performed: these are the decisions that
 # were stored in data, including their initial, post-prescale and final states.
 process.load("EventFilter.L1TRawToDigi.gtStage2Digis_cfi")
-process.unpack = cms.Path(process.gtStage2Digis)
+process.tcdsDigis = cms.EDProducer("TcdsRawToDigi")
+process.unpack = cms.Path(process.gtStage2Digis + process.tcdsDigis)
 
 process.output = cms.OutputModule(
     "PoolOutputModule",
@@ -72,6 +73,7 @@ process.output = cms.OutputModule(
         "drop *",
         "keep GlobalAlgBlkBXVector_gtStage2Digis__SHIFTZB",
         "keep GlobalExtBlkBXVector_gtStage2Digis__SHIFTZB",
+        "keep TCDSRecord_tcdsDigis_tcdsRecord_SHIFTZB",
         "keep edmTriggerResults_TriggerResults__HLT",
     ),
 )

@@ -117,6 +117,8 @@ SUBMISSION_VARIABLES=(
 	TRIGGER_TIMELINE_END_BX
 	TRIGGER_TIMELINE_SEED
 	TRIGGER_COLLIDING_BX_FILE
+	TRIGGER_RULE_MODE
+	TRIGGER_RULE_HISTORY_START_BX
 	TRIGGER_TIMELINE_DIR
 	SHIFT_DT_MODE
 	SHIFT_TRACKER_MODE
@@ -223,8 +225,9 @@ printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s\n' \
 	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED"
 printf 'Timing: mode=%s, BX/phase=%s/%s ns, Geant4 central/forward limits=%s/%s ns\n' \
 	"$SHIFT_TIMING_MODE" "$SHIFT_TIMING_BX_OFFSET" "$SHIFT_TIMING_PHASE_NS" "$SHIFT_G4_MAX_TRACK_TIME_NS" "$SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS"
-printf 'Trigger timeline: mode=%s, BX range=%s..%s, seed=%s\n' \
-	"$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" "$TRIGGER_TIMELINE_SEED"
+printf 'Trigger timeline: mode=%s, BX range=%s..%s, seed=%s, rules=%s, historyStartBX=%s\n' \
+	"$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" \
+	"$TRIGGER_TIMELINE_SEED" "$TRIGGER_RULE_MODE" "$TRIGGER_RULE_HISTORY_START_BX"
 if [[ "$KEEP_LOGS" == 0 ]]; then
 	echo "Cleaning old Condor and payload logs before submission..."
 	"$WORKFLOW_ROOT/scripts/cleanup_condor_logs.sh" \

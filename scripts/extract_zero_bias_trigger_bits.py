@@ -58,6 +58,41 @@ def external_bx_record(block):
     return [index for index in range(256) if block.getExternalDecision(index)]
 
 
+def absolute_bx(orbit, bx_id):
+    """Match the one-based TCDS BXID convention used by CMSSW's rule checker."""
+
+    return int(orbit) * 3564 + int(bx_id) - 1
+
+
+def tcds_record(record):
+    current_absolute_bx = absolute_bx(record.getOrbitNr(), record.getBXID())
+    history = []
+    for accept in record.getFullL1aHistory():
+        history_absolute_bx = absolute_bx(accept.getOrbitNr(), accept.getBXID())
+        history.append(
+            {
+                "index": int(accept.getIndex()),
+                "orbit": int(accept.getOrbitNr()),
+                "bx_id": int(accept.getBXID()),
+                "event_type": int(accept.getEventType()),
+                "delta_bx": current_absolute_bx - history_absolute_bx,
+            }
+        )
+    return {
+        "orbit": int(record.getOrbitNr()),
+        "bx_id": int(record.getBXID()),
+        "event_number": int(record.getEventNumber()),
+        "trigger_count": int(record.getTriggerCount()),
+        "event_type": int(record.getEventType()),
+        "trigger_type_flags": int(record.getTriggerTypeFlags()),
+        "source_id": int(record.getSourceID()),
+        "record_version": int(record.getRecordVersion()),
+        "software_version": int(record.getSwVersion()),
+        "firmware_version": int(record.getFwVersion()),
+        "l1a_history": history,
+    }
+
+
 def main():
     args = parse_args()
     if args.max_events == 0:
@@ -68,9 +103,11 @@ def main():
     l1_handle = Handle("BXVector<GlobalAlgBlk>")
     external_handle = Handle("BXVector<GlobalExtBlk>")
     hlt_handle = Handle("edm::TriggerResults")
+    tcds_handle = Handle("TCDSRecord")
     l1_label = ("gtStage2Digis", "", args.l1_process)
     external_label = ("gtStage2Digis", "", args.l1_process)
     hlt_label = ("TriggerResults", "", args.hlt_process)
+    tcds_label = ("tcdsDigis", "tcdsRecord", args.l1_process)
     seen_hlt_menus = set()
     event_count = 0
 
@@ -86,6 +123,7 @@ def main():
                     "l1_label": list(l1_label),
                     "l1_external_label": list(external_label),
                     "hlt_label": list(hlt_label),
+                    "tcds_label": list(tcds_label),
                     "decision_semantics": {
                         "initial": "uGT algorithm decision before prescales and masks",
                         "intermediate": "uGT algorithm decision after prescales",
@@ -109,6 +147,8 @@ def main():
                 )
             if not event.getByLabel(hlt_label, hlt_handle) or not hlt_handle.isValid():
                 raise RuntimeError(f"missing HLT product {hlt_label} at event index {event_count}")
+            if not event.getByLabel(tcds_label, tcds_handle) or not tcds_handle.isValid():
+                raise RuntimeError(f"missing TCDS product {tcds_label} at event index {event_count}")
 
             trigger_results = hlt_handle.product()
             trigger_names = event.object().triggerNames(trigger_results)
@@ -163,6 +203,7 @@ def main():
                         "orbit": int(auxiliary.orbitNumber()),
                         "bx": int(auxiliary.bunchCrossing()),
                         "is_real_data": bool(auxiliary.isRealData()),
+                        "tcds": tcds_record(tcds_handle.product()),
                         "l1_by_bx": l1_by_bx,
                         "l1_external_by_bx": l1_external_by_bx,
                         "hlt_menu_id": menu_id,

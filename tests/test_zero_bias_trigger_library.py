@@ -17,6 +17,7 @@ from zero_bias_trigger_library import (  # noqa: E402
     sample_loaded_events,
     validate_trigger_library,
 )
+from run3_trigger_rules import TriggerRuleEngine, validate_recorded_l1a_history  # noqa: E402
 
 
 def make_event(event_number, accepted=None):
@@ -41,6 +42,24 @@ def make_event(event_number, accepted=None):
         "orbit": 10 + event_number,
         "bx": 20 + event_number,
         "is_real_data": True,
+        "tcds": {
+            "orbit": 10 + event_number,
+            "bx_id": 21 + event_number,
+            "event_number": event_number,
+            "trigger_count": event_number,
+            "event_type": 1,
+            "trigger_type_flags": 1,
+            "source_id": 1024,
+            "record_version": 1,
+            "software_version": 1,
+            "firmware_version": 1,
+            "l1a_history": [
+                {"index": -1, "orbit": 10, "bx_id": 1, "event_type": 1, "delta_bx": 3},
+                {"index": -2, "orbit": 9, "bx_id": 1, "event_type": 1, "delta_bx": 25},
+                {"index": -3, "orbit": 8, "bx_id": 1, "event_type": 1, "delta_bx": 100},
+                {"index": -4, "orbit": 7, "bx_id": 1, "event_type": 1, "delta_bx": 240},
+            ],
+        },
         "l1_by_bx": {"0": [block]},
         "l1_external_by_bx": {"0": [[11]]},
         "hlt_menu_id": "menu-a",
@@ -111,6 +130,15 @@ class TriggerLibraryTest(unittest.TestCase):
         library = load_trigger_library([str(path)])
         errors, _, _ = validate_trigger_library(library)
         self.assertTrue(any("final bits are not a subset" in error for error in errors))
+
+    def test_tcds_history_rule_violation_is_an_error(self):
+        event = make_event(1)
+        event["tcds"]["l1a_history"][0]["delta_bx"] = 2
+        directory, path = self.write_library([event])
+        self.addCleanup(directory.cleanup)
+        library = load_trigger_library([str(path)])
+        errors, _, _ = validate_trigger_library(library)
+        self.assertTrue(any("TCDS L1A history violates" in error for error in errors))
 
     def test_validator_and_timeline_cli(self):
         directory, path = self.write_library([make_event(1), make_event(2)])
@@ -213,6 +241,79 @@ class TriggerLibraryTest(unittest.TestCase):
                 if record["colliding"]
             )
         )
+
+    def test_rule_enabled_timeline_has_warmup_and_auditable_decisions(self):
+        directory, path = self.write_library([make_event(1), make_event(2)])
+        self.addCleanup(directory.cleanup)
+        timeline_path = Path(directory.name) / "timeline_rules.jsonl"
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "sample_zero_bias_trigger_timeline.py"),
+                str(path),
+                "--output",
+                str(timeline_path),
+                "--start-bx",
+                "-2",
+                "--end-bx",
+                "2",
+                "--seed",
+                "123",
+                "--trigger-rule-mode",
+                "run3",
+                "--trigger-rule-history-start-bx",
+                "-242",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        timeline = [json.loads(line) for line in timeline_path.read_text(encoding="utf-8").splitlines()]
+        metadata = timeline[0]
+        records = timeline[1:]
+        self.assertTrue(metadata["deadtime_applied"])
+        self.assertEqual(metadata["trigger_rules"]["required_history_bx"], 240)
+        self.assertEqual(records[0]["timeline_bx"], -242)
+        self.assertFalse(records[0]["analysis_window"])
+        self.assertEqual(sum(record["analysis_window"] for record in records), 5)
+        self.assertTrue(any(record["readout_after_trigger_rules"] for record in records))
+        self.assertTrue(
+            any(record["trigger_rule_decision"]["violated_rules"] for record in records)
+        )
+
+
+class TriggerRuleEngineTest(unittest.TestCase):
+    def test_exact_rule_boundaries_are_allowed(self):
+        self.assertEqual(validate_recorded_l1a_history([3, 25, 100, 240]), [])
+
+    def test_one_in_three_blocks_two_following_bxs(self):
+        engine = TriggerRuleEngine()
+        accepted = engine.evaluate(0, True)
+        self.assertTrue(accepted["accepted"])
+        self.assertEqual(accepted["reason"], "accepted")
+        self.assertTrue(all(check["would_allow"] for check in accepted["rule_checks"]))
+        blocked = engine.evaluate(1, True)
+        self.assertFalse(blocked["accepted"])
+        self.assertEqual(blocked["reason"], "blocked_by_trigger_rules")
+        self.assertEqual(blocked["violated_rules"][0]["name"], "one_in_three")
+        self.assertFalse(engine.evaluate(2, True)["accepted"])
+        self.assertTrue(engine.evaluate(3, True)["accepted"])
+
+    def test_longer_rule_can_block_after_short_rule_clears(self):
+        engine = TriggerRuleEngine()
+        self.assertTrue(engine.evaluate(0, True)["accepted"])
+        self.assertTrue(engine.evaluate(3, True)["accepted"])
+        decision = engine.evaluate(6, True)
+        self.assertFalse(decision["accepted"])
+        self.assertIn(
+            "two_in_twenty_five",
+            [violation["name"] for violation in decision["violated_rules"]],
+        )
+
+    def test_non_candidate_does_not_change_history(self):
+        engine = TriggerRuleEngine()
+        self.assertFalse(engine.evaluate(0, False)["accepted"])
+        self.assertEqual(engine.accepted_bxs, ())
 
 
 if __name__ == "__main__":

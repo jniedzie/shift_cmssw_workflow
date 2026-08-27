@@ -8,6 +8,8 @@ from itertools import combinations
 import json
 import random
 
+from run3_trigger_rules import validate_recorded_l1a_history
+
 
 SUPPORTED_SCHEMA = "shift-zero-bias-trigger-bits"
 SUPPORTED_SCHEMA_VERSION = 1
@@ -185,6 +187,7 @@ def validate_trigger_library(library):
     warnings = []
     seen_events = {}
     groups = defaultdict(list)
+    missing_tcds_count = 0
 
     for loaded in library.events:
         event = loaded.record
@@ -225,6 +228,26 @@ def validate_trigger_library(library):
                     if block.get("final_or") and not final:
                         raise TriggerLibraryError(f"{prefix}: final_or is true but final bit set is empty")
 
+            tcds = event.get("tcds")
+            if tcds is None:
+                missing_tcds_count += 1
+            else:
+                history = tcds.get("l1a_history")
+                if not isinstance(history, list):
+                    raise TriggerLibraryError("TCDS l1a_history must be a list")
+                indices = [entry.get("index") for entry in history]
+                deltas = [entry.get("delta_bx") for entry in history]
+                if any(not isinstance(value, int) for value in indices + deltas):
+                    raise TriggerLibraryError("TCDS history indices and delta_bx values must be integers")
+                if indices != sorted(indices, reverse=True):
+                    raise TriggerLibraryError("TCDS L1A history indices must be nearest-first")
+                history_violations = validate_recorded_l1a_history(deltas)
+                if history_violations:
+                    raise TriggerLibraryError(
+                        "TCDS L1A history violates Run-3 rule candidate: "
+                        + "; ".join(history_violations)
+                    )
+
             groups[event_group_key(event)].append(loaded)
         except (KeyError, TypeError, ValueError, TriggerLibraryError) as error:
             errors.append(f"{location}: {error}")
@@ -234,6 +257,10 @@ def validate_trigger_library(library):
     }
     if "" in source_datasets:
         warnings.append("at least one input lacks source_dataset provenance")
+    if missing_tcds_count:
+        warnings.append(
+            f"{missing_tcds_count} events lack TCDS L1A-history provenance"
+        )
     warnings.append(
         "fill, luminosity/pileup and colliding-bunch metadata are not yet present in schema version 1"
     )

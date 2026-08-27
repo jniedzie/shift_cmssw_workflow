@@ -447,9 +447,18 @@ luminosity/pileup and colliding-bunch metadata are not yet present.
 `sample_zero_bias_trigger_timeline.py` samples complete event records with a
 fixed seed onto an inclusive relative-BX range.  An optional colliding-BX file
 leaves empty/noncolliding slots unsampled.  Every sampled record retains its
-source file/line and run/lumi/event/orbit/BX.  The output explicitly sets
-`deadtime_applied=false` and `readout_after_trigger_rules=null`; this is a
-candidate-decision timeline, not yet a trigger-rule result.
+source file/line and run/lumi/event/orbit/BX.  The explicit `none` rule mode
+sets `deadtime_applied=false` and `readout_after_trigger_rules=null` and remains
+the pre-rule control.
+
+On 2026-08-27 an optional provisional `run3` rule mode was added.  It applies
+the 1-in-3, 2-in-25, 3-in-100 and 4-in-240 L1A spacing constraints in ordered
+BX sequence, requires at least 240 warm-up BX before the analysis range, and
+records every rule check and blocking accept.  ZeroBias extraction now also
+persists the TCDS 16-entry preceding-L1A history.  A 100-event Run-369943 probe
+had zero history-consistency errors, but its closest preceding accept was 7 BX
+away; the preset therefore remains marked as requiring run-period validation
+and is not yet a final trigger-rate or readout result.
 
 The standard conditions-resolved `L1uGTTreeProducer` is used by
 `zero_bias_l1_menu_cfg.py`; `extract_zero_bias_l1_menu.py` converts its ROOT
@@ -462,12 +471,13 @@ UUIDs (`d10cf9fc`, firmware `e4cb66da`) exactly match the only group in the
 `L1_FirstCollisionInOrbit`.  Supplying a mapping with nonmatching UUIDs is a
 validation error.
 
-The real-data validator reported 100 events, one HLT menu, one trigger group,
-zero errors and one expected conditioning-metadata warning.  A fixed-seed
-test sampled 30 complete records onto BX -24 through +5.  Four unit/integration
-tests cover duplicates, invalid L1 stage nesting, deterministic whole-record
-sampling, menu-name propagation and colliding/empty BX handling.  These tests
-do not establish trigger probabilities or implement deadtime.
+The original real-data validator reported 100 events, one HLT menu, one trigger
+group, zero errors and one expected conditioning-metadata warning.  A
+fixed-seed test sampled 30 complete records onto BX -24 through +5.  The
+expanded suite now has ten unit/integration tests covering library integrity,
+deterministic whole-record sampling, colliding/empty BX handling, TCDS-history
+validation, rule boundaries and rule-enabled warm-up.  These tests do not
+establish trigger probabilities or detector readout acceptance.
 
 ## Milestone 5 - SimHit-to-digi signal survival
 
