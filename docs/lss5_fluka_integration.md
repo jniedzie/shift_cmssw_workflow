@@ -226,9 +226,40 @@ fixed-seed sample.
   and is recorded in the conversion report. A two-region probe converts and
   reads back successfully (3 logical volumes and 51 solids). The full
   1,693-region conversion and geometry validation remain pending.
-- Live CMSSW configuration has not yet been changed or rebuilt. Scheduler state
-  could not be established during this pass, so doing so would violate the
-  rule against modifying a release used by running jobs.
+- Live campaign configuration and built CMSSW libraries have not been changed.
+  Scheduler state could not be established during this pass, so rebuilding the
+  shared release would violate the rule protecting running jobs. The source-only
+  CMSSW implementation prepared under that constraint is described below.
+
+### Initial CMSSW transport integration
+
+The first CMSSW-side source implementation is now present on the checkout's
+local `main` branch. `ShiftMuonTableProducer` has a nested `lssTransport`
+configuration for the EventSetup magnetic-field label, absolute material
+boundary, Geant4e momentum cutoff, maximum step, and maximum path. Existing
+CMS-only values remain the defaults; extending transport toward the target no
+longer requires recompiling the previous 11 m boundary or 25 m path constants.
+
+`ShiftLssMagneticFieldESProducer` wraps a separately labelled standard CMS
+field and applies an ordered, configurable `cms.VPSet` of local field elements.
+The initial implementation supports transformed uniform and analytic
+quadrupole elements with explicit local bounds, origins, proper rotation
+matrices, replacement/addition behavior, and overlap policy. Outside those
+bounds it always delegates to the unchanged CMS field. The
+`customiseShiftLssTransport` relabels the selected standard CMS field producer
+as the composite field's named base, then publishes the composite under the
+empty/default label consumed by `g4SimHits`. SHIFT reconstruction explicitly
+selects that same empty-label product. The base producer module name and base
+label are configuration parameters rather than assumptions in C++.
+
+This is infrastructure, not yet a translation of the 29 proxy assignments.
+The FLUKA-to-CMS transform and geometry-derived element envelopes are still
+unknown, and interpolated `MBXW`, `MQTL`, `MQXA`, `MQXB`, and `MQYana` maps are
+not yet implemented in the CMSSW producer. Configuration deliberately requires
+those spatial definitions rather than treating FLUKA region numbers as
+coordinates. The Python configuration path has been exercised without a
+CMSSW rebuild; C++ compilation and event transport remain pending the scheduler
+safety check.
 
 The next executable deliverable is a bounded, complete GDML conversion with
 lattices preserved, followed by overlap/material scans. Only then should a
