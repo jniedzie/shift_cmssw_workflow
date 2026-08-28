@@ -16,11 +16,13 @@ interface and include the as-installed Run-3 configuration of:
 - the correct Run-3 beam, optics, crossing configuration, and coordinate/time
   conventions.
 
-The FASER/IP1 model is on the wrong side of the ring and is excluded. Phase-2,
-HL-LHC, FACET/PREFACE, schematic, or newly reconstructed CAD models are not
-acceptable substitutes for the Run-3 LSS5 production model. They may be used
-only as software examples or comparison geometries and must be labelled as
-such.
+The FASER/IP1 model is on the wrong side of the ring and cannot establish CMS
+Run-3 acceptance. The available IR1/ATLAS model is nevertheless being used as
+an explicitly provisional engineering and model-sensitivity proxy while the
+IR5 source remains unavailable. Phase-2, HL-LHC, FACET/PREFACE, schematic, or
+newly reconstructed models are likewise not acceptable substitutes for the
+Run-3 LSS5 production model. Every result from a proxy must be labelled with
+its actual interaction region, experiment, beam setup, and model revision.
 
 ## Authoritative model trail
 
@@ -126,7 +128,7 @@ The public FACET converter must not be copied unchanged: the inspected version
 sets all HepMC vertex times to zero, separates output by particle species, and
 does not carry the complete FLUKA history/weight metadata required here.
 
-### Secondary study: translate the LSS5 geometry into Geant4
+### In-process study: translate the proxy geometry into Geant4
 
 A FLUKA-to-Geant4/GDML conversion (for example with `pyg4ometry`, or a future
 FLUKA geometry interface) can be evaluated after the frozen source model is in
@@ -139,6 +141,36 @@ gaps.
 This route is accepted for production only if it agrees with native FLUKA at
 the interface and downstream reference surfaces. Until then it is a prototype,
 not the authoritative model.
+
+### One transport contract for simulation and reconstruction
+
+The CMSSW implementation must expose the same placed material and magnetic
+field to both directions of transport. Adding material only to `g4SimHits`
+would model forward energy loss and scattering while leaving the reconstructed
+state propagation inconsistent. Conversely, a reconstruction-only material
+provider would refit through matter that was absent from the simulated event.
+
+The intended integration therefore has three coupled parts:
+
+1. Attach the converted and validated proxy volumes to the CMSSW DD4hep world
+   with a recorded FLUKA-to-CMS transform and stable volume identifiers.
+2. Implement a composite CMSSW `MagneticField`: the unchanged standard CMS
+   field in the detector, plus the translated FLUKA aperture/yoke field model
+   only in its declared LSS envelope. The 29 active `USRGCALL` assignments,
+   map files, offsets, rotations, units, polarities, and region bindings must
+   survive this translation. GDML alone cannot carry this behavior.
+3. Make the same geometry and field records available to the reconstruction
+   propagator used for SHIFT refitting. The current experimental Geant4
+   navigator/material provider is a useful integration point, but it is not
+   validated for this proxy until it navigates the merged world and uses the
+   composite field rather than an independent approximation.
+
+The bounded acceptance test is a round trip: inject positive and negative
+muons with fixed momenta at the target, record the simulated state and material
+budget at detector entry, then propagate the corresponding reconstructed state
+back to the target. Compare position, direction, signed curvature, path length,
+energy loss, and integrated radiation/interaction lengths against native
+FLUKA/Geant4 reference scans. Forward survival alone is not sufficient.
 
 ## Validation gates
 
@@ -176,15 +208,32 @@ fixed-seed sample.
   Run-3 LSS5 source deck and its exact version were not found.
 - Public FACET and legacy FLUKA LineBuilder resources provide implementation
   clues, not an acceptable Run-3 source model.
-- Implementation is intentionally blocked on obtaining the exact asset bundle
-  above. Writing a converter against an unverified format now would bake in
-  assumptions that can change event grouping, time, weights, geometry, and
-  fields.
+- A frozen IR1/ATLAS proxy bundle is now checked into
+  `models/lss5_ir1_atlas_proxy/source`, with SHA-256 provenance for its master
+  deck, field callback, and active field maps. This begins the converter and
+  CMSSW integration work without presenting IR1 as an IR5 result.
+- `scripts/extract_ir1_fluka_fields.py` produces a versioned JSON manifest of
+  all 29 active FLUKA field assignments independently of geometry conversion.
+  The CMS placement transform remains deliberately unresolved.
+- `scripts/convert_ir1_fluka_geometry.py` verifies the frozen inputs, records
+  the two minimal source normalizations required by `pyg4ometry`, and attempts
+  FLUKA-to-GDML conversion only after an explicit geometry-only acknowledgement.
+  With `pyg4ometry` 1.4.6 the complete deck parses, but its standard conversion
+  stops at the `XRPHA6Rc` lattice cell because its Geant4 boolean solid cannot
+  be meshed solely to obtain the lattice overlap bounding box. The explicit
+  `--use-lattice-aabb-workaround` mode obtains that preselection box from the
+  original FLUKA cell mesh instead; it does not alter solids or omit lattices
+  and is recorded in the conversion report. A two-region probe converts and
+  reads back successfully (3 logical volumes and 51 solids). The full
+  1,693-region conversion and geometry validation remain pending.
+- Live CMSSW configuration has not yet been changed or rebuilt. Scheduler state
+  could not be established during this pass, so doing so would violate the
+  rule against modifying a release used by running jobs.
 
-Once the bundle is available, the first executable deliverable will be a
-native-FLUKA fixed-seed transport to a declared interface surface, plus a
-lossless converter and CMSSW source test for one event before any geometry
-translation is attempted.
+The next executable deliverable is a bounded, complete GDML conversion with
+lattices preserved, followed by overlap/material scans. Only then should a
+separate CMSSW integration change attach the geometry and composite field and
+run the forward/backward closure test above.
 
 ## CERNBox/EOS inventory (2026-08-27)
 
@@ -236,15 +285,16 @@ In particular:
   cannot transport arbitrary SHIFT particles starting near 148 m;
 - the HL-LHC pressure profile is not a material or field description;
 - IR1 and IR5 have different machine layouts, fields, experiment interfaces,
-  and coordinate conventions, so the IR1 deck is not a physical proxy or a
-  conservative uncertainty bound for CMS;
+  and coordinate conventions, so the IR1 deck is a model-sensitivity proxy,
+  not a CMS surrogate or a conservative uncertainty bound;
 - joining the IR1 deck to the CMS HL-LHC records would not represent any real
   LHC configuration.
 
 ## Best bounded work with the available assets
 
 Until an IR5 source deck is obtained, use the CMS output and the IR1 source
-deck as two independent software fixtures:
+deck as two independent fixtures, with the IR1 deck additionally serving as
+the user-approved provisional end-to-end integration model:
 
 1. **Downstream interface prototype from CMS records.** Implement and test a
    strict parser and lossless intermediate representation for the CMS
@@ -274,6 +324,32 @@ fixture than IR1, but any transport result from it must be labelled as a model
 sensitivity study, not Run-3 detector acceptance. Before using any fallback,
 inventory the Run-3 differences in magnets, apertures, absorbers/shielding,
 optics, crossing setup, cavern interface, and coordinate conventions.
+
+### Implemented interface-record prototype
+
+The first bounded software fixture is now available as
+`scripts/convert_fluka_crossings.py`, with parsing and schema support in
+`scripts/lss5_crossing_records.py`. It reads the 12-column CMS FLUKA crossing
+format (plain text or gzip), groups particles without losing FLUKA run/event
+identity, preserves source decimal tokens, records the decompressed-content
+SHA-256 and complete header, and writes a versioned JSONL representation.
+
+The converter deliberately leaves the scoring-surface position, signed
+longitudinal direction, coordinate transform, and FLUKA-to-PDG mapping unset.
+It always marks the input as a software fixture and both Run-3 IR5 geometry
+and magnetic-field validation as false. Therefore its output is suitable for
+parser, grouping, provenance, and future CMSSW-source tests, but not for SHIFT
+transport or detector-acceptance results.
+
+Example using the accessible HL-LHC CMS output strictly as a fixture:
+
+```bash
+python3 scripts/convert_fluka_crossings.py \
+  /eos/project/l/lhc-mib/public/HL-LHC/CMS/local-beam-gas/FLUKA/parts_CMS_21p5m_b2gasN_6e5.dat.gz \
+  --output /tmp/cms_interface_fixture.jsonl.gz \
+  --model-label "HL-LHC CMS local beam-gas output fixture" \
+  --interface-label "CMS cavern interface described as 21.5 m from IP5"
+```
 
 ## Short request to colleagues
 

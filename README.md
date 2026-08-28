@@ -10,3 +10,8 @@ See [setup instructions](docs/setup_instructions.md) for configuration and envir
 
 The provenance requirements and proposed architecture for adding the Run-3
 LSS5 FLUKA model are tracked in [the LSS5 FLUKA integration note](docs/lss5_fluka_integration.md).
+The initial interface-record prototype is `scripts/convert_fluka_crossings.py`.
+The frozen IR1/ATLAS proxy and guarded FLUKA-to-GDML tooling live under
+`models/lss5_ir1_atlas_proxy` and `scripts/convert_ir1_fluka_geometry.py`;
+`scripts/extract_ir1_fluka_fields.py` extracts the separate field contract.
+None of these claims that Run-3 IR5 geometry or magnetic fields are validated.
