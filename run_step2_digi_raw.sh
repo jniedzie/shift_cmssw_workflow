@@ -178,10 +178,35 @@ READOUT_DIAGNOSTICS_CUSTOMISE=""
 case "${SHIFT_READOUT_DIAGNOSTICS:-0}" in
 	0|false|False) ;;
 	1|true|True)
-		READOUT_DIAGNOSTICS_CUSTOMISE="; [output.outputCommands.extend(('keep *_simMuonDTDigis_*_*', 'keep *_simMuonCSCDigis_*_*', 'keep *_simMuonGEMDigis_*_*', 'keep *_simDtTriggerPrimitiveDigis_*_*', 'keep *_simCscTriggerPrimitiveDigis_*_*', 'keep *_simMuonGEMPadDigis_*_*', 'keep *_simMuonGEMPadDigiClusters_*_*', 'keep *_simBmtfDigis_*_*', 'keep *_simKBmtfDigis_*_*', 'keep *_simOmtfDigis_*_*', 'keep *_simEmtfDigis_*_*', 'keep *_simGmtStage2Digis_*_*')) for output in process.outputModules_().values()]"
+		READOUT_DIAGNOSTICS_CUSTOMISE="; [output.outputCommands.extend(('keep *_simMuonDTDigis_*_*', 'keep *_simMuonCSCDigis_*_*', 'keep *_simMuonGEMDigis_*_*', 'keep *_simDtTriggerPrimitiveDigis_*_*', 'keep *_simCscTriggerPrimitiveDigis_*_*', 'keep *_simMuonGEMPadDigis_*_*', 'keep *_simMuonGEMPadDigiClusters_*_*', 'keep *_simBmtfDigis_*_*', 'keep *_simKBmtfDigis_*_*', 'keep *_simOmtfDigis_*_*', 'keep *_simEmtfDigis_*_*', 'keep *_simEmtfShowers_*_*', 'keep *_simGmtStage2Digis_*_*')) for output in process.outputModules_().values()]"
 		;;
 	*) echo "ERROR: SHIFT_READOUT_DIAGNOSTICS must be 0/1 or false/true" >&2; exit 1 ;;
 esac
+
+SIMHIT_REFERENCE_CUSTOMISE=""
+if [[ -n "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]]; then
+	if [[ "$PILEUP_MODE" != none ]]; then
+		echo "ERROR: same-SimHit reference timing is restricted to PILEUP_MODE=none" >&2
+		exit 1
+	fi
+	if [[ ! "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" =~ ^-?[0-9]+$ ]]; then
+		echo "ERROR: SHIFT_SIMHIT_REFERENCE_BX_OFFSET must be empty or an integer" >&2
+		exit 1
+	fi
+	if [[ ! "$SHIFT_SIMHIT_REFERENCE_PHASE_NS" =~ ^-?([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+		echo "ERROR: SHIFT_SIMHIT_REFERENCE_PHASE_NS must be a finite decimal number" >&2
+		exit 1
+	fi
+	case "$SHIFT_READOUT_DIAGNOSTICS" in
+		1|true|True) ;;
+		*) echo "ERROR: same-SimHit reference timing requires SHIFT_READOUT_DIAGNOSTICS=1" >&2; exit 1 ;;
+	esac
+	if [[ "$SHIFT_SIMHIT_REFERENCE_INPUT" != /* || ! -s "$SHIFT_SIMHIT_REFERENCE_INPUT" ]]; then
+		echo "ERROR: SHIFT_SIMHIT_REFERENCE_INPUT must be one absolute, non-empty Step-1 file" >&2
+		exit 1
+	fi
+	SIMHIT_REFERENCE_CUSTOMISE="; from IOMC.ShiftEventTiming.shiftSimHitTiming_customise import customiseShiftSimHitReferenceTiming; process = customiseShiftSimHitReferenceTiming(process, bxOffset=${SHIFT_SIMHIT_REFERENCE_BX_OFFSET}, phaseNs=${SHIFT_SIMHIT_REFERENCE_PHASE_NS}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS})"
+fi
 
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
@@ -224,7 +249,11 @@ if [[ -e "$OUTPUT" ]]; then
 	rm -f -- "$OUTPUT"
 fi
 
-INPUT="$STEP1_DIR/events_step1_part${PART}.root"
+if [[ -n "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]]; then
+	INPUT="$SHIFT_SIMHIT_REFERENCE_INPUT"
+else
+	INPUT="$STEP1_DIR/events_step1_part${PART}.root"
+fi
 if [[ ! -s "$INPUT" ]]; then
 	echo "ERROR: $WORKDIR/$INPUT is missing or empty" >&2
 	exit 1
@@ -232,6 +261,9 @@ fi
 
 echo "=== Step 2: DIGI,L1,DIGI2RAW,HLT (Run 3) ==="
 echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP_INPUT:-none} seed=${PILEUP_SEED:-none}"
+if [[ -n "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]]; then
+	echo "Same-SimHit reference timing: bx=$SHIFT_SIMHIT_REFERENCE_BX_OFFSET phase_ns=$SHIFT_SIMHIT_REFERENCE_PHASE_NS"
+fi
 cmsDriver.py step2 \
 	--step "DIGI:pdigi_valid,L1,DIGI2RAW,HLT:${HLT_MENU},ENDJOB" \
 	--conditions "$CONDITIONS" \
@@ -242,7 +274,7 @@ cmsDriver.py step2 \
 	--filein "file:$INPUT" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, keepMergedTrackTruth=False, keepSimMuonRPCDigis=True, keepPileupPlayback=True)${PILEUP_CUSTOMISE}${READOUT_DIAGNOSTICS_CUSTOMISE}" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, keepMergedTrackTruth=False, keepSimMuonRPCDigis=True, keepPileupPlayback=True)${PILEUP_CUSTOMISE}${READOUT_DIAGNOSTICS_CUSTOMISE}${SIMHIT_REFERENCE_CUSTOMISE}" \
 	"${PILEUP_ARGS[@]}" \
 	--no_exec \
 	-n "$N_EVENTS"

@@ -7,8 +7,10 @@ SimHit-to-digi response tests.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import struct
 from collections import Counter, defaultdict
 
 from DataFormats.FWLite import Events, Handle
@@ -20,6 +22,30 @@ SUBDETECTORS = {
     "RPC": "MuonRPCHits",
     "GEM": "MuonGEMHits",
 }
+
+
+def _non_timing_hit_record(hit):
+    entry = hit.entryPoint()
+    exit_point = hit.exitPoint()
+    return struct.pack(
+        "<IIIiHH10f",
+        int(hit.eventId().rawId()),
+        int(hit.trackId()),
+        int(hit.detUnitId()),
+        int(hit.particleType()),
+        int(hit.processType()),
+        int(hit.hitProdType()),
+        float(entry.x()),
+        float(entry.y()),
+        float(entry.z()),
+        float(exit_point.x()),
+        float(exit_point.y()),
+        float(exit_point.z()),
+        float(hit.pabs()),
+        float(hit.energyLoss()),
+        float(hit.thetaAtEntry()),
+        float(hit.phiAtEntry()),
+    )
 
 
 def _event_id(encoded_event_id):
@@ -51,9 +77,9 @@ def _get_product(event, module, instance, type_name, input_path):
     return handle.product()
 
 
-def _audit_event(event, input_path):
+def _audit_event(event, input_path, track_module="g4SimHits", simhit_module="g4SimHits"):
     tracks = _get_product(
-        event, "g4SimHits", "", "std::vector<SimTrack>", input_path
+        event, track_module, "", "std::vector<SimTrack>", input_path
     )
     track_keys = Counter(_truth_key(track) for track in tracks)
     tracks_by_key = defaultdict(list)
@@ -62,7 +88,13 @@ def _audit_event(event, input_path):
 
     hit_summaries = defaultdict(
         lambda: {
-            name: {"hits": 0, "det_units": set(), "tof_min_ns": None, "tof_max_ns": None}
+            name: {
+                "hits": 0,
+                "det_units": set(),
+                "tof_min_ns": None,
+                "tof_max_ns": None,
+                "non_timing_records": [],
+            }
             for name in SUBDETECTORS
         }
     )
@@ -71,7 +103,7 @@ def _audit_event(event, input_path):
 
     for name, instance in SUBDETECTORS.items():
         hits = _get_product(
-            event, "g4SimHits", instance, "std::vector<PSimHit>", input_path
+            event, simhit_module, instance, "std::vector<PSimHit>", input_path
         )
         for hit in hits:
             if abs(int(hit.particleType())) != 13:
@@ -86,6 +118,7 @@ def _audit_event(event, input_path):
             tof = float(hit.timeOfFlight())
             summary["hits"] += 1
             summary["det_units"].add(int(hit.detUnitId()))
+            summary["non_timing_records"].append(_non_timing_hit_record(hit))
             summary["tof_min_ns"] = tof if summary["tof_min_ns"] is None else min(summary["tof_min_ns"], tof)
             summary["tof_max_ns"] = tof if summary["tof_max_ns"] is None else max(summary["tof_max_ns"], tof)
 
@@ -106,6 +139,9 @@ def _audit_event(event, input_path):
             detector_counts[name] = {
                 "hits": summary["hits"],
                 "det_units": len(summary["det_units"]),
+                "non_timing_sha256": hashlib.sha256(
+                    b"".join(sorted(summary["non_timing_records"]))
+                ).hexdigest(),
                 "tof_min_ns": summary["tof_min_ns"],
                 "tof_max_ns": summary["tof_max_ns"],
             }
@@ -169,6 +205,16 @@ def main():
         help="maximum events per input; negative means all (default: all)",
     )
     parser.add_argument(
+        "--track-module",
+        default="g4SimHits",
+        help="module containing SimTracks (default: g4SimHits)",
+    )
+    parser.add_argument(
+        "--simhit-module",
+        default="g4SimHits",
+        help="module containing muon PSimHits (default: g4SimHits)",
+    )
+    parser.add_argument(
         "--fail-on-identity-error",
         action="store_true",
         help="exit nonzero if a duplicate key, orphan hit or PDG mismatch is found",
@@ -179,11 +225,15 @@ def main():
         parser.error("--max-events must be -1 or a positive integer")
 
     result = {
-        "schema_version": 1,
+        "schema_version": 2,
         "identity_key": ["EncodedEventId.rawId", "SimTrackId"],
         "inputs": [],
         "events": [],
         "selection": {name: [] for name in SUBDETECTORS},
+        "sources": {
+            "sim_tracks": args.track_module,
+            "muon_simhits": args.simhit_module,
+        },
     }
     total_identity_failures = 0
 
@@ -197,7 +247,12 @@ def main():
         for index, event in enumerate(Events(input_path)):
             if args.max_events >= 0 and index >= args.max_events:
                 break
-            summary = _audit_event(event, input_path)
+            summary = _audit_event(
+                event,
+                input_path,
+                track_module=args.track_module,
+                simhit_module=args.simhit_module,
+            )
             summary["input"] = os.path.abspath(input_path)
             summary["input_event_index"] = index
             result["events"].append(summary)

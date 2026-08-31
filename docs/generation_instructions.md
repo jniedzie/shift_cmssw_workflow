@@ -30,6 +30,9 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns BX offset. |
 | `SHIFT_TIMING_PHASE_NS` | Additive fractional timing phase in ns. |
 | `SHIFT_TIMING_FIXED_OFFSET_NS` | Common ns shift used in `fixed` mode. |
+| `SHIFT_READOUT_DIAGNOSTICS` | Default-off persistence of pre-pack muon digis and trigger products for a bounded audit. |
+| `SHIFT_SIMHIT_REFERENCE_BX_OFFSET`, `SHIFT_SIMHIT_REFERENCE_PHASE_NS` | Default-disabled time shift applied to one fixed muon PSimHit realization immediately before no-pileup digitization. |
+| `SHIFT_SIMHIT_REFERENCE_INPUT` | Absolute shared Step-1 file required by a same-SimHit reference scan. |
 | `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
 | `TRIGGER_TIMELINE_MODE` | `none` or `zero_bias_proxy` for a correlated candidate-trigger sidecar. |
@@ -187,7 +190,29 @@ any digitizer, emulator, packer, BX range, or trigger rule. Unpack the resulting
 RAW with `scripts/shift_readout_unpack_cfg.py`, then run
 `scripts/analyze_shift_readout_capture.py`. Compare timing points with
 `scripts/classify_shift_multi_readout.py`; it fails closed if the paired files
-do not contain identical per-muon SimHit populations.
+do not contain identical per-muon non-timing SimHit fingerprints.
+
+For the conditional electronics-response control, reuse one exact nominal
+Step-1 file in distinct Step-2 campaigns and vary only the reference offset:
+
+```bash
+baseline_step1=/absolute/path/events_step1_part0000.root
+
+for reference_bx in 0 1; do
+  CAMPAIGN_NAME="same_simhit_bx${reference_bx}_2023" \
+  PILEUP_MODE=none \
+  SHIFT_READOUT_DIAGNOSTICS=1 \
+  SHIFT_SIMHIT_REFERENCE_INPUT="$baseline_step1" \
+  SHIFT_SIMHIT_REFERENCE_BX_OFFSET="$reference_bx" \
+  SHIFT_SIMHIT_REFERENCE_PHASE_NS=0.0 \
+    ./run_step2_digi_raw.sh 0 10
+done
+```
+
+This producer copies DT, CSC, RPC, and GEM PSimHits and changes only their
+`timeOfFlight` before the unchanged standard mixing/digitization chain. It is
+restricted to no-pileup controls and is not a replacement for Step-1 physical
+timing or detector simulation.
 
 As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
 in 27,774 DBS files, but some blocks have no current file replicas. Do not use

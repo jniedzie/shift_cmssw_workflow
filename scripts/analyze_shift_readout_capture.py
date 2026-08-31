@@ -113,7 +113,10 @@ std::vector<ShiftFlatDigi> shiftFlattenCSCWireDigis(CSCWireDigiCollection const&
   std::vector<ShiftFlatDigi> result;
   for (auto const& detset : digis)
     for (auto digi = detset.second.first; digi != detset.second.second; ++digi)
-      result.push_back({kCSCWire, detset.first.rawId(), digi->getWireGroup(), -1});
+      // CSCWireElectronicsSim::channelIndex encodes wire sim-link channels as
+      // wireGroup + 100. Match that standard convention on both sides.
+      result.push_back(
+          {kCSCWire, detset.first.rawId(), digi->getWireGroup() + 100, -1});
   return result;
 }
 
@@ -285,7 +288,7 @@ def main():
     args = parser.parse_args()
 
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "input": args.input,
         "validated_boundary": "truth SimHit -> simulated digi/link -> packed RAW -> unpacked digi",
         "limitations": [
@@ -350,6 +353,7 @@ def main():
                     missing_kinds[str(kind)] += 1
                 subsystem_result[subsystem] = {
                     "simhits": simhits,
+                    "simhit_non_timing_sha256": muon["subdetectors"][subsystem]["non_timing_sha256"],
                     "linked_simulated_digis": len(linked_keys),
                     "matched_unpacked_digis": len(matched_keys),
                     "linked_samples": dict(sorted(linked_samples.items(), key=lambda item: int(item[0]))),

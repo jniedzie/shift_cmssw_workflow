@@ -12,6 +12,10 @@ def _load(spec):
     with open(path, encoding="utf-8") as input_file:
         report = json.load(input_file)
     muons = {}
+    if report.get("schema_version") != 2:
+        raise RuntimeError(
+            f"{path} uses capture schema {report.get('schema_version')!r}; regenerate it with the current analyzer"
+        )
     for event in report["events"]:
         for muon in event["signal_muons"]:
             key = (event["run"], event["lumi"], event["event"], muon["event_id"]["raw"], muon["track_id"])
@@ -42,14 +46,21 @@ def main():
             for subsystem in reference["subdetectors"]:
                 expected = reference["subdetectors"][subsystem]["simhits"]
                 observed = muons[key]["subdetectors"][subsystem]["simhits"]
-                if expected != observed:
-                    simhit_mismatches.append({
-                        "event": key[2], "track_id": key[4], "subsystem": subsystem,
-                        reference_label: expected, label: observed,
-                    })
+                expected_hash = reference["subdetectors"][subsystem]["simhit_non_timing_sha256"]
+                observed_hash = muons[key]["subdetectors"][subsystem]["simhit_non_timing_sha256"]
+                if expected != observed or expected_hash != observed_hash:
+                    simhit_mismatches.append(
+                        {
+                            "event": key[2],
+                            "track_id": key[4],
+                            "subsystem": subsystem,
+                            reference_label: {"hits": expected, "non_timing_sha256": expected_hash},
+                            label: {"hits": observed, "non_timing_sha256": observed_hash},
+                        }
+                    )
     if simhit_mismatches:
         output = {
-            "schema_version": 1,
+            "schema_version": 2,
             "valid": False,
             "readouts": {label: path for label, path, _ in reports},
             "error": "SimHit populations differ; these are not the same detector-level muon realization.",
@@ -71,21 +82,43 @@ def main():
             for subsystem, values in muon["subdetectors"].items()
             if values["simhits"]
         }
+        subsystem_results = {}
         if not crossed:
             classification = "no_muon_detector_crossing"
-        elif any(muon["classification"] == "complete_at_digi_RAW_boundary" for muon in per_readout.values()):
-            classification = "complete_in_one_tested_readout"
         else:
-            union_complete = True
+            expected = set()
+            stored_by_readout = {label: set() for label in per_readout}
             for subsystem in crossed:
-                expected = set()
-                stored = set()
-                for muon in per_readout.values():
+                subsystem_expected = set()
+                subsystem_stored = {label: set() for label in per_readout}
+                for label, muon in per_readout.items():
                     values = muon["subdetectors"][subsystem]
-                    expected |= _channels(values, "linked_channels")
-                    stored |= _channels(values, "matched_channels")
-                union_complete &= expected <= stored and bool(expected)
-            if union_complete:
+                    subsystem_expected |= _channels(values, "linked_channels")
+                    subsystem_stored[label] |= _channels(values, "matched_channels")
+                expected |= {(subsystem, *channel) for channel in subsystem_expected}
+                for label, channels in subsystem_stored.items():
+                    stored_by_readout[label] |= {(subsystem, *channel) for channel in channels}
+                stored_union = set().union(*subsystem_stored.values())
+                missing_union = subsystem_expected - stored_union
+                missing_kinds = {}
+                for kind, _, _ in missing_union:
+                    missing_kinds[str(kind)] = missing_kinds.get(str(kind), 0) + 1
+                subsystem_results[subsystem] = {
+                    "expected_channels": len(subsystem_expected),
+                    "matched_channels_by_readout": {
+                        label: len(channels) for label, channels in sorted(subsystem_stored.items())
+                    },
+                    "missing_channels_by_readout": {
+                        label: len(subsystem_expected - channels)
+                        for label, channels in sorted(subsystem_stored.items())
+                    },
+                    "matched_channels_in_union": len(stored_union),
+                    "missing_channels_from_union": len(missing_union),
+                    "missing_kinds_from_union": dict(sorted(missing_kinds.items())),
+                }
+            if expected and any(expected <= stored for stored in stored_by_readout.values()):
+                classification = "complete_in_one_tested_readout"
+            elif expected and expected <= set().union(*stored_by_readout.values()):
                 classification = "complete_only_in_union_of_tested_readouts"
             elif any(
                 values["matched_unpacked_digis"]
@@ -106,11 +139,12 @@ def main():
                 "track_id": key[4],
                 "classification": classification,
                 "per_readout": {label: muon["classification"] for label, muon in per_readout.items()},
+                "subsystems": subsystem_results,
             }
         )
 
     output = {
-        "schema_version": 1,
+        "schema_version": 2,
         "valid": True,
         "readouts": {label: path for label, path, _ in reports},
         "definition": "Channel identity is subsystem digi kind, detector id, and channel; BX/TDC sample is omitted when taking the union.",
