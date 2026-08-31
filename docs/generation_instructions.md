@@ -180,6 +180,15 @@ Step-3 `muonRPCDigis` merger consumes them outside `rawDataCollector`.
 directly. This changes persisted intermediate content only; DIGI, L1,
 DIGI2RAW, HLT and detector/electronics configuration remain unchanged.
 
+For a bounded SimHit-to-RAW audit, set `SHIFT_READOUT_DIAGNOSTICS=1` on Step 2.
+This default-off mode persists the standard pre-pack muon digis, local
+primitives, regional candidates, and uGMT candidates; it does not reconfigure
+any digitizer, emulator, packer, BX range, or trigger rule. Unpack the resulting
+RAW with `scripts/shift_readout_unpack_cfg.py`, then run
+`scripts/analyze_shift_readout_capture.py`. Compare timing points with
+`scripts/classify_shift_multi_readout.py`; it fails closed if the paired files
+do not contain identical per-muon SimHit populations.
+
 As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
 in 27,774 DBS files, but some blocks have no current file replicas. Do not use
 that unfiltered inventory for production. The current `T2_CH_CERN` manifest

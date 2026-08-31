@@ -174,6 +174,14 @@ ensure_trigger_timeline() {
 		return 1
 	}
 }
+READOUT_DIAGNOSTICS_CUSTOMISE=""
+case "${SHIFT_READOUT_DIAGNOSTICS:-0}" in
+	0|false|False) ;;
+	1|true|True)
+		READOUT_DIAGNOSTICS_CUSTOMISE="; [output.outputCommands.extend(('keep *_simMuonDTDigis_*_*', 'keep *_simMuonCSCDigis_*_*', 'keep *_simMuonGEMDigis_*_*', 'keep *_simDtTriggerPrimitiveDigis_*_*', 'keep *_simCscTriggerPrimitiveDigis_*_*', 'keep *_simMuonGEMPadDigis_*_*', 'keep *_simMuonGEMPadDigiClusters_*_*', 'keep *_simBmtfDigis_*_*', 'keep *_simKBmtfDigis_*_*', 'keep *_simOmtfDigis_*_*', 'keep *_simEmtfDigis_*_*', 'keep *_simGmtStage2Digis_*_*')) for output in process.outputModules_().values()]"
+		;;
+	*) echo "ERROR: SHIFT_READOUT_DIAGNOSTICS must be 0/1 or false/true" >&2; exit 1 ;;
+esac
 
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
@@ -234,7 +242,7 @@ cmsDriver.py step2 \
 	--filein "file:$INPUT" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, keepMergedTrackTruth=False, keepSimMuonRPCDigis=True, keepPileupPlayback=True)${PILEUP_CUSTOMISE}" \
+	--customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process, keepMergedTrackTruth=False, keepSimMuonRPCDigis=True, keepPileupPlayback=True)${PILEUP_CUSTOMISE}${READOUT_DIAGNOSTICS_CUSTOMISE}" \
 	"${PILEUP_ARGS[@]}" \
 	--no_exec \
 	-n "$N_EVENTS"
