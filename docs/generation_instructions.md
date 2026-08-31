@@ -192,6 +192,17 @@ RAW with `scripts/shift_readout_unpack_cfg.py`, then run
 `scripts/classify_shift_multi_readout.py`; it fails closed if the paired files
 do not contain identical per-muon non-timing SimHit fingerprints.
 
+For the next fixed-trigger boundary, run
+`scripts/analyze_shift_trigger_funnel.py` on each unpacked diagnostic file and
+combine reports with `scripts/classify_shift_trigger_readouts.py`. The analyzer
+tests chamber-compatible CSC correlated LCTs across the real pack/unpack
+boundary. It uses the standard CMSSW comparison convention of emulator BX
+minus 6 versus the readout-relative RAW BX; this is a representation conversion,
+not retiming. DT primitives are simulated-side diagnostics because standard
+`RawToDigi` does not expose a post-RAW DT primitive collection here. Regional
+and uGMT counts are event-global and must not be called signal-truth matches or
+proof of HLT/DAQ acceptance.
+
 For the conditional electronics-response control, reuse one exact nominal
 Step-1 file in distinct Step-2 campaigns and vary only the reference offset:
 
