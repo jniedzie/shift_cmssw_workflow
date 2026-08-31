@@ -258,8 +258,8 @@ validation. It must not be used for a final Run-3 result until that validation
 is complete.
 
 The corrected physical timing, Run-3 trigger-rule warm-up, TCDS validation and
-detector-response implementation sequence is specified in
-`docs/run3_shift_trigger_readout_handoff_2026-08-27.md`.
+detector-response implementation sequence is specified in the
+[top-level trigger document](../../SHIFT_TRIGGER.md).
 
 Run the stages in order from the workflow repository:
 
