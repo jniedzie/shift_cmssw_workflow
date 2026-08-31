@@ -12,6 +12,7 @@ from pathlib import Path
 import re
 import shutil
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 class ProxyModelError(ValueError):
@@ -207,6 +208,143 @@ def _install_lattice_aabb_workaround(converter_module):
     return original
 
 
+def expand_predefined_materials(registry):
+    """Replace NIST handles with explicit compositions for ROOT/DD4hep GDML."""
+
+    from pyg4ometry.geant4._Material import nist_material_2geant4Material
+
+    predefined_by_name = {
+        material.name: material
+        for material in registry.materialDict.values()
+        if getattr(material, "type", None) == "nist"
+    }
+    explicit_by_name = {
+        name: nist_material_2geant4Material(name)
+        for name in predefined_by_name
+    }
+
+    for logical_volume in registry.logicalVolumeDict.values():
+        if getattr(logical_volume, "type", None) != "logical":
+            continue
+        material = logical_volume.material
+        if getattr(material, "type", None) == "nist":
+            logical_volume.material = explicit_by_name[material.name]
+
+    for material in list(registry.materialDict.values()):
+        components = getattr(material, "components", None)
+        if not components:
+            continue
+        material.components = [
+            (
+                explicit_by_name.get(component.name, component)
+                if getattr(component, "type", None) == "nist"
+                else component,
+                fraction,
+                fraction_type,
+            )
+            for component, fraction, fraction_type in components
+        ]
+
+    for original_name in predefined_by_name:
+        registry.materialDict.pop(original_name, None)
+    for explicit in explicit_by_name.values():
+        registry.materialDict[explicit.name] = explicit
+    return dict(
+        sorted(
+            (original_name, explicit.name)
+            for original_name, explicit in explicit_by_name.items()
+        )
+    )
+
+
+def audit_gdml_material_references(gdml_path):
+    root = ET.parse(gdml_path).getroot()
+    materials = root.find("materials")
+    structure = root.find("structure")
+    if materials is None or structure is None:
+        raise ProxyModelError("GDML requires materials and structure sections")
+    defined = {
+        material.attrib["name"]
+        for material in materials.findall("material")
+        if "name" in material.attrib
+    }
+    referenced = {
+        reference.attrib["ref"]
+        for reference in structure.iter("materialref")
+        if "ref" in reference.attrib
+    }
+    undefined = sorted(referenced - defined)
+    return {
+        "defined_material_count": len(defined),
+        "referenced_material_count": len(referenced),
+        "undefined_material_count": len(undefined),
+        "undefined_materials": undefined,
+    }
+
+
+def audit_omitted_region_geometry(fluka_registry, omitted_region_names):
+    details = []
+    for name in omitted_region_names:
+        region = fluka_registry.regionDict[name]
+        try:
+            mesh = region.mesh()
+            detail = {
+                "name": name,
+                "zone_count": len(region.zones),
+                "csg": region.dumps(),
+                "is_null": bool(mesh.isNull()),
+                "vertex_count": int(mesh.vertexCount()),
+                "polygon_count": int(mesh.polygonCount()),
+                "volume_mm3": float(mesh.volume()),
+                "evaluation_error": None,
+            }
+        except Exception as error:
+            detail = {
+                "name": name,
+                "zone_count": len(region.zones),
+                "csg": region.dumps(),
+                "is_null": None,
+                "vertex_count": None,
+                "polygon_count": None,
+                "volume_mm3": None,
+                "evaluation_error": f"{type(error).__name__}: {error}",
+            }
+        details.append(detail)
+
+    source_null_regions = [item["name"] for item in details if item["is_null"] is True]
+    unexpected_omissions = [item["name"] for item in details if item["is_null"] is not True]
+    return {
+        "audited_region_count": len(details),
+        "source_null_region_count": len(source_null_regions),
+        "source_null_regions": source_null_regions,
+        "unexpected_omitted_region_count": len(unexpected_omissions),
+        "unexpected_omitted_regions": unexpected_omissions,
+        "details": details,
+    }
+
+
+def summarize_region_coverage(source_region_names, selected_regions, logical_volume_names):
+    source_region_names = list(source_region_names)
+    requested_region_names = (
+        list(selected_regions) if selected_regions is not None else source_region_names
+    )
+    logical_volume_names = set(logical_volume_names)
+    converted_region_names = [
+        name for name in requested_region_names if f"{name}_lv" in logical_volume_names
+    ]
+    omitted_region_names = sorted(set(requested_region_names) - set(converted_region_names))
+    return {
+        "source_region_count": len(source_region_names),
+        "requested_region_count": len(requested_region_names),
+        "unselected_region_count": len(source_region_names) - len(requested_region_names),
+        "converted_region_count": len(converted_region_names),
+        "converted_regions": converted_region_names,
+        "omitted_region_count": len(omitted_region_names),
+        "omitted_regions": omitted_region_names,
+        "selected_regions": list(selected_regions) if selected_regions is not None else None,
+    }
+
+
 def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaround=False):
     try:
         import pyg4ometry
@@ -255,16 +393,29 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
                 if original_lattice_aabb is not None:
                     converter_module._getTransformedCellRegionAABB = original_lattice_aabb
         geant4_registry.getWorldVolume().clipSolid()
+        explicit_predefined_materials = expand_predefined_materials(geant4_registry)
         temporary_gdml = temporary_dir / "lhc_ir1_atlas_proxy.gdml"
         writer = Writer()
         writer.addDetector(geant4_registry)
         writer.write(str(temporary_gdml))
+        material_reference_audit = audit_gdml_material_references(temporary_gdml)
+        if material_reference_audit["undefined_material_count"]:
+            raise ProxyModelError(
+                "GDML contains undefined material references: "
+                + ", ".join(material_reference_audit["undefined_materials"])
+            )
 
         final_gdml = output_dir / "lhc_ir1_atlas_proxy.gdml"
         final_fields = output_dir / "lhc_ir1_atlas_proxy_fields.json"
         final_report = output_dir / "conversion_report.json"
         final_log = output_dir / conversion_log.name
         write_field_manifest(assignments, temporary_dir / final_fields.name)
+        region_coverage = summarize_region_coverage(
+            fluka_registry.regionDict, regions, geant4_registry.logicalVolumeDict
+        )
+        omitted_region_audit = audit_omitted_region_geometry(
+            fluka_registry, region_coverage["omitted_regions"]
+        )
         report = {
             "schema": "shift-ir1-proxy-conversion",
             "schema_version": 1,
@@ -276,11 +427,13 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
             "geometry": {
                 "gdml": final_gdml.name,
                 "world_volume": geant4_registry.getWorldVolume().name,
-                "source_region_count": len(fluka_registry.regionDict),
-                "selected_regions": list(regions) if regions else None,
+                **region_coverage,
+                "omitted_region_audit": omitted_region_audit,
                 "logical_volume_count": len(geant4_registry.logicalVolumeDict),
                 "solid_count": len(geant4_registry.solidDict),
                 "material_count": len(geant4_registry.materialDict),
+                "explicit_predefined_materials": explicit_predefined_materials,
+                "material_reference_audit": material_reference_audit,
             },
             "magnetic_field": {
                 "manifest": final_fields.name,

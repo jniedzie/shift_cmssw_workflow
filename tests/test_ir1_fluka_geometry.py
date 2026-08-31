@@ -13,9 +13,11 @@ MODEL = REPOSITORY / "models" / "lss5_ir1_atlas_proxy"
 sys.path.insert(0, str(SCRIPTS))
 
 from ir1_fluka_geometry import (  # noqa: E402
+    audit_omitted_region_geometry,
     extract_and_write_field_manifest,
     extract_field_assignments,
     normalized_deck,
+    summarize_region_coverage,
     validate_field_assets,
     verify_source_bundle,
 )
@@ -44,6 +46,62 @@ class Ir1FlukaGeometryTest(unittest.TestCase):
         self.assertEqual(payload["model_status"], "provisional-ir1-atlas-proxy")
         self.assertIsNone(payload["coordinate_transform_to_cms"])
         self.assertEqual(len(payload["assignments"]), 29)
+
+    def test_omitted_region_audit_separates_null_and_unevaluable_regions(self):
+        class Mesh:
+            def __init__(self, is_null):
+                self._is_null = is_null
+
+            def isNull(self):
+                return self._is_null
+
+            def vertexCount(self):
+                return 0 if self._is_null else 8
+
+            def polygonCount(self):
+                return 0 if self._is_null else 12
+
+            def volume(self):
+                return 0.0 if self._is_null else 1.0
+
+        class Region:
+            zones = [object()]
+
+            def __init__(self, mesh=None, error=None):
+                self._mesh = mesh
+                self._error = error
+
+            def mesh(self):
+                if self._error:
+                    raise self._error
+                return self._mesh
+
+            def dumps(self):
+                return "+body"
+
+        class Registry:
+            regionDict = {
+                "Null": Region(Mesh(True)),
+                "NonNull": Region(Mesh(False)),
+                "Error": Region(error=RuntimeError("bad mesh")),
+            }
+
+        audit = audit_omitted_region_geometry(
+            Registry(), ["Null", "NonNull", "Error"]
+        )
+        self.assertEqual(audit["source_null_regions"], ["Null"])
+        self.assertEqual(audit["unexpected_omitted_regions"], ["NonNull", "Error"])
+        self.assertEqual(audit["details"][2]["evaluation_error"], "RuntimeError: bad mesh")
+
+    def test_selected_region_coverage_does_not_call_unselected_regions_omitted(self):
+        coverage = summarize_region_coverage(
+            ["A", "B", "C"], ["A", "C"], ["wl", "A_lv"]
+        )
+        self.assertEqual(coverage["source_region_count"], 3)
+        self.assertEqual(coverage["requested_region_count"], 2)
+        self.assertEqual(coverage["unselected_region_count"], 1)
+        self.assertEqual(coverage["converted_regions"], ["A"])
+        self.assertEqual(coverage["omitted_regions"], ["C"])
 
     def test_normalization_removes_only_known_empty_compound_card(self):
         source = MODEL / "source" / "lhc_ir1_exp_b2.inp"

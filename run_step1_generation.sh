@@ -111,6 +111,51 @@ if [[ ! "$SHIFT_TIMING_MODEL_VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
 	exit 1
 fi
 
+SHIFT_LSS_GEOMETRY_CUSTOMISE=""
+case "${SHIFT_LSS_GEOMETRY_MODE:-none}" in
+	none) ;;
+	external)
+		for required_name in SHIFT_LSS_GDML_FILE SHIFT_LSS_MODEL_ORIGIN_CM SHIFT_LSS_MODEL_TO_CMS SHIFT_LSS_MINIMUM_ABS_Z_CM; do
+			if [[ -z "${!required_name:-}" ]]; then
+				echo "ERROR: $required_name is required when SHIFT_LSS_GEOMETRY_MODE=external" >&2
+				exit 1
+			fi
+		done
+		if [[ "$SHIFT_LSS_GDML_FILE" == /* || "$SHIFT_LSS_GDML_FILE" == *..* ||
+			! "$SHIFT_LSS_GDML_FILE" =~ ^[A-Za-z0-9_./+-]+$ ]]; then
+			echo "ERROR: SHIFT_LSS_GDML_FILE must be a safe CMSSW FileInPath, not an absolute/traversal path" >&2
+			exit 1
+		fi
+		if [[ ! -f "$CMSSW_SRC/$SHIFT_LSS_GDML_FILE" ]]; then
+			echo "ERROR: SHIFT_LSS_GDML_FILE is not installed under CMSSW src: $CMSSW_SRC/$SHIFT_LSS_GDML_FILE" >&2
+			exit 1
+		fi
+		IFS=',' read -r -a lss_origin_values <<< "$SHIFT_LSS_MODEL_ORIGIN_CM"
+		IFS=',' read -r -a lss_rotation_values <<< "$SHIFT_LSS_MODEL_TO_CMS"
+		if (( ${#lss_origin_values[@]} != 3 || ${#lss_rotation_values[@]} != 9 )); then
+			echo "ERROR: SHIFT_LSS_MODEL_ORIGIN_CM and SHIFT_LSS_MODEL_TO_CMS require 3 and 9 comma-separated values" >&2
+			exit 1
+		fi
+		for component in "${lss_origin_values[@]}" "${lss_rotation_values[@]}" "$SHIFT_LSS_MINIMUM_ABS_Z_CM" "${SHIFT_LSS_OVERLAP_TOLERANCE_CM:-0.001}"; do
+			if [[ ! "$component" =~ $FLOAT_PATTERN ]]; then
+				echo "ERROR: all SHIFT LSS transform, boundary, and tolerance values must be finite decimal numbers" >&2
+				exit 1
+			fi
+		done
+		SHIFT_LSS_DETECTOR_ELEMENT_NAME="${SHIFT_LSS_DETECTOR_ELEMENT_NAME:-shiftLssExternal}"
+		if [[ ! "$SHIFT_LSS_DETECTOR_ELEMENT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
+			echo "ERROR: SHIFT_LSS_DETECTOR_ELEMENT_NAME must be a safe identifier" >&2
+			exit 1
+		fi
+		SHIFT_LSS_OVERLAP_TOLERANCE_CM="${SHIFT_LSS_OVERLAP_TOLERANCE_CM:-0.001}"
+		SHIFT_LSS_GEOMETRY_CUSTOMISE="; from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry; process = customiseShiftLssExternalGeometry(process, gdmlFile='$SHIFT_LSS_GDML_FILE', modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), minimumAbsZCm=$SHIFT_LSS_MINIMUM_ABS_Z_CM, detectorElementName='$SHIFT_LSS_DETECTOR_ELEMENT_NAME', overlapToleranceCm=$SHIFT_LSS_OVERLAP_TOLERANCE_CM, checkOverlaps=True)"
+		;;
+	*)
+		echo "ERROR: SHIFT_LSS_GEOMETRY_MODE must be none or external" >&2
+		exit 1
+		;;
+esac
+
 mkdir -p "$WORKDIR" "$OUTPUT_DIR" "$CONFIG_DIR" "$LOG_DIR"
 cd "$WORKDIR"
 
@@ -150,6 +195,7 @@ echo "Generator random seed: $GENERATOR_SEED"
 echo "Geant4 random seed: $SIMULATION_SEED"
 echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DIRECTION_Z bxOffset=$SHIFT_TIMING_BX_OFFSET phaseNs=$SHIFT_TIMING_PHASE_NS fixedOffsetNs=$SHIFT_TIMING_FIXED_OFFSET_NS modelVersion=$SHIFT_TIMING_MODEL_VERSION"
 echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
+echo "SHIFT LSS geometry mode: ${SHIFT_LSS_GEOMETRY_MODE:-none}"
 cmsDriver.py "$PYTHIA_CONFIG" \
 	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
@@ -160,7 +206,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--era "$ERA" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)" \
+	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)${SHIFT_LSS_GEOMETRY_CUSTOMISE}" \
 	--no_exec \
 	-n "$N_EVENTS"
 
