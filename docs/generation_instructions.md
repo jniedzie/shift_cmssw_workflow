@@ -328,6 +328,20 @@ timeline must also use a physical 3564-slot fill mask. Run 369943 maps to fill
   --output /tmp/fill_9017_ip5_bunch_mask.json
 ```
 
+Before selecting a reference slot, scan every filled slot and group identical
+nearby-collision patterns:
+
+```bash
+./scripts/scan_shift_reference_slots.py \
+  /tmp/fill_9017_ip5_bunch_mask.json \
+  --beam 2 --start-bx -24 --end-bx 5 \
+  --output /tmp/fill_9017_beam2_reference_slots.json
+```
+
+The reported `uniform_filled_slot_fraction` is only a structural diagnostic.
+It is explicitly not physics-valid weighting because the normalized LPC mask
+does not contain authoritative per-bunch intensities.
+
 Then identify the filled physical BX slot and beam that produced the SHIFT
 interaction and pass them explicitly:
 
