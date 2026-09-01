@@ -4,6 +4,11 @@ These instructions apply to every task in this repository and must be read
 before changing the workflow, CMSSW configuration, simulation, trigger model,
 or reconstruction.
 
+## Required branch
+
+Always work directly on `main` in this repository. Do not create task branches
+or use Git worktrees unless the user explicitly overrides this policy.
+
 ## Non-negotiable physics objective
 
 The goal is to measure how well SHIFT muons can be triggered, recorded, and

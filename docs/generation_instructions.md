@@ -39,7 +39,10 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `TRIGGER_LIBRARY_JSONL`, `TRIGGER_L1_MENU_JSON` | Validated ZeroBias inputs used by the proxy. |
 | `TRIGGER_TIMELINE_START_BX`, `TRIGGER_TIMELINE_END_BX` | Relative BX interval sampled around every SHIFT event. |
 | `TRIGGER_TIMELINE_SEED` | Trigger sampler seed; fixed seeds are offset by Condor chunk. |
-| `TRIGGER_COLLIDING_BX_FILE` | Optional filling-scheme-derived list of colliding relative BXs. |
+| `TRIGGER_COLLIDING_BX_FILE` | Legacy relative-BX software fixture; mutually exclusive with the physical mask. |
+| `TRIGGER_COLLIDING_BX_MASK` | Absolute normalized LPC IP5 mask JSON; required for fill-aware timelines. |
+| `TRIGGER_REFERENCE_BX_SLOT`, `TRIGGER_SHIFT_BEAM` | Physical 1..3564 SHIFT reference slot and beam, required with the mask. |
+| `TRIGGER_RUN_FILL_MAP` | Versioned authoritative trigger-run to fill mapping; required with the physical mask. |
 | `TRIGGER_RULE_MODE` | `none` for the pre-rule control or `run3` for the versioned L1A spacing-rule proxy. |
 | `TRIGGER_RULE_HISTORY_START_BX` | First warm-up BX; `run3` requires at least 240 BX before the analysis start. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
@@ -225,6 +228,37 @@ This producer copies DT, CSC, RPC, and GEM PSimHits and changes only their
 restricted to no-pileup controls and is not a replacement for Step-1 physical
 timing or detector simulation.
 
+For a complete BX/phase control, the resumable local runner performs Step 2,
+standard RAW unpacking, truth-linked digi capture, and CSC trigger-funnel
+analysis in isolated point directories. It requires an already prepared CMSSW
+runtime and never rebuilds it:
+
+```bash
+CMSSW_PREPARED=1 ./scripts/run_shift_readout_response_grid.py \
+  "$baseline_step1" /tmp/shift_readout_integer_grid \
+  --offsets=-5:24 --phases=0,6.25,12.5,18.75 \
+  --events 10 --workers 2
+```
+
+After producing a rule-enabled timeline whose analysis BX range maps to the
+response offsets, convolve the independent inputs with:
+
+```bash
+./scripts/classify_shift_event_capture.py \
+  /tmp/rule_timeline.jsonl \
+  --response-dir /tmp/shift_readout_integer_grid \
+  --phase-ns 6.25 \
+  --output /tmp/shift_event_capture_phase_6p25.json
+```
+
+The classifier requires embedded same-SimHit provenance, exact signal
+identities and non-timing SimHit fingerprints, complete candidate-L1A grid
+coverage, a rule-enabled timeline, and a structured fill mask. It reports
+candidate L1A, rule-accepted RAW, and HLT-persistence-proxy layers separately,
+including DT/CSC/RPC loss counts. One explicit phase is selected per output;
+run the classifier once per phase. RPC/GEM digi BX values can establish
+`split_within_readout`; DT TDC and CSC time-bin closure remain separate.
+
 As checked on 2026-08-19, the default 2023 dataset contains 999,856,000 events
 in 27,774 DBS files, but some blocks have no current file replicas. Do not use
 that unfiltered inventory for production. The current `T2_CH_CERN` manifest
@@ -284,10 +318,37 @@ BX timeline can then be produced with:
 ```
 
 This output is deliberately pre-deadtime.  `readout_after_trigger_rules` is
-null until a separately validated trigger-rule engine is applied.  Use
-`--colliding-bx-file` with a versioned filling-scheme-derived list to leave
-empty/noncolliding slots unsampled; without it, every requested BX is treated
-as colliding for software tests only.
+null until a separately validated trigger-rule engine is applied. A final
+timeline must also use a physical 3564-slot fill mask. Run 369943 maps to fill
+9017 in `config/run3_trigger_run_fill_map.json`, using CMS BRIL data tag
+`24v2`. Normalize the matching official LPC response:
+
+```bash
+./scripts/fetch_lpc_bunch_mask.py 9017 \
+  --output /tmp/fill_9017_ip5_bunch_mask.json
+```
+
+Then identify the filled physical BX slot and beam that produced the SHIFT
+interaction and pass them explicitly:
+
+```bash
+./scripts/sample_zero_bias_trigger_timeline.py \
+  /tmp/zero_bias_run369943.jsonl \
+  --l1-menu /tmp/zero_bias_l1_menu_run369943.json \
+  --output /tmp/zero_bias_timeline_seed24680.jsonl \
+  --start-bx -24 --end-bx 5 --signal-events 10 --seed 24680 \
+  --colliding-bx-mask /tmp/fill_9017_ip5_bunch_mask.json \
+  --run-fill-map config/run3_trigger_run_fill_map.json \
+  --reference-bx-slot <FILLED_SLOT> --shift-beam <1_OR_2>
+```
+
+The sampler verifies the normalized LPC provenance, beam occupancy, IP5
+collision subset, file digest, orbit wrapping, and trigger-library run-to-fill
+match, and embeds them in timeline metadata. Do not pair a convenient fill
+with an unrelated trigger run. Omitting the mask
+treats every BX as colliding, while legacy `--colliding-bx-file` accepts only
+relative BX values. Both modes are software fixtures and are rejected by the
+final classifier unless `--allow-all-colliding-fixture` is explicit.
 
 For a rule-enabled validation timeline, retain the same analysis range but add
 a complete causal warm-up:

@@ -130,12 +130,46 @@ case "$TRIGGER_TIMELINE_MODE" in
 				TRIGGER_TIMELINE_EFFECTIVE_SEED=$(( (10#$TRIGGER_TIMELINE_SEED - 1 + 10#$CHUNK) % 900000000 + 1 ))
 				;;
 		esac
-		if [[ -n "$TRIGGER_COLLIDING_BX_FILE" ]]; then
+		if [[ -n "$TRIGGER_COLLIDING_BX_FILE" && -n "$TRIGGER_COLLIDING_BX_MASK" ]]; then
+			echo "ERROR: set only one of TRIGGER_COLLIDING_BX_FILE and TRIGGER_COLLIDING_BX_MASK" >&2
+			exit 1
+		fi
+		if [[ -n "$TRIGGER_COLLIDING_BX_MASK" ]]; then
+			if [[ "$TRIGGER_COLLIDING_BX_MASK" != /* || ! -s "$TRIGGER_COLLIDING_BX_MASK" ]]; then
+				echo "ERROR: TRIGGER_COLLIDING_BX_MASK must be an absolute, non-empty file when set" >&2
+				exit 1
+			fi
+			if [[ ! "$TRIGGER_REFERENCE_BX_SLOT" =~ ^[0-9]+$ ]] || (( 10#$TRIGGER_REFERENCE_BX_SLOT < 1 || 10#$TRIGGER_REFERENCE_BX_SLOT > 3564 )); then
+				echo "ERROR: TRIGGER_REFERENCE_BX_SLOT must be an integer from 1 through 3564 with TRIGGER_COLLIDING_BX_MASK" >&2
+				exit 1
+			fi
+			if [[ "$TRIGGER_SHIFT_BEAM" != 1 && "$TRIGGER_SHIFT_BEAM" != 2 ]]; then
+				echo "ERROR: TRIGGER_SHIFT_BEAM must be 1 or 2 with TRIGGER_COLLIDING_BX_MASK" >&2
+				exit 1
+			fi
+			if [[ "$TRIGGER_RUN_FILL_MAP" != /* || ! -s "$TRIGGER_RUN_FILL_MAP" ]]; then
+				echo "ERROR: TRIGGER_RUN_FILL_MAP must be an absolute, non-empty file with TRIGGER_COLLIDING_BX_MASK" >&2
+				exit 1
+			fi
+			TRIGGER_TIMELINE_ARGS+=(
+				--colliding-bx-mask "$TRIGGER_COLLIDING_BX_MASK"
+				--reference-bx-slot "$TRIGGER_REFERENCE_BX_SLOT"
+				--shift-beam "$TRIGGER_SHIFT_BEAM"
+				--run-fill-map "$TRIGGER_RUN_FILL_MAP"
+			)
+		elif [[ -n "$TRIGGER_COLLIDING_BX_FILE" ]]; then
 			if [[ "$TRIGGER_COLLIDING_BX_FILE" != /* || ! -s "$TRIGGER_COLLIDING_BX_FILE" ]]; then
 				echo "ERROR: TRIGGER_COLLIDING_BX_FILE must be an absolute, non-empty file when set" >&2
 				exit 1
 			fi
+			if [[ -n "$TRIGGER_REFERENCE_BX_SLOT" || -n "$TRIGGER_SHIFT_BEAM" ]]; then
+				echo "ERROR: TRIGGER_REFERENCE_BX_SLOT/TRIGGER_SHIFT_BEAM require TRIGGER_COLLIDING_BX_MASK" >&2
+				exit 1
+			fi
 			TRIGGER_TIMELINE_ARGS+=(--colliding-bx-file "$TRIGGER_COLLIDING_BX_FILE")
+		elif [[ -n "$TRIGGER_REFERENCE_BX_SLOT" || -n "$TRIGGER_SHIFT_BEAM" ]]; then
+			echo "ERROR: TRIGGER_REFERENCE_BX_SLOT/TRIGGER_SHIFT_BEAM require TRIGGER_COLLIDING_BX_MASK" >&2
+			exit 1
 		fi
 		if [[ -n "$TRIGGER_GROUP_ID" ]]; then
 			TRIGGER_TIMELINE_ARGS+=(--group-id "$TRIGGER_GROUP_ID")

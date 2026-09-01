@@ -3,9 +3,11 @@
 """Sample whole correlated ZeroBias records onto a reference-BX timeline."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 
 from zero_bias_trigger_library import (
@@ -32,9 +34,29 @@ def parse_args():
         default=1,
         help="number of independent SHIFT-event timelines to sample (default: 1)",
     )
-    parser.add_argument(
+    mask_group = parser.add_mutually_exclusive_group()
+    mask_group.add_argument(
         "--colliding-bx-file",
-        help="optional file containing one colliding relative BX per line; default is every BX",
+        help="legacy relative-BX fixture; not sufficient for a physics result",
+    )
+    mask_group.add_argument(
+        "--colliding-bx-mask",
+        help="versioned cms-lpc-ip5-bunch-mask JSON",
+    )
+    parser.add_argument(
+        "--reference-bx-slot",
+        type=int,
+        help="physical 1..3564 BX slot of the SHIFT collision",
+    )
+    parser.add_argument(
+        "--shift-beam",
+        type=int,
+        choices=(1, 2),
+        help="beam producing the SHIFT interaction; required with --colliding-bx-mask",
+    )
+    parser.add_argument(
+        "--run-fill-map",
+        help="versioned authoritative run-to-fill JSON; required with --colliding-bx-mask",
     )
     parser.add_argument("--without-replacement", action="store_true")
     parser.add_argument("--l1-menu", help="matching bit-to-name JSON for timeline provenance")
@@ -73,6 +95,111 @@ def load_colliding_bxs(path, timeline_bxs):
     return values
 
 
+def load_ip5_bunch_mask(path, timeline_bxs, reference_bx_slot, shift_beam):
+    with open(path, "rb") as source:
+        payload_bytes = source.read()
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise TriggerLibraryError(f"{path} is not valid JSON") from error
+    if (
+        payload.get("schema") != "cms-lpc-ip5-bunch-mask"
+        or payload.get("schema_version") != 1
+        or payload.get("orbit_slots") != 3564
+    ):
+        raise TriggerLibraryError(f"{path} is not a supported LPC IP5 bunch mask")
+    fill_number = payload.get("fill_number")
+    source_metadata = payload.get("source") or {}
+    csv_sha256 = source_metadata.get("csv_sha256", "")
+    if (
+        not isinstance(fill_number, int)
+        or fill_number <= 0
+        or not payload.get("scheme_name")
+        or not re.fullmatch(r"[0-9a-f]{64}", csv_sha256)
+    ):
+        raise TriggerLibraryError(f"{path} lacks complete LPC fill provenance")
+
+    def validated_slots(field):
+        values = payload.get(field)
+        if (
+            not isinstance(values, list)
+            or any(type(value) is not int for value in values)
+            or len(values) != len(set(values))
+            or not set(values) <= set(range(1, 3565))
+        ):
+            raise TriggerLibraryError(f"{path} has invalid {field}")
+        return set(values)
+
+    beam1_slots = validated_slots("beam1_filled_bx_slots")
+    beam2_slots = validated_slots("beam2_filled_bx_slots")
+    colliding_slots = validated_slots("colliding_ip5_bx_slots")
+    if not colliding_slots <= beam1_slots & beam2_slots:
+        raise TriggerLibraryError("colliding IP5 slots are not filled in both beams")
+    if reference_bx_slot is None or shift_beam is None:
+        raise TriggerLibraryError(
+            "--reference-bx-slot and --shift-beam are required with --colliding-bx-mask"
+        )
+    if not 1 <= reference_bx_slot <= 3564:
+        raise TriggerLibraryError("--reference-bx-slot must be in 1..3564")
+    beam_slots = beam1_slots if shift_beam == 1 else beam2_slots
+    if reference_bx_slot not in beam_slots:
+        raise TriggerLibraryError(
+            f"reference BX slot {reference_bx_slot} is not filled in beam {shift_beam}"
+        )
+    relative_colliding = {
+        bx for bx in timeline_bxs
+        if ((reference_bx_slot - 1 + bx) % 3564) + 1 in colliding_slots
+    }
+    provenance = {
+        "source_file": path,
+        "file_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "fill_number": payload.get("fill_number"),
+        "scheme_name": payload.get("scheme_name"),
+        "reference_bx_slot": reference_bx_slot,
+        "shift_beam": shift_beam,
+    }
+    return relative_colliding, provenance
+
+
+def validate_run_fill_map(path, trigger_runs, fill_number):
+    with open(path, "rb") as source:
+        payload_bytes = source.read()
+    try:
+        payload = json.loads(payload_bytes)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise TriggerLibraryError(f"{path} is not valid JSON") from error
+    source_metadata = payload.get("source") or {}
+    if (
+        payload.get("schema") != "cms-run-to-fill-map"
+        or payload.get("schema_version") != 1
+        or not source_metadata.get("service")
+        or not source_metadata.get("query")
+        or not source_metadata.get("retrieved_at")
+        or not isinstance(payload.get("runs"), dict)
+    ):
+        raise TriggerLibraryError(f"{path} lacks authoritative run-to-fill provenance")
+    matched = {}
+    for run in trigger_runs:
+        record = payload["runs"].get(str(run))
+        if not isinstance(record, dict) or type(record.get("fill_number")) is not int:
+            raise TriggerLibraryError(f"{path} has no valid fill mapping for run {run}")
+        observed_fill = record["fill_number"]
+        if observed_fill != fill_number:
+            raise TriggerLibraryError(
+                f"run {run} maps to fill {observed_fill}, not bunch-mask fill {fill_number}"
+            )
+        matched[str(run)] = record
+    return {
+        "status": "validated",
+        "source_file": path,
+        "file_sha256": hashlib.sha256(payload_bytes).hexdigest(),
+        "source": source_metadata,
+        "trigger_runs": list(trigger_runs),
+        "fill_number": fill_number,
+        "matched_records": matched,
+    }
+
+
 def main():
     args = parse_args()
     if args.end_bx < args.start_bx:
@@ -80,6 +207,17 @@ def main():
         return 2
     if args.signal_events < 1:
         print("ERROR: --signal-events must be positive", file=sys.stderr)
+        return 2
+    if not args.colliding_bx_mask and (
+        args.reference_bx_slot is not None
+        or args.shift_beam is not None
+        or args.run_fill_map is not None
+    ):
+        print(
+            "ERROR: --reference-bx-slot/--shift-beam/--run-fill-map require "
+            "--colliding-bx-mask",
+            file=sys.stderr,
+        )
         return 2
     if args.trigger_rule_mode == "run3":
         if args.trigger_rule_history_start_bx is None:
@@ -131,7 +269,32 @@ def main():
             else args.start_bx
         )
         timeline_bxs = list(range(timeline_start_bx, args.end_bx + 1))
-        colliding_bxs = load_colliding_bxs(args.colliding_bx_file, timeline_bxs)
+        bunch_mask_metadata = None
+        if args.colliding_bx_mask:
+            if not args.run_fill_map:
+                raise TriggerLibraryError(
+                    "--run-fill-map is required with --colliding-bx-mask"
+                )
+            colliding_bxs, bunch_mask_metadata = load_ip5_bunch_mask(
+                args.colliding_bx_mask, timeline_bxs,
+                args.reference_bx_slot, args.shift_beam,
+            )
+        else:
+            colliding_bxs = load_colliding_bxs(args.colliding_bx_file, timeline_bxs)
+        trigger_runs = sorted({int(loaded.record["run"]) for loaded in group_events})
+        run_fill_validation = (
+            validate_run_fill_map(
+                args.run_fill_map,
+                trigger_runs,
+                bunch_mask_metadata["fill_number"],
+            )
+            if bunch_mask_metadata
+            else {
+                "status": "missing_fill_mask",
+                "trigger_runs": trigger_runs,
+                "fill_number": None,
+            }
+        )
         sampled = iter(
             sample_loaded_events(
                 group_events,
@@ -163,6 +326,10 @@ def main():
                     "end_bx": args.end_bx,
                     "timeline_start_bx": timeline_start_bx,
                     "colliding_bx_file": args.colliding_bx_file or "",
+                    "colliding_bx_mask_file": args.colliding_bx_mask or "",
+                    "colliding_bx_mask": bunch_mask_metadata,
+                    "run_fill_map_file": args.run_fill_map or "",
+                    "run_fill_validation": run_fill_validation,
                     "sampling": (
                         "without_replacement" if args.without_replacement else "with_replacement"
                     ),

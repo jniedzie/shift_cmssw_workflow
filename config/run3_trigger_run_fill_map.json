@@ -1,0 +1,17 @@
+{
+  "runs": {
+    "369943": {
+      "fill_number": 9017,
+      "lumisections": 391,
+      "start_time_brilcalc": "07/01/23 19:31:56"
+    }
+  },
+  "schema": "cms-run-to-fill-map",
+  "schema_version": 1,
+  "source": {
+    "data_tag": "24v2",
+    "query": "brilcalc lumi -r 369943 --output-style csv",
+    "retrieved_at": "2026-09-01",
+    "service": "CMS BRIL luminosity database"
+  }
+}

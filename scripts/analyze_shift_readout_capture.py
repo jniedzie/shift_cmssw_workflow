@@ -228,6 +228,30 @@ def _product(event, type_name, module, instance, process):
     return handle.product()
 
 
+def _optional_scalar(event, type_name, instance, process):
+    handle = Handle(type_name)
+    if not event.getByLabel("shiftSimHitTime", instance, process, handle):
+        return None
+    product = handle.product()
+    return product if type_name == "std::string" else product[0]
+
+
+def _timing_provenance(event, process):
+    bx_offset = _optional_scalar(event, "int", "bxOffset", process)
+    if bx_offset is None:
+        return None
+    return {
+        "bx_offset": int(bx_offset),
+        "phase_ns": float(_optional_scalar(event, "double", "phaseNs", process)),
+        "applied_shift_ns": float(
+            _optional_scalar(event, "double", "appliedShiftNs", process)
+        ),
+        "model_version": str(
+            _optional_scalar(event, "std::string", "modelVersion", process)
+        ),
+    }
+
+
 def _digi_key(item):
     return int(item.kind), int(item.detId), int(item.channel), int(item.sample)
 
@@ -297,12 +321,18 @@ def main():
             "Regional trigger, uGMT, HLT object, and offline reconstruction closure are pending.",
         ],
         "events": [],
+        "simhit_reference_timing": None,
     }
 
     for index, event in enumerate(Events(args.input)):
         if args.max_events >= 0 and index >= args.max_events:
             break
         truth = _audit_event(event, args.input)
+        timing = _timing_provenance(event, args.input_process)
+        if output["simhit_reference_timing"] is None:
+            output["simhit_reference_timing"] = timing
+        elif timing != output["simhit_reference_timing"]:
+            raise RuntimeError("shiftSimHitTime provenance changes between events")
         links = _flatten_links(event, args.input_process)
         prepack = {
             _digi_key(digi) for digi in _flatten_digis(event, args.input_process, PREPACK_DIGI_PRODUCTS)
