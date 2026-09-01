@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 
@@ -16,14 +17,52 @@ from ir1_fluka_geometry import (  # noqa: E402
     audit_omitted_region_geometry,
     extract_and_write_field_manifest,
     extract_field_assignments,
+    _install_raw_zone_aabb_fallback,
     normalized_deck,
     summarize_region_coverage,
+    summarize_preflight_omissions,
     validate_field_assets,
     verify_source_bundle,
 )
 
 
 class Ir1FlukaGeometryTest(unittest.TestCase):
+    def test_raw_zone_aabb_fallback_replaces_only_independently_non_null_zones(self):
+        converter = SimpleNamespace()
+        retained = object()
+        converter._getRegionZoneAABBs = lambda registry, regions, quadrics: {
+            "Recovered": [None, retained],
+            "Untouched": [None],
+        }
+        preflight = {
+            "secondary_classification": {
+                "non_null_regions": ["Recovered"],
+                "zone_bounds_mm": {
+                    "Recovered": [
+                        [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]],
+                        None,
+                    ],
+                },
+            },
+        }
+        original, details = _install_raw_zone_aabb_fallback(
+            converter, preflight, padding_mm=0.25
+        )
+        try:
+            result = converter._getRegionZoneAABBs(
+                object(), ["Recovered", "Untouched"], {}
+            )
+        finally:
+            converter._getRegionZoneAABBs = original
+        recovered = result["Recovered"][0]
+        self.assertEqual(list(recovered.lower), [0.75, 1.75, 2.75])
+        self.assertEqual(list(recovered.upper), [4.25, 5.25, 6.25])
+        self.assertIs(result["Recovered"][1], retained)
+        self.assertIsNone(result["Untouched"][0])
+        self.assertEqual(
+            details, [{"name": "Recovered", "replaced_zone_count": 1}]
+        )
+
     def test_frozen_source_checksums(self):
         observed = verify_source_bundle(MODEL)
         self.assertEqual(len(observed), 8)
@@ -102,6 +141,41 @@ class Ir1FlukaGeometryTest(unittest.TestCase):
         self.assertEqual(coverage["unselected_region_count"], 1)
         self.assertEqual(coverage["converted_regions"], ["A"])
         self.assertEqual(coverage["omitted_regions"], ["C"])
+
+    def test_preflight_omissions_are_exhaustive_and_reasoned(self):
+        coverage = {
+            "omitted_regions": ["Blackhole", "Null", "Deferred", "Lost"],
+        }
+        preflight = {
+            "blackhole_regions": ["Blackhole"],
+            "source_null_regions": ["Null"],
+            "deferred_null_validation_regions": [
+                "Deferred",
+                "ConvertedDeferred",
+            ],
+        }
+        audit = summarize_preflight_omissions(coverage, preflight)
+        self.assertEqual(
+            audit["intentionally_omitted_blackhole_regions"], ["Blackhole"]
+        )
+        self.assertEqual(audit["source_null_regions"], ["Deferred", "Null"])
+        self.assertEqual(
+            audit["deferred_source_null_regions"], ["Deferred"]
+        )
+        self.assertEqual(
+            audit["deferred_region_conversion_failures"],
+            ["ConvertedDeferred"],
+        )
+        self.assertEqual(audit["unexpected_omitted_regions"], ["Lost"])
+        self.assertEqual(
+            [item["reason"] for item in audit["details"]],
+            [
+                "blackhole",
+                "confirmed_source_null",
+                "deferred_source_null",
+                "unexpected",
+            ],
+        )
 
     def test_normalization_removes_only_known_empty_compound_card(self):
         source = MODEL / "source" / "lhc_ir1_exp_b2.inp"

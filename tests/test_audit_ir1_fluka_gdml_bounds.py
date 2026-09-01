@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 from audit_ir1_fluka_gdml_bounds import (  # noqa: E402
     BOUND_PREFIX,
     ProxyModelError,
+    apply_secondary_source_bounds,
     containment_result,
     isolated_region_bounds,
     parse_root_bounds,
@@ -96,9 +97,39 @@ class Ir1FlukaGdmlBoundsAuditTest(unittest.TestCase):
         self.assertFalse(result["contained"])
         self.assertEqual(result["maximum_containment_deficit_mm"], 0.02)
 
+    def test_secondary_bounds_replace_only_expected_nulls_and_errors(self):
+        bounds = {"Primary": [[0, 0, 0], [1, 1, 1]]}
+        nulls = ["RecoveredNull", "UnresolvedNull"]
+        errors = [
+            {"name": "RecoveredError", "error": "signal 11"},
+            {"name": "UnresolvedError", "error": "signal 6"},
+        ]
+        preflight = {
+            "secondary_classification": {
+                "bounds_mm": {
+                    "RecoveredNull": [[1, 2, 3], [4, 5, 6]],
+                    "RecoveredError": [[7, 8, 9], [10, 11, 12]],
+                    "NotConverted": [[13, 14, 15], [16, 17, 18]],
+                }
+            }
+        }
+        replacements = apply_secondary_source_bounds(
+            bounds,
+            nulls,
+            errors,
+            preflight,
+            ["Primary", "RecoveredNull", "RecoveredError"],
+        )
+        self.assertEqual(replacements, ["RecoveredError", "RecoveredNull"])
+        self.assertEqual(nulls, ["UnresolvedNull"])
+        self.assertEqual(errors, [{"name": "UnresolvedError", "error": "signal 6"}])
+        self.assertNotIn("NotConverted", bounds)
+
     def test_root_expression_uses_placed_node_transform_and_mm(self):
         expression = root_bounds_expression(Path("geometry.gdml"))
         self.assertIn("node->LocalToMaster", expression)
+        self.assertIn("dynamic_cast<TGeoBBox *>", expression)
+        self.assertNotIn("shape->GetAxisRange", expression)
         self.assertIn("10. * placedLow", expression)
         self.assertIn(BOUND_PREFIX, expression)
 

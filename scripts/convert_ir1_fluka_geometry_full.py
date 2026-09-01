@@ -229,6 +229,7 @@ def parse_args():
         default=REPOSITORY / "models" / "lss5_ir1_atlas_proxy",
     )
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--region-timeout-seconds", type=float, default=300.0)
     parser.add_argument(
         "--world-dimensions-mm",
         required=True,
@@ -250,6 +251,9 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.region_timeout_seconds <= 0.0:
+        print("error: --region-timeout-seconds must be positive", file=sys.stderr)
+        return 2
     if not args.acknowledge_geometry_only:
         print("error: pass --acknowledge-geometry-only; GDML contains no magnetic field", file=sys.stderr)
         return 2
@@ -267,6 +271,8 @@ def main():
                 args.model_dir,
                 args.output_dir,
                 lattice_aabb_workaround=True,
+                raw_region_preflight=True,
+                region_timeout_seconds=args.region_timeout_seconds,
             )
         gdml_path = args.output_dir / report["geometry"]["gdml"]
         raw_multi_union_count = count_multi_unions(gdml_path)
@@ -279,6 +285,8 @@ def main():
                 "pyg4ometry_version": metadata.version("pyg4ometry"),
                 "conversion_controls": {
                     "lattice_aabb_workaround": True,
+                    "raw_region_preflight": True,
+                    "raw_region_timeout_seconds": args.region_timeout_seconds,
                     "transformed_infinite_cylinder_centre_workaround": True,
                     "null_body_aabb_workaround": True,
                     "null_only_body_count": len(skipped),
@@ -304,17 +312,24 @@ def main():
                 },
             }
         )
+        omission_audit = report["geometry"]["omitted_region_audit"]
+        unexpected = omission_audit["unexpected_omitted_regions"]
+        deferred_converted = omission_audit[
+            "deferred_region_conversion_failures"
+        ]
         report["geometry"]["lossless_nonempty_region_coverage"] = (
-            report["geometry"]["omitted_region_audit"]["unexpected_omitted_region_count"] == 0
+            not unexpected and not deferred_converted
         )
         write_json_atomic(args.output_dir / "conversion_report.json", report)
-        unexpected = report["geometry"]["omitted_region_audit"][
-            "unexpected_omitted_regions"
-        ]
         if unexpected:
             raise ProxyModelError(
-                "conversion omitted non-empty or unevaluable FLUKA regions: "
+                "conversion omitted raw non-empty FLUKA regions: "
                 + ", ".join(unexpected)
+            )
+        if deferred_converted:
+            raise ProxyModelError(
+                "length safety created material from unresolved raw-null regions: "
+                + ", ".join(deferred_converted)
             )
     except Exception as error:
         failure = {

@@ -4,12 +4,9 @@
 
 import argparse
 from contextlib import redirect_stdout
-from functools import reduce
 import hashlib
 import json
-import os
 from pathlib import Path
-import resource
 import subprocess
 import sys
 import tempfile
@@ -18,6 +15,7 @@ from convert_ir1_fluka_geometry_full import (
     install_transformed_infinite_cylinder_centre_workaround,
     restore_transformed_infinite_cylinder_centres,
 )
+from fluka_region_preflight import isolated_region_bounds
 from ir1_fluka_geometry import ProxyModelError, normalized_deck, verify_source_bundle
 
 
@@ -42,6 +40,7 @@ def parse_args():
     parser.add_argument("--root-command", default="root")
     parser.add_argument("--containment-tolerance-mm", type=float, default=0.01)
     parser.add_argument("--progress-every", type=int, default=100)
+    parser.add_argument("--region-timeout-seconds", type=float, default=300.0)
     return parser.parse_args()
 
 
@@ -53,8 +52,16 @@ auto *top = gGeoManager->GetTopVolume();
 for (int index = 0; index < top->GetNdaughters(); ++index) {{
   auto *node = top->GetNode(index);
   auto *shape = node->GetVolume()->GetShape();
-  double low[3], high[3];
-  for (int axis = 0; axis < 3; ++axis) shape->GetAxisRange(axis + 1, low[axis], high[axis]);
+  shape->ComputeBBox();
+  auto *box = dynamic_cast<TGeoBBox *>(shape);
+  if (!box) gSystem->Exit(3);
+  const double *origin = box->GetOrigin();
+  double low[3] = {{origin[0] - box->GetDX(),
+                    origin[1] - box->GetDY(),
+                    origin[2] - box->GetDZ()}};
+  double high[3] = {{origin[0] + box->GetDX(),
+                     origin[1] + box->GetDY(),
+                     origin[2] + box->GetDZ()}};
   double placedLow[3] = {{1.e99, 1.e99, 1.e99}};
   double placedHigh[3] = {{-1.e99, -1.e99, -1.e99}};
   for (int corner = 0; corner < 8; ++corner) {{
@@ -110,75 +117,7 @@ def read_root_bounds(root_command, gdml_path):
     return parse_root_bounds(combined), combined
 
 
-def isolated_region_bounds(region):
-    """Evaluate native CSG in a child so a CGAL signal is region-local."""
-
-    read_fd, write_fd = os.pipe()
-    child = os.fork()
-    if child == 0:
-        os.close(read_fd)
-        try:
-            resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-            null_fd = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(null_fd, 1)
-            os.dup2(null_fd, 2)
-            os.close(null_fd)
-            zone_bounds = [
-                bound for bound in region.zoneAABBs(aabb=None) if bound is not None
-            ]
-            if zone_bounds:
-                bound = reduce(lambda first, second: first.union(second), zone_bounds)
-                payload = {
-                    "status": "ok",
-                    "bounds": [
-                        list(map(float, bound.lower)),
-                        list(map(float, bound.upper)),
-                    ],
-                }
-            else:
-                payload = {"status": "null"}
-        except BaseException as error:
-            payload = {
-                "status": "error",
-                "error": f"{type(error).__name__}: {error}",
-            }
-        encoded = json.dumps(payload).encode("utf-8")
-        while encoded:
-            written = os.write(write_fd, encoded)
-            encoded = encoded[written:]
-        os.close(write_fd)
-        os._exit(0)
-
-    os.close(write_fd)
-    chunks = []
-    while True:
-        chunk = os.read(read_fd, 4096)
-        if not chunk:
-            break
-        chunks.append(chunk)
-    os.close(read_fd)
-    _, status = os.waitpid(child, 0)
-    if os.WIFSIGNALED(status):
-        child_signal = os.WTERMSIG(status)
-        return {
-            "status": "error",
-            "error": f"native CSG evaluation terminated by signal {child_signal}",
-            "signal": child_signal,
-        }
-    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
-        return {
-            "status": "error",
-            "error": f"CSG evaluation child exited with status {status}",
-        }
-    if not chunks:
-        return {"status": "error", "error": "CSG evaluation child returned no result"}
-    try:
-        return json.loads(b"".join(chunks))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        return {"status": "error", "error": f"invalid child result: {error}"}
-
-
-def source_region_bounds(model_dir, region_names, progress_every=100):
+def source_region_bounds(model_dir, region_names, timeout_seconds=300.0, progress_every=100):
     try:
         from pyg4ometry.fluka import Reader
     except ImportError as error:
@@ -204,7 +143,9 @@ def source_region_bounds(model_dir, region_names, progress_every=100):
                         f"audited source bounds for {index}/{len(region_names)} regions",
                         flush=True,
                     )
-                evaluation = isolated_region_bounds(registry.regionDict[name])
+                evaluation = isolated_region_bounds(
+                    registry.regionDict[name], timeout_seconds=timeout_seconds
+                )
                 if evaluation["status"] == "error":
                     evaluation_errors.append({"name": name, **evaluation})
                     continue
@@ -238,7 +179,40 @@ def containment_result(source_bound, gdml_bound, tolerance_mm):
     }
 
 
-def audit(model_dir, gdml_path, conversion_report_path, root_command, tolerance_mm, progress_every):
+def apply_secondary_source_bounds(
+    source_bounds,
+    source_null_regions,
+    source_bounds_errors,
+    raw_preflight,
+    expected_regions,
+):
+    """Replace failed/null CGAL source bounds with proven pycsg bounds."""
+
+    secondary = (raw_preflight or {}).get("secondary_classification", {})
+    secondary_bounds = secondary.get("bounds_mm", {})
+    expected = set(expected_regions)
+    replacements = sorted(expected & set(secondary_bounds))
+    for name in replacements:
+        source_bounds[name] = secondary_bounds[name]
+    replaced = set(replacements)
+    source_null_regions[:] = [
+        name for name in source_null_regions if name not in replaced
+    ]
+    source_bounds_errors[:] = [
+        item for item in source_bounds_errors if item["name"] not in replaced
+    ]
+    return replacements
+
+
+def audit(
+    model_dir,
+    gdml_path,
+    conversion_report_path,
+    root_command,
+    tolerance_mm,
+    region_timeout_seconds,
+    progress_every,
+):
     verify_source_bundle(model_dir)
     conversion = json.loads(Path(conversion_report_path).read_text(encoding="utf-8"))
     converted_regions = conversion["geometry"]["converted_regions"]
@@ -251,7 +225,14 @@ def audit(model_dir, gdml_path, conversion_report_path, root_command, tolerance_
     missing = sorted(expected - observed)
     unexpected = sorted(observed - expected)
     source_bounds, converted_source_null_regions, source_bounds_errors = source_region_bounds(
-        model_dir, converted_regions, progress_every
+        model_dir, converted_regions, region_timeout_seconds, progress_every
+    )
+    secondary_source_bound_regions = apply_secondary_source_bounds(
+        source_bounds,
+        converted_source_null_regions,
+        source_bounds_errors,
+        conversion["geometry"].get("raw_region_preflight"),
+        expected,
     )
     comparable = expected & observed & set(source_bounds)
     regions = {
@@ -276,6 +257,8 @@ def audit(model_dir, gdml_path, conversion_report_path, root_command, tolerance_
         "converted_source_null_regions": converted_source_null_regions,
         "source_bounds_evaluation_error_count": len(source_bounds_errors),
         "source_bounds_evaluation_errors": source_bounds_errors,
+        "secondary_source_bound_region_count": len(secondary_source_bound_regions),
+        "secondary_source_bound_regions": secondary_source_bound_regions,
         "containment_failure_count": len(failures),
         "containment_failures": failures,
         "maximum_containment_deficit_mm": max(
@@ -296,6 +279,9 @@ def audit(model_dir, gdml_path, conversion_report_path, root_command, tolerance_
 
 def main():
     args = parse_args()
+    if args.region_timeout_seconds <= 0.0:
+        print("error: --region-timeout-seconds must be positive", file=sys.stderr)
+        return 2
     if args.containment_tolerance_mm < 0.0:
         print("error: --containment-tolerance-mm must be non-negative", file=sys.stderr)
         return 2
@@ -306,6 +292,7 @@ def main():
             args.conversion_report,
             args.root_command,
             args.containment_tolerance_mm,
+            args.region_timeout_seconds,
             args.progress_every,
         )
         args.output.parent.mkdir(parents=True, exist_ok=True)

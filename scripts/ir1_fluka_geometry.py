@@ -11,12 +11,22 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
+
+from fluka_region_preflight import (
+    classify_raw_regions,
+    resolve_raw_region_classifications,
+)
 
 
 class ProxyModelError(ValueError):
     pass
+
+
+RAW_ZONE_AABB_PADDING_MM = 1.0e-3
 
 
 @dataclass(frozen=True)
@@ -208,6 +218,72 @@ def _install_lattice_aabb_workaround(converter_module):
     return original
 
 
+def _install_raw_zone_aabb_fallback(
+    converter_module,
+    raw_preflight,
+    padding_mm=RAW_ZONE_AABB_PADDING_MM,
+):
+    """Reuse independently meshed raw-zone bounds when CGAL loses a zone.
+
+    The fallback only supplies the finite minimisation box.  The converted
+    Boolean still comes from the length-safety-adjusted FLUKA source.
+    """
+
+    from pyg4ometry.fluka import AABB
+
+    if padding_mm <= 0.0:
+        raise ValueError("padding_mm must be positive")
+    secondary = raw_preflight["secondary_classification"]
+    independently_non_null = set(secondary["non_null_regions"])
+    raw_zone_bounds = secondary.get("zone_bounds_mm", {})
+    missing = sorted(independently_non_null - set(raw_zone_bounds))
+    if missing:
+        raise ProxyModelError(
+            "secondary preflight omitted per-zone bounds for non-null regions: "
+            + ", ".join(missing)
+        )
+
+    original = converter_module._getRegionZoneAABBs
+    fallback_details = []
+
+    def region_zone_aabbs(flukareg, regions, quadric_region_aabbs):
+        result = original(flukareg, regions, quadric_region_aabbs)
+        selected = set(regions)
+        for name in secondary["non_null_regions"]:
+            if name not in selected or name not in result:
+                continue
+            computed = result[name]
+            independent = raw_zone_bounds[name]
+            if len(computed) != len(independent):
+                raise ProxyModelError(
+                    f"zone-count mismatch for {name}: converter={len(computed)}, "
+                    f"secondary={len(independent)}"
+                )
+            replacements = 0
+            resolved = []
+            for computed_bound, independent_bound in zip(computed, independent):
+                if computed_bound is not None or independent_bound is None:
+                    resolved.append(computed_bound)
+                    continue
+                lower, upper = independent_bound
+                resolved.append(
+                    AABB(
+                        [value - padding_mm for value in lower],
+                        [value + padding_mm for value in upper],
+                    )
+                )
+                replacements += 1
+            if replacements:
+                result[name] = resolved
+                fallback_details.append(
+                    {"name": name, "replaced_zone_count": replacements}
+                )
+        return result
+
+    converter_module._getRegionZoneAABBs = region_zone_aabbs
+    return original, fallback_details
+
+
 def expand_predefined_materials(registry):
     """Replace NIST handles with explicit compositions for ROOT/DD4hep GDML."""
 
@@ -345,7 +421,114 @@ def summarize_region_coverage(source_region_names, selected_regions, logical_vol
     }
 
 
-def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaround=False):
+def write_json_atomic(path, payload):
+    path = Path(path)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(path)
+
+
+def run_secondary_region_preflight(
+    normalized_path,
+    region_names,
+    temporary_dir,
+    timeout_seconds,
+):
+    regions_path = Path(temporary_dir) / "pycsg_regions.json"
+    output_path = Path(temporary_dir) / "pycsg_preflight.json"
+    regions_path.write_text(
+        json.dumps(list(region_names)) + "\n",
+        encoding="utf-8",
+    )
+    command = [
+        sys.executable,
+        str(Path(__file__).with_name("fluka_region_preflight_worker.py")),
+        "--normalized-deck",
+        str(normalized_path),
+        "--regions-json",
+        str(regions_path),
+        "--output",
+        str(output_path),
+        "--timeout-seconds",
+        str(timeout_seconds),
+    ]
+    process_timeout = timeout_seconds * max(1, len(region_names)) + 300.0
+    try:
+        result = subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=process_timeout,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise ProxyModelError(
+            "pycsg raw-region fallback exceeded its aggregate timeout"
+        ) from error
+    if result.returncode:
+        diagnostic = (result.stdout + result.stderr)[-4000:]
+        raise ProxyModelError(
+            "pycsg raw-region fallback failed with status "
+            f"{result.returncode}: {diagnostic}"
+        )
+    secondary = json.loads(output_path.read_text(encoding="utf-8"))
+    if secondary.get("backend") != "pycsg":
+        raise ProxyModelError("secondary raw-region worker did not use pycsg")
+    return secondary
+
+
+def summarize_preflight_omissions(region_coverage, raw_preflight):
+    blackhole = set(raw_preflight["blackhole_regions"])
+    confirmed_null = set(raw_preflight["source_null_regions"])
+    deferred = set(raw_preflight["deferred_null_validation_regions"])
+    omitted = region_coverage["omitted_regions"]
+    omitted_set = set(omitted)
+    deferred_omitted = deferred & omitted_set
+    deferred_converted = sorted(deferred - omitted_set)
+    source_null = confirmed_null | deferred_omitted
+    unexpected = sorted(omitted_set - blackhole - source_null)
+    return {
+        "audited_region_count": len(omitted),
+        "intentionally_omitted_blackhole_region_count": len(blackhole),
+        "intentionally_omitted_blackhole_regions": sorted(blackhole),
+        "confirmed_source_null_region_count": len(confirmed_null),
+        "confirmed_source_null_regions": sorted(confirmed_null),
+        "deferred_source_null_region_count": len(deferred_omitted),
+        "deferred_source_null_regions": sorted(deferred_omitted),
+        "source_null_region_count": len(source_null),
+        "source_null_regions": sorted(source_null),
+        "deferred_region_conversion_failure_count": len(deferred_converted),
+        "deferred_region_conversion_failures": deferred_converted,
+        "unexpected_omitted_region_count": len(unexpected),
+        "unexpected_omitted_regions": unexpected,
+        "details": [
+            {
+                "name": name,
+                "reason": (
+                    "blackhole"
+                    if name in blackhole
+                    else "confirmed_source_null"
+                    if name in confirmed_null
+                    else "deferred_source_null"
+                    if name in deferred_omitted
+                    else "unexpected"
+                ),
+            }
+            for name in omitted
+        ],
+    }
+
+
+def convert_geometry(
+    model_dir,
+    output_dir,
+    regions=None,
+    lattice_aabb_workaround=False,
+    raw_region_preflight=False,
+    region_timeout_seconds=300.0,
+):
     try:
         import pyg4ometry
         from pyg4ometry.convert import fluka2Geant4
@@ -361,6 +544,9 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
     assignments = extract_field_assignments(source_deck)
     validate_field_assets(model_dir, assignments)
     checksums = verify_source_bundle(model_dir)
+    if raw_region_preflight and region_timeout_seconds <= 0.0:
+        raise ProxyModelError("region_timeout_seconds must be positive")
+    raw_preflight = None
 
     with tempfile.TemporaryDirectory(dir=output_dir) as temporary_dir:
         temporary_dir = Path(temporary_dir)
@@ -370,16 +556,77 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
         with conversion_log.open("w", encoding="utf-8") as log, redirect_stdout(log):
             reader = Reader(str(normalized_path))
             fluka_registry = reader.flukaregistry
-            if regions:
+            if regions is not None:
                 unknown_regions = sorted(set(regions) - set(fluka_registry.regionDict))
                 if unknown_regions:
                     raise ProxyModelError("unknown FLUKA regions: " + ", ".join(unknown_regions))
+            requested_regions = (
+                list(regions) if regions is not None else list(fluka_registry.regionDict)
+            )
+            conversion_regions = regions
+            if raw_region_preflight:
+                primary_preflight = classify_raw_regions(
+                    fluka_registry,
+                    requested_regions,
+                    timeout_seconds=region_timeout_seconds,
+                    progress_every=100,
+                )
+                ambiguous_regions = (
+                    primary_preflight["source_null_regions"]
+                    + [
+                        item["name"]
+                        for item in primary_preflight["evaluation_errors"]
+                    ]
+                )
+                if ambiguous_regions:
+                    secondary_preflight = run_secondary_region_preflight(
+                        normalized_path,
+                        ambiguous_regions,
+                        temporary_dir,
+                        region_timeout_seconds,
+                    )
+                else:
+                    secondary_preflight = {
+                        "non_null_regions": [],
+                        "source_null_regions": [],
+                        "evaluation_errors": [],
+                        "backend": "pycsg",
+                    }
+                raw_preflight = resolve_raw_region_classifications(
+                    primary_preflight,
+                    secondary_preflight,
+                    requested_regions,
+                )
+                write_json_atomic(
+                    output_dir / "raw_region_preflight.json",
+                    raw_preflight,
+                )
+                if raw_preflight["evaluation_errors"]:
+                    failures = "; ".join(
+                        f"{item['name']}: {item['error']}"
+                        for item in raw_preflight["evaluation_errors"]
+                    )
+                    raise ProxyModelError(
+                        "raw FLUKA region preflight failed before length safety: "
+                        + failures
+                    )
+                conversion_regions = raw_preflight["conversion_candidate_regions"]
             converter_module = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
             original_lattice_aabb = None
+            original_region_zone_aabbs = None
+            raw_zone_aabb_fallbacks = []
             if lattice_aabb_workaround:
                 original_lattice_aabb = _install_lattice_aabb_workaround(converter_module)
+            if raw_preflight is not None:
+                (
+                    original_region_zone_aabbs,
+                    raw_zone_aabb_fallbacks,
+                ) = _install_raw_zone_aabb_fallback(
+                    converter_module,
+                    raw_preflight,
+                )
             try:
-                geant4_registry = fluka2Geant4(fluka_registry, regions=regions)
+                geant4_registry = fluka2Geant4(fluka_registry, regions=conversion_regions)
             except AttributeError as error:
                 if "getBoundingBox" not in str(error):
                     raise
@@ -390,6 +637,8 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
                     "LATTICE cards."
                 ) from error
             finally:
+                if original_region_zone_aabbs is not None:
+                    converter_module._getRegionZoneAABBs = original_region_zone_aabbs
                 if original_lattice_aabb is not None:
                     converter_module._getTransformedCellRegionAABB = original_lattice_aabb
         geant4_registry.getWorldVolume().clipSolid()
@@ -413,9 +662,14 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
         region_coverage = summarize_region_coverage(
             fluka_registry.regionDict, regions, geant4_registry.logicalVolumeDict
         )
-        omitted_region_audit = audit_omitted_region_geometry(
-            fluka_registry, region_coverage["omitted_regions"]
-        )
+        if raw_preflight is not None:
+            omitted_region_audit = summarize_preflight_omissions(
+                region_coverage, raw_preflight
+            )
+        else:
+            omitted_region_audit = audit_omitted_region_geometry(
+                fluka_registry, region_coverage["omitted_regions"]
+            )
         report = {
             "schema": "shift-ir1-proxy-conversion",
             "schema_version": 1,
@@ -429,6 +683,12 @@ def convert_geometry(model_dir, output_dir, regions=None, lattice_aabb_workaroun
                 "world_volume": geant4_registry.getWorldVolume().name,
                 **region_coverage,
                 "omitted_region_audit": omitted_region_audit,
+                "raw_region_preflight": raw_preflight,
+                "raw_zone_aabb_fallback": {
+                    "padding_mm": RAW_ZONE_AABB_PADDING_MM,
+                    "region_count": len(raw_zone_aabb_fallbacks),
+                    "regions": raw_zone_aabb_fallbacks,
+                },
                 "logical_volume_count": len(geant4_registry.logicalVolumeDict),
                 "solid_count": len(geant4_registry.solidDict),
                 "material_count": len(geant4_registry.materialDict),
