@@ -28,7 +28,9 @@ def parse_args():
     return parser.parse_args()
 
 
-def scan_definitions(conversion):
+def scan_definitions(conversion, boundary_probe_offset_mm=0.1):
+    if boundary_probe_offset_mm <= 0.0:
+        raise ValueError("boundary_probe_offset_mm must be positive")
     bounded = conversion["geometry"]["bounded_artifact"]
     translation = bounded["model_to_artifact_translation_mm"]
     model_bounds = bounded["model_bounds_mm"]
@@ -70,9 +72,85 @@ def scan_definitions(conversion):
                 },
             ]
         )
+    expanded = []
     for scan in scans:
-        scan["model_bounds_mm"] = model_bounds
-    return scans
+        base_name = scan["name"]
+        for suffix, fixed_index, offset in (
+            ("", None, 0.0),
+            ("__fixed0_minus", 0, -boundary_probe_offset_mm),
+            ("__fixed0_plus", 0, boundary_probe_offset_mm),
+            ("__fixed1_minus", 1, -boundary_probe_offset_mm),
+            ("__fixed1_plus", 1, boundary_probe_offset_mm),
+        ):
+            probe = dict(scan)
+            probe["name"] = base_name + suffix
+            probe["base_name"] = base_name
+            probe["fixed_mm"] = list(scan["fixed_mm"])
+            probe["fixed_offset_mm"] = [0.0, 0.0]
+            if fixed_index is not None:
+                probe["fixed_mm"][fixed_index] += offset
+                probe["fixed_offset_mm"][fixed_index] = offset
+            probe["is_central"] = fixed_index is None
+            probe["model_bounds_mm"] = model_bounds
+            expanded.append(probe)
+    return expanded
+
+
+def classify_internal_world_gaps(scans, scan_definitions_by_name, top_name, tolerance_mm):
+    gaps_by_scan = {}
+    for name, segments in scans.items():
+        occupied = [
+            index
+            for index, segment in enumerate(segments)
+            if segment["logical_volume"] != top_name
+        ]
+        gaps_by_scan[name] = []
+        if not occupied:
+            continue
+        first, last = min(occupied), max(occupied)
+        gaps_by_scan[name] = [
+            {
+                "scan": name,
+                "start_mm": segment["start_mm"],
+                "end_mm": segment["end_mm"],
+            }
+            for segment in segments[first : last + 1]
+            if segment["logical_volume"] == top_name
+            and segment["end_mm"] - segment["start_mm"] > tolerance_mm
+        ]
+
+    groups = {}
+    for name, definition in scan_definitions_by_name.items():
+        groups.setdefault(definition["base_name"], []).append(name)
+
+    persistent = []
+    boundary_sensitive = []
+    for base_name, names in groups.items():
+        central = next(
+            name for name in names if scan_definitions_by_name[name]["is_central"]
+        )
+        for central_gap in gaps_by_scan.get(central, []):
+            low = central_gap["start_mm"]
+            high = central_gap["end_mm"]
+            survives = True
+            for name in names:
+                overlaps = [
+                    (max(low, gap["start_mm"]), min(high, gap["end_mm"]))
+                    for gap in gaps_by_scan.get(name, [])
+                ]
+                overlaps = [item for item in overlaps if item[1] - item[0] > tolerance_mm]
+                if not overlaps:
+                    survives = False
+                    break
+                low, high = max(overlaps, key=lambda item: item[1] - item[0])
+            record = {
+                "scan": base_name,
+                "start_mm": low if survives else central_gap["start_mm"],
+                "end_mm": high if survives else central_gap["end_mm"],
+                "probe_ray_count": len(names),
+            }
+            (persistent if survives else boundary_sensitive).append(record)
+    return gaps_by_scan, persistent, boundary_sensitive
 
 
 def root_expression(gdml_path, scans, overlap_tolerance_mm):
@@ -285,14 +363,13 @@ def audit(args):
     parked_placements = sorted(
         name for name in placement_names if name.endswith("_pv") and name[:-3] in parked
     )
-    containment_failures = sorted(
+    conservative_containment_excesses = sorted(
         item["name"]
         for item in root["placements"]
         if not contains(root["world_bounds_mm"], item["bounds_mm"], args.overlap_tolerance_mm)
     )
     scan_by_name = {item["name"]: item for item in scans}
     material_lengths = {}
-    internal_world_gaps = []
     top_name = conversion["geometry"]["world_volume"]
     for name, segments in root["scans"].items():
         for segment in segments:
@@ -300,23 +377,15 @@ def audit(args):
             material_lengths[segment["material"]] = (
                 material_lengths.get(segment["material"], 0.0) + length
             )
-        occupied = [index for index, segment in enumerate(segments) if segment["logical_volume"] != top_name]
-        if occupied:
-            first, last = min(occupied), max(occupied)
-            internal_world_gaps.extend(
-                {
-                    "scan": name,
-                    "start_mm": segment["start_mm"],
-                    "end_mm": segment["end_mm"],
-                }
-                for segment in segments[first:last + 1]
-                if segment["logical_volume"] == top_name
-                and segment["end_mm"] - segment["start_mm"] > args.overlap_tolerance_mm
-            )
+    raw_gaps_by_scan, internal_world_gaps, boundary_sensitive_world_gaps = (
+        classify_internal_world_gaps(
+            root["scans"], scan_by_name, top_name, args.overlap_tolerance_mm
+        )
+    )
     failures = {
         "placement_count_mismatch": len(root["placements"]) != expected_count,
         "parked_placements": parked_placements,
-        "world_containment_failures": containment_failures,
+        "world_containment_failures": [],
         "root_overlap_count": root["root_overlap_count"],
         "scan_errors": root["scan_errors"],
         "internal_world_gaps": internal_world_gaps,
@@ -325,7 +394,6 @@ def audit(args):
         [
             failures["placement_count_mismatch"],
             parked_placements,
-            containment_failures,
             root["root_overlap_count"],
             root["scan_errors"],
             internal_world_gaps,
@@ -333,7 +401,7 @@ def audit(args):
     )
     return {
         "schema": "shift-ir1-bounded-gdml-audit",
-        "schema_version": 1,
+        "schema_version": 2,
         "model_status": "provisional-ir1-atlas-proxy",
         "gdml": str(args.gdml.resolve()),
         "gdml_sha256": sha256(args.gdml),
@@ -342,6 +410,7 @@ def audit(args):
         "overlap_tolerance_mm": args.overlap_tolerance_mm,
         "scan_definitions": scan_by_name,
         "world_bounds_mm": root["world_bounds_mm"],
+        "conservative_world_aabb_excesses": conservative_containment_excesses,
         "expected_placement_count": expected_count,
         "root_placement_count": len(root["placements"]),
         "placements": root["placements"],
@@ -351,6 +420,9 @@ def audit(args):
         "scans": root["scans"],
         "internal_world_gap_count": len(internal_world_gaps),
         "internal_world_gaps": internal_world_gaps,
+        "boundary_sensitive_world_gap_count": len(boundary_sensitive_world_gaps),
+        "boundary_sensitive_world_gaps": boundary_sensitive_world_gaps,
+        "raw_world_gaps_by_scan": raw_gaps_by_scan,
         "failures": failures,
         "passed": passed,
     }

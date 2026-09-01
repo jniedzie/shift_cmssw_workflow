@@ -225,6 +225,12 @@ def _aabb_contains(outer, inner, tolerance_mm=0.0):
     )
 
 
+def _source_bound_clip_region_names(region_names, parking_regions):
+    """Return only parked prototypes that need a finite pre-lattice clip."""
+
+    return set(region_names) & set(parking_regions)
+
+
 def install_lattice_placement_workaround(
     converter_module,
     source_bounds_mm,
@@ -304,8 +310,17 @@ def install_lattice_placement_workaround(
             )
 
         source_bound_clip_count = 0
+        source_bound_clip_regions = _source_bound_clip_region_names(
+            region_names_to_lvs, parking_regions
+        )
         for region_name, region_lv in region_names_to_lvs.items():
-            if region_name not in source_bounds:
+            # Mesh-derived AABBs are used for lattice candidate selection, but
+            # curved CSG surfaces can extend beyond their chordal mesh bounds.
+            # Clip only parked prototypes, which are
+            # subsequently intersected with an exact physical lattice cell.
+            # Clipping ordinary source regions can remove valid material at a
+            # curved boundary (for example the R7/R7UPS B11 annulus).
+            if region_name not in source_bound_clip_regions:
                 continue
             bounds = source_bounds[region_name]
             dimensions = [

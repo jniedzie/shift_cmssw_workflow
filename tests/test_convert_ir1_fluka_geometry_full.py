@@ -19,8 +19,15 @@ from convert_ir1_fluka_geometry_full import (  # noqa: E402
     lower_multi_unions_for_root,
     restore_transformed_infinite_cylinder_centres,
 )
-from ir1_fluka_geometry import _install_lattice_aabb_workaround  # noqa: E402
-from audit_ir1_bounded_gdml import parse_root_output, scan_definitions  # noqa: E402
+from ir1_fluka_geometry import (  # noqa: E402
+    _install_lattice_aabb_workaround,
+    _source_bound_clip_region_names,
+)
+from audit_ir1_bounded_gdml import (  # noqa: E402
+    classify_internal_world_gaps,
+    parse_root_output,
+    scan_definitions,
+)
 from prune_ir1_empty_lattice_intersections import prune_tree  # noqa: E402
 
 
@@ -103,6 +110,15 @@ class LatticeAabbWorkaroundTest(unittest.TestCase):
             Converter._getTransformedCellRegionAABB = original
         self.assertEqual(list(bounds.lower), [3.0, 3.0, 1.0])
         self.assertEqual(list(bounds.upper), [5.0, 7.0, 7.0])
+
+    def test_lattice_source_bound_clipping_is_limited_to_parked_prototypes(self):
+        self.assertEqual(
+            _source_bound_clip_region_names(
+                ["PARKr", "Prototype", "Physical"],
+                {"PARKr", "Prototype"},
+            ),
+            {"PARKr", "Prototype"},
+        )
 
 BOUNDED_GDML = """<?xml version="1.0"?>
 <gdml>
@@ -197,11 +213,54 @@ class BoundedAuditTest(unittest.TestCase):
             }
         }
         scans = scan_definitions(conversion)
-        self.assertEqual(len(scans), 5)
+        self.assertEqual(len(scans), 25)
         self.assertEqual(scans[0]["fixed_mm"], [-10, -20])
-        self.assertEqual(scans[1]["fixed_mm"], [-20, -15.0])
-        self.assertEqual(scans[2]["fixed_mm"], [-10, -15.0])
-        self.assertEqual(scans[3]["fixed_mm"], [-20, 10.0])
+        self.assertEqual(scans[1]["fixed_mm"], [-10.1, -20])
+        self.assertEqual(scans[5]["fixed_mm"], [-20, -15.0])
+        self.assertEqual(scans[10]["fixed_mm"], [-10, -15.0])
+        self.assertEqual(scans[15]["fixed_mm"], [-20, 10.0])
+
+    def test_separates_persistent_and_boundary_sensitive_world_gaps(self):
+        definitions = {
+            name: {
+                "base_name": "ray",
+                "is_central": name == "ray",
+            }
+            for name in ("ray", "ray__minus", "ray__plus")
+        }
+        volume = lambda name, start, end: {
+            "logical_volume": name,
+            "start_mm": start,
+            "end_mm": end,
+        }
+        scans = {
+            "ray": [volume("part", 0, 1), volume("world", 1, 2), volume("part", 2, 3)],
+            "ray__minus": [volume("part", 0, 3)],
+            "ray__plus": [volume("part", 0, 3)],
+        }
+        _, persistent, boundary = classify_internal_world_gaps(
+            scans, definitions, "world", 0.01
+        )
+        self.assertEqual(persistent, [])
+        self.assertEqual(len(boundary), 1)
+
+        scans["ray__minus"] = [
+            volume("part", 0, 1.1),
+            volume("world", 1.1, 1.9),
+            volume("part", 1.9, 3),
+        ]
+        scans["ray__plus"] = [
+            volume("part", 0, 1.2),
+            volume("world", 1.2, 1.8),
+            volume("part", 1.8, 3),
+        ]
+        _, persistent, boundary = classify_internal_world_gaps(
+            scans, definitions, "world", 0.01
+        )
+        self.assertEqual(len(persistent), 1)
+        self.assertEqual(persistent[0]["start_mm"], 1.2)
+        self.assertEqual(persistent[0]["end_mm"], 1.8)
+        self.assertEqual(boundary, [])
 
     def test_parses_root_records(self):
         output = "\n".join(
