@@ -281,6 +281,79 @@ class TriggerLibraryTest(unittest.TestCase):
             any(record["trigger_rule_decision"]["violated_rules"] for record in records)
         )
 
+    def test_recorded_central_mode_does_not_reapply_trigger_rules(self):
+        directory, path = self.write_library([make_event(1), make_event(2)])
+        self.addCleanup(directory.cleanup)
+        timeline_path = Path(directory.name) / "timeline_recorded.jsonl"
+        mask_path = Path(directory.name) / "mask.json"
+        run_fill_path = Path(directory.name) / "run_fill.json"
+        mask_path.write_text(
+            json.dumps(
+                {
+                    "schema": "cms-lpc-ip5-bunch-mask",
+                    "schema_version": 1,
+                    "orbit_slots": 3564,
+                    "fill_number": 9999,
+                    "scheme_name": "test",
+                    "beam1_filled_bx_slots": [1],
+                    "beam2_filled_bx_slots": [1],
+                    "colliding_ip5_bx_slots": [1],
+                    "source": {"csv_sha256": "0" * 64},
+                }
+            ),
+            encoding="utf-8",
+        )
+        run_fill_path.write_text(
+            json.dumps(
+                {
+                    "schema": "cms-run-to-fill-map",
+                    "schema_version": 1,
+                    "source": {
+                        "service": "test",
+                        "query": "test",
+                        "retrieved_at": "2026-09-01",
+                    },
+                    "runs": {"100": {"fill_number": 9999}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "sample_zero_bias_trigger_timeline.py"),
+                str(path),
+                "--output", str(timeline_path),
+                "--start-bx", "0", "--end-bx", "0",
+                "--seed", "123", "--signal-events", "2",
+                "--colliding-bx-mask", str(mask_path),
+                "--reference-slot-mode", "uniform-colliding",
+                "--shift-beam", "2",
+                "--run-fill-map", str(run_fill_path),
+                "--trigger-rule-mode", "recorded",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        timeline = [
+            json.loads(line)
+            for line in timeline_path.read_text(encoding="utf-8").splitlines()
+        ]
+        self.assertFalse(timeline[0]["trigger_rules_applied"])
+        self.assertTrue(timeline[0]["trigger_rules_embodied_by_recorded_l1a"])
+        self.assertEqual(
+            timeline[0]["colliding_bx_mask"]["reference_slot_sampling"]["mode"],
+            "uniform-colliding",
+        )
+        self.assertTrue(all(record["readout_after_trigger_rules"] for record in timeline[1:]))
+        self.assertTrue(
+            all(
+                record["trigger_rule_decision"]["rules_reapplied"] is False
+                for record in timeline[1:]
+            )
+        )
+
 
 class TriggerRuleEngineTest(unittest.TestCase):
     def test_exact_rule_boundaries_are_allowed(self):

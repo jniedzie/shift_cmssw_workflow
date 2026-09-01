@@ -14,6 +14,7 @@ from fetch_lpc_bunch_mask import FillingSchemeError, normalize_lpc_response  # n
 from sample_zero_bias_trigger_timeline import (  # noqa: E402
     TriggerLibraryError,
     load_ip5_bunch_mask,
+    select_reference_slots,
     validate_run_fill_map,
 )
 
@@ -161,6 +162,19 @@ class LpcBunchMaskTest(unittest.TestCase):
             validate_run_fill_map(
                 self.write_run_fill_map(fill=9018), [369943], 9017
             )
+
+    def test_uniform_reference_slot_sampling_is_reproducible(self):
+        first = select_reference_slots([1, 10, 20], "uniform-filled", None, 20, 123)
+        second = select_reference_slots([1, 10, 20], "uniform-filled", None, 20, 123)
+        self.assertEqual(first, second)
+        self.assertTrue(set(first) <= {1, 10, 20})
+        self.assertGreater(len(set(first)), 1)
+
+    def test_reference_slot_modes_fail_closed(self):
+        with self.assertRaisesRegex(TriggerLibraryError, "required"):
+            select_reference_slots([1], "fixed", None, 1, 123)
+        with self.assertRaisesRegex(TriggerLibraryError, "must be omitted"):
+            select_reference_slots([1], "uniform-filled", 1, 1, 123)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_ROOT="$SCRIPT_DIR"
 FORCE=0
 POSITIONAL_ARGS=()
 for argument in "$@"; do
@@ -16,7 +17,7 @@ if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
   exit 2
 fi
 CHUNK="${POSITIONAL_ARGS[0]:-0}"
-source "$SCRIPT_DIR/scripts/setup_cmssw.sh"
+source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 
 case "$SHIFT_DT_MODE" in
@@ -80,13 +81,29 @@ if [[ -e "$OUTPUT" ]]; then
 fi
 INPUT="$STEP2_DIR/events_step2_part${PART}.root"
 [[ -s "$INPUT" ]] || { echo "ERROR: $INPUT is missing or empty" >&2; exit 1; }
+PIGGYBACK_CUSTOMISE=""
+if [[ "$TRIGGER_SCENARIO" == piggyback_central && "$PIGGYBACK_FILTER_RECONSTRUCTION" == 1 ]]; then
+	PIGGYBACK_DECISIONS="$PIGGYBACK_DECISION_DIR/piggyback_decisions_part${PART}.json"
+	[[ -s "$PIGGYBACK_DECISIONS" ]] || {
+		echo "ERROR: missing piggyback decision report: $PIGGYBACK_DECISIONS" >&2
+		exit 1
+	}
+	PIGGYBACK_EVENT_RANGES="$(python3 "$WORKFLOW_ROOT/scripts/piggyback_event_ranges.py" \
+		"$PIGGYBACK_DECISIONS" --level "$PIGGYBACK_FILTER_LEVEL")"
+	if [[ "$PIGGYBACK_EVENT_RANGES" == "[]" ]]; then
+		PIGGYBACK_CUSTOMISE="; process.maxEvents.input = cms.untracked.int32(0)"
+	else
+		PIGGYBACK_CUSTOMISE="; process.source.eventsToProcess = cms.untracked.VEventRange(*${PIGGYBACK_EVENT_RANGES})"
+	fi
+	echo "Piggyback reconstruction filter: level=$PIGGYBACK_FILTER_LEVEL events=$PIGGYBACK_EVENT_RANGES"
+fi
 echo "=== Step 3: RAW2DIGI,L1Reco,RECO -> AODSIM ==="
 echo "Detector modes: DT=$SHIFT_DT_MODE tracker=$SHIFT_TRACKER_MODE GEM=$SHIFT_ENABLE_GEM HCALdiag=$SHIFT_ENABLE_HCAL_DIAGNOSTICS ZDCdiag=$SHIFT_ENABLE_ZDC_DIAGNOSTICS"
 cmsDriver.py step3 --step RAW2DIGI,L1Reco,RECO --conditions "$CONDITIONS" \
   --datatier AODSIM --eventcontent AODSIM --geometry "$GEOMETRY" --era "$ERA" \
   --filein "file:$INPUT" --fileout "file:$LOCAL_OUTPUT" \
   --python_filename "$LOCAL_CONFIG" --no_exec -n "$N_EVENTS" \
-  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth, customiseRecoForShiftMuons, customiseTraversingShiftMuonReco, customiseRecoDiagnostics; process = customiseKeepShiftTruth(process, keepHcalSimHits=${HCAL_DIAGNOSTICS_CMSSW}, keepZDCSimHits=${ZDC_DIAGNOSTICS_CMSSW}, keepMergedTrackTruth=False); process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='${DT_NAVIGATION}', pcaPropagator='SteppingHelixPropagatorAny', enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}); process = customiseTraversingShiftMuonReco(process, trackerMode='${SHIFT_TRACKER_MODE}', enableDTMeasurement=${DT_ENABLED_CMSSW}); process = customiseRecoDiagnostics(process, enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}, trackerMode='${SHIFT_TRACKER_MODE}', enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, dtNavigationMode=${DT_NAVIGATION_CODE})"
+  --customise_commands "from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth, customiseRecoForShiftMuons, customiseTraversingShiftMuonReco, customiseRecoDiagnostics; process = customiseKeepShiftTruth(process, keepHcalSimHits=${HCAL_DIAGNOSTICS_CMSSW}, keepZDCSimHits=${ZDC_DIAGNOSTICS_CMSSW}, keepMergedTrackTruth=False); process = customiseRecoForShiftMuons(process, numberOfSigma=5.0, maxHitChi2=100.0, seedPosition='in', doBackwardFilter=True, keepAllSeedSegments=True, navigationType='${DT_NAVIGATION}', pcaPropagator='SteppingHelixPropagatorAny', enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}); process = customiseTraversingShiftMuonReco(process, trackerMode='${SHIFT_TRACKER_MODE}', enableDTMeasurement=${DT_ENABLED_CMSSW}); process = customiseRecoDiagnostics(process, enableDTMeasurement=${DT_ENABLED_CMSSW}, enableGEMMeasurement=${GEM_ENABLED_CMSSW}, trackerMode='${SHIFT_TRACKER_MODE}', enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, dtNavigationMode=${DT_NAVIGATION_CODE})${PIGGYBACK_CUSTOMISE}"
 
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_AOD_part${PART}_cfg.py"
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then

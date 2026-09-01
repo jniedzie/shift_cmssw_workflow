@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt] [--keep-logs]
+Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt] [--keep-logs] [--check]
        $(basename "$0") --force-steps LIST [--prebuilt] [--keep-logs]
 
 Submit all configured jobs, running only the selected workflow steps.
@@ -18,6 +18,8 @@ build, allowing several configuration-only scans to share the same libraries.
 Before submitting, logs from completed older jobs are removed from the local
 Condor log directory and, when no older workflow jobs are active, from EOS.
 --keep-logs disables this automatic cleanup.
+--check validates configuration and trigger inputs without building, cleaning,
+or contacting Condor.
 
 Examples:
   $(basename "$0") --steps 3,4
@@ -29,6 +31,7 @@ SELECTED_STEPS="1,2,3,4"
 FORCE_SELECTED=0
 USE_PREBUILT=0
 KEEP_LOGS=0
+CHECK_ONLY=0
 while (( $# )); do
 	case "$1" in
 		--steps)
@@ -52,6 +55,10 @@ while (( $# )); do
 			;;
 		--keep-logs)
 			KEEP_LOGS=1
+			shift
+			;;
+		--check)
+			CHECK_ONLY=1
 			shift
 			;;
 		-h|--help)
@@ -109,6 +116,7 @@ SUBMISSION_VARIABLES=(
 	SHIFT_TIMING_MODEL_VERSION
 	SHIFT_G4_MAX_TRACK_TIME_NS
 	SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS
+	TRIGGER_SCENARIO
 	TRIGGER_TIMELINE_MODE
 	TRIGGER_LIBRARY_JSONL
 	TRIGGER_L1_MENU_JSON
@@ -118,12 +126,16 @@ SUBMISSION_VARIABLES=(
 	TRIGGER_TIMELINE_SEED
 	TRIGGER_COLLIDING_BX_FILE
 	TRIGGER_COLLIDING_BX_MASK
+	TRIGGER_REFERENCE_SLOT_MODE
 	TRIGGER_REFERENCE_BX_SLOT
 	TRIGGER_SHIFT_BEAM
 	TRIGGER_RUN_FILL_MAP
 	TRIGGER_RULE_MODE
 	TRIGGER_RULE_HISTORY_START_BX
 	TRIGGER_TIMELINE_DIR
+	PIGGYBACK_DECISION_DIR
+	PIGGYBACK_FILTER_RECONSTRUCTION
+	PIGGYBACK_FILTER_LEVEL
 	SHIFT_DT_MODE
 	SHIFT_TRACKER_MODE
 	SHIFT_ENABLE_GEM
@@ -190,6 +202,64 @@ if [[ "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" == 1 && "$SHIFT_REFIT_GEOMETRY_MATE
 	exit 1
 fi
 
+if [[ "$TRIGGER_SCENARIO" == piggyback_central ]]; then
+	[[ "$PILEUP_MODE" == standard && "$SHIFT_TIMING_MODE" == nominal && "$SHIFT_TIMING_BX_OFFSET" == 0 && "$SHIFT_TIMING_PHASE_NS" =~ ^0+([.]0*)?$ ]] || {
+		echo "Piggyback preflight requires standard pileup and nominal BX-0/phase-0 physical timing" >&2
+		exit 1
+	}
+	[[ "$TRIGGER_TIMELINE_MODE" == zero_bias_proxy && "$TRIGGER_TIMELINE_START_BX" == 0 && "$TRIGGER_TIMELINE_END_BX" == 0 && "$TRIGGER_RULE_MODE" == recorded ]] || {
+		echo "Piggyback preflight requires a BX-0 ZeroBias timeline in recorded-L1A mode" >&2
+		exit 1
+	}
+	[[ -z "$TRIGGER_COLLIDING_BX_FILE" ]] || {
+		echo "Piggyback preflight rejects legacy relative-BX fixtures" >&2
+		exit 1
+	}
+	[[ "$TRIGGER_TIMELINE_SEED" =~ ^[1-9][0-9]*$ && ${#TRIGGER_TIMELINE_SEED} -le 9 && 10#$TRIGGER_TIMELINE_SEED -le 900000000 ]] || {
+		echo "Piggyback preflight requires a fixed trigger seed in 1..900000000" >&2
+		exit 1
+	}
+	case "$PIGGYBACK_FILTER_RECONSTRUCTION:$PIGGYBACK_FILTER_LEVEL" in
+		0:raw|0:persisted|1:raw|1:persisted) ;;
+		*) echo "Invalid piggyback reconstruction filter configuration" >&2; exit 1 ;;
+	esac
+	for input_path in "$TRIGGER_LIBRARY_JSONL" "$TRIGGER_L1_MENU_JSON" "$TRIGGER_COLLIDING_BX_MASK" "$TRIGGER_RUN_FILL_MAP"; do
+		[[ "$input_path" == /* && -s "$input_path" ]] || {
+			echo "Piggyback preflight requires an absolute non-empty input: $input_path" >&2
+			exit 1
+		}
+	done
+	PIGGYBACK_PREFLIGHT_ARGS=(
+		--l1-menu "$TRIGGER_L1_MENU_JSON"
+		--start-bx 0 --end-bx 0 --signal-events 1 --seed "$TRIGGER_TIMELINE_SEED"
+		--colliding-bx-mask "$TRIGGER_COLLIDING_BX_MASK"
+		--reference-slot-mode "$TRIGGER_REFERENCE_SLOT_MODE"
+		--shift-beam "$TRIGGER_SHIFT_BEAM"
+		--run-fill-map "$TRIGGER_RUN_FILL_MAP"
+		--trigger-rule-mode recorded
+	)
+	[[ -z "$TRIGGER_GROUP_ID" ]] || PIGGYBACK_PREFLIGHT_ARGS+=(--group-id "$TRIGGER_GROUP_ID")
+	[[ "$TRIGGER_REFERENCE_SLOT_MODE" != fixed ]] || PIGGYBACK_PREFLIGHT_ARGS+=(--reference-bx-slot "$TRIGGER_REFERENCE_BX_SLOT")
+	PIGGYBACK_PREFLIGHT_OUTPUT="$(mktemp /tmp/shift_piggyback_preflight_XXXXXX.jsonl)"
+	if ! python3 "$SCRIPT_DIR/scripts/sample_zero_bias_trigger_timeline.py" \
+		"$TRIGGER_LIBRARY_JSONL" --output "$PIGGYBACK_PREFLIGHT_OUTPUT" \
+		"${PIGGYBACK_PREFLIGHT_ARGS[@]}"; then
+		rm -f -- "$PIGGYBACK_PREFLIGHT_OUTPUT"
+		echo "Piggyback trigger-input preflight failed; submission aborted" >&2
+		exit 1
+	fi
+	rm -f -- "$PIGGYBACK_PREFLIGHT_OUTPUT"
+	echo "Piggyback trigger-input preflight passed"
+elif [[ "$TRIGGER_SCENARIO" != none ]]; then
+	echo "TRIGGER_SCENARIO must be none or piggyback_central" >&2
+	exit 1
+fi
+
+if [[ "$CHECK_ONLY" == 1 ]]; then
+	echo "Configuration preflight passed; no build, cleanup, or submission performed"
+	exit 0
+fi
+
 "$SCRIPT_DIR/scripts/prepare_condor.sh"
 
 # Standard CERN batch schedds reject /eos paths in submit-file attributes
@@ -229,9 +299,10 @@ printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s\n' \
 	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED"
 printf 'Timing: mode=%s, BX/phase=%s/%s ns, Geant4 central/forward limits=%s/%s ns\n' \
 	"$SHIFT_TIMING_MODE" "$SHIFT_TIMING_BX_OFFSET" "$SHIFT_TIMING_PHASE_NS" "$SHIFT_G4_MAX_TRACK_TIME_NS" "$SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS"
-printf 'Trigger timeline: mode=%s, BX range=%s..%s, seed=%s, rules=%s, historyStartBX=%s\n' \
-	"$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" \
-	"$TRIGGER_TIMELINE_SEED" "$TRIGGER_RULE_MODE" "$TRIGGER_RULE_HISTORY_START_BX"
+printf 'Trigger: scenario=%s, timeline=%s, BX range=%s..%s, seed=%s, rules=%s, referenceSlots=%s, reconstructionFilter=%s/%s\n' \
+	"$TRIGGER_SCENARIO" "$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" \
+	"$TRIGGER_TIMELINE_SEED" "$TRIGGER_RULE_MODE" "$TRIGGER_REFERENCE_SLOT_MODE" \
+	"$PIGGYBACK_FILTER_RECONSTRUCTION" "$PIGGYBACK_FILTER_LEVEL"
 if [[ "$KEEP_LOGS" == 0 ]]; then
 	echo "Cleaning old Condor and payload logs before submission..."
 	"$WORKFLOW_ROOT/scripts/cleanup_condor_logs.sh" \

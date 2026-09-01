@@ -73,6 +73,40 @@ if [[ ! "$N_EVENTS" =~ ^[1-9][0-9]*$ ]]; then
 	exit 1
 fi
 
+case "$TRIGGER_SCENARIO" in
+	none) ;;
+	piggyback_central)
+		[[ "$TRIGGER_TIMELINE_MODE" == zero_bias_proxy ]] || {
+			echo "ERROR: piggyback_central requires TRIGGER_TIMELINE_MODE=zero_bias_proxy" >&2; exit 1;
+		}
+		[[ "$PILEUP_MODE" == standard ]] || {
+			echo "ERROR: piggyback_central production requires PILEUP_MODE=standard" >&2; exit 1;
+		}
+		[[ "$SHIFT_TIMING_MODE" == nominal && "$SHIFT_TIMING_BX_OFFSET" == 0 && "$SHIFT_TIMING_PHASE_NS" =~ ^0+([.]0*)?$ ]] || {
+			echo "ERROR: piggyback_central requires nominal physical timing with BX offset 0 and phase 0" >&2; exit 1;
+		}
+		[[ -z "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]] || {
+			echo "ERROR: piggyback_central production cannot use same-SimHit reference timing" >&2; exit 1;
+		}
+		[[ "$TRIGGER_TIMELINE_START_BX" == 0 && "$TRIGGER_TIMELINE_END_BX" == 0 ]] || {
+			echo "ERROR: piggyback_central production models exactly the ordinary BX-0 readout" >&2; exit 1;
+		}
+		[[ "$TRIGGER_RULE_MODE" == recorded ]] || {
+			echo "ERROR: piggyback_central requires TRIGGER_RULE_MODE=recorded; do not reapply synthetic rules to an already-recorded L1A" >&2; exit 1;
+		}
+		[[ -n "$TRIGGER_COLLIDING_BX_MASK" && -z "$TRIGGER_COLLIDING_BX_FILE" ]] || {
+			echo "ERROR: piggyback_central requires a physical fill mask, not a relative-BX fixture" >&2; exit 1;
+		}
+		case "$PIGGYBACK_FILTER_RECONSTRUCTION" in 0|1) ;; *)
+			echo "ERROR: PIGGYBACK_FILTER_RECONSTRUCTION must be 0 or 1" >&2; exit 1;;
+		esac
+		case "$PIGGYBACK_FILTER_LEVEL" in raw|persisted) ;; *)
+			echo "ERROR: PIGGYBACK_FILTER_LEVEL must be raw or persisted" >&2; exit 1;;
+		esac
+		;;
+	*) echo "ERROR: TRIGGER_SCENARIO must be none or piggyback_central (got '$TRIGGER_SCENARIO')" >&2; exit 1 ;;
+esac
+
 TRIGGER_TIMELINE_ARGS=()
 case "$TRIGGER_TIMELINE_MODE" in
 	none)
@@ -98,6 +132,9 @@ case "$TRIGGER_TIMELINE_MODE" in
 		case "$TRIGGER_RULE_MODE" in
 			none)
 				;;
+			recorded)
+				TRIGGER_TIMELINE_ARGS+=(--trigger-rule-mode recorded)
+				;;
 			run3)
 				if [[ ! "$TRIGGER_RULE_HISTORY_START_BX" =~ ^-?[0-9]+$ ]]; then
 					echo "ERROR: TRIGGER_RULE_HISTORY_START_BX must be an integer" >&2
@@ -109,7 +146,7 @@ case "$TRIGGER_TIMELINE_MODE" in
 				)
 				;;
 			*)
-				echo "ERROR: TRIGGER_RULE_MODE must be none or run3 (got '$TRIGGER_RULE_MODE')" >&2
+				echo "ERROR: TRIGGER_RULE_MODE must be none, recorded, or run3 (got '$TRIGGER_RULE_MODE')" >&2
 				exit 1
 				;;
 		esac
@@ -139,10 +176,20 @@ case "$TRIGGER_TIMELINE_MODE" in
 				echo "ERROR: TRIGGER_COLLIDING_BX_MASK must be an absolute, non-empty file when set" >&2
 				exit 1
 			fi
-			if [[ ! "$TRIGGER_REFERENCE_BX_SLOT" =~ ^[0-9]+$ ]] || (( 10#$TRIGGER_REFERENCE_BX_SLOT < 1 || 10#$TRIGGER_REFERENCE_BX_SLOT > 3564 )); then
-				echo "ERROR: TRIGGER_REFERENCE_BX_SLOT must be an integer from 1 through 3564 with TRIGGER_COLLIDING_BX_MASK" >&2
-				exit 1
-			fi
+			case "$TRIGGER_REFERENCE_SLOT_MODE" in
+				fixed)
+					if [[ ! "$TRIGGER_REFERENCE_BX_SLOT" =~ ^[0-9]+$ ]] || (( 10#$TRIGGER_REFERENCE_BX_SLOT < 1 || 10#$TRIGGER_REFERENCE_BX_SLOT > 3564 )); then
+						echo "ERROR: fixed reference-slot mode requires TRIGGER_REFERENCE_BX_SLOT in 1..3564" >&2
+						exit 1
+					fi
+					;;
+				uniform-filled|uniform-colliding)
+					[[ -z "$TRIGGER_REFERENCE_BX_SLOT" ]] || {
+						echo "ERROR: $TRIGGER_REFERENCE_SLOT_MODE reference-slot mode requires an empty TRIGGER_REFERENCE_BX_SLOT" >&2; exit 1;
+					}
+					;;
+				*) echo "ERROR: TRIGGER_REFERENCE_SLOT_MODE must be fixed, uniform-filled, or uniform-colliding" >&2; exit 1 ;;
+			esac
 			if [[ "$TRIGGER_SHIFT_BEAM" != 1 && "$TRIGGER_SHIFT_BEAM" != 2 ]]; then
 				echo "ERROR: TRIGGER_SHIFT_BEAM must be 1 or 2 with TRIGGER_COLLIDING_BX_MASK" >&2
 				exit 1
@@ -153,10 +200,13 @@ case "$TRIGGER_TIMELINE_MODE" in
 			fi
 			TRIGGER_TIMELINE_ARGS+=(
 				--colliding-bx-mask "$TRIGGER_COLLIDING_BX_MASK"
-				--reference-bx-slot "$TRIGGER_REFERENCE_BX_SLOT"
+				--reference-slot-mode "$TRIGGER_REFERENCE_SLOT_MODE"
 				--shift-beam "$TRIGGER_SHIFT_BEAM"
 				--run-fill-map "$TRIGGER_RUN_FILL_MAP"
 			)
+			if [[ "$TRIGGER_REFERENCE_SLOT_MODE" == fixed ]]; then
+				TRIGGER_TIMELINE_ARGS+=(--reference-bx-slot "$TRIGGER_REFERENCE_BX_SLOT")
+			fi
 		elif [[ -n "$TRIGGER_COLLIDING_BX_FILE" ]]; then
 			if [[ "$TRIGGER_COLLIDING_BX_FILE" != /* || ! -s "$TRIGGER_COLLIDING_BX_FILE" ]]; then
 				echo "ERROR: TRIGGER_COLLIDING_BX_FILE must be an absolute, non-empty file when set" >&2
@@ -207,6 +257,33 @@ ensure_trigger_timeline() {
 		echo "ERROR: trigger timeline generator did not produce a non-empty output" >&2
 		return 1
 	}
+}
+
+ensure_piggyback_decisions() {
+	[[ "$TRIGGER_SCENARIO" == piggyback_central ]] || return 0
+	local timeline_input="$TRIGGER_TIMELINE_DIR/trigger_timeline_part${PART}.jsonl"
+	local decision_output="$PIGGYBACK_DECISION_DIR/piggyback_decisions_part${PART}.json"
+	if [[ "$FORCE" -eq 1 && -e "$decision_output" ]]; then
+		echo "Force rerun requested; removing existing piggyback decisions: $decision_output"
+		rm -f -- "$decision_output"
+	fi
+	if [[ -s "$decision_output" ]]; then
+		echo "Piggyback decision report already exists: $decision_output"
+		return 0
+	fi
+	mkdir -p "$PIGGYBACK_DECISION_DIR"
+	echo "Binding ordinary central-trigger decisions to Step-2 events: $decision_output"
+	python3 "$WORKFLOW_ROOT/scripts/summarize_piggyback_readout.py" \
+		"$timeline_input" --edm-input "$OUTPUT" --output "$decision_output"
+	[[ -s "$decision_output" ]] || {
+		echo "ERROR: piggyback decision summarizer did not produce a non-empty output" >&2
+		return 1
+	}
+}
+
+ensure_trigger_outputs() {
+	ensure_trigger_timeline
+	ensure_piggyback_decisions
 }
 READOUT_DIAGNOSTICS_CUSTOMISE=""
 case "${SHIFT_READOUT_DIAGNOSTICS:-0}" in
@@ -275,7 +352,7 @@ if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
 fi
 if output_is_valid "$OUTPUT"; then
 	echo "Step 2 output already exists and is valid: $OUTPUT"
-	ensure_trigger_timeline
+	ensure_trigger_outputs
 	exit 0
 fi
 if [[ -e "$OUTPUT" ]]; then
@@ -331,4 +408,4 @@ if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
 	echo "WARNING: could not archive Step 2 log at $LOG_SNAPSHOT" >&2
 fi
 
-ensure_trigger_timeline
+ensure_trigger_outputs

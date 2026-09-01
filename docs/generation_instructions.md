@@ -35,16 +35,19 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SHIFT_SIMHIT_REFERENCE_INPUT` | Absolute shared Step-1 file required by a same-SimHit reference scan. |
 | `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
+| `TRIGGER_SCENARIO` | `piggyback_central` conditions production on an ordinary recorded central collision; `none` disables that contract. |
 | `TRIGGER_TIMELINE_MODE` | `none` or `zero_bias_proxy` for a correlated candidate-trigger sidecar. |
 | `TRIGGER_LIBRARY_JSONL`, `TRIGGER_L1_MENU_JSON` | Validated ZeroBias inputs used by the proxy. |
 | `TRIGGER_TIMELINE_START_BX`, `TRIGGER_TIMELINE_END_BX` | Relative BX interval sampled around every SHIFT event. |
 | `TRIGGER_TIMELINE_SEED` | Trigger sampler seed; fixed seeds are offset by Condor chunk. |
 | `TRIGGER_COLLIDING_BX_FILE` | Legacy relative-BX software fixture; mutually exclusive with the physical mask. |
 | `TRIGGER_COLLIDING_BX_MASK` | Absolute normalized LPC IP5 mask JSON; required for fill-aware timelines. |
-| `TRIGGER_REFERENCE_BX_SLOT`, `TRIGGER_SHIFT_BEAM` | Physical 1..3564 SHIFT reference slot and beam, required with the mask. |
+| `TRIGGER_REFERENCE_SLOT_MODE` | `uniform-colliding` for the conditional central-collision sample, `uniform-filled` for structural studies, or `fixed` for a control. |
+| `TRIGGER_REFERENCE_BX_SLOT`, `TRIGGER_SHIFT_BEAM` | Fixed physical slot, when requested, and the SHIFT beam. |
 | `TRIGGER_RUN_FILL_MAP` | Versioned authoritative trigger-run to fill mapping; required with the physical mask. |
-| `TRIGGER_RULE_MODE` | `none` for the pre-rule control or `run3` for the versioned L1A spacing-rule proxy. |
+| `TRIGGER_RULE_MODE` | `recorded` for the conditional piggyback sample; `none` or synthetic `run3` only for separate controls/rate studies. |
 | `TRIGGER_RULE_HISTORY_START_BX` | First warm-up BX; `run3` requires at least 240 BX before the analysis start. |
+| `PIGGYBACK_FILTER_RECONSTRUCTION`, `PIGGYBACK_FILTER_LEVEL` | Filter Step 3 to the decision report at `raw` or `persisted` level. Production defaults to persisted. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
 
 The supported production layout is deliberately canonical:
@@ -83,7 +86,7 @@ mechanism:
 | --- | --- | --- | --- | --- |
 | timing | `nominal` | `none` | `none` | Clean source-derived timing and configurable Geant4 transport guard. |
 | occupancy | `nominal` | `standard` | `none` | Timing plus central CMS pileup mixed through standard CMSSW mixing. |
-| trigger proxy | `nominal` | `standard` | `zero_bias_proxy` | Adds a correlated candidate-trigger timeline sidecar for every SHIFT event. |
+| central piggyback | `nominal` | `standard` | `zero_bias_proxy` | Conditions on an already-recorded central collision and reconstructs the standard BX-0 readout. |
 
 For example, the first campaign needs only:
 
@@ -110,17 +113,21 @@ On lxplus, the 2023 preset already resolves `PILEUP_INPUT` to the complete
 27,774-file manifest under `$SAMPLE_BASE/pileup_inputs`. Override it only when
 using another site or a deliberately bounded pilot manifest.
 
-For the trigger-proxy campaign, retain the occupancy settings, use another
-name, and add durable files visible on every worker:
+For the conditional central-piggyback campaign, retain the occupancy settings,
+use another name, and add durable files visible on every worker:
 
 ```bash
-CAMPAIGN_NAME="${PROCESS}_trigger_proxy_2023"
+CAMPAIGN_NAME="${PROCESS}_piggyback_central_2023"
+TRIGGER_SCENARIO=piggyback_central
 TRIGGER_TIMELINE_MODE=zero_bias_proxy
-TRIGGER_TIMELINE_START_BX=-24
-TRIGGER_TIMELINE_END_BX=5
+TRIGGER_TIMELINE_START_BX=0
+TRIGGER_TIMELINE_END_BX=0
 TRIGGER_TIMELINE_SEED=24680
-TRIGGER_RULE_MODE=none
-# TRIGGER_COLLIDING_BX_FILE="/absolute/shared/path/colliding_relative_bx.txt"
+TRIGGER_RULE_MODE=recorded
+TRIGGER_REFERENCE_SLOT_MODE=uniform-colliding
+TRIGGER_SHIFT_BEAM=2
+PIGGYBACK_FILTER_RECONSTRUCTION=1
+PIGGYBACK_FILTER_LEVEL=persisted
 ```
 
 The 2023 preset already resolves the validated Run-369943 library and L1 menu
@@ -129,12 +136,20 @@ under `$SAMPLE_BASE/trigger_inputs/2023/run369943`. Explicit
 for another site, run, or year; non-2023 presets intentionally leave them
 unset until a year-matched library is prepared.
 
-The third campaign currently tests trigger-proxy orchestration and preserves
-real L1/HLT correlations. It does **not** yet change detector electronics
-integration windows, decide final L1A after trigger rules, or alter which
-CMSSW event is stored. Its per-chunk JSONL is written under
-`$SAMPLE_DIR/trigger_timelines`; those missing links are the next electronics
-timing implementation step, not something the sidecar silently approximates.
+This campaign is conditional on a central event already accepted in data. It
+does not reapply synthetic rules and it never lets SHIFT activity affect the
+trigger decision. Step 2 retains every counterfactual event for the denominator
+and writes a provenance-rich decision report under
+`$SAMPLE_DIR/piggyback_decisions`. Step 3 filters to the selected recorded
+readouts; unchanged standard BX-0 digitization, RAW packing/unpacking, and
+reconstruction determine which delayed SHIFT hits survive. This measures
+conditional reconstruction performance, not the absolute probability for a
+SHIFT collision to coincide with a recorded central event. The ordinary
+recorded trigger source and simulated pileup occupancy are currently sampled
+independently. Therefore this production does not reproduce event-by-event
+correlations between the central event's trigger class and detector occupancy;
+treat that as an occupancy systematic, or replace the independent mixing with
+a validated data-overlay design before making a data-level absolute claim.
 
 `run_condor.sh` pins the process, campaign/sample paths, event count, collision
 year, timing controls, pileup controls, and trigger controls into the submitted
@@ -342,30 +357,38 @@ The reported `uniform_filled_slot_fraction` is only a structural diagnostic.
 It is explicitly not physics-valid weighting because the normalized LPC mask
 does not contain authoritative per-bunch intensities.
 
-Then identify the filled physical BX slot and beam that produced the SHIFT
-interaction and pass them explicitly:
+For conditional central-piggyback production, sample only IP5-colliding slots.
+The ordinary event is already recorded, so its trigger-rule decision must not
+be synthesized a second time:
 
 ```bash
 ./scripts/sample_zero_bias_trigger_timeline.py \
   /tmp/zero_bias_run369943.jsonl \
   --l1-menu /tmp/zero_bias_l1_menu_run369943.json \
-  --output /tmp/zero_bias_timeline_seed24680.jsonl \
-  --start-bx -24 --end-bx 5 --signal-events 10 --seed 24680 \
+  --output /tmp/piggyback_central_seed24680.jsonl \
+  --start-bx 0 --end-bx 0 --signal-events 10 --seed 24680 \
   --colliding-bx-mask /tmp/fill_9017_ip5_bunch_mask.json \
   --run-fill-map config/run3_trigger_run_fill_map.json \
-  --reference-bx-slot <FILLED_SLOT> --shift-beam <1_OR_2>
+  --reference-slot-mode uniform-colliding --shift-beam 2 \
+  --trigger-rule-mode recorded
 ```
 
 The sampler verifies the normalized LPC provenance, beam occupancy, IP5
 collision subset, file digest, orbit wrapping, and trigger-library run-to-fill
-match, and embeds them in timeline metadata. Do not pair a convenient fill
-with an unrelated trigger run. Omitting the mask
+match, and embeds them in timeline metadata. `recorded` means that the source
+event's real L1A and TCDS history are provenance for an already-made decision;
+the four-rule proxy is not reapplied. Uniform colliding-slot weights remain
+provisional because the LPC mask contains no per-bunch luminosities. A fixed
+slot remains available only as a mechanism control by using
+`--reference-slot-mode fixed --reference-bx-slot SLOT`.
+
+Do not pair a convenient fill with an unrelated trigger run. Omitting the mask
 treats every BX as colliding, while legacy `--colliding-bx-file` accepts only
 relative BX values. Both modes are software fixtures and are rejected by the
 final classifier unless `--allow-all-colliding-fixture` is explicit.
 
-For a rule-enabled validation timeline, retain the same analysis range but add
-a complete causal warm-up:
+For a separate absolute-opportunity/rate study using the synthetic rule engine,
+retain the relevant analysis range and add a complete causal warm-up:
 
 ```bash
 TRIGGER_RULE_MODE=run3
@@ -389,6 +412,19 @@ Run the stages in order from the workflow repository:
 ./run_step3_aod.sh 0 10
 ./run_step4_exonanoAOD.sh 0 10
 ```
+
+Before any large Condor submission, run the non-mutating preflight:
+
+```bash
+./run_condor.sh --check
+```
+
+It validates the conditional piggyback contract, trigger library/menu,
+run-to-fill association, physical mask, reference-slot mode, deterministic
+seed, and reconstruction filter without building, cleaning logs, or contacting
+Condor. A production submission must use a new `CAMPAIGN_NAME`; the default is
+`${PROCESS}_piggybackCentral_2023_v1` so it cannot silently reuse the older
+trigger-proxy outputs.
 
 The first positional argument is the chunk and the second is the number of
 events. A valid existing output is reused. Pass `--force` to recreate only the

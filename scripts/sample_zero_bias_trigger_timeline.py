@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import sys
 
@@ -46,7 +47,13 @@ def parse_args():
     parser.add_argument(
         "--reference-bx-slot",
         type=int,
-        help="physical 1..3564 BX slot of the SHIFT collision",
+        help="physical 1..3564 BX slot; required in fixed reference-slot mode",
+    )
+    parser.add_argument(
+        "--reference-slot-mode",
+        choices=("fixed", "uniform-filled", "uniform-colliding"),
+        default="fixed",
+        help="fixed slot or deterministic uniform sampling over filled SHIFT-beam slots",
     )
     parser.add_argument(
         "--shift-beam",
@@ -62,9 +69,9 @@ def parse_args():
     parser.add_argument("--l1-menu", help="matching bit-to-name JSON for timeline provenance")
     parser.add_argument(
         "--trigger-rule-mode",
-        choices=("none", "run3"),
+        choices=("none", "run3", "recorded"),
         default="none",
-        help="apply the versioned Run-3 L1A spacing rules (default: none)",
+        help="none, synthetic Run-3 rules, or an already-recorded source L1A",
     )
     parser.add_argument(
         "--trigger-rule-history-start-bx",
@@ -161,6 +168,74 @@ def load_ip5_bunch_mask(path, timeline_bxs, reference_bx_slot, shift_beam):
     return relative_colliding, provenance
 
 
+def load_filled_reference_slots(path, shift_beam):
+    """Return validated filled slots for one beam from a normalized LPC mask."""
+    if shift_beam not in (1, 2):
+        raise TriggerLibraryError("--shift-beam must be 1 or 2")
+    with open(path, encoding="utf-8") as source:
+        payload = json.load(source)
+    if (
+        payload.get("schema") != "cms-lpc-ip5-bunch-mask"
+        or payload.get("schema_version") != 1
+        or payload.get("orbit_slots") != 3564
+    ):
+        raise TriggerLibraryError(f"{path} is not a supported LPC IP5 bunch mask")
+    slots = payload.get(f"beam{shift_beam}_filled_bx_slots")
+    if (
+        not isinstance(slots, list)
+        or not slots
+        or any(type(slot) is not int or not 1 <= slot <= 3564 for slot in slots)
+        or len(slots) != len(set(slots))
+    ):
+        raise TriggerLibraryError(
+            f"{path} has invalid beam{shift_beam}_filled_bx_slots"
+        )
+    return sorted(slots)
+
+
+def load_colliding_reference_slots(path):
+    """Return validated IP5 collision slots from a normalized LPC mask."""
+    with open(path, encoding="utf-8") as source:
+        payload = json.load(source)
+    if (
+        payload.get("schema") != "cms-lpc-ip5-bunch-mask"
+        or payload.get("schema_version") != 1
+        or payload.get("orbit_slots") != 3564
+    ):
+        raise TriggerLibraryError(f"{path} is not a supported LPC IP5 bunch mask")
+    slots = payload.get("colliding_ip5_bx_slots")
+    if (
+        not isinstance(slots, list)
+        or not slots
+        or any(type(slot) is not int or not 1 <= slot <= 3564 for slot in slots)
+        or len(slots) != len(set(slots))
+    ):
+        raise TriggerLibraryError(f"{path} has invalid colliding_ip5_bx_slots")
+    return sorted(slots)
+
+
+def select_reference_slots(filled_slots, mode, fixed_slot, signal_events, seed):
+    """Choose one physical SHIFT-beam slot per signal event reproducibly."""
+    if mode == "fixed":
+        if fixed_slot is None:
+            raise TriggerLibraryError(
+                "--reference-bx-slot is required with --reference-slot-mode fixed"
+            )
+        if fixed_slot not in filled_slots:
+            raise TriggerLibraryError(
+                f"reference BX slot {fixed_slot} is not filled in the SHIFT beam"
+            )
+        return [fixed_slot] * signal_events
+    if mode in ("uniform-filled", "uniform-colliding"):
+        if fixed_slot is not None:
+            raise TriggerLibraryError(
+                f"--reference-bx-slot must be omitted with --reference-slot-mode {mode}"
+            )
+        generator = random.Random(seed ^ 0x5348494654)
+        return [generator.choice(filled_slots) for _ in range(signal_events)]
+    raise TriggerLibraryError(f"unsupported reference-slot mode {mode!r}")
+
+
 def validate_run_fill_map(path, trigger_runs, fill_number):
     with open(path, "rb") as source:
         payload_bytes = source.read()
@@ -210,6 +285,7 @@ def main():
         return 2
     if not args.colliding_bx_mask and (
         args.reference_bx_slot is not None
+        or args.reference_slot_mode != "fixed"
         or args.shift_beam is not None
         or args.run_fill_map is not None
     ):
@@ -234,6 +310,14 @@ def main():
                 file=sys.stderr,
             )
             return 2
+    if args.trigger_rule_mode == "recorded" and (
+        args.start_bx != 0 or args.end_bx != 0 or not args.colliding_bx_mask
+    ):
+        print(
+            "ERROR: recorded trigger mode requires a physical fill mask and analysis BX 0 only",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         library = load_trigger_library(args.inputs)
@@ -275,12 +359,59 @@ def main():
                 raise TriggerLibraryError(
                     "--run-fill-map is required with --colliding-bx-mask"
                 )
-            colliding_bxs, bunch_mask_metadata = load_ip5_bunch_mask(
-                args.colliding_bx_mask, timeline_bxs,
-                args.reference_bx_slot, args.shift_beam,
+            filled_reference_slots = (
+                load_colliding_reference_slots(args.colliding_bx_mask)
+                if args.reference_slot_mode == "uniform-colliding"
+                else load_filled_reference_slots(args.colliding_bx_mask, args.shift_beam)
             )
+            reference_slots = select_reference_slots(
+                filled_reference_slots,
+                args.reference_slot_mode,
+                args.reference_bx_slot,
+                args.signal_events,
+                args.seed,
+            )
+            colliding_bxs_by_event = []
+            for reference_slot in reference_slots:
+                event_colliding_bxs, event_mask_metadata = load_ip5_bunch_mask(
+                    args.colliding_bx_mask,
+                    timeline_bxs,
+                    reference_slot,
+                    args.shift_beam,
+                )
+                colliding_bxs_by_event.append(event_colliding_bxs)
+                if bunch_mask_metadata is None:
+                    bunch_mask_metadata = event_mask_metadata
+            bunch_mask_metadata["reference_bx_slot"] = (
+                args.reference_bx_slot if args.reference_slot_mode == "fixed" else None
+            )
+            bunch_mask_metadata["reference_slot_sampling"] = {
+                "mode": args.reference_slot_mode,
+                "candidate_filled_slots": len(filled_reference_slots),
+                "weighting_status": (
+                    "fixed_control"
+                    if args.reference_slot_mode == "fixed"
+                    else (
+                        "uniform_colliding_slots_provisional"
+                        if args.reference_slot_mode == "uniform-colliding"
+                        else "uniform_filled_slots_provisional"
+                    )
+                ),
+                "physics_valid": False,
+                "limitation": (
+                    "authoritative per-bunch intensity weights are not available"
+                ),
+            }
+            if args.trigger_rule_mode == "recorded" and any(
+                0 not in values for values in colliding_bxs_by_event
+            ):
+                raise TriggerLibraryError(
+                    "recorded central-L1A mode requires every selected reference slot to collide at IP5"
+                )
         else:
             colliding_bxs = load_colliding_bxs(args.colliding_bx_file, timeline_bxs)
+            colliding_bxs_by_event = [colliding_bxs] * args.signal_events
+            reference_slots = [None] * args.signal_events
         trigger_runs = sorted({int(loaded.record["run"]) for loaded in group_events})
         run_fill_validation = (
             validate_run_fill_map(
@@ -298,7 +429,7 @@ def main():
         sampled = iter(
             sample_loaded_events(
                 group_events,
-                len(colliding_bxs) * args.signal_events,
+                sum(len(values) for values in colliding_bxs_by_event),
                 args.seed,
                 args.without_replacement,
             )
@@ -333,12 +464,15 @@ def main():
                     "sampling": (
                         "without_replacement" if args.without_replacement else "with_replacement"
                     ),
-                    "deadtime_applied": args.trigger_rule_mode == "run3",
+                    "deadtime_applied": args.trigger_rule_mode in ("run3", "recorded"),
                     "trigger_rules_applied": args.trigger_rule_mode == "run3",
+                    "trigger_rules_embodied_by_recorded_l1a": args.trigger_rule_mode == "recorded",
                     "trigger_rule_mode": args.trigger_rule_mode,
                     "trigger_rule_history_start_bx": args.trigger_rule_history_start_bx,
                     "trigger_rules": (
-                        ruleset_metadata() if args.trigger_rule_mode == "run3" else None
+                        ruleset_metadata()
+                        if args.trigger_rule_mode in ("run3", "recorded")
+                        else None
                     ),
                     "l1_menu": (
                         {
@@ -362,6 +496,8 @@ def main():
 
             sample_index = 0
             for signal_event_index in range(args.signal_events):
+                colliding_bxs = colliding_bxs_by_event[signal_event_index]
+                reference_bx_slot = reference_slots[signal_event_index]
                 rule_engine = (
                     TriggerRuleEngine() if args.trigger_rule_mode == "run3" else None
                 )
@@ -369,6 +505,7 @@ def main():
                     record = {
                         "record_type": "timeline_bx",
                         "signal_event_index": signal_event_index,
+                        "reference_bx_slot": reference_bx_slot,
                         "timeline_bx": timeline_bx,
                         "analysis_window": args.start_bx <= timeline_bx <= args.end_bx,
                         "colliding": timeline_bx in colliding_bxs,
@@ -408,6 +545,15 @@ def main():
                         rule_decision = rule_engine.evaluate(timeline_bx, candidate_l1a)
                         record["trigger_rule_decision"] = rule_decision
                         record["readout_after_trigger_rules"] = rule_decision["accepted"]
+                    elif args.trigger_rule_mode == "recorded" and record["candidate_decisions"]:
+                        record["trigger_rule_decision"] = {
+                            "candidate": True,
+                            "accepted": True,
+                            "reason": "recorded_source_event_l1a",
+                            "rules_reapplied": False,
+                            "recorded_tcds": event.get("tcds"),
+                        }
+                        record["readout_after_trigger_rules"] = True
                     output.write(json.dumps(record, sort_keys=True) + "\n")
         os.replace(temporary_path, output_path)
     except OSError as error:
@@ -420,7 +566,7 @@ def main():
 
     print(
         f"wrote {args.signal_events} timelines with {len(timeline_bxs)} BX records each "
-        f"({len(colliding_bxs)} colliding per timeline) "
+        f"({sum(len(values) for values in colliding_bxs_by_event)} total colliding samples) "
         f"from group {key.group_id} to {args.output}"
     )
     return 0
