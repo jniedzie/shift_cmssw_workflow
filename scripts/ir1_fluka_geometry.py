@@ -207,14 +207,283 @@ def _install_lattice_aabb_workaround(converter_module):
     def transformed_cell_region_aabb(lattice):
         transform = lattice.getTransform()
         cell_region = deepcopy(lattice.cellRegion)
-        rotation = transform.leftMultiplyRotation(cell_region.rotation())
-        centre = list(transform.leftMultiplyVector(cell_region.centre()))
+        matrix = transform.to4DMatrix()
         lower, upper = _getBoundingBox(
-            cell_region.mesh(), rotation, centre, cell_region.name
+            cell_region.mesh(), matrix[:3, :3], list(matrix[:3, 3]), cell_region.name
         )
         return fluka.AABB(lower, upper)
 
     converter_module._getTransformedCellRegionAABB = transformed_cell_region_aabb
+    return original
+
+
+def _aabb_contains(outer, inner, tolerance_mm=0.0):
+    return all(
+        outer.lower[axis] - tolerance_mm <= inner.lower[axis]
+        and inner.upper[axis] <= outer.upper[axis] + tolerance_mm
+        for axis in range(3)
+    )
+
+
+def install_lattice_placement_workaround(
+    converter_module,
+    source_bounds_mm,
+    report,
+    containment_tolerance_mm=0.01,
+):
+    """Instantiate FLUKA parking prototypes at their physical lattice cells.
+
+    LineBuilder stores reusable element prototypes inside the explicit PARKr
+    reservoir.  A LATTICE transform maps a physical cell into that reservoir.
+    pyg4ometry 1.4.4 both double-transforms the cell AABB and uses a
+    surface-only intersection predicate, so contained prototypes are missed.
+    This compatibility implementation uses source-audited AABBs only as a
+    conservative preselection, intersects every candidate with the exact cell
+    solid, and places each result with the exact inverse lattice transform.
+    Thus an AABB false positive becomes an empty Boolean rather than material.
+    """
+
+    import numpy as np
+    from pyg4ometry import config, fluka, geant4, transformation
+
+    if containment_tolerance_mm <= 0.0:
+        raise ValueError("containment_tolerance_mm must be positive")
+    try:
+        source_bounds = {
+            name: fluka.AABB(bounds[0], bounds[1])
+            for name, bounds in source_bounds_mm.items()
+        }
+        parking_bounds = source_bounds["PARKr"]
+    except (KeyError, TypeError, ValueError) as error:
+        raise ProxyModelError("source bounds must contain a valid PARKr entry") from error
+
+    parking_regions = {
+        name
+        for name, bounds in source_bounds.items()
+        if name != "PARKr"
+        and _aabb_contains(parking_bounds, bounds, containment_tolerance_mm)
+    }
+    if not parking_regions:
+        raise ProxyModelError("source bounds identify no PARKr prototype regions")
+
+    original = converter_module._convertLatticeCells
+
+    def affine(rotation, translation):
+        matrix = np.identity(4)
+        matrix[:3, :3] = rotation
+        matrix[:3, 3] = translation
+        return matrix
+
+    def placement_affine(placement):
+        active_rotation = transformation.reverse(placement.rotation.eval())
+        return affine(
+            transformation.tbxyz2matrix(active_rotation),
+            placement.position.eval(),
+        )
+
+    def lattice_cell_conversion(
+        geant4_registry,
+        fluka_registry,
+        world_logical_volume,
+        region_zone_aabbs,
+        region_names_to_lvs,
+    ):
+        original_region_placements = {
+            placement.name[:-3]: placement
+            for placement in world_logical_volume.daughterVolumes
+            if placement.name.endswith("_pv")
+            and placement.name[:-3] in region_names_to_lvs
+        }
+        missing_placements = sorted(
+            set(region_names_to_lvs) - set(original_region_placements)
+        )
+        if missing_placements:
+            raise ProxyModelError(
+                "converted regions have no original physical placements: "
+                + ", ".join(missing_placements)
+            )
+
+        source_bound_clip_count = 0
+        for region_name, region_lv in region_names_to_lvs.items():
+            if region_name not in source_bounds:
+                continue
+            bounds = source_bounds[region_name]
+            dimensions = [
+                float(bounds.upper[axis] - bounds.lower[axis])
+                + 2.0 * containment_tolerance_mm
+                for axis in range(3)
+            ]
+            centre = [
+                0.5 * float(bounds.lower[axis] + bounds.upper[axis])
+                for axis in range(3)
+            ]
+            bounds_solid = geant4.solid.Box(
+                f"{region_name}_source_bounds_solid",
+                *dimensions,
+                geant4_registry,
+                "mm",
+            )
+            region_to_model = placement_affine(
+                original_region_placements[region_name]
+            )
+            bounds_to_model = affine(np.identity(3), centre)
+            bounds_to_region_local = np.linalg.inv(region_to_model) @ bounds_to_model
+            region_lv.solid = geant4.solid.Intersection(
+                f"{region_name}_source_bounded_solid",
+                region_lv.solid,
+                bounds_solid,
+                [
+                    transformation.matrix2tbxyz(
+                        bounds_to_region_local[:3, :3]
+                    ),
+                    list(bounds_to_region_local[:3, 3]),
+                ],
+                geant4_registry,
+            )
+            source_bound_clip_count += 1
+
+        placement_details = []
+        used_prototypes = set()
+        clipped_count = 0
+        for lattice_name, lattice in fluka_registry.latticeDict.items():
+            transformed_cell_bounds = converter_module._getTransformedCellRegionAABB(
+                lattice
+            )
+            physical_cell_bounds = fluka.AABB.fromMesh(lattice.cellRegion.mesh())
+            candidates = sorted(
+                name
+                for name in parking_regions
+                if name in region_names_to_lvs
+                and converter_module._areAABBsOverlapping(
+                    transformed_cell_bounds, source_bounds[name]
+                )
+            )
+            if not candidates:
+                raise ProxyModelError(
+                    f"lattice {lattice_name} has no source-audited parking prototypes"
+                )
+
+            # Lattice-cell regions are intentionally omitted from the normal
+            # Geant4 placement pass.  Convert a uniquely named, unplaced copy
+            # here so it can be used as the exact clipping operand without
+            # adding the cell material to the world.
+            unique_cell = lattice.cellRegion.makeUnique(
+                f"__{lattice_name}_lattice_cell", fluka.FlukaRegistry()
+            )
+            unique_cell.name = f"{lattice_name}_lattice_cell"
+            cell_aabb_map = {
+                body.name: physical_cell_bounds for body in unique_cell.bodies()
+            }
+            cell_solid = unique_cell.geant4Solid(
+                geant4_registry, aabb=cell_aabb_map
+            )
+            cell_rotation = transformation.tbxyz2matrix(unique_cell.tbxyz())
+            cell_centre = unique_cell.centre(aabb=cell_aabb_map)
+            cell_to_model = affine(cell_rotation, cell_centre)
+            physical_to_prototype = lattice.getTransform().to4DMatrix()
+            cell_to_prototype = physical_to_prototype @ cell_to_model
+
+            lattice_records = []
+            for prototype_name in candidates:
+                prototype_lv = region_names_to_lvs[prototype_name]
+                prototype_to_model = placement_affine(
+                    original_region_placements[prototype_name]
+                )
+                cell_to_prototype_local = (
+                    np.linalg.inv(prototype_to_model) @ cell_to_prototype
+                )
+                protrusion_mm = max(
+                    max(
+                        transformed_cell_bounds.lower[axis]
+                        - source_bounds[prototype_name].lower[axis],
+                        source_bounds[prototype_name].upper[axis]
+                        - transformed_cell_bounds.upper[axis],
+                        0.0,
+                    )
+                    for axis in range(3)
+                )
+                clipped_solid = geant4.solid.Intersection(
+                    f"{lattice_name}__{prototype_name}_lattice_clip_solid",
+                    prototype_lv.solid,
+                    cell_solid,
+                    [
+                        transformation.matrix2tbxyz(
+                            cell_to_prototype_local[:3, :3]
+                        ),
+                        list(cell_to_prototype_local[:3, 3]),
+                    ],
+                    geant4_registry,
+                )
+                original_do_meshing = config.doMeshing
+                config.doMeshing = False
+                try:
+                    placed_lv = geant4.LogicalVolume(
+                        clipped_solid,
+                        prototype_lv.material,
+                        f"{lattice_name}__{prototype_name}_lattice_clip_lv",
+                        geant4_registry,
+                    )
+                finally:
+                    config.doMeshing = original_do_meshing
+                clipped_count += 1
+
+                prototype_to_physical = (
+                    np.linalg.inv(physical_to_prototype) @ prototype_to_model
+                )
+                active_rotation = transformation.matrix2tbxyz(
+                    prototype_to_physical[:3, :3]
+                )
+                geant4.PhysicalVolume(
+                    list(transformation.reverse(active_rotation)),
+                    list(prototype_to_physical[:3, 3]),
+                    placed_lv,
+                    f"{lattice_name}__{prototype_name}_lattice_pv",
+                    world_logical_volume,
+                    geant4_registry,
+                )
+                used_prototypes.add(prototype_name)
+                lattice_records.append(
+                    {
+                        "prototype": prototype_name,
+                        "clipped_to_cell": True,
+                        "source_aabb_protrusion_mm": float(protrusion_mm),
+                    }
+                )
+            placement_details.append(
+                {
+                    "lattice": lattice_name,
+                    "prototype_count": len(lattice_records),
+                    "physical_cell_bounds_mm": [
+                        [float(value) for value in physical_cell_bounds.lower],
+                        [float(value) for value in physical_cell_bounds.upper],
+                    ],
+                    "prototype_cell_bounds_mm": [
+                        [float(value) for value in transformed_cell_bounds.lower],
+                        [float(value) for value in transformed_cell_bounds.upper],
+                    ],
+                    "prototypes": lattice_records,
+                }
+            )
+
+        report.update(
+            {
+                "parking_region": "PARKr",
+                "source_bound_clip_count": source_bound_clip_count,
+                "source_bound_clip_padding_mm": containment_tolerance_mm,
+                "parking_prototype_count": len(parking_regions),
+                "parking_prototypes": sorted(parking_regions),
+                "lattice_count": len(placement_details),
+                "lattice_placement_count": sum(
+                    item["prototype_count"] for item in placement_details
+                ),
+                "clipped_lattice_placement_count": clipped_count,
+                "used_parking_prototype_count": len(used_prototypes),
+                "unused_parking_prototypes": sorted(parking_regions - used_prototypes),
+                "lattices": placement_details,
+            }
+        )
+
+    converter_module._convertLatticeCells = lattice_cell_conversion
     return original
 
 
@@ -352,7 +621,9 @@ def audit_gdml_material_references(gdml_path):
     undefined = sorted(referenced - defined)
     return {
         "defined_material_count": len(defined),
+        "defined_materials": sorted(defined),
         "referenced_material_count": len(referenced),
+        "referenced_materials": sorted(referenced),
         "undefined_material_count": len(undefined),
         "undefined_materials": undefined,
     }

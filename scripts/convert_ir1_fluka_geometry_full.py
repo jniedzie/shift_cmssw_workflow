@@ -6,6 +6,7 @@ import argparse
 from contextlib import contextmanager
 from copy import deepcopy
 from functools import reduce
+import hashlib
 import importlib
 from importlib import metadata
 import json
@@ -13,7 +14,12 @@ from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
 
-from ir1_fluka_geometry import ProxyModelError, convert_geometry
+from ir1_fluka_geometry import (
+    ProxyModelError,
+    audit_gdml_material_references,
+    convert_geometry,
+    install_lattice_placement_workaround,
+)
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
@@ -80,7 +86,7 @@ def restore_transformed_infinite_cylinder_centres(originals):
 
 
 @contextmanager
-def full_conversion_guards(world_dimensions_mm):
+def full_conversion_guards(world_dimensions_mm, lattice_state=None):
     converter_module = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
     logical_volume_module = importlib.import_module("pyg4ometry.geant4.LogicalVolume")
     original_body_aabb, skipped = install_null_body_aabb_workaround(converter_module)
@@ -89,6 +95,14 @@ def full_conversion_guards(world_dimensions_mm):
     )
     original_world_dimensions = converter_module.WORLD_DIMENSIONS
     original_clip_solid = logical_volume_module.LogicalVolume.clipSolid
+    original_lattice_conversion = None
+    if lattice_state is not None:
+        original_lattice_conversion = install_lattice_placement_workaround(
+            converter_module,
+            lattice_state["source_bounds_mm"],
+            lattice_state["report"],
+            lattice_state["containment_tolerance_mm"],
+        )
     converter_module.WORLD_DIMENSIONS = list(world_dimensions_mm)
     logical_volume_module.LogicalVolume.clipSolid = lambda self, lengthSafety=1e-6: None
     try:
@@ -98,6 +112,8 @@ def full_conversion_guards(world_dimensions_mm):
         logical_volume_module.LogicalVolume.clipSolid = original_clip_solid
         converter_module.WORLD_DIMENSIONS = original_world_dimensions
         converter_module._makeBodyMinimumAABBMap = original_body_aabb
+        if original_lattice_conversion is not None:
+            converter_module._convertLatticeCells = original_lattice_conversion
 
 
 def count_multi_unions(gdml_path):
@@ -221,6 +237,173 @@ def write_json_atomic(path, payload):
     temporary.replace(path)
 
 
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_source_bounds_audit(path):
+    path = Path(path)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProxyModelError(f"cannot read source-bounds audit {path}: {error}") from error
+    if payload.get("schema") != "shift-ir1-proxy-bounds-audit" or not payload.get(
+        "passed"
+    ):
+        raise ProxyModelError("bounded conversion requires a passing IR1 bounds audit")
+    regions = payload.get("regions")
+    if not isinstance(regions, dict) or "PARKr" not in regions:
+        raise ProxyModelError("bounds audit has no PARKr source region")
+    try:
+        source_bounds = {
+            name: item["source_bounds_mm"] for name, item in regions.items()
+        }
+    except (KeyError, TypeError) as error:
+        raise ProxyModelError("bounds audit has malformed source-region bounds") from error
+    return payload, source_bounds
+
+
+def _bounds_contain(outer, inner, tolerance_mm=0.01):
+    return all(
+        outer[0][axis] - tolerance_mm <= inner[0][axis]
+        and inner[1][axis] <= outer[1][axis] + tolerance_mm
+        for axis in range(3)
+    )
+
+
+def bounded_model_envelope(source_bounds_mm, lattice_report, padding_mm):
+    if padding_mm <= 0.0:
+        raise ProxyModelError("bounded world padding must be positive")
+    parking = source_bounds_mm["PARKr"]
+    parking_regions = {
+        name
+        for name, bounds in source_bounds_mm.items()
+        if name != "PARKr" and _bounds_contain(parking, bounds)
+    }
+    retained_bounds = [
+        bounds
+        for name, bounds in source_bounds_mm.items()
+        if name != "PARKr" and name not in parking_regions
+    ]
+    retained_bounds.extend(
+        item["physical_cell_bounds_mm"] for item in lattice_report["lattices"]
+    )
+    if not retained_bounds:
+        raise ProxyModelError("bounded conversion has no physical model bounds")
+    lower = [min(bounds[0][axis] for bounds in retained_bounds) for axis in range(3)]
+    upper = [max(bounds[1][axis] for bounds in retained_bounds) for axis in range(3)]
+    centre = [(low + high) / 2.0 for low, high in zip(lower, upper)]
+    dimensions = [
+        high - low + 2.0 * padding_mm for low, high in zip(lower, upper)
+    ]
+    return {
+        "model_bounds_mm": [lower, upper],
+        "artifact_origin_in_model_mm": centre,
+        "world_dimensions_mm": dimensions,
+        "world_padding_mm": padding_mm,
+        "parking_region_count": len(parking_regions) + 1,
+        "parking_regions": sorted(parking_regions | {"PARKr"}),
+    }
+
+
+def finalize_bounded_gdml(input_path, output_path, envelope):
+    tree = ET.parse(input_path)
+    root = tree.getroot()
+    solids = root.find("solids")
+    structure = root.find("structure")
+    setup = root.find("setup")
+    if solids is None or structure is None or setup is None:
+        raise ProxyModelError("GDML requires solids, structure, and setup sections")
+    world_ref = setup.find("world")
+    if world_ref is None or set(world_ref.attrib) != {"ref"}:
+        raise ProxyModelError("GDML setup has no unambiguous world reference")
+    volumes = {
+        volume.attrib["name"]: volume
+        for volume in structure.findall("volume")
+        if "name" in volume.attrib
+    }
+    try:
+        world = volumes[world_ref.attrib["ref"]]
+        world_solid_ref = world.find("solidref").attrib["ref"]
+    except (KeyError, AttributeError) as error:
+        raise ProxyModelError("GDML world volume is malformed") from error
+    world_solid = next(
+        (solid for solid in solids if solid.attrib.get("name") == world_solid_ref),
+        None,
+    )
+    if world_solid is None or world_solid.tag != "box":
+        raise ProxyModelError("bounded conversion requires a box world solid")
+
+    removed_names = set(envelope["parking_regions"])
+    removed = []
+    for physical in list(world.findall("physvol")):
+        name = physical.attrib.get("name", "")
+        if name.endswith("_pv") and name[:-3] in removed_names:
+            world.remove(physical)
+            removed.append(name[:-3])
+    if set(removed) != removed_names:
+        missing = sorted(removed_names - set(removed))
+        raise ProxyModelError(
+            "bounded conversion did not find every parked placement: "
+            + ", ".join(missing)
+        )
+
+    centre = envelope["artifact_origin_in_model_mm"]
+    for physical in world.findall("physvol"):
+        if physical.find("positionref") is not None:
+            raise ProxyModelError("bounded conversion does not support positionref placements")
+        position = physical.find("position")
+        if position is None:
+            position = ET.SubElement(
+                physical,
+                "position",
+                {
+                    "name": physical.attrib["name"] + "_bounded_pos",
+                    "x": "0",
+                    "y": "0",
+                    "z": "0",
+                    "unit": "mm",
+                },
+            )
+        unit = position.attrib.get("unit", "mm")
+        if unit != "mm":
+            raise ProxyModelError(f"unsupported GDML placement unit {unit}")
+        for axis, offset in zip(("x", "y", "z"), centre):
+            position.attrib[axis] = repr(float(position.attrib.get(axis, "0")) - offset)
+
+    for axis, dimension in zip(("x", "y", "z"), envelope["world_dimensions_mm"]):
+        world_solid.attrib[axis] = repr(float(dimension))
+    world_solid.attrib["lunit"] = "mm"
+
+    placement_material_counts = {}
+    placed_logical_volumes = set()
+    for physical in world.findall("physvol"):
+        volume_ref = physical.find("volumeref")
+        if volume_ref is None:
+            raise ProxyModelError("world placement has no volumeref")
+        volume_name = volume_ref.attrib["ref"]
+        placed_logical_volumes.add(volume_name)
+        material_ref = volumes[volume_name].find("materialref")
+        if material_ref is None:
+            raise ProxyModelError(f"placed volume {volume_name} has no material")
+        material = material_ref.attrib["ref"]
+        placement_material_counts[material] = placement_material_counts.get(material, 0) + 1
+
+    output_path = Path(output_path)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    tree.write(temporary, encoding="utf-8", xml_declaration=True)
+    temporary.replace(output_path)
+    return {
+        **envelope,
+        "removed_parked_placement_count": len(removed),
+        "placed_volume_count": len(world.findall("physvol")),
+        "placed_logical_volume_count": len(placed_logical_volumes),
+        "placed_material_count": len(placement_material_counts),
+        "placed_material_volume_counts": dict(sorted(placement_material_counts.items())),
+        "model_to_artifact_translation_mm": [-value for value in centre],
+    }
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -246,6 +429,20 @@ def parse_args():
             "first-operand transform extension"
         ),
     )
+    parser.add_argument(
+        "--bounded-installable",
+        action="store_true",
+        help=(
+            "instantiate FLUKA lattices, remove the LineBuilder parking reservoir, "
+            "and recenter the physical assembly in a tight external world"
+        ),
+    )
+    parser.add_argument(
+        "--source-bounds-audit",
+        type=Path,
+        help="Passing diagnostic bounds audit used for lossless lattice classification",
+    )
+    parser.add_argument("--bounded-world-padding-mm", type=float, default=10.0)
     return parser.parse_args()
 
 
@@ -263,10 +460,32 @@ def main():
             file=sys.stderr,
         )
         return 2
+    if args.bounded_installable != (args.source_bounds_audit is not None):
+        print(
+            "error: --bounded-installable and --source-bounds-audit must be used together",
+            file=sys.stderr,
+        )
+        return 2
+    if args.bounded_installable and args.bounded_world_padding_mm <= 0.0:
+        print("error: --bounded-world-padding-mm must be positive", file=sys.stderr)
+        return 2
     try:
         dimensions = parse_world_dimensions(args.world_dimensions_mm)
         args.output_dir.mkdir(parents=True, exist_ok=True)
-        with full_conversion_guards(dimensions) as skipped:
+        source_bounds_audit = None
+        lattice_state = None
+        if args.bounded_installable:
+            source_bounds_audit, source_bounds_mm = load_source_bounds_audit(
+                args.source_bounds_audit
+            )
+            lattice_state = {
+                "source_bounds_mm": source_bounds_mm,
+                "containment_tolerance_mm": source_bounds_audit[
+                    "containment_tolerance_mm"
+                ],
+                "report": {},
+            }
+        with full_conversion_guards(dimensions, lattice_state) as skipped:
             report = convert_geometry(
                 args.model_dir,
                 args.output_dir,
@@ -275,10 +494,40 @@ def main():
                 region_timeout_seconds=args.region_timeout_seconds,
             )
         gdml_path = args.output_dir / report["geometry"]["gdml"]
+        bounded_report = None
+        if args.bounded_installable:
+            if source_bounds_audit["source_sha256"] != report["source_sha256"]:
+                raise ProxyModelError(
+                    "source-bounds audit does not match the frozen model source checksums"
+                )
+            envelope = bounded_model_envelope(
+                lattice_state["source_bounds_mm"],
+                lattice_state["report"],
+                args.bounded_world_padding_mm,
+            )
+            bounded_path = args.output_dir / "lhc_ir1_atlas_proxy_bounded.gdml"
+            bounded_report = finalize_bounded_gdml(gdml_path, bounded_path, envelope)
+            gdml_path = bounded_path
+            report["geometry"]["gdml"] = bounded_path.name
+            report["geometry"]["lattice_placement"] = lattice_state["report"]
+            report["geometry"]["bounded_artifact"] = bounded_report
+            material_audit = audit_gdml_material_references(gdml_path)
+            if material_audit["undefined_material_count"]:
+                raise ProxyModelError(
+                    "bounded GDML contains undefined material references: "
+                    + ", ".join(material_audit["undefined_materials"])
+                )
+            report["geometry"]["material_reference_audit"] = material_audit
         raw_multi_union_count = count_multi_unions(gdml_path)
         root_lowering = None
         if args.root_compatible_binary_unions:
             root_lowering = lower_multi_unions_for_root(gdml_path)
+        report["geometry"]["gdml_sha256"] = sha256(gdml_path)
+        if bounded_report is not None:
+            bounded_report["gdml_sha256"] = report["geometry"]["gdml_sha256"]
+            bounded_report["source_bounds_audit_sha256"] = sha256(
+                args.source_bounds_audit
+            )
         report.update(
             {
                 "schema_version": 2,
@@ -292,6 +541,7 @@ def main():
                     "null_only_body_count": len(skipped),
                     "world_dimensions_mm": list(dimensions),
                     "world_clipping_disabled": True,
+                    "bounded_installable_requested": args.bounded_installable,
                 },
                 "root_tgdml_import": {
                     "validated": False,
@@ -307,7 +557,7 @@ def main():
                 "cmssw_geometry_contract": {
                     "default_cms_geometry_must_be_preserved": True,
                     "external_extension_only": True,
-                    "bounded_external_volume_produced": False,
+                    "bounded_external_volume_produced": args.bounded_installable,
                     "overlap_with_cms_geometry_validated": False,
                 },
             }
@@ -345,9 +595,9 @@ def main():
         print(f"error: {error}", file=sys.stderr)
         return 1
     print(
-        f"wrote diagnostic {report['geometry']['gdml']} with "
-        f"{report['geometry']['logical_volume_count']} logical volumes; "
-        "it is not a bounded CMSSW geometry extension"
+        f"wrote {'bounded' if args.bounded_installable else 'diagnostic'} "
+        f"{report['geometry']['gdml']} with "
+        f"{report['geometry']['logical_volume_count']} logical volumes"
     )
     return 0
 
