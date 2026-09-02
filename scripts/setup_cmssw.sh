@@ -154,6 +154,16 @@ output_is_valid() {
 	local output="$1"
 	[[ -s "$output" ]] || return 1
 	if command -v edmFileUtil >/dev/null 2>&1; then
+		local validation_input="$output"
+		# In the EL9 CMSSW runtime, ROOT can segfault while opening otherwise
+		# healthy files through the /eos/home-X FUSE alias. Validate the same
+		# file through the canonical EOS user XRootD namespace instead. Local
+		# scratch files and non-EOS paths remain unchanged.
+		if [[ "$output" =~ ^/eos/home-([^/])/([^/]+)(/.*)$ ]]; then
+			validation_input="root://eosuser.cern.ch//eos/user/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}${BASH_REMATCH[3]}"
+		elif [[ "$output" =~ ^/eos/user/.*$ ]]; then
+			validation_input="root://eosuser.cern.ch/$output"
+		fi
 		# A job evicted while ROOT is closing can leave a non-empty file whose
 		# metadata are readable but whose event trees are incomplete.  On EOS,
 		# edmFileUtil can block indefinitely on such a file and prevent the retry
@@ -163,7 +173,7 @@ output_is_valid() {
 			echo "ERROR: OUTPUT_VALIDATION_TIMEOUT_SECONDS must be a positive integer (got '$validation_timeout')" >&2
 			return 1
 		fi
-		timeout "${validation_timeout}s" edmFileUtil "$output" >/dev/null 2>&1
+		timeout "${validation_timeout}s" edmFileUtil "$validation_input" >/dev/null 2>&1
 	fi
 }
 
