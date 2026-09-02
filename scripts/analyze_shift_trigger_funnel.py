@@ -147,28 +147,47 @@ def _product(event, type_name, module, instance, process):
     return handle.product()
 
 
-def _optional_scalar(event, type_name, instance, process):
+def _optional_scalar(event, type_name, module, instance, process=None):
     handle = Handle(type_name)
-    if not event.getByLabel("shiftSimHitTime", instance, process, handle):
+    if process:
+        found = event.getByLabel(module, instance, process, handle)
+    else:
+        found = event.getByLabel(module, instance, handle)
+    if not found:
         return None
     product = handle.product()
     return product if type_name == "std::string" else product[0]
 
 
 def _timing_provenance(event, process):
-    bx_offset = _optional_scalar(event, "int", "bxOffset", process)
-    if bx_offset is None:
-        return None
-    return {
-        "bx_offset": int(bx_offset),
-        "phase_ns": float(_optional_scalar(event, "double", "phaseNs", process)),
-        "applied_shift_ns": float(
-            _optional_scalar(event, "double", "appliedShiftNs", process)
-        ),
-        "model_version": str(
-            _optional_scalar(event, "std::string", "modelVersion", process)
-        ),
-    }
+    for module, timing_kind, product_process in (
+        ("shiftSimHitTime", "post-Geant4 same-SimHit reference", process),
+        ("shiftEventTime", "physical event time before Geant4", None),
+    ):
+        bx_offset = _optional_scalar(
+            event, "int", module, "bxOffset", product_process
+        )
+        if bx_offset is None:
+            continue
+        return {
+            "source_module": module,
+            "timing_kind": timing_kind,
+            "bx_offset": int(bx_offset),
+            "phase_ns": float(
+                _optional_scalar(event, "double", module, "phaseNs", product_process)
+            ),
+            "applied_shift_ns": float(
+                _optional_scalar(
+                    event, "double", module, "appliedShiftNs", product_process
+                )
+            ),
+            "model_version": str(
+                _optional_scalar(
+                    event, "std::string", module, "modelVersion", product_process
+                )
+            ),
+        }
+    return None
 
 
 def _truth_chambers(event, process):
@@ -273,10 +292,15 @@ def main():
             break
         truth = _audit_event(event, args.input)
         timing = _timing_provenance(event, args.input_process)
+        timing_configuration = (
+            {key: value for key, value in timing.items() if key != "applied_shift_ns"}
+            if timing is not None
+            else None
+        )
         if output["simhit_reference_timing"] is None:
-            output["simhit_reference_timing"] = timing
-        elif timing != output["simhit_reference_timing"]:
-            raise RuntimeError("shiftSimHitTime provenance changes between events")
+            output["simhit_reference_timing"] = timing_configuration
+        elif timing_configuration != output["simhit_reference_timing"]:
+            raise RuntimeError("SHIFT timing provenance changes between events")
         chambers = _truth_chambers(event, args.truth_process)
 
         prepack_product = _product(
@@ -303,6 +327,9 @@ def main():
 
         event_result = {
             "run": truth["run"], "lumi": truth["lumi"], "event": truth["event"],
+            "applied_shift_ns": (
+                float(timing["applied_shift_ns"]) if timing is not None else None
+            ),
             "regional_candidate_bx_counts": _bx_counts(event, args.input_process),
             "signal_muons": [],
         }

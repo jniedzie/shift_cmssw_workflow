@@ -92,6 +92,7 @@ process.output = cms.OutputModule(
         "keep PSimHits_g4SimHits_MuonCSCHits_*",
         "keep PSimHits_g4SimHits_MuonRPCHits_*",
         "keep PSimHits_g4SimHits_MuonGEMHits_*",
+        "keep *_shiftEventTime_*_*",
         "keep *_shiftSimHitTime_*_*",
         "keep *_simMuonDTDigis_*_*",
         "keep *_simMuonCSCDigis_*_*",

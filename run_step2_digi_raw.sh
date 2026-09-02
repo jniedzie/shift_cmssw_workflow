@@ -30,6 +30,9 @@ case "$PILEUP_MODE" in
 	none)
 		;;
 	standard|run3_2024)
+		case "$PILEUP_SEQUENTIAL" in 0|1) ;; *)
+			echo "ERROR: PILEUP_SEQUENTIAL must be 0 or 1" >&2; exit 1;;
+		esac
 		if [[ -z "$PILEUP_INPUT" ]]; then
 			echo "ERROR: PILEUP_MODE=$PILEUP_MODE requires PILEUP_INPUT" >&2
 			echo "Use filelist:/absolute/path for Condor, or das:$PILEUP_DATASET for an interactive test." >&2
@@ -60,7 +63,7 @@ case "$PILEUP_MODE" in
 				;;
 		esac
 		PILEUP_ARGS+=(--pileup "$PILEUP_SCENARIO" --pileup_input "$PILEUP_INPUT")
-		PILEUP_CUSTOMISE="; process.RandomNumberGeneratorService.mix.initialSeed = cms.untracked.uint32(${PILEUP_SEED})"
+		PILEUP_CUSTOMISE="; process.RandomNumberGeneratorService.mix.initialSeed = cms.untracked.uint32(${PILEUP_SEED}); process.mix.input.sequential = cms.untracked.bool(${PILEUP_SEQUENTIAL})"
 		;;
 	*)
 		echo "ERROR: PILEUP_MODE must be none or standard (got '$PILEUP_MODE')" >&2
@@ -82,9 +85,23 @@ case "$TRIGGER_SCENARIO" in
 		[[ "$PILEUP_MODE" == standard ]] || {
 			echo "ERROR: piggyback_central production requires PILEUP_MODE=standard" >&2; exit 1;
 		}
-		[[ "$SHIFT_TIMING_MODE" == nominal && "$SHIFT_TIMING_BX_OFFSET" == 0 && "$SHIFT_TIMING_PHASE_NS" =~ ^0+([.]0*)?$ ]] || {
-			echo "ERROR: piggyback_central requires nominal physical timing with BX offset 0 and phase 0" >&2; exit 1;
+		[[ "$SHIFT_TIMING_MODE" == nominal ]] || {
+			echo "ERROR: piggyback_central requires nominal physical SHIFT timing" >&2; exit 1;
 		}
+		[[ "$SHIFT_TIMING_BX_OFFSET" =~ ^-?[0-9]+$ ]] || {
+			echo "ERROR: piggyback_central requires an integer SHIFT_TIMING_BX_OFFSET" >&2; exit 1;
+		}
+		python3 - "$SHIFT_TIMING_PHASE_NS" "$SHIFT_TIMING_BUNCH_SPACING_NS" <<'PY'
+import math
+import sys
+
+phase = float(sys.argv[1])
+spacing = float(sys.argv[2])
+if not math.isfinite(phase) or not math.isfinite(spacing) or spacing <= 0.0:
+    raise SystemExit("ERROR: piggyback timing phase and bunch spacing must be finite, with positive spacing")
+if phase < 0.0 or phase >= spacing:
+    raise SystemExit("ERROR: piggyback timing requires 0 <= SHIFT_TIMING_PHASE_NS < SHIFT_TIMING_BUNCH_SPACING_NS")
+PY
 		[[ -z "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]] || {
 			echo "ERROR: piggyback_central production cannot use same-SimHit reference timing" >&2; exit 1;
 		}
@@ -274,7 +291,10 @@ ensure_piggyback_decisions() {
 	mkdir -p "$PIGGYBACK_DECISION_DIR"
 	echo "Binding ordinary central-trigger decisions to Step-2 events: $decision_output"
 	python3 "$WORKFLOW_ROOT/scripts/summarize_piggyback_readout.py" \
-		"$timeline_input" --edm-input "$OUTPUT" --output "$decision_output"
+		"$timeline_input" --edm-input "$OUTPUT" --output "$decision_output" \
+		--shift-arrival-bx-offset "$SHIFT_TIMING_BX_OFFSET" \
+		--shift-arrival-phase-ns "$SHIFT_TIMING_PHASE_NS" \
+		--bunch-spacing-ns "$SHIFT_TIMING_BUNCH_SPACING_NS"
 	[[ -s "$decision_output" ]] || {
 		echo "ERROR: piggyback decision summarizer did not produce a non-empty output" >&2
 		return 1
@@ -289,7 +309,7 @@ READOUT_DIAGNOSTICS_CUSTOMISE=""
 case "${SHIFT_READOUT_DIAGNOSTICS:-0}" in
 	0|false|False) ;;
 	1|true|True)
-		READOUT_DIAGNOSTICS_CUSTOMISE="; [output.outputCommands.extend(('keep *_simMuonDTDigis_*_*', 'keep *_simMuonCSCDigis_*_*', 'keep *_simMuonGEMDigis_*_*', 'keep *_simDtTriggerPrimitiveDigis_*_*', 'keep *_simCscTriggerPrimitiveDigis_*_*', 'keep *_simMuonGEMPadDigis_*_*', 'keep *_simMuonGEMPadDigiClusters_*_*', 'keep *_simBmtfDigis_*_*', 'keep *_simKBmtfDigis_*_*', 'keep *_simOmtfDigis_*_*', 'keep *_simEmtfDigis_*_*', 'keep *_simEmtfShowers_*_*', 'keep *_simGmtStage2Digis_*_*')) for output in process.outputModules_().values()]"
+		READOUT_DIAGNOSTICS_CUSTOMISE="; [output.outputCommands.extend(('keep *_shiftEventTime_*_*', 'keep *_simMuonDTDigis_*_*', 'keep *_simMuonCSCDigis_*_*', 'keep *_simMuonGEMDigis_*_*', 'keep *_simDtTriggerPrimitiveDigis_*_*', 'keep *_simCscTriggerPrimitiveDigis_*_*', 'keep *_simMuonGEMPadDigis_*_*', 'keep *_simMuonGEMPadDigiClusters_*_*', 'keep *_simBmtfDigis_*_*', 'keep *_simKBmtfDigis_*_*', 'keep *_simOmtfDigis_*_*', 'keep *_simEmtfDigis_*_*', 'keep *_simEmtfShowers_*_*', 'keep *_simGmtStage2Digis_*_*')) for output in process.outputModules_().values()]"
 		;;
 	*) echo "ERROR: SHIFT_READOUT_DIAGNOSTICS must be 0/1 or false/true" >&2; exit 1 ;;
 esac
@@ -371,7 +391,7 @@ if [[ ! -s "$INPUT" ]]; then
 fi
 
 echo "=== Step 2: DIGI,L1,DIGI2RAW,HLT (Run 3) ==="
-echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP_INPUT:-none} seed=${PILEUP_SEED:-none}"
+echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP_INPUT:-none} seed=${PILEUP_SEED:-none} sequential=${PILEUP_SEQUENTIAL:-0}"
 if [[ -n "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]]; then
 	echo "Same-SimHit reference timing: bx=$SHIFT_SIMHIT_REFERENCE_BX_OFFSET phase_ns=$SHIFT_SIMHIT_REFERENCE_PHASE_NS"
 fi

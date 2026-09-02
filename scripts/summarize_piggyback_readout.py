@@ -5,13 +5,14 @@ import argparse
 from collections import defaultdict
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import sys
 
 
 SCHEMA = "shift-piggyback-central-readout"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class PiggybackError(RuntimeError):
@@ -73,9 +74,44 @@ def ordinary_l1_candidate(record):
     )
 
 
-def build_piggyback_summary(timeline_path, event_ids):
+def readout_timing_contract(bx_offset, phase_ns, bunch_spacing_ns):
+    if not isinstance(bx_offset, int):
+        raise PiggybackError("SHIFT timing BX offset must be an integer")
+    if not math.isfinite(phase_ns) or not math.isfinite(bunch_spacing_ns):
+        raise PiggybackError("SHIFT timing phase and bunch spacing must be finite")
+    if bunch_spacing_ns <= 0.0:
+        raise PiggybackError("SHIFT timing bunch spacing must be positive")
+    if phase_ns < 0.0 or phase_ns >= bunch_spacing_ns:
+        raise PiggybackError(
+            "piggyback SHIFT timing phase must satisfy 0 <= phase < bunch spacing"
+        )
+    relative_ns = bx_offset * bunch_spacing_ns + phase_ns
+    return {
+        "central_l1a_bx": 0,
+        "shift_arrival_bx_offset": bx_offset,
+        "shift_arrival_phase_ns": phase_ns,
+        "bunch_spacing_ns": bunch_spacing_ns,
+        "additional_shift_arrival_relative_to_l1a_ns": relative_ns,
+        "sign_convention": (
+            "positive means the SHIFT collision and its detector hits arrive later "
+            "relative to the central BX-0 L1A"
+        ),
+        "electronics_configuration_modified": False,
+    }
+
+
+def build_piggyback_summary(
+    timeline_path,
+    event_ids,
+    shift_arrival_bx_offset=0,
+    shift_arrival_phase_ns=0.0,
+    bunch_spacing_ns=25.0,
+):
     metadata, records = load_timeline(timeline_path)
     mask, slot_sampling = validate_piggyback_metadata(metadata)
+    timing = readout_timing_contract(
+        shift_arrival_bx_offset, shift_arrival_phase_ns, bunch_spacing_ns
+    )
     if len(records) != len(event_ids):
         raise PiggybackError(
             f"timeline has {len(records)} signal events but EDM has {len(event_ids)}"
@@ -119,6 +155,9 @@ def build_piggyback_summary(timeline_path, event_ids):
                 "trigger_rule_decision": rule_decision,
                 "ordinary_trigger_source": record.get("source"),
                 "signal_contributed_to_trigger_decision": False,
+                "additional_shift_arrival_relative_to_l1a_ns": timing[
+                    "additional_shift_arrival_relative_to_l1a_ns"
+                ],
             }
         )
 
@@ -146,8 +185,10 @@ def build_piggyback_summary(timeline_path, event_ids):
         "schema_version": SCHEMA_VERSION,
         "scenario": "piggyback_central",
         "validated_boundary": (
-            "ordinary central-collision L1A and HLT-proxy decision -> standard BX0 RAW readout"
+            "ordinary central-collision BX-0 L1A -> configured physical SHIFT arrival "
+            "time -> unchanged standard digitization and RAW readout"
         ),
+        "readout_timing": timing,
         "signal_contributed_to_trigger_decision": False,
         "timeline_file": str(timeline_path),
         "timeline_file_sha256": hashlib.sha256(Path(timeline_path).read_bytes()).hexdigest(),
@@ -194,9 +235,18 @@ def main():
     parser.add_argument("timeline")
     parser.add_argument("--edm-input", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--shift-arrival-bx-offset", type=int, default=0)
+    parser.add_argument("--shift-arrival-phase-ns", type=float, default=0.0)
+    parser.add_argument("--bunch-spacing-ns", type=float, default=25.0)
     args = parser.parse_args()
     try:
-        summary = build_piggyback_summary(args.timeline, edm_event_ids(args.edm_input))
+        summary = build_piggyback_summary(
+            args.timeline,
+            edm_event_ids(args.edm_input),
+            shift_arrival_bx_offset=args.shift_arrival_bx_offset,
+            shift_arrival_phase_ns=args.shift_arrival_phase_ns,
+            bunch_spacing_ns=args.bunch_spacing_ns,
+        )
         output = Path(args.output)
         output.parent.mkdir(parents=True, exist_ok=True)
         temporary = output.with_name(f"{output.name}.partial.{os.getpid()}")

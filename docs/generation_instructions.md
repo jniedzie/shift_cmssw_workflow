@@ -23,12 +23,13 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `PILEUP_SCENARIO` | CMSSW pileup profile selected by `COLLISION_YEAR`. |
 | `PILEUP_DATASET` | Central CMS minimum-bias GEN-SIM dataset queried through DAS. |
 | `PILEUP_INPUT` | `filelist:/absolute/path`, `das:...`, or explicit pileup ROOT PFNs. |
-| `PILEUP_SEED` | Mixing seed; fix it for reproducible occupancy comparisons. |
+| `PILEUP_SEED` | Mixing random seed; fix it for comparisons, but use `PILEUP_SEQUENTIAL=1` as well when the pileup events must match job by job. |
+| `PILEUP_SEQUENTIAL` | Set to `1` only for paired timing scans so matching jobs read the same ordered pileup events from the same manifest. |
 | `PILEUP_RSE` | Disk RSE used to prepare production manifests; defaults to `T2_CH_CERN`. |
 | `SHIFT_TIMING_MODE` | `nominal`, exact `legacy` regression, or a `fixed` test shift. |
 | `SHIFT_TIMING_BEAM_DIRECTION_Z` | Longitudinal beam direction, `-1` or `1`. |
-| `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns BX offset. |
-| `SHIFT_TIMING_PHASE_NS` | Additive fractional timing phase in ns. |
+| `SHIFT_TIMING_BX_OFFSET` | Additive integer 25 ns shift of the physical SHIFT event. In piggyback mode, positive means SHIFT arrives later than the central BX-0 L1A. |
+| `SHIFT_TIMING_PHASE_NS` | Additive fractional timing phase in ns; use `0 <= phase < 25` in piggyback mode. |
 | `SHIFT_TIMING_FIXED_OFFSET_NS` | Common ns shift used in `fixed` mode. |
 | `SHIFT_READOUT_DIAGNOSTICS` | Default-off persistence of pre-pack muon digis and trigger products for a bounded audit. |
 | `SHIFT_SIMHIT_REFERENCE_BX_OFFSET`, `SHIFT_SIMHIT_REFERENCE_PHASE_NS` | Default-disabled time shift applied to one fixed muon PSimHit realization immediately before no-pileup digitization. |
@@ -141,8 +142,15 @@ does not reapply synthetic rules and it never lets SHIFT activity affect the
 trigger decision. Step 2 retains every counterfactual event for the denominator
 and writes a provenance-rich decision report under
 `$SAMPLE_DIR/piggyback_decisions`. Step 3 filters to the selected recorded
-readouts; unchanged standard BX-0 digitization, RAW packing/unpacking, and
-reconstruction determine which delayed SHIFT hits survive. This measures
+readouts; unchanged standard digitization, RAW packing/unpacking, and
+reconstruction determine which delayed SHIFT hits survive relative to the
+central BX-0 L1A. `SHIFT_TIMING_BX_OFFSET=0` and
+`SHIFT_TIMING_PHASE_NS=0.0` are the nominal coincident control. A positive
+offset moves the complete physical SHIFT event later while leaving the central
+trigger and pileup at BX 0; a negative offset moves SHIFT earlier. Hits on
+either side of the L1A may survive when they fall in the real subsystem sample
+buffers. They are not removed merely because their time is before the L1A.
+This measures
 conditional reconstruction performance, not the absolute probability for a
 SHIFT collision to coincide with a recorded central event. The ordinary
 recorded trigger source and simulated pileup occupancy are currently sampled
@@ -150,6 +158,44 @@ independently. Therefore this production does not reproduce event-by-event
 correlations between the central event's trigger class and detector occupancy;
 treat that as an occupancy systematic, or replace the independent mixing with
 a validated data-overlay design before making a data-level absolute claim.
+
+To measure the complete physical timing response, make paired campaigns with
+fixed generator, Geant4, pileup, and trigger seeds, changing only the physical
+SHIFT arrival offset. Also set `PILEUP_SEQUENTIAL=1`: the mixing seed fixes the
+random draws, while CMSSW's sequential secondary source makes matching jobs
+read the same ordered pileup events from the same manifest. Every point must
+rerun Steps 1 through 4 because the shift is applied before Geant4; this keeps
+standard pileup at BX 0 and avoids modifying CMSSW mixing or electronics code.
+For example:
+
+```bash
+GENERATOR_SEED=13579
+SIMULATION_SEED=24680
+PILEUP_SEED=86420
+PILEUP_SEQUENTIAL=1
+TRIGGER_TIMELINE_SEED=24680
+
+# Coincident reference
+CAMPAIGN_NAME="${PROCESS}_piggybackCentral_bx0_2023" \
+SHIFT_TIMING_BX_OFFSET=0 SHIFT_TIMING_PHASE_NS=0.0 \
+  ./run_condor.sh
+
+# Central L1A occurs 25 ns before the nominal SHIFT arrival
+CAMPAIGN_NAME="${PROCESS}_piggybackCentral_bxPlus1_2023" \
+SHIFT_TIMING_BX_OFFSET=1 SHIFT_TIMING_PHASE_NS=0.0 \
+  ./run_condor.sh --prebuilt
+```
+
+The decision JSON records the signed SHIFT-arrival difference from the BX-0
+L1A and explicitly records that the electronics configuration was not changed.
+This full physical scan includes all standard timing-dependent behavior from
+Geant4 onward. Use the existing no-pileup same-SimHit scan when the question is
+strictly which losses were introduced by digitization, BX assignment, and RAW
+readout, with the simulated detector crossings held exactly fixed.
+Do not combine offsets with an assumed probability yet: the current recorded
+ZeroBias source establishes a real accepted central readout, but it does not
+provide an unbiased distribution of central-trigger times relative to an
+independent SHIFT collision.
 
 `run_condor.sh` pins the process, campaign/sample paths, event count, collision
 year, timing controls, pileup controls, and trigger controls into the submitted

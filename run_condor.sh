@@ -105,6 +105,7 @@ SUBMISSION_VARIABLES=(
 	PILEUP_DATASET
 	PILEUP_INPUT
 	PILEUP_SEED
+	PILEUP_SEQUENTIAL
 	SHIFT_TIMING_MODE
 	SHIFT_TIMING_BEAM_DIRECTION_Z
 	SHIFT_TIMING_BX_OFFSET
@@ -160,6 +161,10 @@ if [[ ! "$STEP4_INPUTS_PER_JOB" =~ ^[1-9][0-9]*$ ]]; then
 	printf 'STEP4_INPUTS_PER_JOB must be a positive integer (got: %s)\n' "$STEP4_INPUTS_PER_JOB" >&2
 	exit 1
 fi
+case "$PILEUP_SEQUENTIAL" in
+	0|1) ;;
+	*) printf 'PILEUP_SEQUENTIAL must be 0 or 1 (got: %s)\n' "$PILEUP_SEQUENTIAL" >&2; exit 1 ;;
+esac
 if [[ "$STEP4_INPUTS_PER_JOB" != 1 && "$NORMALIZED_STEPS" != 4 ]]; then
 	echo "STEP4_INPUTS_PER_JOB > 1 is only safe for a Step-4-only submission" >&2
 	exit 1
@@ -203,10 +208,21 @@ if [[ "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" == 1 && "$SHIFT_REFIT_GEOMETRY_MATE
 fi
 
 if [[ "$TRIGGER_SCENARIO" == piggyback_central ]]; then
-	[[ "$PILEUP_MODE" == standard && "$SHIFT_TIMING_MODE" == nominal && "$SHIFT_TIMING_BX_OFFSET" == 0 && "$SHIFT_TIMING_PHASE_NS" =~ ^0+([.]0*)?$ ]] || {
-		echo "Piggyback preflight requires standard pileup and nominal BX-0/phase-0 physical timing" >&2
+	[[ "$PILEUP_MODE" == standard && "$SHIFT_TIMING_MODE" == nominal ]] || {
+		echo "Piggyback preflight requires standard pileup and nominal physical SHIFT timing" >&2
 		exit 1
 	}
+	python3 - "$SHIFT_TIMING_PHASE_NS" "$SHIFT_TIMING_BUNCH_SPACING_NS" <<'PY'
+import math
+import sys
+
+phase = float(sys.argv[1])
+spacing = float(sys.argv[2])
+if not math.isfinite(phase) or not math.isfinite(spacing) or spacing <= 0.0:
+    raise SystemExit("Piggyback timing phase and bunch spacing must be finite, with positive spacing")
+if phase < 0.0 or phase >= spacing:
+    raise SystemExit("Piggyback timing requires 0 <= SHIFT_TIMING_PHASE_NS < SHIFT_TIMING_BUNCH_SPACING_NS")
+PY
 	[[ "$TRIGGER_TIMELINE_MODE" == zero_bias_proxy && "$TRIGGER_TIMELINE_START_BX" == 0 && "$TRIGGER_TIMELINE_END_BX" == 0 && "$TRIGGER_RULE_MODE" == recorded ]] || {
 		echo "Piggyback preflight requires a BX-0 ZeroBias timeline in recorded-L1A mode" >&2
 		exit 1
@@ -295,8 +311,8 @@ printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed 
 printf 'Reconstruction: DT=%s, tracker=%s, GEM/HCAL/ZDC=%s/%s/%s, augment DT/tracker=%s/%s, extended timing=%s\n' \
 	"$SHIFT_DT_MODE" "$SHIFT_TRACKER_MODE" "$SHIFT_ENABLE_GEM" "$SHIFT_ENABLE_HCAL_DIAGNOSTICS" "$SHIFT_ENABLE_ZDC_DIAGNOSTICS" \
 	"$SHIFT_AUGMENT_DT_HITS" "$SHIFT_AUGMENT_TRACKER_HITS" "$SHIFT_USE_EXTENDED_TIMING"
-printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s\n' \
-	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED"
+printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s, sequential=%s\n' \
+	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED" "$PILEUP_SEQUENTIAL"
 printf 'Timing: mode=%s, BX/phase=%s/%s ns, Geant4 central/forward limits=%s/%s ns\n' \
 	"$SHIFT_TIMING_MODE" "$SHIFT_TIMING_BX_OFFSET" "$SHIFT_TIMING_PHASE_NS" "$SHIFT_G4_MAX_TRACK_TIME_NS" "$SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS"
 printf 'Trigger: scenario=%s, timeline=%s, BX range=%s..%s, seed=%s, rules=%s, referenceSlots=%s, reconstructionFilter=%s/%s\n' \

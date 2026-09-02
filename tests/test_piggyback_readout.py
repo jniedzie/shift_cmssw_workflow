@@ -14,6 +14,7 @@ sys.path.insert(0, str(SCRIPTS))
 from summarize_piggyback_readout import (  # noqa: E402
     PiggybackError,
     build_piggyback_summary,
+    readout_timing_contract,
 )
 
 
@@ -117,7 +118,48 @@ class PiggybackReadoutTest(unittest.TestCase):
         self.assertFalse(result["physics_result_valid"])
         self.assertEqual(result["summary"]["events"], 2)
         self.assertEqual(result["summary"]["persisted_by_ordinary_hlt_proxy"], 1)
+        self.assertEqual(result["schema_version"], 2)
+        self.assertEqual(
+            result["readout_timing"][
+                "additional_shift_arrival_relative_to_l1a_ns"
+            ],
+            0.0,
+        )
+        self.assertFalse(
+            result["readout_timing"]["electronics_configuration_modified"]
+        )
         self.assertEqual(json.loads(command.stdout), ["1:1:11"])
+
+    def test_positive_shift_means_shift_arrives_after_central_l1a(self):
+        with tempfile.TemporaryDirectory() as directory:
+            timeline = self.write_timeline(directory)
+            result = build_piggyback_summary(
+                timeline,
+                [
+                    {"run": 1, "lumi": 1, "event": 11},
+                    {"run": 1, "lumi": 1, "event": 12},
+                ],
+                shift_arrival_bx_offset=2,
+                shift_arrival_phase_ns=6.25,
+                bunch_spacing_ns=25.0,
+            )
+        self.assertEqual(
+            result["readout_timing"][
+                "additional_shift_arrival_relative_to_l1a_ns"
+            ],
+            56.25,
+        )
+        self.assertTrue(
+            all(
+                decision["additional_shift_arrival_relative_to_l1a_ns"] == 56.25
+                for decision in result["decisions"]
+            )
+        )
+
+    def test_rejects_noncanonical_piggyback_phase(self):
+        for phase in (-0.1, 25.0):
+            with self.subTest(phase=phase), self.assertRaises(PiggybackError):
+                readout_timing_contract(0, phase, 25.0)
 
     def test_rejects_noncentral_analysis_window(self):
         with tempfile.TemporaryDirectory() as directory:

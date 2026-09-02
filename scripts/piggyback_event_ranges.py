@@ -16,7 +16,7 @@ def main():
             payload = json.load(source)
         if (
             payload.get("schema") != "shift-piggyback-central-readout"
-            or payload.get("schema_version") != 1
+            or payload.get("schema_version") not in (1, 2)
             or payload.get("scenario") != "piggyback_central"
             or payload.get("signal_contributed_to_trigger_decision") is not False
         ):
