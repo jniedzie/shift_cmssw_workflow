@@ -18,6 +18,10 @@ if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
 	exit 2
 fi
 CHUNK="${POSITIONAL_ARGS[0]:-0}"
+if [[ ! "$CHUNK" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: chunk must be a non-negative integer (got '$CHUNK')" >&2
+	exit 2
+fi
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
@@ -48,7 +52,8 @@ case "${SHIFT_TO_CMS_TRANSPORT:-1}" in
 	*) echo "ERROR: SHIFT_TO_CMS_TRANSPORT must be 0/1 or false/true" >&2; exit 1 ;;
 esac
 
-case "$GENERATOR_SEED" in
+GENERATOR_SEED_BASE="$GENERATOR_SEED"
+case "$GENERATOR_SEED_BASE" in
 	random)
 		# Reading from /dev/urandom avoids reusing cmsDriver's default seed.
 		GENERATOR_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
@@ -63,11 +68,12 @@ case "$GENERATOR_SEED" in
 			echo "ERROR: GENERATOR_SEED must be 'random' or an integer from 1 through 900000000" >&2
 			exit 1
 		fi
-		GENERATOR_SEED=$((10#$GENERATOR_SEED))
+		GENERATOR_SEED=$(( (10#$GENERATOR_SEED_BASE - 1 + 10#$CHUNK) % 900000000 + 1 ))
 		;;
 esac
 
-case "$SIMULATION_SEED" in
+SIMULATION_SEED_BASE="$SIMULATION_SEED"
+case "$SIMULATION_SEED_BASE" in
 	random)
 		SIMULATION_SEED=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
 		SIMULATION_SEED=$((SIMULATION_SEED % 900000000 + 1))
@@ -81,7 +87,7 @@ case "$SIMULATION_SEED" in
 			echo "ERROR: SIMULATION_SEED must be 'random' or an integer from 1 through 900000000" >&2
 			exit 1
 		fi
-		SIMULATION_SEED=$((10#$SIMULATION_SEED))
+		SIMULATION_SEED=$(( (10#$SIMULATION_SEED_BASE - 1 + 10#$CHUNK) % 900000000 + 1 ))
 		;;
 esac
 
@@ -191,8 +197,8 @@ if [[ -e "$OUTPUT" ]]; then
 fi
 
 echo "=== Step 1: GEN,SIM (Run 3) ==="
-echo "Generator random seed: $GENERATOR_SEED"
-echo "Geant4 random seed: $SIMULATION_SEED"
+echo "Generator random seed: $GENERATOR_SEED (configured base: $GENERATOR_SEED_BASE, chunk: $CHUNK)"
+echo "Geant4 random seed: $SIMULATION_SEED (configured base: $SIMULATION_SEED_BASE, chunk: $CHUNK)"
 echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DIRECTION_Z bxOffset=$SHIFT_TIMING_BX_OFFSET phaseNs=$SHIFT_TIMING_PHASE_NS fixedOffsetNs=$SHIFT_TIMING_FIXED_OFFSET_NS modelVersion=$SHIFT_TIMING_MODEL_VERSION"
 echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
 echo "SHIFT LSS geometry mode: ${SHIFT_LSS_GEOMETRY_MODE:-none}"

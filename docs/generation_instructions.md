@@ -17,14 +17,14 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SAMPLE_NAME`, `CAMPAIGN_NAME` | Components of the campaign output path. |
 | `N_EVENTS`, `N_JOBS` | Events per chunk and number of Condor jobs. |
 | `COLLISION_YEAR` | Coherent `2022`, `2023`, or `2024` era/GlobalTag/pileup preset; currently defaults to `2023`. |
-| `GENERATOR_SEED` | `random` or a fixed integer from 1 through 900000000. |
-| `SIMULATION_SEED` | Geant4 seed; fix it with `GENERATOR_SEED` for paired timing scans. |
+| `GENERATOR_SEED` | `random` or a fixed campaign seed base. A fixed base is advanced by chunk, avoiding duplicate jobs while pairing matching chunks across scans. |
+| `SIMULATION_SEED` | Geant4 campaign seed base; fix it with `GENERATOR_SEED` for paired timing scans. |
 | `PILEUP_MODE` | `none` or opt-in `standard` central pileup in Step 2. |
 | `PILEUP_SCENARIO` | CMSSW pileup profile selected by `COLLISION_YEAR`. |
 | `PILEUP_DATASET` | Central CMS minimum-bias GEN-SIM dataset queried through DAS. |
 | `PILEUP_INPUT` | `filelist:/absolute/path`, `das:...`, or explicit pileup ROOT PFNs. |
-| `PILEUP_SEED` | Mixing random seed; fix it for comparisons, but use `PILEUP_SEQUENTIAL=1` as well when the pileup events must match job by job. |
-| `PILEUP_SEQUENTIAL` | Set to `1` only for paired timing scans so matching jobs read the same ordered pileup events from the same manifest. |
+| `PILEUP_SEED` | Mixing campaign seed base, advanced by chunk; fix it for comparisons. |
+| `PILEUP_SEQUENTIAL` | Set to `1` only for paired timing scans. Matching chunks use the same pileup sequence, while different chunks rotate across the manifest. |
 | `PILEUP_RSE` | Disk RSE used to prepare production manifests; defaults to `T2_CH_CERN`. |
 | `SHIFT_TIMING_MODE` | `nominal`, exact `legacy` regression, or a `fixed` test shift. |
 | `SHIFT_TIMING_BEAM_DIRECTION_Z` | Longitudinal beam direction, `-1` or `1`. |

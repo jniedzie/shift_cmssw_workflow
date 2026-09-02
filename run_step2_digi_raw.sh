@@ -18,6 +18,10 @@ if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
 	exit 2
 fi
 CHUNK="${POSITIONAL_ARGS[0]:-0}"
+if [[ ! "$CHUNK" =~ ^[0-9]+$ ]]; then
+	echo "ERROR: chunk must be a non-negative integer (got '$CHUNK')" >&2
+	exit 2
+fi
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
@@ -26,6 +30,7 @@ CONFIG_DIR="$STEP2_CONFIG_DIR"
 
 PILEUP_ARGS=()
 PILEUP_CUSTOMISE=""
+PILEUP_SEED_BASE="$PILEUP_SEED"
 case "$PILEUP_MODE" in
 	none)
 		;;
@@ -45,7 +50,7 @@ case "$PILEUP_MODE" in
 				exit 1
 			fi
 		fi
-		case "$PILEUP_SEED" in
+		case "$PILEUP_SEED_BASE" in
 			random)
 				PILEUP_SEED="$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')"
 				PILEUP_SEED=$((PILEUP_SEED % 900000000 + 1))
@@ -59,11 +64,14 @@ case "$PILEUP_MODE" in
 					echo "ERROR: PILEUP_SEED must be 'random' or an integer from 1 through 900000000" >&2
 					exit 1
 				fi
-				PILEUP_SEED=$((10#$PILEUP_SEED))
+				PILEUP_SEED=$(( (10#$PILEUP_SEED_BASE - 1 + 10#$CHUNK) % 900000000 + 1 ))
 				;;
 		esac
 		PILEUP_ARGS+=(--pileup "$PILEUP_SCENARIO" --pileup_input "$PILEUP_INPUT")
 		PILEUP_CUSTOMISE="; process.RandomNumberGeneratorService.mix.initialSeed = cms.untracked.uint32(${PILEUP_SEED}); process.mix.input.sequential = cms.untracked.bool(${PILEUP_SEQUENTIAL})"
+		if [[ "$PILEUP_SEQUENTIAL" == 1 ]]; then
+			PILEUP_CUSTOMISE+="; _shiftPileupFiles = list(process.mix.input.fileNames); _shiftPileupStart = ${CHUNK} % len(_shiftPileupFiles); process.mix.input.fileNames = cms.untracked.vstring(_shiftPileupFiles[_shiftPileupStart:] + _shiftPileupFiles[:_shiftPileupStart])"
+		fi
 		;;
 	*)
 		echo "ERROR: PILEUP_MODE must be none or standard (got '$PILEUP_MODE')" >&2
@@ -391,7 +399,7 @@ if [[ ! -s "$INPUT" ]]; then
 fi
 
 echo "=== Step 2: DIGI,L1,DIGI2RAW,HLT (Run 3) ==="
-echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP_INPUT:-none} seed=${PILEUP_SEED:-none} sequential=${PILEUP_SEQUENTIAL:-0}"
+echo "Pileup: mode=$PILEUP_MODE scenario=${PILEUP_SCENARIO:-none} input=${PILEUP_INPUT:-none} seed=${PILEUP_SEED:-none} base=${PILEUP_SEED_BASE:-none} sequential=${PILEUP_SEQUENTIAL:-0}"
 if [[ -n "$SHIFT_SIMHIT_REFERENCE_BX_OFFSET" ]]; then
 	echo "Same-SimHit reference timing: bx=$SHIFT_SIMHIT_REFERENCE_BX_OFFSET phase_ns=$SHIFT_SIMHIT_REFERENCE_PHASE_NS"
 fi
