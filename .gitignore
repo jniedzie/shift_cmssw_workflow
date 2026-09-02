@@ -1,5 +1,6 @@
 *.pyc
 logs
+condor/runtime_snapshots/
 
 *.root
 jniedzie.cc

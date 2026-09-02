@@ -513,7 +513,7 @@ It validates the conditional piggyback contract, trigger library/menu,
 run-to-fill association, physical mask, reference-slot mode, deterministic
 seed, and reconstruction filter without building, cleaning logs, or contacting
 Condor. A production submission must use a new `CAMPAIGN_NAME`; the default is
-`${PROCESS}_piggybackCentral_2023_v1` so it cannot silently reuse the older
+`${PROCESS}_piggybackCentral_bx0_phase0_2023_v1` so it cannot silently reuse the older
 trigger-proxy outputs.
 
 The first positional argument is the chunk and the second is the number of
@@ -564,9 +564,10 @@ Submit the full chain or selected stages with:
 ```
 
 Before submitting, the workflow builds the shared CMSSW release and records a
-runtime fingerprint. Never rebuild or relink that release while jobs are
-running. The cleanup helper also preserves logs whenever it cannot reliably
-query the scheduler.
+runtime fingerprint. It also makes a read-only workflow snapshot for the
+workers, so later edits to the main checkout cannot alter running jobs. Never
+rebuild or relink the shared CMSSW release while jobs are running. The cleanup
+helper also preserves logs whenever it cannot reliably query the scheduler.
 
 For each production, validate the Condor event log and payload publication
 messages in addition to counting EOS files. Do not merge until every expected

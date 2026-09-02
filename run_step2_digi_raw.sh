@@ -35,7 +35,10 @@ case "$PILEUP_MODE" in
 	none)
 		;;
 	standard|run3_2024)
-		case "$PILEUP_SEQUENTIAL" in 0|1) ;; *)
+		case "$PILEUP_SEQUENTIAL" in
+			0) PILEUP_SEQUENTIAL_CMS=False ;;
+			1) PILEUP_SEQUENTIAL_CMS=True ;;
+			*)
 			echo "ERROR: PILEUP_SEQUENTIAL must be 0 or 1" >&2; exit 1;;
 		esac
 		if [[ -z "$PILEUP_INPUT" ]]; then
@@ -68,7 +71,7 @@ case "$PILEUP_MODE" in
 				;;
 		esac
 		PILEUP_ARGS+=(--pileup "$PILEUP_SCENARIO" --pileup_input "$PILEUP_INPUT")
-		PILEUP_CUSTOMISE="; process.RandomNumberGeneratorService.mix.initialSeed = cms.untracked.uint32(${PILEUP_SEED}); process.mix.input.sequential = cms.untracked.bool(${PILEUP_SEQUENTIAL})"
+		PILEUP_CUSTOMISE="; process.RandomNumberGeneratorService.mix.initialSeed = cms.untracked.uint32(${PILEUP_SEED}); process.mix.input.sequential = cms.untracked.bool(${PILEUP_SEQUENTIAL_CMS})"
 		if [[ "$PILEUP_SEQUENTIAL" == 1 ]]; then
 			PILEUP_CUSTOMISE+="; _shiftPileupFiles = list(process.mix.input.fileNames); _shiftPileupStart = ${CHUNK} % len(_shiftPileupFiles); process.mix.input.fileNames = cms.untracked.vstring(_shiftPileupFiles[_shiftPileupStart:] + _shiftPileupFiles[:_shiftPileupStart])"
 		fi

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKFLOW_ROOT="$SCRIPT_DIR"
 
 usage() {
 	cat <<EOF
@@ -328,9 +329,24 @@ CMSSW_RUNTIME_FINGERPRINT="$(cmssw_runtime_fingerprint)"
 	exit 1
 }
 
+# Workers share the AFS checkout and execute the stage scripts hours after
+# submission. Freeze the small workflow tree so an unrelated edit cannot
+# change a script while a running shell is reading it. The CMSSW release and
+# campaign outputs remain at their configured shared locations.
+SNAPSHOT_PARENT="$WORKFLOW_ROOT/condor/runtime_snapshots/$CAMPAIGN_NAME"
+SNAPSHOT_ROOT="$SNAPSHOT_PARENT/$(date -u +%Y%m%dT%H%M%SZ)-$$"
+mkdir -p "$SNAPSHOT_ROOT"
+rsync -a \
+	--exclude=.git \
+	--exclude=/condor/logs \
+	--exclude=/condor/runtime_snapshots \
+	"$WORKFLOW_ROOT/" "$SNAPSHOT_ROOT/"
+chmod -R a-w "$SNAPSHOT_ROOT"
+echo "Frozen workflow snapshot: $SNAPSHOT_ROOT"
+
 submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
-sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<max_materialize>|$CONDOR_MAX_MATERIALIZE|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$WORKFLOW_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
+sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<max_materialize>|$CONDOR_MAX_MATERIALIZE|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$SNAPSHOT_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
 	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
 printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB, max materialized=%s)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
