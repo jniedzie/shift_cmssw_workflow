@@ -67,7 +67,7 @@ PY
 	fi
 
 	if [[ "$SHIFT_LSS_MATERIAL_MODE" == external ]]; then
-		for required_name in SHIFT_LSS_GDML_FILE SHIFT_LSS_GDML_SHA256 SHIFT_LSS_MINIMUM_ABS_Z_CM \
+		for required_name in SHIFT_LSS_GDML_FILE SHIFT_LSS_GDML_SHA256 SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM SHIFT_LSS_MINIMUM_ABS_Z_CM \
 			SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM; do
 			if [[ -z "${!required_name:-}" ]]; then
 				echo "ERROR: $required_name is required when SHIFT_LSS_MATERIAL_MODE=external" >&2
@@ -94,6 +94,18 @@ PY
 			return 1
 		fi
 		lss_audit_gdml_sha256="${SHIFT_LSS_GDML_SHA256,,}"
+		IFS=',' read -r -a lss_artifact_origin_values <<< "$SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM"
+		if (( ${#lss_artifact_origin_values[@]} != 3 )) || ! python3 - "${lss_artifact_origin_values[@]}" <<'PY'
+import math
+import sys
+
+values = [float(value) for value in sys.argv[1:]]
+if len(values) != 3 or not all(math.isfinite(value) for value in values):
+    raise SystemExit("SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM must contain three finite values")
+PY
+		then
+			return 1
+		fi
 		SHIFT_LSS_DETECTOR_ELEMENT_NAME="${SHIFT_LSS_DETECTOR_ELEMENT_NAME:-shiftLssExternal}"
 		SHIFT_LSS_OVERLAP_TOLERANCE_CM="${SHIFT_LSS_OVERLAP_TOLERANCE_CM:-0.001}"
 		if [[ ! "$SHIFT_LSS_DETECTOR_ELEMENT_NAME" =~ ^[A-Za-z][A-Za-z0-9_]*$ ]]; then
@@ -102,7 +114,7 @@ PY
 		fi
 		# This is Python source passed as one quoted cmsDriver argument.
 		# shellcheck disable=SC2089
-		SHIFT_LSS_GEOMETRY_PYTHON="; from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry; process = customiseShiftLssExternalGeometry(process, gdmlFile='$SHIFT_LSS_GDML_FILE', modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), minimumAbsZCm=$SHIFT_LSS_MINIMUM_ABS_Z_CM, detectorElementName='$SHIFT_LSS_DETECTOR_ELEMENT_NAME', overlapToleranceCm=$SHIFT_LSS_OVERLAP_TOLERANCE_CM, checkOverlaps=True)"
+		SHIFT_LSS_GEOMETRY_PYTHON="; from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry; process = customiseShiftLssExternalGeometry(process, gdmlFile='$SHIFT_LSS_GDML_FILE', artifactOriginInModelCm=($SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM), modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), minimumAbsZCm=$SHIFT_LSS_MINIMUM_ABS_Z_CM, detectorElementName='$SHIFT_LSS_DETECTOR_ELEMENT_NAME', overlapToleranceCm=$SHIFT_LSS_OVERLAP_TOLERANCE_CM, checkOverlaps=True)"
 		SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW=True
 	fi
 
@@ -150,7 +162,7 @@ PY
 		SHIFT_LSS_SIMULATION_PYTHON="$SHIFT_LSS_FIELD_IMPORT_PYTHON; from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseShiftLssMagneticField; process = customiseShiftLssMagneticField(process, fieldElements=$SHIFT_LSS_FIELD_ELEMENTS_PYTHON)"
 	fi
 	SHIFT_LSS_CONTRACT_SHA256="$(python3 - "$SHIFT_LSS_MATERIAL_MODE" "$SHIFT_LSS_FIELD_MODE" \
-		"$lss_audit_gdml_sha256" "$lss_audit_field_scale" "$SHIFT_LSS_MODEL_ORIGIN_CM" \
+		"$lss_audit_gdml_sha256" "$lss_audit_field_scale" "${SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM:-}" "$SHIFT_LSS_MODEL_ORIGIN_CM" \
 		"$SHIFT_LSS_MODEL_TO_CMS" "${SHIFT_LSS_MINIMUM_ABS_Z_CM:-}" \
 		"$SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM" "$SHIFT_LSS_GEANT4E_MOMENTUM_LIMIT_GEV" \
 		"$SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM" "$SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM" <<'PY'
@@ -159,7 +171,7 @@ import json
 import sys
 
 contract = dict(zip((
-    "material_mode", "field_mode", "gdml_sha256", "field_scale", "model_origin_cm",
+    "material_mode", "field_mode", "gdml_sha256", "field_scale", "artifact_origin_in_model_cm", "model_origin_cm",
     "model_to_cms", "minimum_abs_z_cm", "material_boundary_abs_z_cm",
     "geant4e_momentum_limit_gev", "geant4e_maximum_step_length_mm",
     "geant4e_maximum_path_length_cm",
@@ -168,14 +180,14 @@ payload = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("as
 print(hashlib.sha256(payload).hexdigest())
 PY
 )"
-	SHIFT_LSS_AUDIT_PYTHON="; process.shiftLssWorkflowContract = cms.PSet(contractVersion=cms.uint32(1), contractSha256=cms.string('$SHIFT_LSS_CONTRACT_SHA256'), materialMode=cms.string('$SHIFT_LSS_MATERIAL_MODE'), fieldMode=cms.string('$SHIFT_LSS_FIELD_MODE'), gdmlSha256=cms.string('$lss_audit_gdml_sha256'), fieldScale=cms.string('$lss_audit_field_scale'), modelOriginCm=cms.vdouble($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=cms.vdouble($SHIFT_LSS_MODEL_TO_CMS))"
+	SHIFT_LSS_AUDIT_PYTHON="; process.shiftLssWorkflowContract = cms.PSet(contractVersion=cms.uint32(2), contractSha256=cms.string('$SHIFT_LSS_CONTRACT_SHA256'), materialMode=cms.string('$SHIFT_LSS_MATERIAL_MODE'), fieldMode=cms.string('$SHIFT_LSS_FIELD_MODE'), gdmlSha256=cms.string('$lss_audit_gdml_sha256'), fieldScale=cms.string('$lss_audit_field_scale'), artifactOriginInModelCm=cms.string('${SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM:-}'), modelOriginCm=cms.vdouble($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=cms.vdouble($SHIFT_LSS_MODEL_TO_CMS))"
 	SHIFT_LSS_SIMULATION_PYTHON="$SHIFT_LSS_GEOMETRY_PYTHON$SHIFT_LSS_SIMULATION_PYTHON"
 	SHIFT_LSS_RECONSTRUCTION_PYTHON="$SHIFT_LSS_GEOMETRY_PYTHON$SHIFT_LSS_FIELD_IMPORT_PYTHON; from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseShiftLssTransport; process = customiseShiftLssTransport(process, fieldElements=$SHIFT_LSS_FIELD_ELEMENTS_PYTHON, materialBoundaryAbsZCm=$SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM, geant4eMomentumLimitGeV=$SHIFT_LSS_GEANT4E_MOMENTUM_LIMIT_GEV, geant4eMaximumStepLengthMm=$SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM, geant4eMaximumPathLengthCm=$SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM)"
 	SHIFT_LSS_SIMULATION_PYTHON="$SHIFT_LSS_SIMULATION_PYTHON$SHIFT_LSS_AUDIT_PYTHON"
 	SHIFT_LSS_RECONSTRUCTION_PYTHON="$SHIFT_LSS_RECONSTRUCTION_PYTHON$SHIFT_LSS_AUDIT_PYTHON"
 	# The Python strings are data consumed inside quoted cmsDriver arguments.
 	# shellcheck disable=SC2090
-	export SHIFT_LSS_MATERIAL_MODE SHIFT_LSS_FIELD_MODE SHIFT_LSS_MODEL_ORIGIN_CM SHIFT_LSS_MODEL_TO_CMS \
+	export SHIFT_LSS_MATERIAL_MODE SHIFT_LSS_FIELD_MODE SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM SHIFT_LSS_MODEL_ORIGIN_CM SHIFT_LSS_MODEL_TO_CMS \
 		SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW SHIFT_LSS_SIMULATION_PYTHON \
 		SHIFT_LSS_RECONSTRUCTION_PYTHON SHIFT_LSS_CONTRACT_SHA256
 }

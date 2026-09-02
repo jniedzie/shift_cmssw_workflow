@@ -239,6 +239,20 @@ DRIVER_ARGS=(
 DRIVER_ARGS+=("${CUSTOMISE_COMMAND_ARGS[@]}")
 cmsDriver.py step4 "${DRIVER_ARGS[@]}"
 
+if [[ "$SHIFT_LSS_MATERIAL_MODE" != none || "$SHIFT_LSS_FIELD_MODE" != none ]]; then
+	for ((input_offset = 0; input_offset < STEP4_INPUTS_PER_JOB; ++input_offset)); do
+		input_part="$(printf '%04d' "$((INPUT_START + input_offset))")"
+		shopt -s nullglob
+		step1_configs=("$STEP1_CONFIG_DIR/events_step1_part${input_part}_seed"*"_cfg.py")
+		shopt -u nullglob
+		if (( ${#step1_configs[@]} != 1 )); then
+			echo "ERROR: expected exactly one archived Step-1 config for LSS audit of part $input_part; found ${#step1_configs[@]}" >&2
+			exit 1
+		fi
+		python3 "$WORKFLOW_ROOT/scripts/audit_lss_resolved_configs.py" "${step1_configs[0]}" "$LOCAL_CONFIG"
+	done
+fi
+
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_${OUTPUT_LABEL}_part_${PART}_cfg.py"
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
 	echo "WARNING: could not archive Step 4 config at $CONFIG_SNAPSHOT; continuing with local config" >&2
