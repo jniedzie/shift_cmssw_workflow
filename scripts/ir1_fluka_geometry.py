@@ -8,6 +8,7 @@ from copy import deepcopy
 import hashlib
 import importlib
 import json
+import math
 from pathlib import Path
 import re
 import shutil
@@ -229,6 +230,118 @@ def _source_bound_clip_region_names(region_names, parking_regions):
     """Return only parked prototypes that need a finite pre-lattice clip."""
 
     return set(region_names) & set(parking_regions)
+
+
+def _axis_aligned_plane_box_bounds(zone, angular_tolerance=1.0e-12):
+    """Return exact bounds for a plane-only rectangular zone, or ``None``.
+
+    FLUKA plane bodies describe the half-space on the negative side of their
+    normal.  An intersection retains that half-space and a subtraction retains
+    its complement.  This recognises transformed planes too, but only when
+    their final normals are axis-aligned.  Redundant planes are resolved by
+    taking the tightest lower and upper bound on each axis.
+    """
+
+    if angular_tolerance <= 0.0:
+        raise ValueError("angular_tolerance must be positive")
+    lower = [-math.inf] * 3
+    upper = [math.inf] * 3
+    operations = [(item, False) for item in zone.intersections]
+    operations.extend((item, True) for item in zone.subtractions)
+    if not operations:
+        return None
+    for operation, complemented in operations:
+        body = operation.body
+        if not hasattr(body, "toPlane"):
+            return None
+        normal, point = body.toPlane()
+        normal = [float(value) for value in normal]
+        point = [float(value) for value in point]
+        magnitude = math.sqrt(sum(value * value for value in normal))
+        if not math.isfinite(magnitude) or magnitude == 0.0:
+            return None
+        unit = [value / magnitude for value in normal]
+        aligned = [axis for axis, value in enumerate(unit) if abs(value) > angular_tolerance]
+        if len(aligned) != 1:
+            return None
+        axis = aligned[0]
+        if abs(abs(unit[axis]) - 1.0) > angular_tolerance:
+            return None
+        coordinate = point[axis]
+        retains_lower_side = unit[axis] > 0.0
+        if complemented:
+            retains_lower_side = not retains_lower_side
+        if retains_lower_side:
+            upper[axis] = min(upper[axis], coordinate)
+        else:
+            lower[axis] = max(lower[axis], coordinate)
+    if not all(math.isfinite(value) for value in lower + upper):
+        return None
+    if any(low >= high for low, high in zip(lower, upper)):
+        return None
+    return [lower, upper]
+
+
+def install_axis_aligned_plane_box_lowering(converter_module, report):
+    """Lower finite plane-only rectangular zones to native FLUKA RPP bodies.
+
+    Large Boolean half-space operands are numerically fragile after GDML is
+    imported by ROOT.  Replacing an exactly equivalent bounded conjunction by
+    one native box removes those operands without using mesh-derived bounds.
+    """
+
+    from pyg4ometry.fluka import RPP
+    from pyg4ometry.fluka.region import Zone
+
+    original = converter_module._filterHalfSpaces
+
+    def filter_and_lower(fluka_registry, region_zone_aabbs):
+        filtered = original(fluka_registry, region_zone_aabbs)
+        details = []
+        for region in filtered.regionDict.values():
+            lowered_zones = []
+            for zone_index, zone in enumerate(region.zones):
+                bounds = _axis_aligned_plane_box_bounds(zone)
+                if bounds is None:
+                    lowered_zones.append(zone)
+                    continue
+                base_name = f"{region.name}_zone{zone_index}_axis_box"
+                name = base_name
+                suffix = 1
+                while name in filtered.bodyDict:
+                    name = f"{base_name}_{suffix}"
+                    suffix += 1
+                lower, upper = bounds
+                # RPP's positional order is xmin, xmax, ymin, ymax, zmin, zmax.
+                box = RPP(
+                    name,
+                    lower[0],
+                    upper[0],
+                    lower[1],
+                    upper[1],
+                    lower[2],
+                    upper[2],
+                    addRegistry=False,
+                )
+                filtered.addBody(box)
+                lowered = Zone(name=zone.name)
+                lowered.addIntersection(box)
+                lowered_zones.append(lowered)
+                details.append(
+                    {
+                        "region": region.name,
+                        "zone_index": zone_index,
+                        "source_plane_count": len(zone.intersections)
+                        + len(zone.subtractions),
+                        "bounds_mm": bounds,
+                    }
+                )
+            region.zones = lowered_zones
+        report.extend(details)
+        return filtered
+
+    converter_module._filterHalfSpaces = filter_and_lower
+    return original
 
 
 def install_lattice_placement_workaround(
@@ -900,9 +1013,14 @@ def convert_geometry(
             converter_module = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
             original_lattice_aabb = None
             original_region_zone_aabbs = None
+            original_half_space_filter = None
             raw_zone_aabb_fallbacks = []
+            lowered_axis_aligned_boxes = []
             if lattice_aabb_workaround:
                 original_lattice_aabb = _install_lattice_aabb_workaround(converter_module)
+            original_half_space_filter = install_axis_aligned_plane_box_lowering(
+                converter_module, lowered_axis_aligned_boxes
+            )
             if raw_preflight is not None:
                 (
                     original_region_zone_aabbs,
@@ -923,6 +1041,8 @@ def convert_geometry(
                     "LATTICE cards."
                 ) from error
             finally:
+                if original_half_space_filter is not None:
+                    converter_module._filterHalfSpaces = original_half_space_filter
                 if original_region_zone_aabbs is not None:
                     converter_module._getRegionZoneAABBs = original_region_zone_aabbs
                 if original_lattice_aabb is not None:
@@ -974,6 +1094,10 @@ def convert_geometry(
                     "padding_mm": RAW_ZONE_AABB_PADDING_MM,
                     "region_count": len(raw_zone_aabb_fallbacks),
                     "regions": raw_zone_aabb_fallbacks,
+                },
+                "axis_aligned_plane_box_lowering": {
+                    "zone_count": len(lowered_axis_aligned_boxes),
+                    "zones": lowered_axis_aligned_boxes,
                 },
                 "logical_volume_count": len(geant4_registry.logicalVolumeDict),
                 "solid_count": len(geant4_registry.solidDict),

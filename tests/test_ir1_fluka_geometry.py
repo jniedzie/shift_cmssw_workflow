@@ -14,6 +14,7 @@ MODEL = REPOSITORY / "models" / "lss5_ir1_atlas_proxy"
 sys.path.insert(0, str(SCRIPTS))
 
 from ir1_fluka_geometry import (  # noqa: E402
+    _axis_aligned_plane_box_bounds,
     audit_omitted_region_geometry,
     extract_and_write_field_manifest,
     extract_field_assignments,
@@ -26,7 +27,59 @@ from ir1_fluka_geometry import (  # noqa: E402
 )
 
 
+class _Plane:
+    def __init__(self, normal, point):
+        self._normal = normal
+        self._point = point
+
+    def toPlane(self):
+        return self._normal, self._point
+
+
+class _Operation:
+    def __init__(self, body):
+        self.body = body
+
+
+class _Zone:
+    def __init__(self, intersections, subtractions):
+        self.intersections = [_Operation(body) for body in intersections]
+        self.subtractions = [_Operation(body) for body in subtractions]
+
+
 class Ir1FlukaGeometryTest(unittest.TestCase):
+    def test_axis_aligned_plane_box_bounds_uses_tightest_exact_planes(self):
+        zone = _Zone(
+            intersections=[
+                _Plane([1, 0, 0], [4, 0, 0]),
+                _Plane([0, 1, 0], [0, 6, 0]),
+                _Plane([0, 0, 1], [0, 0, 8]),
+                _Plane([0, 0, 1], [0, 0, 80]),
+            ],
+            subtractions=[
+                _Plane([1, 0, 0], [1, 0, 0]),
+                _Plane([0, 1, 0], [0, 2, 0]),
+                _Plane([0, 0, 1], [0, 0, 3]),
+                _Plane([0, 0, 1], [0, 0, -30]),
+            ],
+        )
+        self.assertEqual(
+            _axis_aligned_plane_box_bounds(zone),
+            [[1.0, 2.0, 3.0], [4.0, 6.0, 8.0]],
+        )
+
+    def test_axis_aligned_plane_box_bounds_rejects_non_rectangular_zones(self):
+        oblique = _Zone(
+            intersections=[_Plane([1, 1, 0], [1, 1, 0])],
+            subtractions=[],
+        )
+        unbounded = _Zone(
+            intersections=[_Plane([1, 0, 0], [1, 0, 0])],
+            subtractions=[],
+        )
+        self.assertIsNone(_axis_aligned_plane_box_bounds(oblique))
+        self.assertIsNone(_axis_aligned_plane_box_bounds(unbounded))
+
     def test_raw_zone_aabb_fallback_replaces_only_independently_non_null_zones(self):
         converter = SimpleNamespace()
         retained = object()
