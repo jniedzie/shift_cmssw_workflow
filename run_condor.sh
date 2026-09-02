@@ -305,6 +305,29 @@ if [[ "$CHECK_ONLY" == 1 ]]; then
 	exit 0
 fi
 
+if [[ "$SAMPLE_BASE" =~ ^/eos/home-([^/])/([^/]+)(/.*)?$ ]]; then
+	command -v eos >/dev/null 2>&1 || {
+		echo "ERROR: eos client is required to check quota for $SAMPLE_BASE" >&2
+		exit 1
+	}
+	EOS_QUOTA_PATH="/eos/user/${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+	if ! EOS_QUOTA_REPORT="$(timeout 30 eos root://eosuser.cern.ch quota "$EOS_QUOTA_PATH" 2>&1)"; then
+		echo "ERROR: could not query EOS quota for $EOS_QUOTA_PATH; submission aborted" >&2
+		echo "$EOS_QUOTA_REPORT" >&2
+		exit 1
+	fi
+	if [[ -z "$EOS_QUOTA_REPORT" ]]; then
+		echo "ERROR: EOS returned no quota information for $EOS_QUOTA_PATH; submission aborted" >&2
+		exit 1
+	fi
+	if [[ "$EOS_QUOTA_REPORT" == *exceeded* || "$EOS_QUOTA_REPORT" == *"100.00 %"* ]]; then
+		echo "ERROR: EOS quota is full for $EOS_QUOTA_PATH; submission aborted before building CMSSW" >&2
+		echo "$EOS_QUOTA_REPORT" >&2
+		exit 1
+	fi
+	echo "EOS quota preflight passed for $EOS_QUOTA_PATH"
+fi
+
 "$SCRIPT_DIR/scripts/prepare_condor.sh"
 
 # Standard CERN batch schedds reject /eos paths in submit-file attributes
