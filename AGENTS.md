@@ -43,6 +43,22 @@ If a proposed implementation would alter any electronics or trigger rule,
 stop and flag that it conflicts with the project objective instead of making
 the change.
 
+## LSS geometry-converter priority
+
+- The provisional IR1/ATLAS deck is a difficult regression fixture, not the
+  geometry to optimize. The production input is expected to become a CMS
+  LSS/IR5 FLUKA deck.
+- Improve the FLUKA-to-CMSSW converter and its audits generically: preserve
+  FLUKA Boolean semantics, lattices, transforms, materials, bounds, and
+  completeness across input models.
+- Do not hard-code ATLAS region/body names, coordinates, materials, hand-tuned
+  AABBs, or gap fills to make this fixture pass. Use an ATLAS-specific probe
+  only to isolate a reusable defect and add a construct-level regression test.
+- If a change would not apply to an equivalent FLUKA construct in the future
+  CMS deck, report it as model-specific and do not spend time fine-tuning it.
+- The future CMS deck must pass the same fail-closed conversion, overlap, gap,
+  material, transform, and transport gates without favorable special cases.
+
 ## Workflow safety
 
 - Read `docs/generation_instructions.md` and the relevant timing/overlay note
