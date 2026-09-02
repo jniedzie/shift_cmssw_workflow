@@ -19,6 +19,8 @@ if (( ${#POSITIONAL_ARGS[@]} > 2 )); then
 fi
 CHUNK="${POSITIONAL_ARGS[0]:-0}"
 source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
+source "$WORKFLOW_ROOT/scripts/configure_lss.sh"
+configure_shift_lss
 N_EVENTS="${POSITIONAL_ARGS[1]:-$N_EVENTS}"
 WORKDIR="${WORKDIR:-$SAMPLE_DIR}"
 OUTPUT_DIR="$STEP4_DIR"
@@ -108,6 +110,12 @@ STEP4_N_EVENTS=$((N_EVENTS * STEP4_INPUTS_PER_JOB))
 # end of the generated configuration, after the final EXO/Nano setup.
 CUSTOMISE_COMMAND_ARGS=()
 GROUPED_SOURCE_COMMAND=""
+if [[ "$SHIFT_LSS_MATERIAL_MODE" != none || "$SHIFT_LSS_FIELD_MODE" != none ]]; then
+	if [[ "${AOD_TO_EXONANO_CUSTOMISE:-}" != "PhysicsTools/ShiftMuonSegments/shiftMuonSegments_customise.customise" ]]; then
+		echo "ERROR: LSS reconstruction requires the canonical ShiftMuonSegments Step-4 customisation" >&2
+		exit 1
+	fi
+fi
 if [[ "$STEP4_INPUTS_PER_JOB" != 1 ]]; then
 	# Independently generated chunks restart their EDM event numbering. They are
 	# distinct events despite equal run/lumi/event IDs, so grouped test inputs
@@ -176,6 +184,10 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		1) GEOMETRY_TARGET_MATERIAL_CMSSW=True ;;
 		*) echo "ERROR: SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL must be 0 or 1 (got '$SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL')" >&2; exit 1 ;;
 	esac
+	if [[ "$SHIFT_LSS_MATERIAL_MODE" == external && "$SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL" == 1 ]]; then
+		echo "ERROR: external LSS material already selects detailed target-leg navigation; disable SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL" >&2
+		exit 1
+	fi
 	case "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" in
 		0) LOG_GEOMETRY_COMPARISON_CMSSW=False ;;
 		1) LOG_GEOMETRY_COMPARISON_CMSSW=True ;;
@@ -188,7 +200,7 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
@@ -206,6 +218,8 @@ echo "Directional refit geometry material in fitter: $SHIFT_REFIT_GEOMETRY_MATER
 echo "Directional refit geometry material in smoother: $SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER"
 echo "Directional refit geometry material on target leg: $SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL"
 echo "Directional refit log geometry comparison: $SHIFT_REFIT_LOG_GEOMETRY_COMPARISON"
+echo "SHIFT LSS material/field modes: $SHIFT_LSS_MATERIAL_MODE/$SHIFT_LSS_FIELD_MODE"
+[[ -z "${SHIFT_LSS_CONTRACT_SHA256:-}" ]] || echo "SHIFT LSS contract SHA-256: $SHIFT_LSS_CONTRACT_SHA256"
 echo "Step-4 grouped inputs: $STEP4_INPUTS_PER_JOB (parts $INPUT_START through $((INPUT_START + STEP4_INPUTS_PER_JOB - 1)))"
 DRIVER_ARGS=(
 	--step "$NANO_STEP"

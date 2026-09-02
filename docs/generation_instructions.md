@@ -36,6 +36,11 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SHIFT_SIMHIT_REFERENCE_INPUT` | Absolute shared Step-1 file required by a same-SimHit reference scan. |
 | `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
+| `SHIFT_LSS_MATERIAL_MODE` | `none` or `external`; attaches the same explicitly transformed external material in Step 1 and Step 4. |
+| `SHIFT_LSS_FIELD_MODE` | `none` or provisional `ir1_atlas_proxy`; selects the same composite field for simulation and SHIFT reconstruction. |
+| `SHIFT_LSS_GDML_FILE`, `SHIFT_LSS_GDML_SHA256` | Installed CMSSW `FileInPath` and required frozen-artifact checksum for external material. |
+| `SHIFT_LSS_MODEL_ORIGIN_CM`, `SHIFT_LSS_MODEL_TO_CMS` | Required common translation and proper rotation. There is deliberately no default transform. |
+| `SHIFT_LSS_FIELD_SCALE` | Required signed scale for the provisional field. Its sign records the reviewed polarity. |
 | `TRIGGER_SCENARIO` | `piggyback_central` conditions production on an ordinary recorded central collision; `none` disables that contract. |
 | `TRIGGER_TIMELINE_MODE` | `none` or `zero_bias_proxy` for a correlated candidate-trigger sidecar. |
 | `TRIGGER_LIBRARY_JSONL`, `TRIGGER_L1_MENU_JSON` | Validated ZeroBias inputs used by the proxy. |
@@ -192,6 +197,45 @@ This full physical scan includes all standard timing-dependent behavior from
 Geant4 onward. Use the existing no-pileup same-SimHit scan when the question is
 strictly which losses were introduced by digitization, BX assignment, and RAW
 readout, with the simulated detector crossings held exactly fixed.
+
+### LSS material and field comparison
+
+LSS transport is off unless at least one of `SHIFT_LSS_MATERIAL_MODE` and
+`SHIFT_LSS_FIELD_MODE` is explicitly enabled. The workflow validates one
+common origin and rotation and passes it to Step-1 Geant4 simulation and the
+Step-4 SHIFT propagators. External material also enables detailed Geant4e
+navigation on the target leg. It is mutually exclusive with the older
+`SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL=1` ablation.
+
+The provisional IR1/ATLAS fixture additionally requires:
+
+```bash
+SHIFT_LSS_GDML_FILE=PhysicsTools/ShiftLssGeometry/data/validated_lss.gdml
+SHIFT_LSS_GDML_SHA256=recorded_64_character_digest
+SHIFT_LSS_MODEL_ORIGIN_CM=x,y,z
+SHIFT_LSS_MODEL_TO_CMS=r00,r01,r02,r10,r11,r12,r20,r21,r22
+SHIFT_LSS_MINIMUM_ABS_Z_CM=2750
+SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM=14800
+SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM=20000
+SHIFT_LSS_FIELD_SCALE=reviewed_signed_scale
+```
+
+Do not copy the numerical placeholders into a campaign. The transform, source
+side, boundary, and polarity must be documented and reviewed first. The GDML
+must be installed below `CMSSW_SRC` and always runs with overlap checks.
+
+Use four paired campaigns with identical generator and simulation seeds:
+
+| Control | `SHIFT_LSS_MATERIAL_MODE` | `SHIFT_LSS_FIELD_MODE` |
+| --- | --- | --- |
+| CMS only | `none` | `none` |
+| Material only | `external` | `none` |
+| Field only | `none` | `ir1_atlas_proxy` |
+| Material and field | `external` | `ir1_atlas_proxy` |
+
+The middle two are diagnostic ablations; only the combined row represents the
+complete proxy. Keep every result labelled IR1/ATLAS until an authoritative
+Run-3 IR5 model passes the same gates.
 Do not combine offsets with an assumed probability yet: the current recorded
 ZeroBias source establishes a real accepted central readout, but it does not
 provide an unbiased distribution of central-trigger times relative to an

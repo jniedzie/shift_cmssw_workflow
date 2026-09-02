@@ -90,6 +90,8 @@ done
 [[ -n "$NORMALIZED_STEPS" ]] || { echo "ERROR: no workflow steps selected" >&2; exit 2; }
 
 source "$SCRIPT_DIR/config/workflow.env"
+source "$SCRIPT_DIR/scripts/configure_lss.sh"
+configure_shift_lss
 
 # The submit description has an explicit `environment` attribute, so campaign
 # identity, pileup, and reconstruction settings must be serialized rather than
@@ -117,6 +119,20 @@ SUBMISSION_VARIABLES=(
 	SHIFT_TIMING_MODEL_VERSION
 	SHIFT_G4_MAX_TRACK_TIME_NS
 	SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS
+	SHIFT_LSS_MATERIAL_MODE
+	SHIFT_LSS_FIELD_MODE
+	SHIFT_LSS_GDML_FILE
+	SHIFT_LSS_GDML_SHA256
+	SHIFT_LSS_MODEL_ORIGIN_CM
+	SHIFT_LSS_MODEL_TO_CMS
+	SHIFT_LSS_MINIMUM_ABS_Z_CM
+	SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM
+	SHIFT_LSS_GEANT4E_MOMENTUM_LIMIT_GEV
+	SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM
+	SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM
+	SHIFT_LSS_FIELD_SCALE
+	SHIFT_LSS_DETECTOR_ELEMENT_NAME
+	SHIFT_LSS_OVERLAP_TOLERANCE_CM
 	TRIGGER_SCENARIO
 	TRIGGER_TIMELINE_MODE
 	TRIGGER_LIBRARY_JSONL
@@ -205,6 +221,17 @@ fi
 if [[ "$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON" == 1 && "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" == 0 && "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" == 0 && "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" == 0 ]]; then
 	echo "SHIFT_REFIT_LOG_GEOMETRY_COMPARISON requires a geometry material mode" >&2
 	exit 1
+fi
+if [[ "$SHIFT_LSS_MATERIAL_MODE" == external && "$SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL" == 1 ]]; then
+	echo "SHIFT_LSS_MATERIAL_MODE=external selects detailed target-leg navigation and is mutually exclusive with SHIFT_REFIT_GEOMETRY_TARGET_MATERIAL=1" >&2
+	exit 1
+fi
+if [[ ",$NORMALIZED_STEPS," == *,4,* &&
+      ( "$SHIFT_LSS_MATERIAL_MODE" != none || "$SHIFT_LSS_FIELD_MODE" != none ) ]]; then
+	if [[ "${AOD_TO_EXONANO_CUSTOMISE:-}" != "PhysicsTools/ShiftMuonSegments/shiftMuonSegments_customise.customise" ]]; then
+		echo "LSS reconstruction requires the canonical ShiftMuonSegments Step-4 customisation" >&2
+		exit 1
+	fi
 fi
 
 if [[ "$TRIGGER_SCENARIO" == piggyback_central ]]; then
@@ -315,6 +342,9 @@ printf 'Pileup: mode=%s, scenario=%s, input=%s, seed=%s, sequential=%s\n' \
 	"$PILEUP_MODE" "$PILEUP_SCENARIO" "${PILEUP_INPUT:-none}" "$PILEUP_SEED" "$PILEUP_SEQUENTIAL"
 printf 'Timing: mode=%s, BX/phase=%s/%s ns, Geant4 central/forward limits=%s/%s ns\n' \
 	"$SHIFT_TIMING_MODE" "$SHIFT_TIMING_BX_OFFSET" "$SHIFT_TIMING_PHASE_NS" "$SHIFT_G4_MAX_TRACK_TIME_NS" "$SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS"
+printf 'LSS: material=%s, field=%s, transform origin=%s\n' \
+	"$SHIFT_LSS_MATERIAL_MODE" "$SHIFT_LSS_FIELD_MODE" "${SHIFT_LSS_MODEL_ORIGIN_CM:-unset}"
+[[ -z "${SHIFT_LSS_CONTRACT_SHA256:-}" ]] || printf 'LSS contract SHA-256: %s\n' "$SHIFT_LSS_CONTRACT_SHA256"
 printf 'Trigger: scenario=%s, timeline=%s, BX range=%s..%s, seed=%s, rules=%s, referenceSlots=%s, reconstructionFilter=%s/%s\n' \
 	"$TRIGGER_SCENARIO" "$TRIGGER_TIMELINE_MODE" "$TRIGGER_TIMELINE_START_BX" "$TRIGGER_TIMELINE_END_BX" \
 	"$TRIGGER_TIMELINE_SEED" "$TRIGGER_RULE_MODE" "$TRIGGER_REFERENCE_SLOT_MODE" \
