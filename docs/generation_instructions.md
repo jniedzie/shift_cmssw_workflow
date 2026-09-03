@@ -358,7 +358,9 @@ test-only runner. It copies each Step-1 file to local scratch once, reuses the
 same SimHits at every requested delay, and runs the unchanged 2023
 digitization, RAW packing/unpacking, and SHIFT reconstruction for each point.
 It writes compact NanoAOD files directly, without persistent Step-2 or Step-3
-files and without the unrelated PAT/EXONanoAOD work:
+files and without the unrelated PAT/EXONanoAOD work. Each ROOT file is created
+in local scratch and moved into the requested output directory only after the
+CMSSW job succeeds:
 
 ```bash
 ./scripts/run_shift_reco_delay_scan.py \

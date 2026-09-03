@@ -200,6 +200,7 @@ def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_r
     driver_log = log_dir / f"cmsDriver_part{part}.log"
     run_log = log_dir / f"cmsRun_part{part}.log"
     dummy_aod = work_root / f"unused_aod_{delay_name(delay)}_{part}.root"
+    local_output = work_root / f"events_shiftDelayScan_{delay_name(delay)}_part{part}.root"
 
     timing = (
         "from IOMC.ShiftEventTiming.shiftSimHitTiming_customise import "
@@ -239,16 +240,23 @@ def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_r
     environment = sanitized_runtime_environment(os.environ)
     run_logged(driver, driver_log, env=environment)
     with config_path.open("a", encoding="utf-8") as config_file:
-        config_file.write(compact_footer(output_path, delay, bx, phase, source_inputs))
-    if args.force and output_path.exists():
-        output_path.unlink()
+        config_file.write(compact_footer(local_output, delay, bx, phase, source_inputs))
     run_logged(
         runtime_command(cmssw_dir, ["cmsRun", config_path]),
         run_log,
         env=environment,
     )
-    if not output_path.is_file() or output_path.stat().st_size <= 1024:
-        raise RuntimeError(f"cmsRun did not produce a healthy compact output: {output_path}")
+    if not local_output.is_file() or local_output.stat().st_size <= 1024:
+        raise RuntimeError(f"cmsRun did not produce a healthy compact output: {local_output}")
+    partial_output = output_path.parent / f".{output_path.name}.{os.getpid()}.partial"
+    try:
+        shutil.copy2(local_output, partial_output)
+        if partial_output.stat().st_size != local_output.stat().st_size:
+            raise RuntimeError(f"incomplete staged output: {partial_output}")
+        os.replace(partial_output, output_path)
+    finally:
+        if partial_output.exists():
+            partial_output.unlink()
     report = {
         "status": "complete",
         "format": "shift-reco-delay-scan-v1",
