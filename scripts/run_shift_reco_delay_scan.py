@@ -378,7 +378,10 @@ def main():
         "failures": failures,
         "pileup_mode": "none",
     }
-    with (args.output_dir / "scan.json").open("w", encoding="utf-8") as summary_file:
+    selected_first = part_label(selected[0], args.first_file)
+    selected_last = part_label(selected[-1], args.first_file + len(selected) - 1)
+    summary_path = args.output_dir / f"scan_part{selected_first}to{selected_last}.json"
+    with summary_path.open("w", encoding="utf-8") as summary_file:
         json.dump(summary, summary_file, indent=2, sort_keys=True)
         summary_file.write("\n")
     return 1 if failures else 0
