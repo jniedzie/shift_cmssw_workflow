@@ -364,7 +364,7 @@ files and without the unrelated PAT/EXONanoAOD work:
 ./scripts/run_shift_reco_delay_scan.py \
   /absolute/path/to/the/baseline/sample \
   /absolute/path/to/shift_delay_scan \
-  --delays=-100:100:10 --files 100 --workers 2
+  --delays=-100:100:10 --files 1000 --files-per-job 100 --workers 2
 
 ../tea_shift_cmssw/utils/shift_delay_efficiency_plotter.py \
   /absolute/path/to/shift_delay_scan

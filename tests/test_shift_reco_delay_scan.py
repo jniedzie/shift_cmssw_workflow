@@ -60,13 +60,14 @@ class ShiftRecoDelayScanTest(unittest.TestCase):
     def test_compact_output_keeps_delay_provenance_and_no_aod_path(self):
         footer = compact_footer(
             Path("/tmp/output.root"), Decimal("-6.25"), -1,
-            Decimal("18.75"), Path("/input.root"),
+            Decimal("18.75"), [Path("/input.root")],
         )
         self.assertIn('"delay_ns":"-6.25"', footer)
         self.assertIn('"bx_offset":-1', footer)
         self.assertIn('process.schedule.remove(process.AODSIMoutput_step)', footer)
         self.assertIn('"NanoAODOutputModule"', footer)
         self.assertIn("nanoaodUniqueString_nanoMetadata", footer)
+        self.assertIn('"source_step1":["/input.root"]', footer)
 
 
 if __name__ == "__main__":

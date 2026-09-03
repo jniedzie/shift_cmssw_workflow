@@ -97,14 +97,14 @@ def part_label(path, fallback):
     return stem[len(marker):] if stem.startswith(marker) else f"{fallback:04d}"
 
 
-def compact_footer(output_path, delay, bx, phase, source_path):
+def compact_footer(output_path, delay, bx, phase, source_paths):
     provenance = json.dumps(
         {
             "format": "shift-reco-delay-scan-v1",
             "delay_ns": _decimal_text(delay),
             "bx_offset": bx,
             "phase_ns": _decimal_text(phase),
-            "source_step1": str(source_path),
+            "source_step1": [str(path) for path in source_paths],
             "pileup_mode": "none",
         },
         sort_keys=True,
@@ -147,14 +147,14 @@ process.schedule.append(process.NANOAODSIMoutput_step)
 '''
 
 
-def report_matches(report_path, output_path, delay, source_path):
+def report_matches(report_path, output_path, delay, source_paths):
     try:
         with report_path.open(encoding="utf-8") as report_file:
             report = json.load(report_file)
         return (
             report["status"] == "complete"
             and report["delay_ns"] == _decimal_text(delay)
-            and report["source_step1"] == str(source_path)
+            and report["source_step1"] == [str(path) for path in source_paths]
             and output_path.is_file()
             and output_path.stat().st_size > 1024
         )
@@ -179,12 +179,12 @@ def run_logged(command, log_path, *, env):
         )
 
 
-def run_point(delay, staged_input, source_input, part, args, cmssw_dir, work_root):
+def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_root):
     bx, phase = normalize_delay(delay)
     point_dir = args.output_dir / delay_name(delay)
     output_path = point_dir / f"events_shiftDelayScan_part{part}.root"
     report_path = point_dir / f"events_shiftDelayScan_part{part}.json"
-    if not args.force and report_matches(report_path, output_path, delay, source_input):
+    if not args.force and report_matches(report_path, output_path, delay, source_inputs):
         return "reused"
     if not args.force and (output_path.exists() or report_path.exists()):
         raise RuntimeError(
@@ -229,7 +229,7 @@ def run_point(delay, staged_input, source_input, part, args, cmssw_dir, work_roo
             "--conditions", args.global_tag,
             "--datatier", "AODSIM", "--eventcontent", "AODSIM",
             "--geometry", "DB:Extended", "--era", "Run3_2023",
-            "--filein", f"file:{staged_input}",
+            "--filein", ",".join(f"file:{path}" for path in staged_inputs),
             "--fileout", f"file:{dummy_aod}",
             "--python_filename", config_path,
             "--no_exec", "-n", str(args.events),
@@ -239,7 +239,7 @@ def run_point(delay, staged_input, source_input, part, args, cmssw_dir, work_roo
     environment = sanitized_runtime_environment(os.environ)
     run_logged(driver, driver_log, env=environment)
     with config_path.open("a", encoding="utf-8") as config_file:
-        config_file.write(compact_footer(output_path, delay, bx, phase, source_input))
+        config_file.write(compact_footer(output_path, delay, bx, phase, source_inputs))
     if args.force and output_path.exists():
         output_path.unlink()
     run_logged(
@@ -255,7 +255,7 @@ def run_point(delay, staged_input, source_input, part, args, cmssw_dir, work_roo
         "delay_ns": _decimal_text(delay),
         "bx_offset": bx,
         "phase_ns": _decimal_text(phase),
-        "source_step1": str(source_input),
+        "source_step1": [str(path) for path in source_inputs],
         "output": str(output_path),
         "output_bytes": output_path.stat().st_size,
         "pileup_mode": "none",
@@ -274,9 +274,13 @@ def main():
         "--delays", default="-100:100:10",
         help="delays in ns; comma-separated values or inclusive START:STOP:STEP ranges",
     )
-    parser.add_argument("--events", type=int, default=-1, help="events per Step-1 file")
+    parser.add_argument("--events", type=int, default=-1, help="maximum events per file group")
     parser.add_argument("--first-file", type=int, default=0)
     parser.add_argument("--files", type=int, default=1, help="number of Step-1 files")
+    parser.add_argument(
+        "--files-per-job", type=int, default=1,
+        help="Step-1 files processed together in each CMSSW job",
+    )
     parser.add_argument("--workers", type=int, default=1, help="parallel delays per staged file")
     parser.add_argument("--global-tag", default="auto:phase1_2023_realistic")
     parser.add_argument("--force", action="store_true")
@@ -289,8 +293,11 @@ def main():
         parser.error(str(error))
     if args.events == 0 or args.events < -1:
         parser.error("--events must be -1 or positive")
-    if args.first_file < 0 or args.files < 1 or args.workers < 1:
-        parser.error("--first-file must be non-negative; --files and --workers must be positive")
+    if args.first_file < 0 or args.files < 1 or args.files_per_job < 1 or args.workers < 1:
+        parser.error(
+            "--first-file must be non-negative; --files, --files-per-job, and --workers "
+            "must be positive"
+        )
     selected = inputs[args.first_file:args.first_file + args.files]
     if not selected:
         parser.error("the selected Step-1 file range is empty")
@@ -303,31 +310,41 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     failures = []
-    for input_index, source_input in enumerate(selected, start=args.first_file):
-        part = part_label(source_input, input_index)
+    groups = [
+        selected[index:index + args.files_per_job]
+        for index in range(0, len(selected), args.files_per_job)
+    ]
+    for group_index, source_inputs in enumerate(groups):
+        first_index = args.first_file + group_index * args.files_per_job
+        first_part = part_label(source_inputs[0], first_index)
+        last_part = part_label(source_inputs[-1], first_index + len(source_inputs) - 1)
+        part = first_part if len(source_inputs) == 1 else f"{first_part}to{last_part}"
         if not args.force and all(
             report_matches(
                 args.output_dir / delay_name(delay) / f"events_shiftDelayScan_part{part}.json",
                 args.output_dir / delay_name(delay) / f"events_shiftDelayScan_part{part}.root",
                 delay,
-                source_input,
+                source_inputs,
             )
             for delay in delays
         ):
             for delay in delays:
                 print(
-                    f"{source_input.name} delay {_decimal_text(delay)} ns: reused",
+                    f"files {part} delay {_decimal_text(delay)} ns: reused",
                     flush=True,
                 )
             continue
         with tempfile.TemporaryDirectory(prefix=f"shift_delay_scan_{part}_") as temp_dir:
-            staged_input = Path(temp_dir) / source_input.name
-            print(f"staging once: {source_input} -> {staged_input}", flush=True)
-            shutil.copy2(source_input, staged_input)
+            staged_inputs = []
+            for source_input in source_inputs:
+                staged_input = Path(temp_dir) / source_input.name
+                print(f"staging once: {source_input} -> {staged_input}", flush=True)
+                shutil.copy2(source_input, staged_input)
+                staged_inputs.append(staged_input)
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
                 futures = {
                     executor.submit(
-                        run_point, delay, staged_input, source_input, part, args,
+                        run_point, delay, staged_inputs, source_inputs, part, args,
                         cmssw_dir, Path(temp_dir),
                     ): delay
                     for delay in delays
@@ -336,11 +353,13 @@ def main():
                     delay = futures[future]
                     try:
                         status = future.result()
-                        print(f"{source_input.name} delay {_decimal_text(delay)} ns: {status}", flush=True)
+                        print(f"files {part} delay {_decimal_text(delay)} ns: {status}", flush=True)
                     except Exception as error:
-                        failures.append((str(source_input), _decimal_text(delay), str(error)))
+                        failures.append(
+                            ([str(path) for path in source_inputs], _decimal_text(delay), str(error))
+                        )
                         print(
-                            f"{source_input.name} delay {_decimal_text(delay)} ns: FAILED: {error}",
+                            f"files {part} delay {_decimal_text(delay)} ns: FAILED: {error}",
                             file=sys.stderr,
                             flush=True,
                         )
