@@ -19,9 +19,9 @@ def file_groups(total_files, files_per_job):
 
 def quote_argument(value):
     value = str(value)
-    if '"' in value or "\n" in value:
+    if "'" in value or "\n" in value:
         raise ValueError(f"unsupported character in Condor argument: {value!r}")
-    return f'"{value}"'
+    return f"'{value}'"
 
 
 def render_submit(runner, baseline, output_dir, delays, groups, workers, memory_mb, log_dir):
@@ -39,7 +39,7 @@ def render_submit(runner, baseline, output_dir, delays, groups, workers, memory_
     rows = "\n".join(f"{first} {count}" for first, count in groups)
     return f"""universe = vanilla
 executable = {runner}
-arguments = {arguments}
+arguments = "{arguments}"
 should_transfer_files = NO
 getenv = True
 request_cpus = {workers}
