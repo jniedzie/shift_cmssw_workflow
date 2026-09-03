@@ -182,16 +182,19 @@ def write_collada(path, meshes):
 
 
 def write_preview_collada(path, meshes):
-    """Write a deliberately simple Collada 1.4.1 file for macOS Preview.
+    """Write a conservative Collada 1.4.1 file for macOS Preview.
 
-    Preview is unreliable with many nested nodes and separately indexed flat
-    normals.  This form uses eight flat geometry nodes, triangle-only faces,
-    one position index, Lambert materials, short text lines, and no extensions.
+    Preview is less forgiving than Quick Look when a mesh has no normal input.
+    Use one flat geometry per populated category, triangle-only faces, and
+    matching position/normal indices.  This avoids both separately indexed
+    attributes and importer-side normal generation.
     """
-    grouped = {category: [] for category in COLORS}
+    grouped = {category: {"positions": [], "normals": []} for category in COLORS}
     for mesh in meshes:
-        positions, _ = display_triangle_data(mesh)
-        grouped[mesh.category].extend(positions)
+        positions, normals = display_triangle_data(mesh)
+        grouped[mesh.category]["positions"].extend(positions)
+        grouped[mesh.category]["normals"].extend(normals)
+    populated = [category for category, data in grouped.items() if data["positions"]]
     with path.open("w", encoding="utf-8", newline="\n") as output:
         output.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         output.write('<COLLADA xmlns="http://www.collada.org/2005/11/COLLADASchema" version="1.4.1">\n')
@@ -214,32 +217,49 @@ def write_preview_collada(path, meshes):
             output.write(f'<instance_effect url="#{category}-effect"/></material>\n')
         output.write('  </library_materials>\n')
         output.write('  <library_geometries>\n')
-        for category, positions in grouped.items():
-            source_id = category + "-positions"
+        for category in populated:
+            positions = grouped[category]["positions"]
+            normals = grouped[category]["normals"]
+            position_source_id = category + "-positions"
+            normal_source_id = category + "-normals"
             output.write(f'    <geometry id="{category}-geometry" name="{sanitize(LABELS[category])}"><mesh>\n')
-            output.write(f'      <source id="{source_id}">\n')
-            output.write(f'        <float_array id="{source_id}-array" count="{3 * len(positions)}">\n')
+            output.write(f'      <source id="{position_source_id}">\n')
+            output.write(f'        <float_array id="{position_source_id}-array" count="{3 * len(positions)}">\n')
             for offset in range(0, len(positions), 4):
                 output.write('          ' + ' '.join(
                     f'{coordinate:.7g}' for point in positions[offset:offset + 4] for coordinate in point
                 ) + '\n')
             output.write('        </float_array>\n')
-            output.write(f'        <technique_common><accessor source="#{source_id}-array" count="{len(positions)}" stride="3">')
+            output.write(f'        <technique_common><accessor source="#{position_source_id}-array" count="{len(positions)}" stride="3">')
             output.write('<param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>')
             output.write('</accessor></technique_common>\n')
             output.write('      </source>\n')
-            output.write(f'      <vertices id="{category}-vertices"><input semantic="POSITION" source="#{source_id}"/></vertices>\n')
+            output.write(f'      <source id="{normal_source_id}">\n')
+            output.write(f'        <float_array id="{normal_source_id}-array" count="{3 * len(normals)}">\n')
+            for offset in range(0, len(normals), 4):
+                output.write('          ' + ' '.join(
+                    f'{coordinate:.7g}' for normal in normals[offset:offset + 4] for coordinate in normal
+                ) + '\n')
+            output.write('        </float_array>\n')
+            output.write(f'        <technique_common><accessor source="#{normal_source_id}-array" count="{len(normals)}" stride="3">')
+            output.write('<param name="X" type="float"/><param name="Y" type="float"/><param name="Z" type="float"/>')
+            output.write('</accessor></technique_common>\n')
+            output.write('      </source>\n')
+            output.write(f'      <vertices id="{category}-vertices"><input semantic="POSITION" source="#{position_source_id}"/></vertices>\n')
             output.write(f'      <triangles material="{category}-material-symbol" count="{len(positions) // 3}">\n')
             output.write(f'        <input semantic="VERTEX" source="#{category}-vertices" offset="0"/>\n')
+            output.write(f'        <input semantic="NORMAL" source="#{normal_source_id}" offset="1"/>\n')
             output.write('        <p>\n')
-            for offset in range(0, len(positions), 36):
-                output.write('          ' + ' '.join(str(index) for index in range(offset, min(offset + 36, len(positions)))) + '\n')
+            for offset in range(0, len(positions), 18):
+                output.write('          ' + ' '.join(
+                    f'{index} {index}' for index in range(offset, min(offset + 18, len(positions)))
+                ) + '\n')
             output.write('        </p>\n')
             output.write('      </triangles>\n')
             output.write('    </mesh></geometry>\n')
         output.write('  </library_geometries>\n')
         output.write('  <library_visual_scenes><visual_scene id="Scene" name="CMS_and_LSS_test_geometry">\n')
-        for category in COLORS:
+        for category in populated:
             output.write(f'    <node id="{category}-node" name="{sanitize(LABELS[category])}">\n')
             output.write(f'      <instance_geometry url="#{category}-geometry"><bind_material><technique_common>\n')
             output.write(f'        <instance_material symbol="{category}-material-symbol" target="#{category}-material"/>\n')
