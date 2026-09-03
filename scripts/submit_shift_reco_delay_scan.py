@@ -41,6 +41,7 @@ def render_submit(runner, baseline, output_dir, delays, groups, workers, memory_
 executable = {runner}
 arguments = "{arguments}"
 should_transfer_files = NO
+transfer_executable = False
 getenv = True
 request_cpus = {workers}
 request_memory = {memory_mb} MB

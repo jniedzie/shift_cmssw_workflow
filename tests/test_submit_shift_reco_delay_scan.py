@@ -23,6 +23,7 @@ class SubmitShiftRecoDelayScanTest(unittest.TestCase):
         self.assertIn("--first-file $(first_file)", text)
         self.assertIn("--files-per-job $(file_count)", text)
         self.assertIn("request_cpus = 2", text)
+        self.assertIn("transfer_executable = False", text)
         self.assertIn("0 20\n20 5", text)
         self.assertIn(
             'arguments = "\'/input\' \'/output\' \'--delays=-100:100:10\'',
