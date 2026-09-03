@@ -353,6 +353,39 @@ CMSSW_PREPARED=1 ./scripts/run_shift_readout_response_grid.py \
   --events 10 --workers 2
 ```
 
+For a high-statistics reconstruction-efficiency scan, use the separate
+test-only runner. It copies each Step-1 file to local scratch once, reuses the
+same SimHits at every requested delay, and runs the unchanged 2023
+digitization, RAW packing/unpacking, and SHIFT reconstruction for each point.
+It writes compact NanoAOD files directly, without persistent Step-2 or Step-3
+files and without the unrelated PAT/EXONanoAOD work:
+
+```bash
+./scripts/run_shift_reco_delay_scan.py \
+  /absolute/path/to/the/baseline/sample \
+  /absolute/path/to/shift_delay_scan \
+  --delays=-100:100:10 --files 100 --workers 2
+
+../tea_shift_cmssw/utils/shift_delay_efficiency_plotter.py \
+  /absolute/path/to/shift_delay_scan
+```
+
+The delay is in ns and may be positive or negative. The runner converts it to
+the exact BX plus phase representation; for example, `-6.25 ns` becomes BX
+`-1` plus phase `18.75 ns`. Each output embeds that conversion and the original
+Step-1 path in NanoAOD run metadata and in a JSON sidecar. The plotter applies
+the same J/psi truth matching and topology definitions as
+`ShiftHistogramsFiller::FillEfficiencies` and writes the binomial counts as
+JSON beside the muon and dimuon PDFs. It refuses to compare points whose
+embedded delays disagree with their directories or whose Step-1 input sets are
+not identical.
+
+This scan is the no-pileup, same-SimHit control. It isolates the response of
+the fixed electronics/readout and reconstruction to delay. It is not the final
+piggyback result with central-collision occupancy. Validate selected points
+against the full four-step physical-timing workflow before interpreting the
+curve as the production result.
+
 After producing a rule-enabled timeline whose analysis BX range maps to the
 response offsets, convolve the independent inputs with:
 
