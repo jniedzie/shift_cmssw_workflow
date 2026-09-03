@@ -372,6 +372,20 @@ CMSSW job succeeds:
   /absolute/path/to/shift_delay_scan
 ```
 
+For the complete sample, submit the grouped scan to HTCondor instead of
+running it on a login node:
+
+```bash
+./scripts/submit_shift_reco_delay_scan.py \
+  /absolute/path/to/the/baseline/sample \
+  /absolute/path/to/shift_delay_scan \
+  --delays=-100:100:10 --files-per-job 20 --workers 2
+```
+
+The submitter uses all available Step-1 files unless `--files` limits them.
+Each Condor job owns one input group and all delays for that group, preserving
+paired denominators and allowing failed groups to be resubmitted safely.
+
 The delay is in ns and may be positive or negative. The runner converts it to
 the exact BX plus phase representation; for example, `-6.25 ns` becomes BX
 `-1` plus phase `18.75 ns`. Each output embeds that conversion and the original
