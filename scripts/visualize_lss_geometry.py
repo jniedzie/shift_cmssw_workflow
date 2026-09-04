@@ -34,6 +34,38 @@ COLORS = {
     "lss_beamline": (0.08, 0.09, 0.11, 0.92),
 }
 
+# Brighter PBR colors for interactive viewers.  Small emissive terms below
+# keep these hues recognizable under both Preview's light environment and
+# darker third-party viewer lighting without making the surfaces look unlit.
+GLB_COLORS = {
+    "cms_muon": (0.098, 0.463, 0.824, 0.72),
+    "cms_calo": (0.949, 0.557, 0.169, 0.92),
+    "cms_tracker": (0.125, 0.639, 0.529, 1.00),
+    "cms_forward": (0.612, 0.416, 0.871, 0.82),
+    "cms_cavern": (0.612, 0.639, 0.686, 0.10),
+    "lss_tunnel": (0.349, 0.384, 0.451, 0.18),
+    "lss_magnet": (0.882, 0.341, 0.349, 1.00),
+    "lss_beamline": (0.067, 0.094, 0.153, 1.00),
+}
+
+# Enclosing structures stay transparent enough to expose the machine and
+# tracks.  Conservative opacities plus single-sided rendering below reduce
+# the depth-sorting flicker caused by stacked front/back transparent faces.
+USDZ_COLORS = {
+    "cms_muon": (0.035, 0.245, 0.560, 0.35),
+    "cms_calo": (0.710, 0.335, 0.015, 0.62),
+    "cms_tracker": (0.020, 0.390, 0.265, 0.78),
+    "cms_forward": (0.340, 0.145, 0.555, 0.48),
+    "cms_cavern": (0.310, 0.335, 0.380, 0.12),
+    "lss_tunnel": (0.185, 0.210, 0.255, 0.22),
+    "lss_magnet": (0.645, 0.075, 0.060, 1.00),
+    "lss_beamline": (0.020, 0.030, 0.050, 1.00),
+}
+MUON_COLORS = {
+    13: (0.00, 0.78, 0.28, 1.0),
+    -13: (0.00, 0.78, 0.28, 1.0),
+}
+
 LABELS = {
     "cms_muon": "CMS muon system",
     "cms_calo": "CMS calorimeters",
@@ -45,10 +77,154 @@ LABELS = {
     "lss_beamline": "beam pipe and beam-line parts",
 }
 
+ANIMATION_FPS = 24
+ANIMATION_SECONDS = 16
+PRESENTATION_CENTRE = (120.70199584960938, 0.39999961853027344, -1.4663352966308594)
+CMS_PRESENTATION_FOCUS = (0.0, 0.0, 0.0)
+MODEL_KEYFRAMES = (
+    # seconds, point to keep centred, scale, rotation around the vertical axis
+    (0.0, PRESENTATION_CENTRE, 1.0, 0.0),
+    (0.5, PRESENTATION_CENTRE, 1.0, 0.0),
+    (3.5, (158.0, 0.0, 0.0), 3.0, -45.0),
+    (9.5, CMS_PRESENTATION_FOCUS, 3.8, -55.0),
+    (12.5, CMS_PRESENTATION_FOCUS, 3.8, -75.0),
+    (15.5, PRESENTATION_CENTRE, 1.0, 0.0),
+    (16.0, PRESENTATION_CENTRE, 1.0, 0.0),
+)
+
 
 def sanitize(text):
     result = re.sub(r"[^A-Za-z0-9_.-]+", "_", text)
     return result if result and not result[0].isdigit() else "node_" + result
+
+
+def model_matrix(focus, scale, yaw_degrees):
+    """Transform the model so ``focus`` stays at the overview centre."""
+    angle = math.radians(yaw_degrees)
+    cosine = math.cos(angle)
+    sine = math.sin(angle)
+    linear = (
+        (scale * cosine, 0.0, -scale * sine),
+        (0.0, scale, 0.0),
+        (scale * sine, 0.0, scale * cosine),
+    )
+    translation = tuple(
+        PRESENTATION_CENTRE[axis]
+        - sum(focus[source_axis] * linear[source_axis][axis] for source_axis in range(3))
+        for axis in range(3)
+    )
+    return (
+        (*linear[0], 0.0),
+        (*linear[1], 0.0),
+        (*linear[2], 0.0),
+        (*translation, 1.0),
+    )
+
+
+def presentation_model_samples():
+    """Sample a model transform that Keynote recognises as embedded animation."""
+    samples = []
+    segment = 0
+    for frame in range(ANIMATION_SECONDS * ANIMATION_FPS + 1):
+        seconds = frame / ANIMATION_FPS
+        while segment + 2 < len(MODEL_KEYFRAMES) and seconds > MODEL_KEYFRAMES[segment + 1][0]:
+            segment += 1
+        start = MODEL_KEYFRAMES[segment]
+        stop = MODEL_KEYFRAMES[min(segment + 1, len(MODEL_KEYFRAMES) - 1)]
+        fraction = 0.0 if stop[0] == start[0] else (seconds - start[0]) / (stop[0] - start[0])
+        fraction = max(0.0, min(1.0, fraction))
+        eased = fraction * fraction * (3.0 - 2.0 * fraction)
+        focus = tuple(start[1][axis] + eased * (stop[1][axis] - start[1][axis]) for axis in range(3))
+        scale = start[2] + eased * (stop[2] - start[2])
+        yaw = start[3] + eased * (stop[3] - start[3])
+        samples.append((frame, model_matrix(focus, scale, yaw)))
+    return samples
+
+
+def load_geant_event(path, event_number):
+    """Load muon trajectories for one event from the Geant step export."""
+    payload = json.loads(path.read_text())
+    events = payload.get("events", [payload])
+    for event in events:
+        if int(event["event"]) == event_number:
+            return [track for track in event.get("tracks", []) if abs(int(track["pdg_id"])) == 13]
+    raise RuntimeError(f"event {event_number} is absent from {path}")
+
+
+def clipped_track_points(track, minimum_z=-18.0, maximum_points=180):
+    """Return unique viewer-oriented points without extending beyond CMS."""
+    source_points = []
+    for point in track["points_m"]:
+        if point[2] < minimum_z:
+            break
+        converted = (point[2], point[1], -point[0])
+        if not source_points or converted != source_points[-1]:
+            source_points.append(converted)
+    if len(source_points) <= maximum_points:
+        return source_points
+    indices = sorted({round(index * (len(source_points) - 1) / (maximum_points - 1))
+                      for index in range(maximum_points)})
+    return [source_points[index] for index in indices]
+
+
+def track_tube_data(points, radius=0.16, sides=6):
+    """Build an opaque low-poly tube around a predominantly beam-directed path."""
+    if len(points) < 2:
+        return [], []
+    rings = [
+        [(point[0], point[1] + radius * math.cos(2.0 * math.pi * side / sides),
+          point[2] + radius * math.sin(2.0 * math.pi * side / sides))
+         for side in range(sides)]
+        for point in points
+    ]
+    positions = []
+    normals = []
+    for first, second in zip(rings, rings[1:]):
+        for side in range(sides):
+            vertices = (first[side], second[side], second[(side + 1) % sides],
+                        first[(side + 1) % sides])
+            for triangle in ((vertices[0], vertices[1], vertices[2]),
+                             (vertices[0], vertices[2], vertices[3])):
+                one, two, three = triangle
+                edge_one = tuple(two[axis] - one[axis] for axis in range(3))
+                edge_two = tuple(three[axis] - one[axis] for axis in range(3))
+                normal = (
+                    edge_one[1] * edge_two[2] - edge_one[2] * edge_two[1],
+                    edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
+                    edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
+                )
+                magnitude = math.sqrt(sum(component * component for component in normal))
+                if magnitude == 0.0:
+                    continue
+                positions.extend(triangle)
+                normals.extend([tuple(component / magnitude for component in normal)] * 3)
+    return positions, normals
+
+
+def muon_position_samples(points, start_seconds=3.5, stop_seconds=9.5):
+    """Move a marker along a trajectory, synchronized with the tunnel flight."""
+    lengths = [0.0]
+    for first, second in zip(points, points[1:]):
+        lengths.append(lengths[-1] + math.sqrt(sum(
+            (second[axis] - first[axis]) ** 2 for axis in range(3)
+        )))
+    total = lengths[-1]
+    result = []
+    segment = 0
+    for frame in range(ANIMATION_SECONDS * ANIMATION_FPS + 1):
+        seconds = frame / ANIMATION_FPS
+        fraction = (seconds - start_seconds) / (stop_seconds - start_seconds)
+        distance = max(0.0, min(1.0, fraction)) * total
+        while segment + 2 < len(points) and lengths[segment + 1] < distance:
+            segment += 1
+        span = lengths[segment + 1] - lengths[segment]
+        local = 0.0 if span == 0.0 else (distance - lengths[segment]) / span
+        position = tuple(
+            points[segment][axis] + local * (points[segment + 1][axis] - points[segment][axis])
+            for axis in range(3)
+        )
+        result.append((frame, position))
+    return result
 
 
 def load_obj(path):
@@ -190,8 +366,9 @@ def write_preview_collada(path, meshes):
     attributes and importer-side normal generation.
     """
     grouped = {category: {"positions": [], "normals": []} for category in COLORS}
+    seen_triangles = set()
     for mesh in meshes:
-        positions, normals = display_triangle_data(mesh)
+        positions, normals = display_triangle_data(mesh, seen_triangles)
         grouped[mesh.category]["positions"].extend(positions)
         grouped[mesh.category]["normals"].extend(normals)
     populated = [category for category, data in grouped.items() if data["positions"]]
@@ -270,8 +447,8 @@ def write_preview_collada(path, meshes):
         output.write('</COLLADA>\n')
 
 
-def display_triangle_data(mesh):
-    """Return unindexed, viewer-oriented triangles with flat normals."""
+def display_triangle_data(mesh, seen_triangles=None):
+    """Return clean, unindexed, viewer-oriented triangles with flat normals."""
     positions = []
     normals = []
     for triangle in mesh.triangles:
@@ -284,19 +461,34 @@ def display_triangle_data(mesh):
             edge_one[2] * edge_two[0] - edge_one[0] * edge_two[2],
             edge_one[0] * edge_two[1] - edge_one[1] * edge_two[0],
         )
-        magnitude = math.sqrt(sum(component * component for component in normal))
-        normal = tuple(component / magnitude for component in normal) if magnitude else (0.0, 1.0, 0.0)
+        magnitude_squared = sum(component * component for component in normal)
+        edge_scale_squared = max(
+            sum((two[axis] - one[axis]) ** 2 for axis in range(3)),
+            sum((three[axis] - one[axis]) ** 2 for axis in range(3)),
+            sum((three[axis] - two[axis]) ** 2 for axis in range(3)),
+        )
+        if magnitude_squared <= (1.e-12 * edge_scale_squared) ** 2:
+            continue
+        # Faces separated by less than 0.1 mm are visually coincident at this
+        # scale and z-fight in Keynote even when their source floats differ.
+        key = tuple(sorted(tuple(round(value, 4) for value in point) for point in points))
+        if seen_triangles is not None:
+            if key in seen_triangles:
+                continue
+            seen_triangles.add(key)
+        magnitude = math.sqrt(magnitude_squared)
+        normal = tuple(component / magnitude for component in normal)
         positions.extend(points)
         normals.extend([normal] * 3)
     return positions, normals
 
 
 def write_glb(path, meshes):
-    """Write a dependency-free glTF 2.0 binary for VS Code and web viewers."""
+    """Write a dependency-free glTF 2.0 binary for Preview and VS Code."""
     document = {
         "asset": {"version": "2.0", "generator": "SHIFT geometry visualizer"},
         "scene": 0,
-        "scenes": [{"name": "SHIFT geometry", "nodes": list(range(len(meshes)))}],
+        "scenes": [{"name": "SHIFT geometry", "nodes": []}],
         "nodes": [],
         "meshes": [],
         "materials": [],
@@ -305,15 +497,16 @@ def write_glb(path, meshes):
         "accessors": [],
     }
     material_indices = {}
-    for category, (red, green, blue, alpha) in COLORS.items():
+    for category, (red, green, blue, alpha) in GLB_COLORS.items():
         material_indices[category] = len(document["materials"])
         material = {
             "name": category,
             "pbrMetallicRoughness": {
                 "baseColorFactor": [red, green, blue, alpha],
                 "metallicFactor": 0.0,
-                "roughnessFactor": 0.72,
+                "roughnessFactor": 0.88,
             },
+            "emissiveFactor": [0.08 * red, 0.08 * green, 0.08 * blue],
             "doubleSided": True,
         }
         if alpha < 1.0:
@@ -339,8 +532,11 @@ def write_glb(path, meshes):
         document["accessors"].append(accessor)
         return len(document["accessors"]) - 1
 
+    seen_triangles = set()
     for mesh in meshes:
-        positions, normals = display_triangle_data(mesh)
+        positions, normals = display_triangle_data(mesh, seen_triangles)
+        if not positions:
+            continue
         position_accessor = add_vectors(positions, True)
         normal_accessor = add_vectors(normals, False)
         mesh_index = len(document["meshes"])
@@ -357,6 +553,7 @@ def write_glb(path, meshes):
             }
         )
         document["nodes"].append({"name": mesh.name, "mesh": mesh_index})
+        document["scenes"][0]["nodes"].append(len(document["nodes"]) - 1)
 
     document["buffers"][0]["byteLength"] = len(binary)
     json_chunk = json.dumps(document, separators=(",", ":")).encode("utf-8")
@@ -371,19 +568,34 @@ def write_glb(path, meshes):
         output.write(binary)
 
 
-def write_usdz(path, meshes):
-    """Write an uncompressed, 64-byte-aligned USDA package for macOS Preview."""
+def write_usdz(path, meshes, geant_tracks=None, event_number=None):
+    """Write an uncompressed, 64-byte-aligned USDA package for Apple viewers."""
+    model_samples = presentation_model_samples()
     lines = [
         "#usda 1.0",
         "(",
         '    defaultPrim = "SHIFTGeometry"',
+        "    startTimeCode = 0",
+        f"    endTimeCode = {ANIMATION_SECONDS * ANIMATION_FPS}",
+        f"    timeCodesPerSecond = {ANIMATION_FPS}",
+        f"    framesPerSecond = {ANIMATION_FPS}",
         "    metersPerUnit = 1",
         '    upAxis = "Y"',
         ")",
         'def Xform "SHIFTGeometry" {',
-        '    def Scope "Materials" {',
+        '    matrix4d xformOp:transform.timeSamples = {',
     ]
-    for category, (red, green, blue, alpha) in COLORS.items():
+    for frame, matrix in model_samples:
+        rows = ", ".join(
+            "(" + ", ".join(f"{value:.9g}" for value in row) + ")" for row in matrix
+        )
+        lines.append(f"        {frame}: ({rows}),")
+    lines.extend([
+        '    }',
+        '    uniform token[] xformOpOrder = ["xformOp:transform"]',
+        '    def Scope "Materials" {',
+    ])
+    for category, (red, green, blue, alpha) in USDZ_COLORS.items():
         material = sanitize(category)
         lines.extend(
             [
@@ -393,25 +605,51 @@ def write_usdz(path, meshes):
                 '                uniform token info:id = "UsdPreviewSurface"',
                 f'                color3f inputs:diffuseColor = ({red:.6g}, {green:.6g}, {blue:.6g})',
                 f'                float inputs:opacity = {alpha:.6g}',
+                '                float inputs:opacityThreshold = 0.01',
                 '                float inputs:roughness = 0.72',
                 '                token outputs:surface',
                 "            }",
                 "        }",
             ]
         )
+    if geant_tracks:
+        for pdg_id, material in ((13, "muon_minus"), (-13, "muon_plus")):
+            red, green, blue, alpha = MUON_COLORS[pdg_id]
+            lines.extend([
+                f'        def Material "{material}" {{',
+                f'            token outputs:surface.connect = </SHIFTGeometry/Materials/{material}/PreviewSurface.outputs:surface>',
+                '            def Shader "PreviewSurface" {',
+                '                uniform token info:id = "UsdPreviewSurface"',
+                f'                color3f inputs:diffuseColor = ({red:.6g}, {green:.6g}, {blue:.6g})',
+                f'                color3f inputs:emissiveColor = ({red * 0.55:.6g}, {green * 0.55:.6g}, {blue * 0.55:.6g})',
+                f'                float inputs:opacity = {alpha:.6g}',
+                '                float inputs:roughness = 0.35',
+                '                token outputs:surface',
+                "            }",
+                "        }",
+            ])
     lines.extend(["    }", '    def Xform "Geometry" {'])
-    for index, mesh in enumerate(meshes):
-        positions, normals = display_triangle_data(mesh)
-        name = f"mesh_{index}_{sanitize(mesh.name)}"
+    # Merge the many source objects by material.  Keynote otherwise changes
+    # the sort order of hundreds of transparent meshes during motion, which
+    # appears as frame-to-frame flicker.
+    category_data = {category: ([], []) for category in USDZ_COLORS}
+    seen_triangles = set()
+    for mesh in meshes:
+        positions, normals = display_triangle_data(mesh, seen_triangles)
+        category_data[mesh.category][0].extend(positions)
+        category_data[mesh.category][1].extend(normals)
+    for category, (positions, normals) in category_data.items():
+        if not positions:
+            continue
         points = ", ".join(f"({x:.7g}, {y:.7g}, {z:.7g})" for x, y, z in positions)
         normal_values = ", ".join(f"({x:.7g}, {y:.7g}, {z:.7g})" for x, y, z in normals)
         indices = ", ".join(str(value) for value in range(len(positions)))
-        counts = ", ".join("3" for _ in mesh.triangles)
+        counts = ", ".join("3" for _ in range(len(positions) // 3))
         lines.extend(
             [
-                f'        def Mesh "{name}" {{',
-                f'            rel material:binding = </SHIFTGeometry/Materials/{sanitize(mesh.category)}>',
-                '            uniform bool doubleSided = true',
+                f'        def Mesh "{sanitize(category)}_geometry" {{',
+                f'            rel material:binding = </SHIFTGeometry/Materials/{sanitize(category)}>',
+                f'            uniform bool doubleSided = {str(USDZ_COLORS[category][3] >= 1.0).lower()}',
                 f'            int[] faceVertexCounts = [{counts}]',
                 f'            int[] faceVertexIndices = [{indices}]',
                 f'            normal3f[] normals = [{normal_values}] (interpolation = "vertex")',
@@ -420,7 +658,45 @@ def write_usdz(path, meshes):
                 "        }",
             ]
         )
-    lines.extend(["    }", "}", ""])
+    lines.append("    }")
+    if geant_tracks:
+        lines.append(f'    def Xform "Event_{event_number}" {{')
+        for index, track in enumerate(geant_tracks):
+            pdg_id = int(track["pdg_id"])
+            material = "muon_minus" if pdg_id == 13 else "muon_plus"
+            points = clipped_track_points(track)
+            positions, normals = track_tube_data(points)
+            if not positions:
+                continue
+            name = f"muon_{index}_{'minus' if pdg_id == 13 else 'plus'}"
+            point_values = ", ".join(f"({x:.7g}, {y:.7g}, {z:.7g})" for x, y, z in positions)
+            normal_values = ", ".join(f"({x:.7g}, {y:.7g}, {z:.7g})" for x, y, z in normals)
+            indices = ", ".join(str(value) for value in range(len(positions)))
+            counts = ", ".join("3" for _ in range(len(positions) // 3))
+            lines.extend([
+                f'        def Mesh "{name}_track" {{',
+                f'            rel material:binding = </SHIFTGeometry/Materials/{material}>',
+                '            uniform bool doubleSided = false',
+                f'            int[] faceVertexCounts = [{counts}]',
+                f'            int[] faceVertexIndices = [{indices}]',
+                f'            normal3f[] normals = [{normal_values}] (interpolation = "vertex")',
+                f'            point3f[] points = [{point_values}]',
+                '            uniform token subdivisionScheme = "none"',
+                "        }",
+                f'        def Sphere "{name}_head" {{',
+                f'            rel material:binding = </SHIFTGeometry/Materials/{material}>',
+                '            double radius = 0.48',
+                '            double3 xformOp:translate.timeSamples = {',
+            ])
+            for frame, position in muon_position_samples(points):
+                lines.append(f"                {frame}: ({position[0]:.7g}, {position[1]:.7g}, {position[2]:.7g}),")
+            lines.extend([
+                "            }",
+                '            uniform token[] xformOpOrder = ["xformOp:translate"]',
+                "        }",
+            ])
+        lines.append("    }")
+    lines.extend(["}", ""])
     payload = "\n".join(lines).encode("utf-8")
     member_name = "cms_lss_geometry.usda"
     info = zipfile.ZipInfo(member_name)
@@ -536,23 +812,37 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("input", type=Path, help="selected Wavefront OBJ from extract_lss_visualization_meshes")
     parser.add_argument("output_dir", type=Path)
+    parser.add_argument("--geant-tracks", type=Path,
+                        help="optional Geant trajectory JSON from visualize_lss_event")
+    parser.add_argument("--event", type=int,
+                        help="event number to overlay (required with --geant-tracks)")
     args = parser.parse_args()
+    if (args.geant_tracks is None) != (args.event is None):
+        parser.error("--geant-tracks and --event must be provided together")
     args.output_dir.mkdir(parents=True, exist_ok=True)
     meshes = load_obj(args.input)
     if not meshes:
         raise RuntimeError("input selection contains no meshes")
+    geant_tracks = load_geant_event(args.geant_tracks, args.event) if args.geant_tracks else []
 
     png = args.output_dir / "cms_lss_geometry_overview.png"
     dae = args.output_dir / "cms_lss_geometry.dae"
     glb = args.output_dir / "cms_lss_geometry.glb"
-    usdz = args.output_dir / "cms_lss_geometry.usdz"
+    usdz_name = (f"cms_lss_geometry_event{args.event}_keynote_v6.usdz"
+                 if geant_tracks else "cms_lss_geometry_keynote.usdz")
+    usdz = args.output_dir / usdz_name
     obj = args.output_dir / "cms_lss_geometry_overview.obj"
     if args.input.resolve() != obj.resolve():
         shutil.copyfile(args.input, obj)
     bounds = render(png, meshes)
     write_preview_collada(dae, meshes)
     write_glb(glb, meshes)
-    write_usdz(usdz, meshes)
+    write_usdz(usdz, meshes, geant_tracks, args.event)
+    seen_triangles = set()
+    portable_triangle_count = sum(
+        len(display_triangle_data(mesh, seen_triangles)[0]) // 3 for mesh in meshes
+    )
+    source_triangle_count = sum(len(mesh.triangles) for mesh in meshes)
     manifest = {
         "input": obj.name,
         "input_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
@@ -564,10 +854,36 @@ def main():
         ],
         "mesh_count": len(meshes),
         "vertex_count": sum(len(mesh.vertices) for mesh in meshes),
-        "triangle_count": sum(len(mesh.triangles) for mesh in meshes),
+        "triangle_count": source_triangle_count,
+        "portable_triangle_count": portable_triangle_count,
+        "discarded_portable_faces": source_triangle_count - portable_triangle_count,
+        "portable_mesh_cleanup": "discard degenerate triangles and faces coincident within 0.1 mm",
+        "usdz_mesh_batching": "one mesh per material category to stabilize transparent rendering",
+        "recommended_viewer_background": "white; controlled by the viewer because glTF has no background field",
+        "usdz_animation": {
+            "duration_seconds": ANIMATION_SECONDS,
+            "frames_per_second": ANIMATION_FPS,
+            "animated_prim": "/SHIFTGeometry",
+            "compatibility": "model transform animation for Keynote; no animated USD camera",
+            "sequence": [
+                "full CMS and LSS overview",
+                "collimator region near z=158 m",
+                "follow the nominal muon direction toward CMS",
+                "orbit around CMS",
+                "return to the full overview",
+            ],
+        },
+        "geant_event_overlay": ({
+            "event": args.event,
+            "source": args.geant_tracks.name,
+            "muon_count": len(geant_tracks),
+            "style": "opaque emissive green tubes with animated heads",
+            "track_extent": "clipped after z=-18 m to preserve presentation framing",
+        } if geant_tracks else None),
         "bounds_m": {axis: list(limits) for axis, limits in zip("xyz", bounds)},
         "category_mesh_counts": {category: sum(mesh.category == category for mesh in meshes) for category in COLORS},
         "outputs": {
+            "recommended_macos": glb.name,
             "overview_png": png.name,
             "gltf_binary": glb.name,
             "apple_usdz": usdz.name,

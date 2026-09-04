@@ -291,19 +291,77 @@ def draw_event(path, meshes, event, vertex, tracks, mode):
 
 def summary_stats(events, geant_events):
     material = Counter()
+    material_by_event = []
+    geant_counts = []
+    reached_counts = []
     transported = reached_cms = 0
     for tracks in geant_events.values():
+        event_material = Counter()
+        event_transported = event_reached_cms = 0
         for track in tracks:
             if abs(int(track["pdg_id"])) != 13:
                 continue
             transported += 1
-            if any(abs(point[2]) <= 18.0 and math.hypot(point[0], point[1]) <= 18.0
-                   for point in track["points_m"]):
+            event_transported += 1
+            reaches_cms = any(
+                abs(point[2]) <= 18.0 and math.hypot(point[0], point[1]) <= 18.0
+                for point in track["points_m"]
+            )
+            if reaches_cms:
                 reached_cms += 1
+                event_reached_cms += 1
             for row in track.get("materials", []):
-                material[clean_material_name(row["name"])] += row["path_m"]
+                name = clean_material_name(row["name"])
+                material[name] += row["path_m"]
+                event_material[name] += row["path_m"]
+        geant_counts.append(event_transported)
+        reached_counts.append(event_reached_cms)
+        material_by_event.append(event_material)
     reco_counts = Counter(min(len(event["reco_muons"]), 2) for event in events)
-    return {
+    count_samples = {
+        "generated_muons": [len(event["gen_muons"]) for event in events],
+        "geant_muons": geant_counts,
+        "geant_muons_reaching_cms": reached_counts,
+        "reconstructed_muons": [len(event["reco_muons"]) for event in events],
+        "generator_matched_reconstructed_muons": [
+            sum(muon["gen_index"] >= 0 for muon in event["reco_muons"]) for event in events
+        ],
+        "events_with_0_reco_muons": [len(event["reco_muons"]) == 0 for event in events],
+        "events_with_1_reco_muon": [len(event["reco_muons"]) == 1 for event in events],
+        "events_with_2_or_more_reco_muons": [len(event["reco_muons"]) >= 2 for event in events],
+    }
+
+    def yield_standard_error(values):
+        if len(values) < 2:
+            return 0.0
+        mean = sum(values) / len(values)
+        sample_variance = sum((value - mean) ** 2 for value in values) / (len(values) - 1)
+        return math.sqrt(len(values) * sample_variance)
+
+    material_names = [name for name, _ in material.most_common()]
+    displayed_groups = [(name, {name}) for name in material_names[:6]]
+    if len(material_names) > 6:
+        displayed_groups.append(("other", set(material_names[6:])))
+    event_totals = [sum(paths.values()) for paths in material_by_event]
+    material_uncertainties = {}
+    for label, names in displayed_groups:
+        numerators = [sum(paths[name] for name in names) for paths in material_by_event]
+        numerator_total = sum(numerators)
+        denominator_total = sum(event_totals)
+        if len(numerators) < 2 or denominator_total <= 0.0:
+            material_uncertainties[label] = 0.0
+            continue
+        fraction = numerator_total / denominator_total
+        residual_sum_squares = sum(
+            (numerator - fraction * denominator) ** 2
+            for numerator, denominator in zip(numerators, event_totals)
+        )
+        material_uncertainties[label] = (
+            100.0 * math.sqrt(len(numerators) / (len(numerators) - 1) * residual_sum_squares)
+            / denominator_total
+        )
+
+    result = {
         "events_processed": len(events),
         "generated_muons": sum(len(event["gen_muons"]) for event in events),
         "geant_muons": transported,
@@ -316,30 +374,74 @@ def summary_stats(events, geant_events):
         "events_with_2_or_more_reco_muons": reco_counts[2],
         "events_with_valid_dimuon_vertex": sum(bool(event["vertices"]) for event in events),
         "material_path_m": dict(material.most_common()),
+        "count_stat_uncertainty": {
+            name: yield_standard_error(values) for name, values in count_samples.items()
+        },
+        "material_path_fraction_stat_uncertainty_percent": material_uncertainties,
     }
+    return result
 
 
-def draw_summary(path, stats):
+def draw_summary(output_dir, stats):
     import matplotlib.pyplot as plt
 
-    figure, axes = plt.subplots(1, 3, figsize=(18, 8), facecolor="white")
-    figure.subplots_adjust(left=0.06, right=0.98, bottom=0.16, top=0.82, wspace=0.30)
+    event_count = stats["events_processed"]
+    name_prefix = f"summary_{event_count}_events"
+    subtitle = (
+        f"{stats['geant_muons_reaching_cms']} of {stats['geant_muons']} Geant4 muons "
+        f"reach the CMS-size region; {stats['events_with_valid_dimuon_vertex']} "
+        f"{'event has' if stats['events_with_valid_dimuon_vertex'] == 1 else 'events have'} "
+        "a valid dimuon vertex"
+    )
+    footer = (
+        "Error bars show event-level statistical standard errors.\n"
+        "Temporary ATLAS-side test model; this is not the final CMS-side LSS geometry."
+    )
+
+    def make_figure(left=0.16):
+        figure, axis = plt.subplots(figsize=(8, 7), facecolor="white")
+        figure.subplots_adjust(left=left, right=0.94, bottom=0.21, top=0.72)
+        figure.suptitle(f"Current LSS test geometry: {event_count} event summary",
+                        fontsize=19, fontweight="bold", color="#111827", y=0.96)
+        figure.text(0.5, 0.83, subtitle, ha="center", fontsize=11, color="#374151",
+                    wrap=True)
+        figure.text(0.5, 0.055, footer, ha="center", fontsize=10, color="#4b5563")
+        return figure, axis
+
+    output_names = []
     panels = [
         (["generated", "Geant4", "reach CMS", "reco candidates", "gen-matched reco"],
          [stats["generated_muons"], stats["geant_muons"], stats["geant_muons_reaching_cms"],
           stats["reconstructed_muons"], stats["generator_matched_reconstructed_muons"]],
-         "Muon counts", "#0f766e"),
+         ["generated_muons", "geant_muons", "geant_muons_reaching_cms",
+          "reconstructed_muons", "generator_matched_reconstructed_muons"],
+         "Muon counts", "#0f766e", "muon_counts"),
         (["0 muons", "1 muon", "2+ muons"],
          [stats["events_with_0_reco_muons"], stats["events_with_1_reco_muon"],
-          stats["events_with_2_or_more_reco_muons"]], "Reconstructed muons per event", "#b91c1c"),
+          stats["events_with_2_or_more_reco_muons"]],
+         ["events_with_0_reco_muons", "events_with_1_reco_muon",
+          "events_with_2_or_more_reco_muons"],
+         "Reconstructed muons per event", "#b91c1c", "reco_muons_per_event"),
     ]
-    for axis, (labels, values, title, color) in zip(axes[:2], panels):
-        bars = axis.bar(labels, values, color=color, alpha=0.86)
-        axis.bar_label(bars, padding=3, fontsize=12)
+    count_uncertainties = stats.get("count_stat_uncertainty", {})
+    for labels, values, uncertainty_keys, title, color, suffix in panels:
+        figure, axis = make_figure()
+        errors = [count_uncertainties.get(key, 0.0) for key in uncertainty_keys]
+        bars = axis.bar(labels, values, yerr=errors, capsize=4, color=color, alpha=0.86,
+                        error_kw={"elinewidth": 1.4, "capthick": 1.4})
         axis.set_title(title, fontsize=15)
-        axis.set_ylim(0, max(values + [1]) * 1.18)
+        upper_edge = max([value + error for value, error in zip(values, errors)] + [1])
+        axis.set_ylim(0, upper_edge * 1.22)
+        for bar, value, error in zip(bars, values, errors):
+            axis.text(bar.get_x() + bar.get_width() / 2, value + error + upper_edge * 0.015,
+                      f"{value:g}", ha="center", va="bottom", fontsize=12)
         axis.grid(axis="y", color="#aeb8c6", alpha=0.35)
         axis.tick_params(axis="x", rotation=18)
+        name = f"{name_prefix}_{suffix}.png"
+        figure.savefig(output_dir / name, dpi=180, facecolor="white")
+        plt.close(figure)
+        output_names.append(name)
+
     materials = list(stats["material_path_m"].items())
     total_path = sum(value for _, value in materials)
     shown = materials[:6]
@@ -348,24 +450,25 @@ def draw_summary(path, stats):
     if len(materials) > 6:
         labels.append("other")
         values.append(max(0.0, 100.0 - sum(values)))
-    bars = axes[2].barh(labels[::-1], values[::-1], color="#1d4ed8", alpha=0.82)
-    axes[2].bar_label(bars, fmt="%.1f%%", padding=3, fontsize=10)
-    axes[2].set_title("Share of all Geant4 muon paths", fontsize=15)
-    axes[2].set_xlabel("path length")
-    axes[2].set_xlim(0, max(values + [1]) * 1.22)
-    axes[2].grid(axis="x", color="#aeb8c6", alpha=0.35)
-    figure.suptitle(f"Current LSS test geometry: {stats['events_processed']} event summary",
-                    fontsize=22, fontweight="bold", color="#111827")
-    figure.text(0.5, 0.875,
-                f"{stats['geant_muons_reaching_cms']} of {stats['geant_muons']} Geant4 muons "
-                f"reach the CMS-size region; {stats['events_with_valid_dimuon_vertex']} event has "
-                "a valid dimuon vertex",
-                ha="center", fontsize=13, color="#374151")
-    figure.text(0.5, 0.055,
-                "Temporary ATLAS-side test model; this is not the final CMS-side LSS geometry.",
-                ha="center", fontsize=11, color="#4b5563")
-    figure.savefig(path, dpi=180, facecolor="white")
+    material_uncertainties = stats.get("material_path_fraction_stat_uncertainty_percent", {})
+    errors = [material_uncertainties.get(label, 0.0) for label in labels]
+    figure, axis = make_figure(left=0.35)
+    bars = axis.barh(labels[::-1], values[::-1], xerr=errors[::-1], capsize=4,
+                     color="#1d4ed8", alpha=0.82,
+                     error_kw={"elinewidth": 1.4, "capthick": 1.4})
+    axis.set_title("Share of all Geant4 muon paths", fontsize=15)
+    axis.set_xlabel("path length")
+    upper_edge = max([value + error for value, error in zip(values, errors)] + [1])
+    axis.set_xlim(0, upper_edge * 1.25)
+    for bar, value, error in zip(bars, values[::-1], errors[::-1]):
+        axis.text(value + error + upper_edge * 0.01, bar.get_y() + bar.get_height() / 2,
+                  f"{value:.1f}%", ha="left", va="center", fontsize=10)
+    axis.grid(axis="x", color="#aeb8c6", alpha=0.35)
+    name = f"{name_prefix}_material_path.png"
+    figure.savefig(output_dir / name, dpi=180, facecolor="white")
     plt.close(figure)
+    output_names.append(name)
+    return output_names
 
 
 def main():
@@ -380,8 +483,7 @@ def main():
     geant_events = load_geant(args.geant_tracks)
     stats = summary_stats(events, geant_events)
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    summary_name = f"summary_{len(events)}_events.png"
-    draw_summary(args.output_dir / summary_name, stats)
+    summary_names = draw_summary(args.output_dir, stats)
     event, vertex = select_event(events)
     tracks = geant_events.get(event["event"], [])
     if len(tracks_by_charge(tracks)) != 2:
@@ -398,7 +500,7 @@ def main():
                            "event": event["event"], "topologies": [
                                TOPOLOGY_NAMES[muon["topology"]] for muon in event["reco_muons"]],
                            "vertex_m": vertex["point_m"], "vertex_kind": vertex["kind"]},
-        "outputs": names + [summary_name], "stats": stats,
+        "outputs": names + summary_names, "stats": stats,
     }
     (args.output_dir / "MANIFEST.json").write_text(json.dumps(manifest, indent=2) + "\n")
     print(json.dumps(manifest, indent=2))
