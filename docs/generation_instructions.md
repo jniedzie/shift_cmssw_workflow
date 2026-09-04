@@ -390,6 +390,23 @@ each Step-1 file, so CMSSW rejects later files in a multi-file group as
 duplicate events. Grouping ten such files therefore processes only the first
 file and silently loses 90% of the intended statistics.
 
+Wait for the scan cluster to leave the queue before repairing incomplete
+points. The repair submitter checks the full JSON/ROOT size and provenance
+contract, then creates one small forced job for each invalid file/delay pair.
+It does not overwrite healthy pairs:
+
+```bash
+./scripts/submit_shift_reco_delay_repair.py \
+  /absolute/path/to/the/baseline/sample \
+  /absolute/path/to/shift_delay_scan \
+  --delays=-100:100:10 --workers 8
+```
+
+Run the same command with `--dry-run` after the repair cluster finishes. An
+`invalid points: 0` result is the metadata and file-size gate before merging.
+The merge then opens every input ROOT file and checks that their total event
+count is preserved.
+
 After every delay job is complete and its ROOT/JSON pair is healthy, merge one
 file per delay on Condor. This stages the small inputs locally, runs `hadd`,
 and replaces the single-file tag with the union of all Step-1 provenance, so

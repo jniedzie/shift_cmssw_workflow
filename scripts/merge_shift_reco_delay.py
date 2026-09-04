@@ -67,6 +67,34 @@ def rewrite_tag(path, provenance):
     return entries
 
 
+def event_count(path):
+    """Open one input with ROOT so unreadable files fail before publication."""
+    import ROOT
+
+    ROOT.gROOT.SetBatch(True)
+    source = ROOT.TFile.Open(str(path), "READ")
+    if not source or source.IsZombie():
+        raise RuntimeError(f"cannot open input ROOT file: {path}")
+    tree = source.Get("Events")
+    entries = int(tree.GetEntries()) if tree else -1
+    source.Close()
+    if entries < 0:
+        raise RuntimeError(f"input ROOT file has no Events tree: {path}")
+    return entries
+
+
+def write_json_atomic(path, payload):
+    partial = path.parent / f".{path.name}.{os.getpid()}.partial"
+    try:
+        with partial.open("w", encoding="utf-8") as report_file:
+            json.dump(payload, report_file, indent=2, sort_keys=True)
+            report_file.write("\n")
+        os.replace(partial, path)
+    finally:
+        if partial.exists():
+            partial.unlink()
+
+
 def merge_delay(delay_dir, output_root, force=False):
     roots, sources, fields = load_inputs(delay_dir)
     output_dir = output_root / delay_dir.name
@@ -80,9 +108,11 @@ def merge_delay(delay_dir, output_root, force=False):
     with tempfile.TemporaryDirectory(prefix=f"shift_delay_merge_{delay_dir.name}_") as temporary:
         temporary = Path(temporary)
         staged = []
+        expected_entries = 0
         for index, source in enumerate(roots):
             destination = temporary / f"input_{index:04d}.root"
             shutil.copy2(source, destination)
+            expected_entries += event_count(destination)
             staged.append(destination)
         local_output = temporary / output_path.name
         completed = subprocess.run(
@@ -94,6 +124,10 @@ def merge_delay(delay_dir, output_root, force=False):
             raise RuntimeError(f"hadd failed with status {completed.returncode}")
         provenance = {**fields, "source_step1": sources}
         entries = rewrite_tag(local_output, provenance)
+        if entries != expected_entries:
+            raise RuntimeError(
+                f"merged event-count mismatch: got {entries}, expected {expected_entries}"
+            )
         partial = output_dir / f".{output_path.name}.{os.getpid()}.partial"
         try:
             shutil.copy2(local_output, partial)
@@ -108,15 +142,18 @@ def merge_delay(delay_dir, output_root, force=False):
         "status": "complete",
         "format": "shift-reco-delay-scan-merge-v1",
         "delay_ns": fields["delay_ns"],
+        "bx_offset": fields["bx_offset"],
+        "phase_ns": fields["phase_ns"],
+        "pileup_mode": fields["pileup_mode"],
         "source_step1": sources,
         "input_files": [str(path) for path in roots],
+        "input_file_count": len(roots),
         "output": str(output_path),
         "output_bytes": output_path.stat().st_size,
         "events": entries,
+        "input_events": expected_entries,
     }
-    with report_path.open("w", encoding="utf-8") as report_file:
-        json.dump(report, report_file, indent=2, sort_keys=True)
-        report_file.write("\n")
+    write_json_atomic(report_path, report)
     print(f"merged {len(roots)} files with {entries} events into {output_path}", flush=True)
 
 
