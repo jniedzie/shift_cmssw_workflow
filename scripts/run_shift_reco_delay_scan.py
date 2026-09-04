@@ -179,6 +179,33 @@ def run_logged(command, log_path, *, env):
         )
 
 
+def publish_file(source, destination):
+    """Atomically publish a completed local file to the shared output area."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.parent / f".{destination.name}.{os.getpid()}.partial"
+    try:
+        shutil.copy2(source, partial)
+        if partial.stat().st_size != source.stat().st_size:
+            raise RuntimeError(f"incomplete staged file: {partial}")
+        os.replace(partial, destination)
+    finally:
+        if partial.exists():
+            partial.unlink()
+
+
+def write_json_atomic(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    partial = path.parent / f".{path.name}.{os.getpid()}.partial"
+    try:
+        with partial.open("w", encoding="utf-8") as output:
+            json.dump(payload, output, indent=2, sort_keys=True)
+            output.write("\n")
+        os.replace(partial, path)
+    finally:
+        if partial.exists():
+            partial.unlink()
+
+
 def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_root):
     bx, phase = normalize_delay(delay)
     point_dir = args.output_dir / delay_name(delay)
@@ -196,9 +223,15 @@ def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_r
     config_dir = args.output_dir / "configs" / delay_name(delay)
     log_dir = args.output_dir / "logs" / delay_name(delay)
     config_dir.mkdir(parents=True, exist_ok=True)
-    config_path = config_dir / f"events_shiftDelayScan_part{part}_cfg.py"
-    driver_log = log_dir / f"cmsDriver_part{part}.log"
-    run_log = log_dir / f"cmsRun_part{part}.log"
+    config_name = f"events_shiftDelayScan_part{part}_cfg.py"
+    driver_log_name = f"cmsDriver_part{part}.log"
+    run_log_name = f"cmsRun_part{part}.log"
+    published_config = config_dir / config_name
+    published_driver_log = log_dir / driver_log_name
+    published_run_log = log_dir / run_log_name
+    config_path = work_root / f"{delay_name(delay)}_{config_name}"
+    driver_log = work_root / f"{delay_name(delay)}_{driver_log_name}"
+    run_log = work_root / f"{delay_name(delay)}_{run_log_name}"
     dummy_aod = work_root / f"unused_aod_{delay_name(delay)}_{part}.root"
     local_output = work_root / f"events_shiftDelayScan_{delay_name(delay)}_part{part}.root"
 
@@ -238,25 +271,33 @@ def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_r
         ],
     )
     environment = sanitized_runtime_environment(os.environ)
-    run_logged(driver, driver_log, env=environment)
-    with config_path.open("a", encoding="utf-8") as config_file:
-        config_file.write(compact_footer(local_output, delay, bx, phase, source_inputs))
-    run_logged(
-        runtime_command(cmssw_dir, ["cmsRun", config_path]),
-        run_log,
-        env=environment,
-    )
+    try:
+        run_logged(driver, driver_log, env=environment)
+        with config_path.open("a", encoding="utf-8") as config_file:
+            config_file.write(compact_footer(local_output, delay, bx, phase, source_inputs))
+        run_logged(
+            runtime_command(cmssw_dir, ["cmsRun", config_path]),
+            run_log,
+            env=environment,
+        )
+    except Exception as error:
+        for local_path, published_path in (
+            (config_path, published_config),
+            (driver_log, published_driver_log),
+            (run_log, published_run_log),
+        ):
+            if local_path.is_file():
+                publish_file(local_path, published_path)
+        raise RuntimeError(f"{error}; published logs under {log_dir}") from error
+    for local_path, published_path in (
+        (config_path, published_config),
+        (driver_log, published_driver_log),
+        (run_log, published_run_log),
+    ):
+        publish_file(local_path, published_path)
     if not local_output.is_file() or local_output.stat().st_size <= 1024:
         raise RuntimeError(f"cmsRun did not produce a healthy compact output: {local_output}")
-    partial_output = output_path.parent / f".{output_path.name}.{os.getpid()}.partial"
-    try:
-        shutil.copy2(local_output, partial_output)
-        if partial_output.stat().st_size != local_output.stat().st_size:
-            raise RuntimeError(f"incomplete staged output: {partial_output}")
-        os.replace(partial_output, output_path)
-    finally:
-        if partial_output.exists():
-            partial_output.unlink()
+    publish_file(local_output, output_path)
     report = {
         "status": "complete",
         "format": "shift-reco-delay-scan-v1",
@@ -268,9 +309,7 @@ def run_point(delay, staged_inputs, source_inputs, part, args, cmssw_dir, work_r
         "output_bytes": output_path.stat().st_size,
         "pileup_mode": "none",
     }
-    with report_path.open("w", encoding="utf-8") as report_file:
-        json.dump(report, report_file, indent=2, sort_keys=True)
-        report_file.write("\n")
+    write_json_atomic(report_path, report)
     return "generated"
 
 
@@ -381,9 +420,7 @@ def main():
     selected_first = part_label(selected[0], args.first_file)
     selected_last = part_label(selected[-1], args.first_file + len(selected) - 1)
     summary_path = args.output_dir / f"scan_part{selected_first}to{selected_last}.json"
-    with summary_path.open("w", encoding="utf-8") as summary_file:
-        json.dump(summary, summary_file, indent=2, sort_keys=True)
-        summary_file.write("\n")
+    write_json_atomic(summary_path, summary)
     return 1 if failures else 0
 
 

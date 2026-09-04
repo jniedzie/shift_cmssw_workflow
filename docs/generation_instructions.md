@@ -366,10 +366,10 @@ CMSSW job succeeds:
 ./scripts/run_shift_reco_delay_scan.py \
   /absolute/path/to/the/baseline/sample \
   /absolute/path/to/shift_delay_scan \
-  --delays=-100:100:10 --files 1000 --files-per-job 100 --workers 2
+  --delays=-100:100:10 --files 1 --files-per-job 1 --workers 2
 
 ../tea_shift_cmssw/utils/shift_delay_efficiency_plotter.py \
-  /absolute/path/to/shift_delay_scan
+  /absolute/path/to/shift_delay_scan --workers 4
 ```
 
 For the complete sample, submit the grouped scan to HTCondor instead of
@@ -379,12 +379,28 @@ running it on a login node:
 ./scripts/submit_shift_reco_delay_scan.py \
   /absolute/path/to/the/baseline/sample \
   /absolute/path/to/shift_delay_scan \
-  --delays=-100:100:10 --files-per-job 20 --workers 2
+  --delays=-100:100:10 --files-per-job 1 --workers 2
 ```
 
 The submitter uses all available Step-1 files unless `--files` limits them.
 Each Condor job owns one input group and all delays for that group, preserving
 paired denominators and allowing failed groups to be resubmitted safely.
+Keep `--files-per-job 1` for the current samples: event numbers restart in
+each Step-1 file, so CMSSW rejects later files in a multi-file group as
+duplicate events. Grouping ten such files therefore processes only the first
+file and silently loses 90% of the intended statistics.
+
+After every delay job is complete and its ROOT/JSON pair is healthy, merge one
+file per delay on Condor. This stages the small inputs locally, runs `hadd`,
+and replaces the single-file tag with the union of all Step-1 provenance, so
+the plotter can still enforce identical denominators:
+
+```bash
+./scripts/submit_shift_reco_delay_merge.py /absolute/path/to/shift_delay_scan
+
+../tea_shift_cmssw/utils/shift_delay_efficiency_plotter.py \
+  /absolute/path/to/shift_delay_scan/merged --workers 4
+```
 
 The delay is in ns and may be positive or negative. The runner converts it to
 the exact BX plus phase representation; for example, `-6.25 ns` becomes BX
@@ -392,9 +408,15 @@ the exact BX plus phase representation; for example, `-6.25 ns` becomes BX
 Step-1 path in NanoAOD run metadata and in a JSON sidecar. The plotter applies
 the same J/psi truth matching and topology definitions as
 `ShiftHistogramsFiller::FillEfficiencies` and writes the binomial counts as
-JSON beside the muon and dimuon PDFs. It refuses to compare points whose
-embedded delays disagree with their directories or whose Step-1 input sets are
-not identical.
+JSON beside the muon and dimuon PDFs. Before counting, it keeps only file-group
+names present at every delay and reports any incomplete groups it excludes.
+It then refuses to compare points whose embedded delays disagree with their
+directories or whose resulting Step-1 input sets are not identical. The first
+counting pass uses four processes by default and loads only the twelve required
+ROOT branches. Its JSON output is also the cache: repeating the same command
+redraws immediately from those counts. Use `--workers N` to change the
+first-pass parallelism, `--recount` after changing the inputs or counting
+definitions, or `--counts-json FILE` to redraw directly from a saved cache.
 
 This scan is the no-pileup, same-SimHit control. It isolates the response of
 the fixed electronics/readout and reconstruction to delay. It is not the final

@@ -8,7 +8,11 @@ import unittest
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from submit_shift_reco_delay_scan import file_groups, render_submit  # noqa: E402
+from submit_shift_reco_delay_scan import (  # noqa: E402
+    file_groups,
+    prepare_output_directories,
+    render_submit,
+)
 
 
 class SubmitShiftRecoDelayScanTest(unittest.TestCase):
@@ -29,6 +33,17 @@ class SubmitShiftRecoDelayScanTest(unittest.TestCase):
             'arguments = "\'/input\' \'/output\' \'--delays=-100:100:10\'',
             text,
         )
+
+    def test_shared_delay_directories_are_precreated(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "scan"
+            prepare_output_directories(output, [-25, 0, 12.5])
+            for name in ("delay_m25ns", "delay_p0ns", "delay_p12p5ns"):
+                self.assertTrue((output / name).is_dir())
+                self.assertTrue((output / "configs" / name).is_dir())
+                self.assertTrue((output / "logs" / name).is_dir())
 
 
 if __name__ == "__main__":

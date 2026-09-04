@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from run_shift_reco_delay_scan import find_step1_files, parse_delays
+from run_shift_reco_delay_scan import delay_name, find_step1_files, parse_delays
 
 
 def file_groups(total_files, files_per_job):
@@ -15,6 +15,15 @@ def file_groups(total_files, files_per_job):
         (first, min(files_per_job, total_files - first))
         for first in range(0, total_files, files_per_job)
     ]
+
+
+def prepare_output_directories(output_dir, delays):
+    """Create shared EOS directories before parallel jobs can race on them."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for delay in delays:
+        name = delay_name(delay)
+        for relative in (Path(name), Path("configs") / name, Path("logs") / name):
+            (output_dir / relative).mkdir(parents=True, exist_ok=True)
 
 
 def quote_argument(value):
@@ -62,14 +71,14 @@ def main():
     parser.add_argument("output_dir", type=Path)
     parser.add_argument("--delays", default="-100:100:10")
     parser.add_argument("--files", type=int, help="number of Step-1 files; default: all")
-    parser.add_argument("--files-per-job", type=int, default=20)
+    parser.add_argument("--files-per-job", type=int, default=1)
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--memory-mb", type=int, default=8000)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
 
     try:
-        parse_delays(args.delays)
+        delays = parse_delays(args.delays)
         available = find_step1_files(args.baseline_step1)
     except ValueError as error:
         parser.error(str(error))
@@ -81,7 +90,7 @@ def main():
 
     workflow_root = Path(__file__).resolve().parents[1]
     output_dir = args.output_dir.resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
+    prepare_output_directories(output_dir, delays)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     log_dir = workflow_root / "condor" / "delay_scan_logs" / f"{output_dir.name}_{timestamp}"
     log_dir.mkdir(parents=True, exist_ok=False)

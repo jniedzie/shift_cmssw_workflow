@@ -16,6 +16,8 @@ from run_shift_reco_delay_scan import (  # noqa: E402
     find_step1_files,
     normalize_delay,
     parse_delays,
+    publish_file,
+    write_json_atomic,
 )
 
 
@@ -68,6 +70,21 @@ class ShiftRecoDelayScanTest(unittest.TestCase):
         self.assertIn('"NanoAODOutputModule"', footer)
         self.assertIn("nanoaodUniqueString_nanoMetadata", footer)
         self.assertIn('"source_step1":["/input.root"]', footer)
+
+    def test_completed_files_and_reports_are_published_atomically(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "local.log"
+            destination = root / "shared" / "published.log"
+            source.write_text("complete\n", encoding="utf-8")
+            publish_file(source, destination)
+            self.assertEqual(destination.read_text(encoding="utf-8"), "complete\n")
+            self.assertEqual(list(destination.parent.glob("*.partial")), [])
+
+            report = root / "shared" / "report.json"
+            write_json_atomic(report, {"status": "complete", "events": 10})
+            self.assertIn('"status": "complete"', report.read_text(encoding="utf-8"))
+            self.assertEqual(list(report.parent.glob("*.partial")), [])
 
 
 if __name__ == "__main__":
