@@ -1,0 +1,296 @@
+{
+  "schema": "shift-collection-sensitivity-v1",
+  "physics_valid": false,
+  "fill": 9017,
+  "parent_slots": 399,
+  "readout_bx_window": [
+    -7,
+    7
+  ],
+  "results": [
+    {
+      "phase_ns": 0,
+      "object": "muon",
+      "q": 0.001,
+      "lower": 0.00017704053026692794,
+      "upper": 0.0008106236847251106,
+      "expected_reconstructed_readouts": 0.0008106236847251106,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 0,
+      "object": "muon",
+      "q": 0.01,
+      "lower": 0.0017704053026692819,
+      "upper": 0.008106236847251175,
+      "expected_reconstructed_readouts": 0.008106236847251175,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 0,
+      "object": "muon",
+      "q": 0.05,
+      "lower": 0.00885202651334641,
+      "upper": 0.04053118423625579,
+      "expected_reconstructed_readouts": 0.04053118423625579,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 0,
+      "object": "dimuon",
+      "q": 0.001,
+      "lower": 3.644444086470446e-05,
+      "upper": 0.00013207049045574172,
+      "expected_reconstructed_readouts": 0.00013207049045574172,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 0,
+      "object": "dimuon",
+      "q": 0.01,
+      "lower": 0.00036444440864704156,
+      "upper": 0.0013207049045574145,
+      "expected_reconstructed_readouts": 0.0013207049045574145,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 0,
+      "object": "dimuon",
+      "q": 0.05,
+      "lower": 0.001822222043235226,
+      "upper": 0.006603524522787034,
+      "expected_reconstructed_readouts": 0.006603524522787034,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 5,
+      "object": "muon",
+      "q": 0.001,
+      "lower": 0.0001764360016269905,
+      "upper": 0.0008263937830650504,
+      "expected_reconstructed_readouts": 0.0008263937830650504,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 5,
+      "object": "muon",
+      "q": 0.01,
+      "lower": 0.001764360016269935,
+      "upper": 0.008263937830650525,
+      "expected_reconstructed_readouts": 0.008263937830650525,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 5,
+      "object": "muon",
+      "q": 0.05,
+      "lower": 0.008821800081349612,
+      "upper": 0.041319689153252646,
+      "expected_reconstructed_readouts": 0.041319689153252646,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 5,
+      "object": "dimuon",
+      "q": 0.001,
+      "lower": 3.661716333325701e-05,
+      "upper": 0.000132600292017314,
+      "expected_reconstructed_readouts": 0.000132600292017314,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 5,
+      "object": "dimuon",
+      "q": 0.01,
+      "lower": 0.0003661716333325705,
+      "upper": 0.001326002920173128,
+      "expected_reconstructed_readouts": 0.001326002920173128,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 5,
+      "object": "dimuon",
+      "q": 0.05,
+      "lower": 0.0018308581666628735,
+      "upper": 0.006630014600865654,
+      "expected_reconstructed_readouts": 0.006630014600865654,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 10,
+      "object": "muon",
+      "q": 0.001,
+      "lower": 0.00017695416903265184,
+      "upper": 0.0008438799194021506,
+      "expected_reconstructed_readouts": 0.0008438799194021506,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 10,
+      "object": "muon",
+      "q": 0.01,
+      "lower": 0.0017695416903265196,
+      "upper": 0.008438799194021445,
+      "expected_reconstructed_readouts": 0.008438799194021445,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 10,
+      "object": "muon",
+      "q": 0.05,
+      "lower": 0.008847708451632616,
+      "upper": 0.042193995970107416,
+      "expected_reconstructed_readouts": 0.042193995970107416,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 10,
+      "object": "dimuon",
+      "q": 0.001,
+      "lower": 3.799894308168226e-05,
+      "upper": 0.00013926308361512655,
+      "expected_reconstructed_readouts": 0.00013926308361512655,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 10,
+      "object": "dimuon",
+      "q": 0.01,
+      "lower": 0.0003799894308168189,
+      "upper": 0.0013926308361512688,
+      "expected_reconstructed_readouts": 0.0013926308361512688,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 10,
+      "object": "dimuon",
+      "q": 0.05,
+      "lower": 0.0018999471540841089,
+      "upper": 0.006963154180756275,
+      "expected_reconstructed_readouts": 0.006963154180756275,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 15,
+      "object": "muon",
+      "q": 0.001,
+      "lower": 0.00017626327915843773,
+      "upper": 0.0008393759349274836,
+      "expected_reconstructed_readouts": 0.0008393759349274836,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 15,
+      "object": "muon",
+      "q": 0.01,
+      "lower": 0.0017626327915843808,
+      "upper": 0.008393759349274842,
+      "expected_reconstructed_readouts": 0.008393759349274842,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 15,
+      "object": "muon",
+      "q": 0.05,
+      "lower": 0.008813163957921984,
+      "upper": 0.04196879674637408,
+      "expected_reconstructed_readouts": 0.04196879674637408,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 15,
+      "object": "dimuon",
+      "q": 0.001,
+      "lower": 3.713533073891681e-05,
+      "upper": 0.00013609590840160516,
+      "expected_reconstructed_readouts": 0.00013609590840160516,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 15,
+      "object": "dimuon",
+      "q": 0.01,
+      "lower": 0.0003713533073891652,
+      "upper": 0.0013609590840160534,
+      "expected_reconstructed_readouts": 0.0013609590840160534,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 15,
+      "object": "dimuon",
+      "q": 0.05,
+      "lower": 0.001856766536945826,
+      "upper": 0.006804795420080262,
+      "expected_reconstructed_readouts": 0.006804795420080262,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 20,
+      "object": "muon",
+      "q": 0.001,
+      "lower": 0.00017583147298705682,
+      "upper": 0.0008252147061100374,
+      "expected_reconstructed_readouts": 0.0008252147061100374,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 20,
+      "object": "muon",
+      "q": 0.01,
+      "lower": 0.0017583147298705702,
+      "upper": 0.008252147061100359,
+      "expected_reconstructed_readouts": 0.008252147061100359,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 20,
+      "object": "muon",
+      "q": 0.05,
+      "lower": 0.008791573649352817,
+      "upper": 0.04126073530550172,
+      "expected_reconstructed_readouts": 0.04126073530550172,
+      "denominator": 11202
+    },
+    {
+      "phase_ns": 20,
+      "object": "dimuon",
+      "q": 0.001,
+      "lower": 3.661716333325701e-05,
+      "upper": 0.00013052762239467689,
+      "expected_reconstructed_readouts": 0.00013052762239467689,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 20,
+      "object": "dimuon",
+      "q": 0.01,
+      "lower": 0.0003661716333325705,
+      "upper": 0.0013052762239467598,
+      "expected_reconstructed_readouts": 0.0013052762239467598,
+      "denominator": 5601
+    },
+    {
+      "phase_ns": 20,
+      "object": "dimuon",
+      "q": 0.05,
+      "lower": 0.0018308581666628735,
+      "upper": 0.006526381119733795,
+      "expected_reconstructed_readouts": 0.006526381119733795,
+      "denominator": 5601
+    }
+  ],
+  "assumptions": [
+    "Uniform production across filled Beam-2 slots; independent of signal kinematics.",
+    "q is the marginal probability per colliding BX of a usable stored ordinary CMS readout, after all real constraints.",
+    "q is a sensitivity parameter, not a measured rate or a proposed change to trigger settings.",
+    "Trigger opportunity independent of simulated signal; no assumption of independence between BX decisions.",
+    "Bounds use max(P_i) <= P(union_i) <= min(1,sum(P_i)); no reconstruction across separate events.",
+    "Physical timing already in response: query additional phase - 25*k only.",
+    "Bounds cover the stated finite window and empirical no-pileup sample only; no confidence interval or tail bound.",
+    "Muon and dimuon denominators are generator objects, not all produced SHIFT interactions."
+  ],
+  "inputs": {
+    "/eos/home-j/jniedzie/shift_cmssw/jpsi/Charmonium_FixedTarget_pThat_1to5GeV_13p6TeV_sameSimHitDelayScan_m200to200_10k_2023_v2/plots_refined/shift_delay_efficiencies.json": "357495ac33b93dad8f701ad56b041a9705fb28706fd62074e91d810874cff89f",
+    "/eos/home-j/jniedzie/shift_cmssw/trigger_response_grids/run369943_fill9017_same_simhit_20260901/shift_fill_9017_mask.json": "fbae6025bb7e1632d5b9975e2f3c9ef9340b0775ca84c75236503b2447b67916"
+  }
+}
