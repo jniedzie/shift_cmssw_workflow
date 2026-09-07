@@ -191,7 +191,7 @@ if [[ "$STEP4_INPUTS_PER_JOB" != 1 && "$NORMALIZED_STEPS" != 4 ]]; then
 	echo "STEP4_INPUTS_PER_JOB > 1 is only safe for a Step-4-only submission" >&2
 	exit 1
 fi
-for variable_name in CONDOR_REQUEST_CPUS CONDOR_REQUEST_MEMORY_MB CONDOR_MAX_MATERIALIZE; do
+for variable_name in CONDOR_REQUEST_CPUS CONDOR_REQUEST_MEMORY_MB; do
 	variable_value="${!variable_name}"
 	if [[ ! "$variable_value" =~ ^[1-9][0-9]*$ ]]; then
 		printf '%s must be a positive integer (got: %s)\n' "$variable_name" "$variable_value" >&2
@@ -374,11 +374,11 @@ echo "Frozen workflow snapshot: $SNAPSHOT_ROOT"
 
 submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
-sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<max_materialize>|$CONDOR_MAX_MATERIALIZE|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$SNAPSHOT_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
+sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$SNAPSHOT_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
 	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
-printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB, max materialized=%s)\n' \
+printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
-	"$CONDOR_REQUEST_MEMORY_MB" "$CONDOR_MAX_MATERIALIZE"
+	"$CONDOR_REQUEST_MEMORY_MB"
 printf 'Reconstruction: DT=%s, tracker=%s, GEM/HCAL/ZDC=%s/%s/%s, augment DT/tracker=%s/%s, extended timing=%s\n' \
 	"$SHIFT_DT_MODE" "$SHIFT_TRACKER_MODE" "$SHIFT_ENABLE_GEM" "$SHIFT_ENABLE_HCAL_DIAGNOSTICS" "$SHIFT_ENABLE_ZDC_DIAGNOSTICS" \
 	"$SHIFT_AUGMENT_DT_HITS" "$SHIFT_AUGMENT_TRACKER_HITS" "$SHIFT_USE_EXTENDED_TIMING"

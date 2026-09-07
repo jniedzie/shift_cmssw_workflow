@@ -64,7 +64,7 @@ not be called a material-only effect.
 The rock-continuation GDML digest is
 `cce155b2e5bb2cc81a0a4f113fa0be839fd0dbd2de96aeb583561e8b612bdc1a`.
 The batch request uses the workday flavour to avoid the previous twenty-minute
-removals. At most 100 jobs per campaign are materialized at once. Step 1
+removals. Submit all jobs without a materialization/concurrency throttle. Step 1
 archives compact per-chunk upstream transport JSON alongside raw logs.
 
 - Corrected five-event smoke: `lssTargetMaterial148m_smoke_2023`, cluster 17330023.
@@ -82,8 +82,9 @@ archives compact per-chunk upstream transport JSON alongside raw logs.
   `docs/results/lss_paired_10k_2023/completion_status.json` and `summary.json`.
 
 Both productions contain 10,000 events, not 10,000 reconstructed muons. The
-100-job materialization cap means `condor_q` initially displays only part of
-each submitted 1000-job factory; it does not reduce the requested event count.
+initial 100-job materialization cap was lifted on both active factories to
+their full 1000-job size at the user's request. Future submissions omit
+`max_materialize` entirely.
 
 ## Completion and analysis gate
 
