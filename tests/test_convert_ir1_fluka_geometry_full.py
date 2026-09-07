@@ -13,6 +13,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 from convert_ir1_fluka_geometry_full import (  # noqa: E402
     ProxyModelError,
+    add_bounded_rock_shell,
     bounded_model_envelope,
     finalize_bounded_gdml,
     install_transformed_infinite_cylinder_centre_workaround,
@@ -125,6 +126,7 @@ BOUNDED_GDML = """<?xml version="1.0"?>
   <materials>
     <material name="Vacuum" Z="1"><D value="1e-25" unit="g/cm3"/><atom value="1" unit="g/mole"/></material>
     <material name="Steel" Z="26"><D value="7" unit="g/cm3"/><atom value="56" unit="g/mole"/></material>
+    <material name="Rock" Z="14"><D value="2" unit="g/cm3"/><atom value="28" unit="g/mole"/></material>
   </materials>
   <solids><box name="world_solid" x="1000" y="1000" z="1000" lunit="mm"/><box name="part" x="1" y="1" z="1" lunit="mm"/></solids>
   <structure>
@@ -193,6 +195,55 @@ class BoundedArtifactTest(unittest.TestCase):
             self.assertEqual([world_box.attrib[axis] for axis in "xyz"], ["22.0", "42.0", "62.0"])
             self.assertEqual(report["removed_parked_placement_count"], 2)
             self.assertEqual(report["placed_material_volume_counts"], {"Steel": 1, "Vacuum": 1})
+
+    def test_adds_an_asymmetric_exterior_shell_without_changing_interior_daughters(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.gdml"
+            output = Path(directory) / "rock.gdml"
+            source.write_text(BOUNDED_GDML, encoding="utf-8")
+            report = add_bounded_rock_shell(
+                source, output, "Rock", (10, 20, 30, 40, 50, 60)
+            )
+            root = ET.parse(output).getroot()
+            solids = {item.attrib["name"]: item for item in root.find("solids")}
+            world = next(
+                volume for volume in root.find("structure").findall("volume")
+                if volume.attrib["name"] == "wl"
+            )
+            shell = next(
+                volume for volume in root.find("structure").findall("volume")
+                if volume.attrib["name"] == "shift_rock_continuation_lv"
+            )
+            self.assertEqual(shell.find("materialref").attrib["ref"], "Rock")
+            self.assertEqual(shell.find("solidref").attrib["ref"], "shift_rock_continuation_solid")
+            self.assertEqual(
+                solids["world_solid"].attrib["x"], "1040.0"
+            )
+            self.assertEqual(
+                solids["world_solid"].attrib["y"], "1080.0"
+            )
+            self.assertEqual(
+                solids["world_solid"].attrib["z"], "1120.0"
+            )
+            self.assertEqual(
+                solids["shift_rock_continuation_outer_solid"].attrib["z"], "1110.0"
+            )
+            self.assertEqual(
+                solids["shift_rock_continuation_solid"].find("position").attrib["z"], "-5.0"
+            )
+            self.assertEqual(
+                world.find("physvol[@name='shift_rock_continuation_pv']").find("position").attrib["z"], "5.0"
+            )
+            self.assertEqual(report["preserved_interior_daughter_count"], 4)
+            self.assertEqual(report["padding_mm"]["z"], [50, 60])
+
+    def test_rejects_undefined_rock_material(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.gdml"
+            output = Path(directory) / "rock.gdml"
+            source.write_text(BOUNDED_GDML, encoding="utf-8")
+            with self.assertRaisesRegex(ProxyModelError, "not defined"):
+                add_bounded_rock_shell(source, output, "Missing", (1, 1, 1, 1, 1, 1))
 
 
 class BoundedAuditTest(unittest.TestCase):

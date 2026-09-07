@@ -35,6 +35,24 @@ def parse_world_dimensions(text):
     return dimensions
 
 
+def parse_shell_padding(text):
+    """Parse lower/upper exterior thicknesses in X, Y, Z, in millimetres."""
+
+    try:
+        padding = tuple(float(item.strip()) for item in text.split(","))
+    except ValueError as error:
+        raise ProxyModelError(
+            "rock-shell padding must contain six numeric X-,X+,Y-,Y+,Z-,Z+ values in mm"
+        ) from error
+    if len(padding) != 6 or any(value < 0.0 for value in padding):
+        raise ProxyModelError(
+            "rock-shell padding must contain six non-negative X-,X+,Y-,Y+,Z-,Z+ values in mm"
+        )
+    if not any(value > 0.0 for value in padding):
+        raise ProxyModelError("rock-shell padding must be non-zero")
+    return padding
+
+
 def install_null_body_aabb_workaround(converter_module):
     """Skip bodies only when no retained FLUKA region references them."""
 
@@ -306,7 +324,138 @@ def bounded_model_envelope(source_bounds_mm, lattice_report, padding_mm):
     }
 
 
-def finalize_bounded_gdml(input_path, output_path, envelope):
+def add_bounded_rock_shell(input_path, output_path, material, padding_mm):
+    """Add an exterior CSG shell without changing the bounded model interior.
+
+    The imported FLUKA world is vacuum and is intentionally discarded by the
+    CMSSW attachment.  A rock world material would consequently have no effect.
+    This creates a real placed shell volume outside the original bounded box.
+    Every original daughter, including tunnel, cavern, shaft, and service-void
+    regions, remains inside the shell's subtracted interior.
+    """
+
+    if len(padding_mm) != 6 or any(value < 0.0 for value in padding_mm):
+        raise ProxyModelError("rock-shell padding must contain six non-negative values")
+    if not any(value > 0.0 for value in padding_mm):
+        raise ProxyModelError("rock-shell padding must be non-zero")
+
+    tree = ET.parse(input_path)
+    root = tree.getroot()
+    materials = root.find("materials")
+    solids = root.find("solids")
+    structure = root.find("structure")
+    setup = root.find("setup")
+    if materials is None or solids is None or structure is None or setup is None:
+        raise ProxyModelError("GDML requires materials, solids, structure, and setup sections")
+    defined_materials = {item.attrib.get("name") for item in materials if item.attrib.get("name")}
+    if material not in defined_materials:
+        raise ProxyModelError(f"rock-shell material {material} is not defined in GDML")
+    world_ref = setup.find("world")
+    if world_ref is None or set(world_ref.attrib) != {"ref"}:
+        raise ProxyModelError("GDML setup has no unambiguous world reference")
+    volumes = {volume.attrib["name"]: volume for volume in structure.findall("volume")}
+    try:
+        world = volumes[world_ref.attrib["ref"]]
+        world_solid_ref = world.find("solidref").attrib["ref"]
+    except (KeyError, AttributeError) as error:
+        raise ProxyModelError("bounded GDML world volume is malformed") from error
+    world_solid = next((item for item in solids if item.attrib.get("name") == world_solid_ref), None)
+    if world_solid is None or world_solid.tag != "box":
+        raise ProxyModelError("rock-shell augmentation requires a box world solid")
+    if world.find("physvol[@name='shift_rock_continuation_pv']") is not None:
+        raise ProxyModelError("bounded GDML already contains a shift rock continuation")
+
+    try:
+        inner_dimensions = [float(world_solid.attrib[axis]) for axis in ("x", "y", "z")]
+    except (KeyError, ValueError) as error:
+        raise ProxyModelError("bounded GDML world box has invalid dimensions") from error
+    if any(value <= 0.0 for value in inner_dimensions):
+        raise ProxyModelError("bounded GDML world box dimensions must be positive")
+    unit = world_solid.attrib.get("lunit", "mm")
+    if unit != "mm":
+        raise ProxyModelError("rock-shell augmentation requires millimetre world dimensions")
+
+    lower = padding_mm[0::2]
+    upper = padding_mm[1::2]
+    outer_dimensions = [
+        dimension + low + high
+        for dimension, low, high in zip(inner_dimensions, lower, upper)
+    ]
+    outer_centre = [(high - low) / 2.0 for low, high in zip(lower, upper)]
+    containment_dimensions = [
+        dimension + 2.0 * max(low, high)
+        for dimension, low, high in zip(inner_dimensions, lower, upper)
+    ]
+    names = {item.attrib.get("name") for item in solids} | set(volumes)
+    generated = {
+        "shift_rock_continuation_outer_solid",
+        "shift_rock_continuation_inner_solid",
+        "shift_rock_continuation_solid",
+        "shift_rock_continuation_lv",
+        "shift_rock_continuation_pv",
+    }
+    collision = sorted(name for name in generated if name in names)
+    if collision:
+        raise ProxyModelError("rock-shell generated-name collision: " + ", ".join(collision))
+
+    ET.SubElement(
+        solids,
+        "box",
+        {"name": "shift_rock_continuation_outer_solid",
+         **{axis: repr(value) for axis, value in zip(("x", "y", "z"), outer_dimensions)},
+         "lunit": "mm"},
+    )
+    ET.SubElement(
+        solids,
+        "box",
+        {"name": "shift_rock_continuation_inner_solid",
+         **{axis: repr(value) for axis, value in zip(("x", "y", "z"), inner_dimensions)},
+         "lunit": "mm"},
+    )
+    shell = ET.SubElement(solids, "subtraction", {"name": "shift_rock_continuation_solid"})
+    ET.SubElement(shell, "first", {"ref": "shift_rock_continuation_outer_solid"})
+    ET.SubElement(shell, "second", {"ref": "shift_rock_continuation_inner_solid"})
+    ET.SubElement(
+        shell,
+        "position",
+        {"name": "shift_rock_continuation_inner_offset",
+         **{axis: repr(-value) for axis, value in zip(("x", "y", "z"), outer_centre)},
+         "unit": "mm"},
+    )
+    shell_volume = ET.Element("volume", {"name": "shift_rock_continuation_lv"})
+    ET.SubElement(shell_volume, "materialref", {"ref": material})
+    ET.SubElement(shell_volume, "solidref", {"ref": "shift_rock_continuation_solid"})
+    # ROOT's GDML importer resolves logical-volume references in document order.
+    # Declare the shell before the world that places it.
+    structure.insert(list(structure).index(world), shell_volume)
+    shell_placement = ET.SubElement(world, "physvol", {"name": "shift_rock_continuation_pv"})
+    ET.SubElement(shell_placement, "volumeref", {"ref": "shift_rock_continuation_lv"})
+    ET.SubElement(
+        shell_placement,
+        "position",
+        {"name": "shift_rock_continuation_position",
+         **{axis: repr(value) for axis, value in zip(("x", "y", "z"), outer_centre)},
+         "unit": "mm"},
+    )
+    for axis, value in zip(("x", "y", "z"), containment_dimensions):
+        world_solid.attrib[axis] = repr(value)
+
+    output_path = Path(output_path)
+    temporary = output_path.with_suffix(output_path.suffix + ".tmp")
+    tree.write(temporary, encoding="utf-8", xml_declaration=True)
+    temporary.replace(output_path)
+    return {
+        "material": material,
+        "padding_mm": {axis: [low, high] for axis, low, high in zip(("x", "y", "z"), lower, upper)},
+        "interior_world_dimensions_mm": inner_dimensions,
+        "outer_shell_dimensions_mm": outer_dimensions,
+        "outer_shell_centre_mm": outer_centre,
+        "containment_world_dimensions_mm": containment_dimensions,
+        "preserved_interior_daughter_count": len(world.findall("physvol")) - 1,
+    }
+
+
+def finalize_bounded_gdml(input_path, output_path, envelope, rock_shell=None):
     tree = ET.parse(input_path)
     root = tree.getroot()
     solids = root.find("solids")
@@ -393,7 +542,7 @@ def finalize_bounded_gdml(input_path, output_path, envelope):
     temporary = output_path.with_suffix(output_path.suffix + ".tmp")
     tree.write(temporary, encoding="utf-8", xml_declaration=True)
     temporary.replace(output_path)
-    return {
+    report = {
         **envelope,
         "removed_parked_placement_count": len(removed),
         "placed_volume_count": len(world.findall("physvol")),
@@ -402,6 +551,14 @@ def finalize_bounded_gdml(input_path, output_path, envelope):
         "placed_material_volume_counts": dict(sorted(placement_material_counts.items())),
         "model_to_artifact_translation_mm": [-value for value in centre],
     }
+    if rock_shell is not None:
+        report["rock_shell"] = add_bounded_rock_shell(
+            output_path,
+            output_path,
+            rock_shell["material"],
+            rock_shell["padding_mm"],
+        )
+    return report
 
 
 def parse_args():
@@ -443,6 +600,22 @@ def parse_args():
         help="Passing diagnostic bounds audit used for lossless lattice classification",
     )
     parser.add_argument("--bounded-world-padding-mm", type=float, default=10.0)
+    parser.add_argument(
+        "--bounded-rock-shell-material",
+        help=(
+            "Defined GDML material for a placed exterior continuation shell; "
+            "requires --bounded-rock-shell-padding-mm"
+        ),
+    )
+    parser.add_argument(
+        "--bounded-rock-shell-padding-mm",
+        type=parse_shell_padding,
+        metavar="X-,X+,Y-,Y+,Z-,Z+",
+        help=(
+            "Exterior continuation thicknesses in mm. The original bounded model "
+            "is subtracted exactly, preserving its explicit void regions."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -468,6 +641,17 @@ def main():
         return 2
     if args.bounded_installable and args.bounded_world_padding_mm <= 0.0:
         print("error: --bounded-world-padding-mm must be positive", file=sys.stderr)
+        return 2
+    if (args.bounded_rock_shell_material is None) != (
+        args.bounded_rock_shell_padding_mm is None
+    ):
+        print(
+            "error: --bounded-rock-shell-material and --bounded-rock-shell-padding-mm must be used together",
+            file=sys.stderr,
+        )
+        return 2
+    if args.bounded_rock_shell_material and not args.bounded_installable:
+        print("error: a bounded rock shell requires --bounded-installable", file=sys.stderr)
         return 2
     try:
         dimensions = parse_world_dimensions(args.world_dimensions_mm)
@@ -506,7 +690,15 @@ def main():
                 args.bounded_world_padding_mm,
             )
             bounded_path = args.output_dir / "lhc_ir1_atlas_proxy_bounded.gdml"
-            bounded_report = finalize_bounded_gdml(gdml_path, bounded_path, envelope)
+            rock_shell = None
+            if args.bounded_rock_shell_material:
+                rock_shell = {
+                    "material": args.bounded_rock_shell_material,
+                    "padding_mm": args.bounded_rock_shell_padding_mm,
+                }
+            bounded_report = finalize_bounded_gdml(
+                gdml_path, bounded_path, envelope, rock_shell=rock_shell
+            )
             gdml_path = bounded_path
             report["geometry"]["gdml"] = bounded_path.name
             report["geometry"]["lattice_placement"] = lattice_state["report"]
