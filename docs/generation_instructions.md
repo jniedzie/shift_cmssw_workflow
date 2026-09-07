@@ -195,6 +195,11 @@ shift, phase, and BX provenance beside each event's existing per-muon SimHit
 time range. This supplies the physical-time record without changing generation
 or detector simulation.
 
+Use `scripts/build_shift_event_delay_response.py` to validate the third input
+from paired full-chain reconstruction results. Its CSV preserves each signal
+event's physical delay and outcome at every scanned additional delay; it
+rejects reconstruction without a readout and duplicate timing points.
+
 ```bash
 python3 scripts/convolve_shift_collection.py \
   --parent-weights parent_bunch_distribution.json \
