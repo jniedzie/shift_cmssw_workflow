@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-scripts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+scripts_dir="${1:?absolute frozen scripts directory}"
+shift
 cmssw_src="${1:?CMSSW src}"
 shift
 source /cvmfs/cms.cern.ch/cmsset_default.sh
