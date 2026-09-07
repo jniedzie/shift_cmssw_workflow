@@ -10,6 +10,7 @@ from collections import defaultdict
 from pathlib import Path
 
 PREFIX = re.compile(r"\[FixedTargetMuonDebug\]\[(?P<source>[^]]+)\]\s+(?P<body>.*)")
+POINT = re.compile(r"\[ShiftEventDisplay\]\[G4Point\]\s+(?P<body>.*)")
 FIELD = re.compile(r"(?P<key>[A-Za-z0-9_]+)=(?P<value>\([^)]*\)|[^\s]+)")
 
 def parse_fields(body):
@@ -53,30 +54,44 @@ def classify(start, end, steps):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("log", type=Path)
+    ap.add_argument("log", type=Path, nargs="+", help="one or more cmsRun logs")
     ap.add_argument("output", type=Path)
     args = ap.parse_args()
-    grouped = defaultdict(lambda: {"starts": {}, "ends": {}, "steps": defaultdict(list)})
-    for line in args.log.read_text(errors="replace").splitlines():
-        m = PREFIX.search(line)
-        if not m:
-            continue
-        d = parse_fields(m.group("body")); event = d.get("event"); track = d.get("track_id")
-        if event is None or track is None:
-            continue
-        key = (int(event), int(track)); source = m.group("source")
-        if source == "PrimaryFate" and d.get("stage") == "track-start": grouped[key]["starts"][track] = d
-        elif source == "PrimaryFate" and d.get("stage") == "track-end": grouped[key]["ends"][track] = d
-        elif source == "G4Step": grouped[key]["steps"][track].append(d)
+    grouped = defaultdict(lambda: {"starts": {}, "ends": {}, "steps": defaultdict(list), "points": defaultdict(list)})
+    for path in args.log:
+        for line in path.read_text(errors="replace").splitlines():
+            m = PREFIX.search(line)
+            point = POINT.search(line)
+            if not m and not point:
+                continue
+            d = parse_fields((m or point).group("body")); event = d.get("event"); track = d.get("track_id")
+            if event is None or track is None:
+                continue
+            key = (str(path), int(event), int(track)); source = m.group("source") if m else None
+            if point:
+                grouped[key]["points"][track].append(d)
+            elif source == "PrimaryFate" and d.get("stage") == "track-start": grouped[key]["starts"][track] = d
+            elif source == "PrimaryFate" and d.get("stage") == "track-end": grouped[key]["ends"][track] = d
+            elif source == "G4Step": grouped[key]["steps"][track].append(d)
     rows = []
-    for (event, track), g in sorted(grouped.items()):
+    for (source_log, event, track), g in sorted(grouped.items()):
         start = g["starts"].get(str(track)); end = g["ends"].get(str(track)); steps = g["steps"].get(str(track), [])
         if not start or not end: continue
+        points = g["points"].get(str(track), [])
         category, reason = classify(start, end, steps)
-        rows.append({"event": event, "track_id": int(track), "category": category, "kill_reason": reason,
+        materials = defaultdict(float)
+        for point in points:
+            materials[point.get("material", "unknown")] += float(point.get("step_length_mm", 0.0))
+        rock_path_m = sum(length for name, length in materials.items()
+                          if any(token in name.lower() for token in ("rock", "earth", "soil", "earthboh"))) / 1000.0
+        if rock_path_m > 0.0 and float(end.get("kinetic_energy_GeV", "inf")) < 0.01:
+            category = "stopped_in_rock"
+        rows.append({"source_log": source_log, "event": event, "track_id": int(track), "category": category, "kill_reason": reason,
                      "start_volume": start.get("volume"), "end_volume": end.get("volume"),
                      "end_process": end.get("last_process"), "end_energy_GeV": float(end.get("kinetic_energy_GeV", "nan")),
-                     "steps": int(end.get("steps", 0)), "deflection_angle_deg": angle(vec(start.get("momentum_GeV")), vec(end.get("momentum_GeV")))})
+                     "steps": int(end.get("steps", 0)), "rock_path_m": rock_path_m,
+                     "materials_m": {name: length / 1000.0 for name, length in sorted(materials.items())},
+                     "deflection_angle_deg": angle(vec(start.get("momentum_GeV")), vec(end.get("momentum_GeV")))})
     counts = defaultdict(int)
     for row in rows: counts[row["category"]] += 1
     payload = {"format_version": 1, "tracks": rows, "counts": dict(sorted(counts.items()))}
