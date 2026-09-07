@@ -68,8 +68,22 @@ removals. At most 100 jobs per campaign are materialized at once. Step 1
 archives compact per-chunk upstream transport JSON alongside raw logs.
 
 - Corrected five-event smoke: `lssTargetMaterial148m_smoke_2023`, cluster 17330023.
+  Passed with exit 0, five readable NanoAOD events, identical GenPart content
+  to the paired control, four reconstructed rows (one matched primary), and
+  a valid 148 m material boundary on all four reconstructed rows. The resolved
+  Step-1/Step-4 geometry/field contract audit passed.
 - 10k control: `lssPaired_control_10k_2023_v1`, cluster 17330025.
-- The 10k combined sample is pending the corrected smoke result.
+- 10k combined: `lssPaired_materialField_10k_2023_v1`, cluster 17330027.
+- Automatic paired validation and plots: cluster 17330028, using frozen
+  scripts in `condor/lss_paired_completion_20260907`. It waits for all 1000
+  NanoAOD chunks and archived Step-4 logs in both samples, plus all comparison
+  transport summaries. Its 48-hour timeout fails explicitly if outputs remain
+  incomplete. Progress and final results go to
+  `docs/results/lss_paired_10k_2023/completion_status.json` and `summary.json`.
+
+Both productions contain 10,000 events, not 10,000 reconstructed muons. The
+100-job materialization cap means `condor_q` initially displays only part of
+each submitted 1000-job factory; it does not reduce the requested event count.
 
 ## Completion and analysis gate
 
