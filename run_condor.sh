@@ -400,4 +400,12 @@ if [[ "$KEEP_LOGS" == 0 ]]; then
 else
 	echo "Keeping logs from older jobs (--keep-logs)"
 fi
-condor_submit "$submit_file"
+if [[ -n "${CONDOR_JOB_FLAVOUR:-}" ]]; then
+	case "$CONDOR_JOB_FLAVOUR" in
+		espresso|microcentury|longlunch|workday|tomorrow|testmatch|nextweek) ;;
+		*) echo "Invalid CONDOR_JOB_FLAVOUR: $CONDOR_JOB_FLAVOUR" >&2; exit 2 ;;
+	esac
+	condor_submit -append "+JobFlavour = \"$CONDOR_JOB_FLAVOUR\"" "$submit_file"
+else
+	condor_submit "$submit_file"
+fi

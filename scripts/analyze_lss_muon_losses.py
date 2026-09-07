@@ -31,6 +31,47 @@ def angle(a, b):
         return None
     return math.degrees(math.acos(max(-1.0, min(1.0, sum(x*y for x,y in zip(a,b))/(na*nb)))))
 
+def before_cms(start, end, points, entrance_abs_z_mm):
+    """Summarize transport up to the first inward entrance-plane crossing.
+
+    This plane is a transport milestone, not a detector acceptance test.
+    A missing trace is unknown, never proof that a particle missed CMS.
+    """
+    origin = vec(start.get("position_mm"))
+    if origin is None or not points:
+        return {"cms_plane_reached": None, "upstream_rock_path_m": None}
+    side = 1 if origin[2] >= 0 else -1
+    previous = origin
+    materials = defaultdict(float)
+    reached = side * origin[2] <= entrance_abs_z_mm
+    crossing = None
+    for point in points:
+        if reached:
+            break
+        position = vec(point.get("position_mm"))
+        if position is None:
+            raise ValueError("trace point without a valid position")
+        fraction = 1.0
+        if side * position[2] <= entrance_abs_z_mm:
+            fraction = (side * previous[2] - entrance_abs_z_mm) / (side * (previous[2] - position[2]))
+            crossing = [a + fraction * (b-a) for a, b in zip(previous, position)]
+            reached = True
+        materials[point.get("material", "unknown")] += fraction * float(point.get("step_length_mm", 0.0)) / 1000.0
+        previous = position
+    terminal = vec(end.get("position_mm"))
+    # The current trace hook omits the killing step. Never classify a final
+    # point beyond the entrance as an upstream stop solely from trace absence.
+    terminal_beyond = terminal is not None and side * terminal[2] <= entrance_abs_z_mm
+    energy = float(end.get("kinetic_energy_GeV", "inf"))
+    return {
+        "cms_plane_reached": True if reached else (None if terminal_beyond else False),
+        "cms_plane_crossing_mm": crossing,
+        "upstream_rock_path_m": sum(v for k,v in materials.items() if any(s in k.lower() for s in ("rock", "earth", "soil"))),
+        "upstream_materials_m": dict(materials),
+        "low_energy_end_before_cms": not reached and not terminal_beyond and energy < 0.01,
+        "end_position_mm": terminal,
+    }
+
 def classify(start, end, steps):
     reason = next((s.get("reason") for s in steps if s.get("stage") == "cmssw-kill"), None)
     if reason:
@@ -39,8 +80,7 @@ def classify(start, end, steps):
         volume = (end or {}).get("volume", "").lower()
         proc = (end or {}).get("last_process", "").lower()
         energy = float((end or {}).get("kinetic_energy_GeV", "inf"))
-        rock = any(any(token in (s.get("pre_volume", "") + s.get("post_volume", "") + s.get("pre_region", "") + s.get("post_region", "")).lower() for token in ("rock", "earth", "molar", "soil")) for s in steps if s.get("stage") == "volume-transition")
-        if energy < 0.01 and (rock or any(t in volume for t in ("rock", "earth", "soil"))):
+        if energy < 0.01 and any(t in volume for t in ("rock", "earth", "soil")):
             category = "stopped_in_rock"
         elif energy < 0.01 and volume not in ("", "outside-world"):
             category = "stopped_in_material"
@@ -56,6 +96,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("log", type=Path, nargs="+", help="one or more cmsRun logs")
     ap.add_argument("output", type=Path)
+    ap.add_argument("--cms-entrance-abs-z-mm", type=float, default=11000.0,
+                    help="transport entrance plane; crossing alone is not detector acceptance")
     args = ap.parse_args()
     grouped = defaultdict(lambda: {"starts": {}, "ends": {}, "steps": defaultdict(list), "points": defaultdict(list)})
     for path in args.log:
@@ -84,17 +126,23 @@ def main():
             materials[point.get("material", "unknown")] += float(point.get("step_length_mm", 0.0))
         rock_path_m = sum(length for name, length in materials.items()
                           if any(token in name.lower() for token in ("rock", "earth", "soil", "earthboh"))) / 1000.0
-        if rock_path_m > 0.0 and float(end.get("kinetic_energy_GeV", "inf")) < 0.01:
-            category = "stopped_in_rock"
+        # Rock encountered anywhere is not evidence of stopping in rock.
+        # Preserve the observed endpoint material separately from path totals.
+        terminal_material = points[-1].get("material") if points else None
+        upstream = before_cms(start, end, points, args.cms_entrance_abs_z_mm)
         rows.append({"source_log": source_log, "event": event, "track_id": int(track), "category": category, "kill_reason": reason,
+                     "pdg_id": int(start["pdg_id"]), "start_momentum_GeV": vec(start.get("momentum_GeV")),
                      "start_volume": start.get("volume"), "end_volume": end.get("volume"),
                      "end_process": end.get("last_process"), "end_energy_GeV": float(end.get("kinetic_energy_GeV", "nan")),
                      "steps": int(end.get("steps", 0)), "rock_path_m": rock_path_m,
+                     "terminal_recorded_material": terminal_material, **upstream,
                      "materials_m": {name: length / 1000.0 for name, length in sorted(materials.items())},
                      "deflection_angle_deg": angle(vec(start.get("momentum_GeV")), vec(end.get("momentum_GeV")))})
     counts = defaultdict(int)
     for row in rows: counts[row["category"]] += 1
-    payload = {"format_version": 1, "tracks": rows, "counts": dict(sorted(counts.items()))}
+    payload = {"format_version": 2, "tracks": rows, "counts": dict(sorted(counts.items())),
+               "cms_entrance_abs_z_mm": args.cms_entrance_abs_z_mm,
+               "boundary_note": "Entrance-plane transport milestone, not detector acceptance; terminal step may be absent"}
     args.output.write_text(json.dumps(payload, indent=2) + "\n")
     print("tracks=" + str(len(rows)), "counts=" + json.dumps(dict(sorted(counts.items())), sort_keys=True))
 

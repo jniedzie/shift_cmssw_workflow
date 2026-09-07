@@ -199,6 +199,12 @@ if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then
 	echo "WARNING: could not archive Step 1 log at $LOG_SNAPSHOT" >&2
 fi
 
+if [[ "$TRACE_PRIMARY_MUON_PATHS_CMS" == True && "$DEBUG_MUON_PRIMARIES_CMS" == True ]]; then
+	python3 "$WORKFLOW_ROOT/scripts/analyze_lss_muon_losses.py" "$LOCAL_LOG" \
+		"$LOCAL_STEP1_DIR/muon_transport_part${PART}.json"
+	cp "$LOCAL_STEP1_DIR/muon_transport_part${PART}.json" "$LOG_DIR/muon_transport_part${PART}.json"
+fi
+
 # Pythia prints the generated cross section and its statistical uncertainty in
 # the end-of-job summary.  Keep one shared, latest value for this sample.
 if ! "$WORKFLOW_ROOT/scripts/update_cross_section.sh" \
