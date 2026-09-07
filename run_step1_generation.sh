@@ -46,6 +46,12 @@ case "${DEBUG_MUON_TRACKING:-0}" in
 	*) echo "ERROR: DEBUG_MUON_TRACKING must be 0/1 or false/true" >&2; exit 1 ;;
 esac
 
+case "${TRACE_PRIMARY_MUON_PATHS:-0}" in
+	0|false|False) TRACE_PRIMARY_MUON_PATHS_CMS="False" ;;
+	1|true|True) TRACE_PRIMARY_MUON_PATHS_CMS="True" ;;
+	*) echo "ERROR: TRACE_PRIMARY_MUON_PATHS must be 0/1 or false/true" >&2; exit 1 ;;
+esac
+
 case "${SHIFT_TO_CMS_TRANSPORT:-1}" in
 	0|false|False) SHIFT_TO_CMS_TRANSPORT_CMS="False" ;;
 	1|true|True) SHIFT_TO_CMS_TRANSPORT_CMS="True" ;;
@@ -171,7 +177,7 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--era "$ERA" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)${SHIFT_LSS_SIMULATION_PYTHON}" \
+	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.TracePrimaryTracksForVisualization = cms.untracked.bool(${TRACE_PRIMARY_MUON_PATHS_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)${SHIFT_LSS_SIMULATION_PYTHON}" \
 	--no_exec \
 	-n "$N_EVENTS"
 
