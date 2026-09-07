@@ -10,7 +10,12 @@ export N_JOBS="${N_JOBS:-1000}" N_EVENTS="${N_EVENTS:-10}"
 export GENERATOR_SEED=13579 SIMULATION_SEED=24680
 export COLLISION_YEAR=2023 PILEUP_MODE=none TRIGGER_SCENARIO=none TRIGGER_TIMELINE_MODE=none
 export SHIFT_TIMING_MODE=nominal SHIFT_TIMING_BX_OFFSET=0 SHIFT_TIMING_PHASE_NS=0.0
-export DEBUG_MUON_PRIMARIES=1 DEBUG_MUON_TRACKING=0 TRACE_PRIMARY_MUON_PATHS=1
+# Full Geant4 point traces are deliberately opt-in: at production scale they
+# duplicate multi-gigabyte logs on the submit host.  The reconstruction output
+# remains sufficient for the paired efficiency and response comparison.
+export DEBUG_MUON_PRIMARIES="${DEBUG_MUON_PRIMARIES:-0}"
+export DEBUG_MUON_TRACKING="${DEBUG_MUON_TRACKING:-0}"
+export TRACE_PRIMARY_MUON_PATHS="${TRACE_PRIMARY_MUON_PATHS:-0}"
 export CONDOR_REQUEST_MEMORY_MB=4000
 export CONDOR_JOB_FLAVOUR=workday
 export SHIFT_LSS_MATERIAL_MODE=none SHIFT_LSS_FIELD_MODE=none
