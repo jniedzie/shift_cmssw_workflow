@@ -14,35 +14,15 @@ namespace = runpy.run_path(base_config)
 process = namespace["process"]
 process.maxEvents.input = int(os.environ.get("SHIFT_TRACE_MAX_EVENTS", "3"))
 
-# Use the same temporary model placement as the geometry overview.  It is a
-# software test of the visualization chain, not an approved CMS-side placement.
-from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry
-from PhysicsTools.ShiftMuonSegments.shiftLssIr1AtlasProxy_cff import shiftLssIr1AtlasProxyFieldElements
-from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseShiftLssMagneticField
-
-model_origin = (0.0, 0.0, 0.0)
-model_to_cms = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
-process = customiseShiftLssExternalGeometry(
-    process,
-    gdmlFile=("PhysicsTools/ShiftLssGeometry/data/ir1_atlas_proxy/"
-              "lhc_ir1_atlas_proxy_bounded.gdml"),
-    artifactOriginInModelCm=(0.0, 4299.5, 14575.200000105498),
-    modelOriginCm=model_origin,
-    modelToCms=model_to_cms,
-    minimumAbsZCm=1100.0,
-    checkOverlaps=False,
-)
-process = customiseShiftLssMagneticField(
-    process,
-    fieldElements=shiftLssIr1AtlasProxyFieldElements(
-        modelOriginCm=model_origin,
-        modelToCms=model_to_cms,
-        fieldScale=1.0,
-    ),
-)
+# The base campaign config already owns geometry and field setup.  Keeping it
+# intact is essential for a paired rerun; the old fallback is retained only
+# for standalone visualization configs that do not have g4SimHits yet.
+if not hasattr(process, "g4SimHits"):
+    raise RuntimeError("base Step-1 config has no g4SimHits")
 process.g4SimHits.SteppingAction.TracePrimaryTracksForVisualization = cms.untracked.bool(True)
 process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(True)
 process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(True)
+process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(True)
 
 # This is a diagnostic rerun.  Never overwrite the campaign output.
 output_path = os.environ.get("SHIFT_TRACE_OUTPUT", "/tmp/shift_lss_event_trace.root")
