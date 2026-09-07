@@ -165,6 +165,44 @@ correlations between the central event's trigger class and detector occupancy;
 treat that as an occupancy systematic, or replace the independent mixing with
 a validated data-overlay design before making a data-level absolute claim.
 
+## Absolute collection convolution
+
+Do not multiply average conditional efficiencies into a collection rate. Use
+`scripts/convolve_shift_collection.py` after preparing one compatible Run-3
+run/fill with a versioned parent-slot-weight JSON, an ordered measured-L1A/HLT
+timeline JSONL, and an event-level delay-response JSON. The input schemas are
+`shift-parent-bunch-distribution`, `shift-l1a-opportunity-timeline`, and
+`shift-event-delay-response` (all version 1).
+
+For each recorded L1A at relative BX `k`, the script queries the matching
+event's response at `physical_delay_ns - 25*k` and unions every readout in the
+window. It rejects provisional inputs unless `--allow-provisional` is given;
+such an output remains an explicitly invalid structural control.
+
+Use `scripts/build_shift_parent_bunch_distribution.py` to normalize the first
+input from a complete CSV of `slot,bunch_population,source_weight`, checked
+against the official LPC mask. It records both input sources and rejects a
+missing, duplicated, or unfilled slot. The `--physics-valid` flag is an
+explicit assertion that the supplied bunch populations and source weights are
+authoritative; it does not derive either quantity from the simulation.
+
+Use `scripts/build_shift_l1a_opportunity_timeline.py` to turn an ordered,
+measured scaler/TCDS/OMS CSV into the second input. It requires the complete
+state for each tested BX: recorded-L1A, HLT persistence, run, and lumisection;
+it rejects a noncausal HLT-persisted entry. `audit_shift_muon_truth.py` now
+also writes unchanged `shiftEventTime` source coordinates, source time, applied
+shift, phase, and BX provenance beside each event's existing per-muon SimHit
+time range. This supplies the physical-time record without changing generation
+or detector simulation.
+
+```bash
+python3 scripts/convolve_shift_collection.py \
+  --parent-weights parent_bunch_distribution.json \
+  --response event_delay_response.json \
+  --timeline measured_l1a_opportunities.jsonl \
+  --output collection_probability.json
+```
+
 To measure the complete physical timing response, make paired campaigns with
 fixed generator, Geant4, pileup, and trigger seeds, changing only the physical
 SHIFT arrival offset. Also set `PILEUP_SEQUENTIAL=1`: the mixing seed fixes the

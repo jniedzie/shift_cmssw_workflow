@@ -24,6 +24,35 @@ SUBDETECTORS = {
 }
 
 
+def _optional_timing_scalar(event, instance, type_name="double"):
+    """Read unchanged ShiftEventTime provenance when present in the input."""
+    handle = Handle(type_name)
+    if not event.getByLabel("shiftEventTime", instance, handle):
+        return None
+    product = handle.product()
+    return product if type_name == "std::string" else product[0]
+
+
+def _timing_summary(event):
+    source_ct_mm = _optional_timing_scalar(event, "sourceCtBeforeMm")
+    applied_shift_ns = _optional_timing_scalar(event, "appliedShiftNs")
+    if source_ct_mm is None or applied_shift_ns is None:
+        return {"status": "missing_shift_event_time_metadata"}
+    return {
+        "status": "present",
+        "source_x_mm": float(_optional_timing_scalar(event, "sourceXmm")),
+        "source_y_mm": float(_optional_timing_scalar(event, "sourceYmm")),
+        "source_z_mm": float(_optional_timing_scalar(event, "sourceZmm")),
+        "source_ct_before_mm": float(source_ct_mm),
+        "applied_shift_ns": float(applied_shift_ns),
+        "phase_ns": float(_optional_timing_scalar(event, "phaseNs")),
+        "bx_offset": int(_optional_timing_scalar(event, "bxOffset", "int")),
+        "beam_direction_z": int(_optional_timing_scalar(event, "beamDirectionZ", "int")),
+        "timing_mode": str(_optional_timing_scalar(event, "timingMode", "std::string")),
+        "model_version": str(_optional_timing_scalar(event, "modelVersion", "std::string")),
+    }
+
+
 def _non_timing_hit_record(hit):
     entry = hit.entryPoint()
     exit_point = hit.exitPoint()
@@ -170,6 +199,7 @@ def _audit_event(event, input_path, track_module="g4SimHits", simhit_module="g4S
     ]
     return {
         **_event_number(event),
+        "physical_timing": _timing_summary(event),
         "sim_tracks": len(tracks),
         "signal_muons": signal_muons,
         "identity_failures": {
