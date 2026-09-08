@@ -74,30 +74,52 @@ archives compact per-chunk upstream transport JSON alongside raw logs.
   Step-1/Step-4 geometry/field contract audit passed.
 - 10k control: `lssPaired_control_10k_2023_v1`, cluster 17330025.
 - 10k combined: `lssPaired_materialField_10k_2023_v1`, cluster 17330027.
-- Automatic paired validation and plots: cluster 17330028, using frozen
-  scripts in `condor/lss_paired_completion_20260907`. It waits for all 1000
-  NanoAOD chunks and archived Step-4 logs in both samples, plus all comparison
-  transport summaries. Its 48-hour timeout fails explicitly if outputs remain
-  incomplete. Progress and final results go to
-  `docs/results/lss_paired_10k_2023/completion_status.json` and `summary.json`.
+- The automatic paired-validation monitor was cancelled when production was
+  intentionally stopped short of 1000 valid chunks. No final 10k plots have
+  been produced yet.
 
 Both productions contain 10,000 events, not 10,000 reconstructed muons. The
 initial 100-job materialization cap was lifted on both active factories to
 their full 1000-job size at the user's request. Future submissions omit
 `max_materialize` entirely.
 
-## Completion and analysis gate
+## Current 997-chunk handoff
+
+Production was deliberately stopped after three control jobs remained in the
+scheduler (17330025.506, .513 and .686); the separate plot-monitor job was
+also cancelled. At handoff, .513 and .686 were in Condor's removal state;
+they are no longer running. The three jobs had already written their paired
+NanoAOD files, so cancelling them does not alter the retained event set.
+
+Terminal failures left control chunk 0810 and material-plus-field chunks 0463
+and 0469 without final NanoAOD. To make the retained samples strictly paired,
+the existing counterparts were removed: material-plus-field 0810 and control
+0463/0469. Both campaigns now contain the same 997 readable Step-4 chunk
+indices. The corresponding NanoAOD files are under:
+
+- `/eos/home-j/jniedzie/shift_cmssw/jpsi/lssPaired_control_10k_2023_v1/samples/step4`
+- `/eos/home-j/jniedzie/shift_cmssw/jpsi/lssPaired_materialField_10k_2023_v1/samples/step4`
+
+Before analysis, re-check that the two filename-index sets are identical and
+that each ROOT file is readable. The retained events still use the fixed,
+per-chunk generator and simulation seeds, so the 997 chunks are suitable for
+one-to-one control versus combined material/field comparison.
+
+## Pending analysis gate
 
 Run `scripts/compare_lss_reconstruction.py CONTROL COMPARISON OUTPUT
---expected-events 10000 --transport-directory COMPARISON/logs` when all
-Step-4 outputs are healthy. It rejects missing/unequal chunk sets, duplicate
-events, mismatching generator content, invalid ROOT files, invalid generator
-associations, and ambiguous transport joins. A SHA-256 fingerprint of the
-stored truth content is saved for each event.
+--expected-events 9970` after confirming the 997-chunk set above. Do not pass
+`--transport-directory`: the full per-step transport trace was disabled for
+the later production jobs to avoid AFS scheduler-log quota exhaustion. The
+script rejects missing/unequal chunk sets, duplicate events, mismatching
+generator content, invalid ROOT files, and invalid generator associations. A
+SHA-256 fingerprint of the stored truth content is saved for each event.
 
 The report produces efficiency versus generated pt/pz/eta with Wilson 68%
 intervals, signed q/pt response distributions, and pt scale and central-68%
 resolution versus generated |pz|. The response is also shown for the common
 set of muons reconstructed in both samples, separating selection changes
-from response changes. Raw counts, unique matched counts, duplicates,
-out-of-plot-range response counts, and rock-group denominators remain explicit.
+from response changes. Raw counts, unique matched counts, duplicates, and
+out-of-plot-range response counts remain explicit. The detailed causal
+rock/tunnel transport classification is available only from the earlier
+100-event trace sample.

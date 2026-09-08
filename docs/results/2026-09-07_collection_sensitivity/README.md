@@ -14,8 +14,19 @@ independent of slot and ordinary trigger decisions. Let q be the marginal
 probability that a colliding BX has a usable stored ordinary CMS readout,
 already including L1, HLT, stream retention and live-state losses. Noncolliding
 BXs have zero opportunity in this restricted ordinary-collision scenario.
-The q values 0.1%, 1%, 5% are parameter examples, not measured rates.
-Their compatibility with actual Run-3 operation has not been established.
+The q values 0.1%, 1%, 5% are parameter examples, not measured rates.  A
+simple rate-based provisional estimate is much smaller: using 100 kHz ordinary
+L1A, 3 kHz usable HLT output, and 386 colliding slots gives
+`q = 3,000 / (40 MHz * 386 / 3564) = 0.0695%` per colliding BX.  This treats
+the usable HLT rate as already including stream retention and live-state
+losses.  It is a planning estimate, not a Run-3 measurement.
+
+For a deliberately broad sensitivity range, 2--5 kHz usable HLT, 300--500
+colliding slots, and 90--110 kHz L1A correspond to approximately 0.0036--0.0149%
+per colliding BX.  The L1A rate cancels from q when the usable HLT rate is
+specified directly; it remains useful for checking the implied conditional HLT
+retention (about 2--5% in this example).  The calculation is reproducible with
+`scripts/estimate_piggyback_opportunity.py`.
 
 For each parent slot s and relative readout BX k in [-7,+7], use the existing
 efficiency at additional delay phase - 25*k ns. Flight time is already present
