@@ -232,6 +232,45 @@ def _source_bound_clip_region_names(region_names, parking_regions):
     return set(region_names) & set(parking_regions)
 
 
+def _axis_aligned_plane_constraints(zone, angular_tolerance=1.0e-12):
+    """Return bounds and operations for direct axis-aligned plane constraints."""
+
+    if angular_tolerance <= 0.0:
+        raise ValueError("angular_tolerance must be positive")
+    lower = [-math.inf] * 3
+    upper = [math.inf] * 3
+    accepted = []
+    operations = [(item, False) for item in zone.intersections]
+    operations.extend((item, True) for item in zone.subtractions)
+    for operation, complemented in operations:
+        body = operation.body
+        if not hasattr(body, "toPlane"):
+            continue
+        normal, point = body.toPlane()
+        normal = [float(value) for value in normal]
+        point = [float(value) for value in point]
+        magnitude = math.sqrt(sum(value * value for value in normal))
+        if not math.isfinite(magnitude) or magnitude == 0.0:
+            continue
+        unit = [value / magnitude for value in normal]
+        aligned = [axis for axis, value in enumerate(unit) if abs(value) > angular_tolerance]
+        if len(aligned) != 1:
+            continue
+        axis = aligned[0]
+        if abs(abs(unit[axis]) - 1.0) > angular_tolerance:
+            continue
+        coordinate = point[axis]
+        retains_lower_side = unit[axis] > 0.0
+        if complemented:
+            retains_lower_side = not retains_lower_side
+        if retains_lower_side:
+            upper[axis] = min(upper[axis], coordinate)
+        else:
+            lower[axis] = max(lower[axis], coordinate)
+        accepted.append(operation)
+    return lower, upper, accepted
+
+
 def _axis_aligned_plane_box_bounds(zone, angular_tolerance=1.0e-12):
     """Return exact bounds for a plane-only rectangular zone, or ``None``.
 
@@ -242,39 +281,11 @@ def _axis_aligned_plane_box_bounds(zone, angular_tolerance=1.0e-12):
     taking the tightest lower and upper bound on each axis.
     """
 
-    if angular_tolerance <= 0.0:
-        raise ValueError("angular_tolerance must be positive")
-    lower = [-math.inf] * 3
-    upper = [math.inf] * 3
-    operations = [(item, False) for item in zone.intersections]
-    operations.extend((item, True) for item in zone.subtractions)
-    if not operations:
+    lower, upper, accepted = _axis_aligned_plane_constraints(
+        zone, angular_tolerance
+    )
+    if len(accepted) != len(zone.intersections) + len(zone.subtractions):
         return None
-    for operation, complemented in operations:
-        body = operation.body
-        if not hasattr(body, "toPlane"):
-            return None
-        normal, point = body.toPlane()
-        normal = [float(value) for value in normal]
-        point = [float(value) for value in point]
-        magnitude = math.sqrt(sum(value * value for value in normal))
-        if not math.isfinite(magnitude) or magnitude == 0.0:
-            return None
-        unit = [value / magnitude for value in normal]
-        aligned = [axis for axis, value in enumerate(unit) if abs(value) > angular_tolerance]
-        if len(aligned) != 1:
-            return None
-        axis = aligned[0]
-        if abs(abs(unit[axis]) - 1.0) > angular_tolerance:
-            return None
-        coordinate = point[axis]
-        retains_lower_side = unit[axis] > 0.0
-        if complemented:
-            retains_lower_side = not retains_lower_side
-        if retains_lower_side:
-            upper[axis] = min(upper[axis], coordinate)
-        else:
-            lower[axis] = max(lower[axis], coordinate)
     if not all(math.isfinite(value) for value in lower + upper):
         return None
     if any(low >= high for low, high in zip(lower, upper)):
@@ -282,7 +293,9 @@ def _axis_aligned_plane_box_bounds(zone, angular_tolerance=1.0e-12):
     return [lower, upper]
 
 
-def install_axis_aligned_plane_box_lowering(converter_module, report):
+def install_axis_aligned_plane_box_lowering(
+    converter_module, report, preserved_half_spaces=None
+):
     """Lower finite plane-only rectangular zones to native FLUKA RPP bodies.
 
     Large Boolean half-space operands are numerically fragile after GDML is
@@ -298,13 +311,39 @@ def install_axis_aligned_plane_box_lowering(converter_module, report):
     def filter_and_lower(fluka_registry, region_zone_aabbs):
         filtered = original(fluka_registry, region_zone_aabbs)
         details = []
+        preserved_by_region = {
+            item["region"]: set(item["preserved_planes"])
+            for item in (preserved_half_spaces or [])
+        }
         for region in filtered.regionDict.values():
             lowered_zones = []
             for zone_index, zone in enumerate(region.zones):
-                bounds = _axis_aligned_plane_box_bounds(zone)
-                if bounds is None:
+                lower, upper, operations = _axis_aligned_plane_constraints(zone)
+                operation_names = {operation.body.name for operation in operations}
+                repairs_pruned_plane = bool(
+                    operation_names & preserved_by_region.get(region.name, set())
+                )
+                exact_box = _axis_aligned_plane_box_bounds(zone)
+                if not repairs_pruned_plane and exact_box is None:
                     lowered_zones.append(zone)
                     continue
+                if exact_box is not None:
+                    lower, upper = exact_box
+                else:
+                    extent = [float(value) for value in converter_module.WORLD_DIMENSIONS]
+                    lower = [
+                        value if math.isfinite(value) else -extent[axis]
+                        for axis, value in enumerate(lower)
+                    ]
+                    upper = [
+                        value if math.isfinite(value) else extent[axis]
+                        for axis, value in enumerate(upper)
+                    ]
+                if any(low >= high for low, high in zip(lower, upper)):
+                    raise ProxyModelError(
+                        f"{region.name} zone {zone_index} has contradictory axis-aligned planes"
+                    )
+                bounds = [lower, upper]
                 base_name = f"{region.name}_zone{zone_index}_axis_box"
                 name = base_name
                 suffix = 1
@@ -324,15 +363,24 @@ def install_axis_aligned_plane_box_lowering(converter_module, report):
                     addRegistry=False,
                 )
                 filtered.addBody(box)
-                lowered = Zone(name=zone.name)
+                lowered = deepcopy(zone)
+                lowered.intersections = [
+                    item
+                    for item in lowered.intersections
+                    if item.body.name not in operation_names
+                ]
+                lowered.subtractions = [
+                    item
+                    for item in lowered.subtractions
+                    if item.body.name not in operation_names
+                ]
                 lowered.addIntersection(box)
                 lowered_zones.append(lowered)
                 details.append(
                     {
                         "region": region.name,
                         "zone_index": zone_index,
-                        "source_plane_count": len(zone.intersections)
-                        + len(zone.subtractions),
+                        "source_plane_count": len(operations),
                         "bounds_mm": bounds,
                     }
                 )
@@ -341,6 +389,39 @@ def install_axis_aligned_plane_box_lowering(converter_module, report):
         return filtered
 
     converter_module._filterHalfSpaces = filter_and_lower
+    return original
+
+
+def install_exact_half_space_preservation(converter_module, report):
+    """Keep FLUKA plane constraints that pyg4ometry would prune.
+
+    pyg4ometry identifies a plane as redundant from the AABB of one region,
+    but later sizes each shared body from the union of every region using it.
+    A plane removed in the first frame can therefore become necessary in the
+    second and reopen material outside the raw FLUKA region.  Keep the exact
+    Boolean constraints; finite sizing remains the converter's responsibility.
+    """
+
+    from copy import deepcopy
+
+    original = converter_module._filterHalfSpaces
+
+    def preserve(fluka_registry, region_zone_aabbs):
+        filtered = original(fluka_registry, region_zone_aabbs)
+        details = []
+        for name, region in fluka_registry.regionDict.items():
+            if name not in filtered.regionDict:
+                continue
+            kept = {body.name for body in filtered.regionDict[name].bodies()}
+            removed = sorted(
+                {body.name for body in region.bodies() if body.name not in kept}
+            )
+            if removed:
+                details.append({"region": name, "preserved_planes": removed})
+        report.extend(details)
+        return deepcopy(fluka_registry)
+
+    converter_module._filterHalfSpaces = preserve
     return original
 
 
@@ -1014,12 +1095,19 @@ def convert_geometry(
             original_lattice_aabb = None
             original_region_zone_aabbs = None
             original_half_space_filter = None
+            original_half_space_pruning = None
             raw_zone_aabb_fallbacks = []
             lowered_axis_aligned_boxes = []
+            preserved_half_spaces = []
             if lattice_aabb_workaround:
                 original_lattice_aabb = _install_lattice_aabb_workaround(converter_module)
+            original_half_space_pruning = install_exact_half_space_preservation(
+                converter_module, preserved_half_spaces
+            )
             original_half_space_filter = install_axis_aligned_plane_box_lowering(
-                converter_module, lowered_axis_aligned_boxes
+                converter_module,
+                lowered_axis_aligned_boxes,
+                preserved_half_spaces,
             )
             if raw_preflight is not None:
                 (
@@ -1043,6 +1131,8 @@ def convert_geometry(
             finally:
                 if original_half_space_filter is not None:
                     converter_module._filterHalfSpaces = original_half_space_filter
+                if original_half_space_pruning is not None:
+                    converter_module._filterHalfSpaces = original_half_space_pruning
                 if original_region_zone_aabbs is not None:
                     converter_module._getRegionZoneAABBs = original_region_zone_aabbs
                 if original_lattice_aabb is not None:
@@ -1098,6 +1188,10 @@ def convert_geometry(
                 "axis_aligned_plane_box_lowering": {
                     "zone_count": len(lowered_axis_aligned_boxes),
                     "zones": lowered_axis_aligned_boxes,
+                },
+                "exact_half_space_preservation": {
+                    "region_count": len(preserved_half_spaces),
+                    "regions": preserved_half_spaces,
                 },
                 "logical_volume_count": len(geant4_registry.logicalVolumeDict),
                 "solid_count": len(geant4_registry.solidDict),

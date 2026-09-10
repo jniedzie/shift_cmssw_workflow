@@ -18,6 +18,8 @@ from ir1_fluka_geometry import (  # noqa: E402
     audit_omitted_region_geometry,
     extract_and_write_field_manifest,
     extract_field_assignments,
+    install_exact_half_space_preservation,
+    install_axis_aligned_plane_box_lowering,
     _install_raw_zone_aabb_fallback,
     normalized_deck,
     summarize_region_coverage,
@@ -28,9 +30,10 @@ from ir1_fluka_geometry import (  # noqa: E402
 
 
 class _Plane:
-    def __init__(self, normal, point):
+    def __init__(self, normal, point, name="plane"):
         self._normal = normal
         self._point = point
+        self.name = name
 
     def toPlane(self):
         return self._normal, self._point
@@ -46,8 +49,117 @@ class _Zone:
         self.intersections = [_Operation(body) for body in intersections]
         self.subtractions = [_Operation(body) for body in subtractions]
 
+    def bodies(self):
+        return [item.body for item in self.intersections + self.subtractions]
+
+
+class _Region:
+    def __init__(self, bodies):
+        self._bodies = bodies
+
+    def bodies(self):
+        return self._bodies
+
+
+class _Registry:
+    def __init__(self, regions):
+        self.regionDict = regions
+
 
 class Ir1FlukaGeometryTest(unittest.TestCase):
+    def test_exact_half_space_preservation_wraps_lossy_pruning(self):
+        lower, upper = _Plane([0, 0, 1], [0, 0, 3], "lower"), _Plane(
+            [0, 0, 1], [0, 0, 8], "upper"
+        )
+        source = _Registry({"Region": _Region([lower, upper])})
+        converter = SimpleNamespace(
+            _filterHalfSpaces=lambda registry, bounds: _Registry(
+                {"Region": _Region([upper])}
+            )
+        )
+        report = []
+        original = install_exact_half_space_preservation(converter, report)
+        try:
+            result = converter._filterHalfSpaces(source, {"Region": object()})
+        finally:
+            converter._filterHalfSpaces = original
+        self.assertEqual(result.regionDict["Region"].bodies()[0]._point, [0, 0, 3])
+        self.assertIsNot(result, source)
+        self.assertEqual(
+            report, [{"region": "Region", "preserved_planes": [lower.name]}]
+        )
+
+    def test_shared_plane_pruning_is_preserved_and_lowered(self):
+        try:
+            from pyg4ometry import fluka
+            import importlib
+
+            converter = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
+        except ImportError:
+            self.skipTest("pyg4ometry is required for the converter integration test")
+
+        registry = fluka.FlukaRegistry()
+        shared = fluka.XYP("shared", 0.0, flukaregistry=registry)
+        box_a = fluka.RPP(
+            "box_a", -1, 1, -1, 1, 10, 20, flukaregistry=registry
+        )
+        box_b = fluka.RPP(
+            "box_b", -1, 1, -1, 1, -1, 1, flukaregistry=registry
+        )
+        zone_a = fluka.Zone("zone_a")
+        zone_a.addIntersection(box_a)
+        zone_a.addSubtraction(shared)
+        zone_b = fluka.Zone("zone_b")
+        zone_b.addIntersection(box_b)
+        zone_b.addSubtraction(shared)
+        region_a = fluka.Region("A")
+        region_a.addZone(zone_a)
+        region_b = fluka.Region("B")
+        region_b.addZone(zone_b)
+        registry.addRegion(region_a)
+        registry.addRegion(region_b)
+        region_zone_aabbs = {
+            "A": [fluka.AABB([-1, -1, 10], [1, 1, 20])],
+            "B": [fluka.AABB([-1, -1, 0], [1, 1, 1])],
+        }
+
+        baseline = converter._filterHalfSpaces(registry, region_zone_aabbs)
+        self.assertNotIn(
+            "shared", {body.name for body in baseline.regionDict["A"].bodies()}
+        )
+        self.assertIn(
+            "shared", {body.name for body in baseline.regionDict["B"].bodies()}
+        )
+
+        preserved = []
+        lowered = []
+        original_preservation = install_exact_half_space_preservation(
+            converter, preserved
+        )
+        original_lowering = install_axis_aligned_plane_box_lowering(
+            converter, lowered, preserved
+        )
+        try:
+            repaired = converter._filterHalfSpaces(registry, region_zone_aabbs)
+        finally:
+            converter._filterHalfSpaces = original_lowering
+            converter._filterHalfSpaces = original_preservation
+
+        self.assertEqual(
+            preserved, [{"region": "A", "preserved_planes": ["shared"]}]
+        )
+        self.assertEqual(len(lowered), 1)
+        self.assertEqual(lowered[0]["region"], "A")
+        self.assertEqual(
+            lowered[0]["bounds_mm"],
+            [[-10000.0, -10000.0, 0.0], [10000.0, 10000.0, 10000.0]],
+        )
+        repaired_a = {body.name for body in repaired.regionDict["A"].bodies()}
+        repaired_b = {body.name for body in repaired.regionDict["B"].bodies()}
+        self.assertIn("A_zone0_axis_box", repaired_a)
+        self.assertNotIn("shared", repaired_a)
+        self.assertIn("shared", repaired_b)
+
     def test_axis_aligned_plane_box_bounds_uses_tightest_exact_planes(self):
         zone = _Zone(
             intersections=[
@@ -79,6 +191,11 @@ class Ir1FlukaGeometryTest(unittest.TestCase):
         )
         self.assertIsNone(_axis_aligned_plane_box_bounds(oblique))
         self.assertIsNone(_axis_aligned_plane_box_bounds(unbounded))
+        invalid = _Zone(
+            intersections=[_Plane([0, 0, 0], [0, 0, 0])],
+            subtractions=[],
+        )
+        self.assertIsNone(_axis_aligned_plane_box_bounds(invalid))
 
     def test_raw_zone_aabb_fallback_replaces_only_independently_non_null_zones(self):
         converter = SimpleNamespace()
