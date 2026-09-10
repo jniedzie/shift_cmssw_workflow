@@ -96,13 +96,20 @@ def scan_definitions(conversion, boundary_probe_offset_mm=0.1):
     return expanded
 
 
-def classify_internal_world_gaps(scans, scan_definitions_by_name, top_name, tolerance_mm):
+def classify_internal_world_gaps(
+    scans, scan_definitions_by_name, top_name, tolerance_mm, envelope_volumes=()
+):
+    # A separately added outer shell does not extend the source model's
+    # occupied span. Otherwise its presence reclassifies exterior padding and
+    # empty space around irregular source boundaries as lost source material.
+    # Keep all navigation segments unchanged, including genuine interior gaps.
+    outside_source = {top_name, *envelope_volumes}
     gaps_by_scan = {}
     for name, segments in scans.items():
         occupied = [
             index
             for index, segment in enumerate(segments)
-            if segment["logical_volume"] != top_name
+            if segment["logical_volume"] not in outside_source
         ]
         gaps_by_scan[name] = []
         if not occupied:
@@ -377,11 +384,21 @@ def audit(args):
             material_lengths[segment["material"]] = (
                 material_lengths.get(segment["material"], 0.0) + length
             )
-    raw_gaps_by_scan, internal_world_gaps, boundary_sensitive_world_gaps = (
+    envelope_volumes = (
+        ("shift_rock_continuation_lv",) if expected.get("rock_shell") else ()
+    )
+    raw_gaps_by_scan, all_persistent_gaps, _ = classify_internal_world_gaps(
+        root["scans"], scan_by_name, top_name, args.overlap_tolerance_mm
+    )
+    _, internal_world_gaps, boundary_sensitive_world_gaps = (
         classify_internal_world_gaps(
-            root["scans"], scan_by_name, top_name, args.overlap_tolerance_mm
+            root["scans"], scan_by_name, top_name, args.overlap_tolerance_mm,
+            envelope_volumes=envelope_volumes,
         )
     )
+    envelope_interface_gaps = [
+        gap for gap in all_persistent_gaps if gap not in internal_world_gaps
+    ]
     failures = {
         "placement_count_mismatch": len(root["placements"]) != expected_count,
         "parked_placements": parked_placements,
@@ -401,7 +418,7 @@ def audit(args):
     )
     return {
         "schema": "shift-ir1-bounded-gdml-audit",
-        "schema_version": 2,
+        "schema_version": 3,
         "model_status": "provisional-ir1-atlas-proxy",
         "gdml": str(args.gdml.resolve()),
         "gdml_sha256": sha256(args.gdml),
@@ -423,6 +440,9 @@ def audit(args):
         "boundary_sensitive_world_gap_count": len(boundary_sensitive_world_gaps),
         "boundary_sensitive_world_gaps": boundary_sensitive_world_gaps,
         "raw_world_gaps_by_scan": raw_gaps_by_scan,
+        "source_span_excluded_envelope_volumes": list(envelope_volumes),
+        "envelope_interface_world_gap_count": len(envelope_interface_gaps),
+        "envelope_interface_world_gaps": envelope_interface_gaps,
         "failures": failures,
         "passed": passed,
     }

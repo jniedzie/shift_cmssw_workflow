@@ -16,6 +16,8 @@ sys.path.insert(0, str(SCRIPTS))
 from ir1_fluka_geometry import (  # noqa: E402
     _axis_aligned_plane_box_bounds,
     audit_omitted_region_geometry,
+    cached_raw_preflight,
+    ProxyModelError,
     extract_and_write_field_manifest,
     extract_field_assignments,
     install_exact_half_space_preservation,
@@ -67,6 +69,36 @@ class _Registry:
 
 
 class Ir1FlukaGeometryTest(unittest.TestCase):
+    def test_raw_cache_reuses_only_matching_complete_intact_audits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cache.json"
+            identity = {"source": "first", "version": "one"}
+            result = {"evaluation_errors": [], "conversion_candidate_regions": ["region"]}
+            calls = []
+
+            def evaluate():
+                calls.append(True)
+                return result
+
+            self.assertEqual(cached_raw_preflight(path, identity, evaluate), result)
+            self.assertEqual(cached_raw_preflight(path, identity, evaluate), result)
+            self.assertEqual(len(calls), 1)
+            with self.assertRaises(ProxyModelError):
+                cached_raw_preflight(path, {"source": "changed"}, evaluate)
+            payload = json.loads(path.read_text())
+            payload["result"]["conversion_candidate_regions"] = []
+            path.write_text(json.dumps(payload))
+            with self.assertRaises(ProxyModelError):
+                cached_raw_preflight(path, identity, evaluate)
+            self.assertEqual(len(calls), 1)
+
+    def test_raw_cache_does_not_publish_failed_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cache.json"
+            result = {"evaluation_errors": [{"name": "region", "error": "timeout"}]}
+            self.assertEqual(cached_raw_preflight(path, {}, lambda: result), result)
+            self.assertFalse(path.exists())
+
     def test_exact_half_space_preservation_wraps_lossy_pruning(self):
         lower, upper = _Plane([0, 0, 1], [0, 0, 3], "lower"), _Plane(
             [0, 0, 1], [0, 0, 8], "upper"

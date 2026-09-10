@@ -103,8 +103,49 @@ def restore_transformed_infinite_cylinder_centres(originals):
         cylinder_class.centre = original
 
 
+def install_lattice_mesh_cache(converter_module, report):
+    """Reuse immutable prototype meshes within one lattice-content pass.
+
+    Preserve the upstream candidate selection and intersection predicate.
+    Only registry region objects are cached: transformed cell copies must
+    still be evaluated in their own frame. Clone on access because native
+    Boolean operations may modify their mesh arguments.
+    """
+    from pyg4ometry.fluka import Region
+
+    original = converter_module._getContentsOfLatticeCells
+
+    def contents(registry, region_aabbs):
+        original_mesh = Region.mesh
+        prototypes = {id(region) for region in registry.regionDict.values()}
+        meshes = {}
+        report.update(prototype_mesh_builds=0, prototype_mesh_reuses=0)
+
+        def mesh(region, aabb=None):
+            if id(region) not in prototypes or aabb is not None:
+                return original_mesh(region, aabb=aabb)
+            key = id(region)
+            if key not in meshes:
+                meshes[key] = original_mesh(region)
+                report["prototype_mesh_builds"] += 1
+            else:
+                report["prototype_mesh_reuses"] += 1
+            return meshes[key].clone()
+
+        Region.mesh = mesh
+        try:
+            return original(registry, region_aabbs)
+        finally:
+            Region.mesh = original_mesh
+
+    converter_module._getContentsOfLatticeCells = contents
+    return original
+
+
 @contextmanager
-def full_conversion_guards(world_dimensions_mm, lattice_state=None):
+def full_conversion_guards(world_dimensions_mm, lattice_state=None, performance_report=None):
+    from pyg4ometry import config
+
     converter_module = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
     logical_volume_module = importlib.import_module("pyg4ometry.geant4.LogicalVolume")
     original_body_aabb, skipped = install_null_body_aabb_workaround(converter_module)
@@ -114,6 +155,13 @@ def full_conversion_guards(world_dimensions_mm, lattice_state=None):
     original_world_dimensions = converter_module.WORLD_DIMENSIONS
     original_clip_solid = logical_volume_module.LogicalVolume.clipSolid
     original_lattice_conversion = None
+    original_meshing = config.doMeshing
+    original_lattice_contents = None
+    if performance_report is not None:
+        # GDML stores analytic CSG, not these eager display meshes. Explicit
+        # raw-region and lattice meshes and all downstream audits still run.
+        config.doMeshing = False
+        original_lattice_contents = install_lattice_mesh_cache(converter_module, performance_report)
     if lattice_state is not None:
         original_lattice_conversion = install_lattice_placement_workaround(
             converter_module,
@@ -126,6 +174,9 @@ def full_conversion_guards(world_dimensions_mm, lattice_state=None):
     try:
         yield skipped
     finally:
+        config.doMeshing = original_meshing
+        if original_lattice_contents is not None:
+            converter_module._getContentsOfLatticeCells = original_lattice_contents
         restore_transformed_infinite_cylinder_centres(original_cylinder_centres)
         logical_volume_module.LogicalVolume.clipSolid = original_clip_solid
         converter_module.WORLD_DIMENSIONS = original_world_dimensions
@@ -570,6 +621,10 @@ def parse_args():
     )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--region-timeout-seconds", type=float, default=300.0)
+    parser.add_argument("--raw-preflight-cache", type=Path,
+                        help="Create or reuse an integrity-checked raw audit for identical source and converter inputs")
+    parser.add_argument("--avoid-redundant-meshing", action="store_true",
+                        help="Skip display meshes and reuse cloned prototype meshes during lattice discovery")
     parser.add_argument(
         "--world-dimensions-mm",
         required=True,
@@ -669,15 +724,19 @@ def main():
                 ],
                 "report": {},
             }
-        with full_conversion_guards(dimensions, lattice_state) as skipped:
+        performance_report = {} if args.avoid_redundant_meshing else None
+        with full_conversion_guards(dimensions, lattice_state, performance_report) as skipped:
             report = convert_geometry(
                 args.model_dir,
                 args.output_dir,
                 lattice_aabb_workaround=True,
                 raw_region_preflight=True,
                 region_timeout_seconds=args.region_timeout_seconds,
+                raw_preflight_cache=args.raw_preflight_cache,
             )
         gdml_path = args.output_dir / report["geometry"]["gdml"]
+        if performance_report is not None:
+            report["geometry"]["meshing_optimization"] = performance_report
         bounded_report = None
         if args.bounded_installable:
             if source_bounds_audit["source_sha256"] != report["source_sha256"]:

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 from pathlib import Path
+import importlib
+from types import SimpleNamespace
 import sys
 import tempfile
 import unittest
@@ -16,6 +18,8 @@ from convert_ir1_fluka_geometry_full import (  # noqa: E402
     add_bounded_rock_shell,
     bounded_model_envelope,
     finalize_bounded_gdml,
+    full_conversion_guards,
+    install_lattice_mesh_cache,
     install_transformed_infinite_cylinder_centre_workaround,
     lower_multi_unions_for_root,
     restore_transformed_infinite_cylinder_centres,
@@ -54,6 +58,65 @@ GDML = """<?xml version="1.0"?>
   </solids>
 </gdml>
 """
+
+
+class MeshingOptimizationTest(unittest.TestCase):
+    def test_cache_clones_prototypes_and_restores_mesh_on_failure(self):
+        try:
+            from pyg4ometry import fluka
+        except ImportError:
+            self.skipTest("requires pyg4ometry")
+        region = fluka.Region("prototype")
+        zone = fluka.Zone()
+        zone.addIntersection(fluka.RPP("box", -1, 1, -2, 2, -3, 3))
+        region.addZone(zone)
+        registry = SimpleNamespace(regionDict={"prototype": region})
+        original_mesh = fluka.Region.mesh
+        expected = region.mesh().toVerticesAndPolygons()[0]
+
+        def discover(registry, aabbs):
+            for _ in range(12):
+                mesh = region.mesh()
+                self.assertEqual(mesh.toVerticesAndPolygons()[0], expected)
+                mesh.translate([100, 0, 0])
+            raise RuntimeError("deliberate intersection failure")
+
+        converter = SimpleNamespace(_getContentsOfLatticeCells=discover)
+        report = {}
+        install_lattice_mesh_cache(converter, report)
+        with self.assertRaisesRegex(RuntimeError, "deliberate"):
+            converter._getContentsOfLatticeCells(registry, {})
+        self.assertIs(fluka.Region.mesh, original_mesh)
+        self.assertEqual(report, {"prototype_mesh_builds": 1, "prototype_mesh_reuses": 11})
+
+    def test_optimized_export_preserves_analytic_gdml(self):
+        try:
+            from pyg4ometry import fluka, gdml, config
+        except ImportError:
+            self.skipTest("requires pyg4ometry")
+        converter = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
+        registry = fluka.FlukaRegistry()
+        region = fluka.Region("box_region")
+        zone = fluka.Zone()
+        zone.addIntersection(fluka.RPP("box", -1, 1, -2, 2, -3, 3, flukaregistry=registry))
+        region.addZone(zone)
+        registry.addRegion(region)
+        registry.addMaterialAssignments("IRON", region)
+        original_meshing = config.doMeshing
+        original_contents = converter._getContentsOfLatticeCells
+        with tempfile.TemporaryDirectory() as directory:
+            outputs = []
+            for report in (None, {}):
+                with full_conversion_guards([100, 100, 100], performance_report=report):
+                    result = converter.fluka2Geant4(registry)
+                    writer = gdml.Writer()
+                    writer.addDetector(result)
+                    path = Path(directory) / ("baseline.gdml" if report is None else "optimized.gdml")
+                    writer.write(str(path))
+                    outputs.append(path.read_text())
+                self.assertEqual(config.doMeshing, original_meshing)
+                self.assertIs(converter._getContentsOfLatticeCells, original_contents)
+            self.assertEqual(outputs[0], outputs[1])
 
 
 class InfiniteCylinderTransformWorkaroundTest(unittest.TestCase):

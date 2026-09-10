@@ -1001,6 +1001,33 @@ def summarize_preflight_omissions(region_coverage, raw_preflight):
     }
 
 
+def cached_raw_preflight(cache_path, identity, evaluate):
+    """Reuse only a complete, integrity-checked audit of identical inputs."""
+    def digest(result):
+        return hashlib.sha256(json.dumps(result, sort_keys=True).encode()).hexdigest()
+
+    if cache_path is not None:
+        cache_path = Path(cache_path)
+        if cache_path.exists():
+            try:
+                payload = json.loads(cache_path.read_text())
+                if (payload.get("schema") != "shift-raw-preflight-cache-v1"
+                        or payload.get("identity") != identity
+                        or digest(payload["result"]) != payload.get("result_sha256")
+                        or payload["result"].get("evaluation_errors") != []):
+                    raise ValueError("identity, integrity, or completion mismatch")
+                return payload["result"]
+            except (ValueError, KeyError, TypeError) as error:
+                raise ProxyModelError(f"invalid raw preflight cache {cache_path}: {error}") from error
+    result = evaluate()
+    if cache_path is not None and result.get("evaluation_errors") == []:
+        write_json_atomic(cache_path, {
+            "schema": "shift-raw-preflight-cache-v1", "identity": identity,
+            "result": result, "result_sha256": digest(result),
+        })
+    return result
+
+
 def convert_geometry(
     model_dir,
     output_dir,
@@ -1008,6 +1035,7 @@ def convert_geometry(
     lattice_aabb_workaround=False,
     raw_region_preflight=False,
     region_timeout_seconds=300.0,
+    raw_preflight_cache=None,
 ):
     try:
         import pyg4ometry
@@ -1027,6 +1055,8 @@ def convert_geometry(
     if raw_region_preflight and region_timeout_seconds <= 0.0:
         raise ProxyModelError("region_timeout_seconds must be positive")
     raw_preflight = None
+    if raw_preflight_cache is not None and not raw_region_preflight:
+        raise ProxyModelError("raw_preflight_cache requires raw_region_preflight")
 
     with tempfile.TemporaryDirectory(dir=output_dir) as temporary_dir:
         temporary_dir = Path(temporary_dir)
@@ -1045,38 +1075,58 @@ def convert_geometry(
             )
             conversion_regions = regions
             if raw_region_preflight:
-                primary_preflight = classify_raw_regions(
-                    fluka_registry,
-                    requested_regions,
-                    timeout_seconds=region_timeout_seconds,
-                    progress_every=100,
-                )
-                ambiguous_regions = (
-                    primary_preflight["source_null_regions"]
-                    + [
-                        item["name"]
-                        for item in primary_preflight["evaluation_errors"]
-                    ]
-                )
-                if ambiguous_regions:
-                    secondary_preflight = run_secondary_region_preflight(
-                        normalized_path,
-                        ambiguous_regions,
-                        temporary_dir,
-                        region_timeout_seconds,
+                def evaluate_preflight():
+                    primary_preflight = classify_raw_regions(
+                        fluka_registry,
+                        requested_regions,
+                        timeout_seconds=region_timeout_seconds,
+                        progress_every=100,
                     )
-                else:
-                    secondary_preflight = {
-                        "non_null_regions": [],
-                        "source_null_regions": [],
-                        "evaluation_errors": [],
-                        "backend": "pycsg",
-                    }
-                raw_preflight = resolve_raw_region_classifications(
-                    primary_preflight,
-                    secondary_preflight,
-                    requested_regions,
-                )
+                    ambiguous_regions = (
+                        primary_preflight["source_null_regions"]
+                        + [
+                            item["name"]
+                            for item in primary_preflight["evaluation_errors"]
+                        ]
+                    )
+                    if ambiguous_regions:
+                        secondary_preflight = run_secondary_region_preflight(
+                            normalized_path,
+                            ambiguous_regions,
+                            temporary_dir,
+                            region_timeout_seconds,
+                        )
+                    else:
+                        secondary_preflight = {
+                            "non_null_regions": [],
+                            "source_null_regions": [],
+                            "evaluation_errors": [],
+                            "backend": "pycsg",
+                        }
+                    return resolve_raw_region_classifications(
+                        primary_preflight,
+                        secondary_preflight,
+                        requested_regions,
+                    )
+                from importlib import metadata
+                from pyg4ometry import config
+                converter = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
+                identity = {
+                    "normalized_sha256": hashlib.sha256(normalized_path.read_bytes()).hexdigest(),
+                    "source_sha256": checksums,
+                    "regions": requested_regions,
+                    "timeout_seconds": region_timeout_seconds,
+                    "python": sys.version,
+                    "packages": {name: metadata.version(name) for name in ("pyg4ometry", "numpy", "sympy")},
+                    "world_dimensions": list(converter.WORLD_DIMENSIONS),
+                    "meshing_backend": str(config.meshing),
+                    "code_sha256": {
+                        name: hashlib.sha256((Path(__file__).parent / name).read_bytes()).hexdigest()
+                        for name in ("ir1_fluka_geometry.py", "fluka_region_preflight.py",
+                                     "fluka_region_preflight_worker.py", "convert_ir1_fluka_geometry_full.py")
+                    },
+                }
+                raw_preflight = cached_raw_preflight(raw_preflight_cache, identity, evaluate_preflight)
                 write_json_atomic(
                     output_dir / "raw_region_preflight.json",
                     raw_preflight,
