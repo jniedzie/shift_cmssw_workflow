@@ -25,10 +25,12 @@ case "$mode" in
   combined) export SHIFT_LSS_MATERIAL_MODE=external SHIFT_LSS_FIELD_MODE=ir1_atlas_proxy ;;
   *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac
-export SHIFT_LSS_GDML_FILE=PhysicsTools/ShiftLssGeometry/data/ir1_atlas_proxy/lhc_ir1_atlas_proxy_rock_continuation_bounded.gdml
-export SHIFT_LSS_GDML_SHA256=cce155b2e5bb2cc81a0a4f113fa0be839fd0dbd2de96aeb583561e8b612bdc1a
+export SHIFT_LSS_GDML_FILE=PhysicsTools/ShiftLssGeometry/data/ir1_atlas_proxy/lhc_ir1_halfspace_repaired_20260910.gdml
+export SHIFT_LSS_GDML_SHA256=d6f9f6fa5658a55e365d5a80025522cac7bcab1ce6fb006ca27b5120f5f41f66
 export SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM=0.0,4299.5,14575.200000105498
 export SHIFT_LSS_MODEL_ORIGIN_CM=0,0,0 SHIFT_LSS_MODEL_TO_CMS=1,0,0,0,1,0,0,0,1
 export SHIFT_LSS_MINIMUM_ABS_Z_CM=1100 SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM=14800
+export SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM=0.2
+export SHIFT_USE_VERTEX_CONSTRAINED_REFIT=${SHIFT_USE_VERTEX_CONSTRAINED_REFIT:-1}
 export SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM=20000 SHIFT_LSS_FIELD_SCALE=1.0
 exec "$workflow_dir/run_condor.sh" --prebuilt --keep-logs "$@"

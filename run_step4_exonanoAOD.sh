@@ -159,6 +159,11 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		1) USE_SECOND_ITERATION_CMSSW=True ;;
 		*) echo "ERROR: SHIFT_REFIT_USE_SECOND_ITERATION must be 0 or 1 (got '$SHIFT_REFIT_USE_SECOND_ITERATION')" >&2; exit 1 ;;
 	esac
+	case "$SHIFT_USE_VERTEX_CONSTRAINED_REFIT" in
+		0) USE_VERTEX_REFIT_CMSSW=False ;;
+		1) USE_VERTEX_REFIT_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_USE_VERTEX_CONSTRAINED_REFIT must be 0 or 1 (got '$SHIFT_USE_VERTEX_CONSTRAINED_REFIT')" >&2; exit 1 ;;
+	esac
 	case "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" in
 		0) DETAILED_REFIT_MATERIAL_CMSSW=False ;;
 		1) DETAILED_REFIT_MATERIAL_CMSSW=True ;;
@@ -200,7 +205,7 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}, useVertexConstrainedRefit=${USE_VERTEX_REFIT_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
@@ -211,6 +216,7 @@ echo "Augmented measurements: DT=$SHIFT_AUGMENT_DT_HITS tracker=$SHIFT_AUGMENT_T
 echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"
 echo "Directional refit second-pass seed error rescale: $SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE"
 echo "Directional refit use second iteration: $SHIFT_REFIT_USE_SECOND_ITERATION"
+echo "Reconstructed-vertex refit: $SHIFT_USE_VERTEX_CONSTRAINED_REFIT"
 echo "Directional refit energy-loss scale: $SHIFT_REFIT_ENERGY_LOSS_SCALE"
 echo "Directional refit detailed material effects: $SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS"
 echo "Directional refit geometry mean-loss material effects: $SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS"
