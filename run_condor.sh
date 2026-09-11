@@ -98,6 +98,12 @@ configure_shift_lss
 # identity, pileup, and reconstruction settings must be serialized rather than
 # inherited.
 SUBMISSION_VARIABLES=(
+	SHIFT_TARGET_DETAILED_MATERIAL
+	SHIFT_TARGET_NUMERICAL_COVARIANCE
+	STEP3_DIR
+	STEP1_CONFIG_DIR
+	SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE
+	SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN
 	COLLISION_YEAR
 	GEOMETRY
 	ERA
@@ -175,6 +181,33 @@ SUBMISSION_VARIABLES=(
 for variable_name in "${SUBMISSION_VARIABLES[@]}"; do
 	export "$variable_name"
 done
+
+for covariance_flag in SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN SHIFT_TARGET_DETAILED_MATERIAL SHIFT_TARGET_NUMERICAL_COVARIANCE; do
+    [[ "${!covariance_flag}" == 0 || "${!covariance_flag}" == 1 ]] || {
+        echo "Invalid $covariance_flag: expected 0 or 1" >&2; exit 2;
+    }
+done
+if [[ "$SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
+    echo "Target energy-loss Jacobian requires consistent backward covariance" >&2; exit 2
+fi
+
+# Optional exact Step-3 chunk list for matched or incomplete input campaigns.
+CHUNK_IDS=()
+if [[ -n "${CONDOR_CHUNKS_FILE:-}" ]]; then
+    [[ "$NORMALIZED_STEPS" == 4 && "$STEP4_INPUTS_PER_JOB" == 1 ]] || {
+        echo "Explicit chunks require Step 4 only and one input per job" >&2; exit 2;
+    }
+    [[ -r "$CONDOR_CHUNKS_FILE" ]] || { echo "Unreadable chunk list" >&2; exit 2; }
+    mapfile -t CHUNK_IDS < "$CONDOR_CHUNKS_FILE"
+    declare -A CHUNKS_SEEN=()
+    for chunk_id in "${CHUNK_IDS[@]}"; do
+        [[ "$chunk_id" =~ ^(0|[1-9][0-9]*)$ && -z "${CHUNKS_SEEN[$chunk_id]:-}" ]] || {
+            echo "Invalid or duplicate chunk ID: $chunk_id" >&2; exit 2;
+        }
+        CHUNKS_SEEN[$chunk_id]=1
+    done
+    [[ "${#CHUNK_IDS[@]}" == "$N_JOBS" ]] || { echo "Chunk list count differs from N_JOBS" >&2; exit 2; }
+fi
 
 if [[ ! "$N_JOBS" =~ ^[1-9][0-9]*$ ]]; then
 	printf 'N_JOBS must be a positive integer (got: %s)\n' "$N_JOBS" >&2
@@ -377,6 +410,14 @@ submit_file="$(mktemp "$WORKFLOW_ROOT/condor/shift_cmssw.XXXXXX.sub")"
 trap 'rm -f "$submit_file"' EXIT
 sed "s|<n_jobs>|$N_JOBS|g; s|<request_cpus>|$CONDOR_REQUEST_CPUS|g; s|<request_memory_mb>|$CONDOR_REQUEST_MEMORY_MB|g; s|<seed_momentum_scale>|$SHIFT_REFIT_SEED_MOMENTUM_SCALE|g; s|<energy_loss_scale>|$SHIFT_REFIT_ENERGY_LOSS_SCALE|g; s|<detailed_material_effects>|$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS|g; s|<geometry_material_effects>|$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS|g; s|<geometry_material_fitter>|$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER|g; s|<geometry_material_smoother>|$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER|g; s|<log_geometry_comparison>|$SHIFT_REFIT_LOG_GEOMETRY_COMPARISON|g; s|<step4_inputs_per_job>|$STEP4_INPUTS_PER_JOB|g; s|<cmssw_runtime_fingerprint>|$CMSSW_RUNTIME_FINGERPRINT|g; s|<log_dir>|$CONDOR_LOG_DIR|g; s|<workflow_root>|$SNAPSHOT_ROOT|g; s|<selected_steps>|$NORMALIZED_STEPS|g; s|<force_selected>|$FORCE_SELECTED|g; s|<process>|$PROCESS|g; s|<sample_name>|$SAMPLE_NAME|g; s|<campaign_name>|$CAMPAIGN_NAME|g; s|<sample_base>|$SAMPLE_BASE|g; s|<sample_dir>|$SAMPLE_DIR|g; s|<n_events>|$N_EVENTS|g" \
 	"$WORKFLOW_ROOT/condor/shift_cmssw.sub" > "$submit_file"
+if (( ${#CHUNK_IDS[@]} )); then
+    sed -i '/^CHUNK[[:space:]]*=/d; /^queue /d' "$submit_file"
+    {
+        echo 'queue CHUNK from ('
+        printf '%s\n' "${CHUNK_IDS[@]}"
+        echo ')'
+    } >> "$submit_file"
+fi
 printf 'Submitting %s jobs for step(s) %s (force=%s, Step-4 inputs/job=%s, seed scale=%s, energy-loss scale=%s, detailed=%s, geometry both/fitter/smoother=%s/%s/%s, CPUs=%s, memory=%s MB)\n' \
 	"$N_JOBS" "$NORMALIZED_STEPS" "$FORCE_SELECTED" "$STEP4_INPUTS_PER_JOB" "$SHIFT_REFIT_SEED_MOMENTUM_SCALE" "$SHIFT_REFIT_ENERGY_LOSS_SCALE" "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS" "$SHIFT_REFIT_GEOMETRY_MATERIAL_FITTER" "$SHIFT_REFIT_GEOMETRY_MATERIAL_SMOOTHER" "$CONDOR_REQUEST_CPUS" \
 	"$CONDOR_REQUEST_MEMORY_MB"
