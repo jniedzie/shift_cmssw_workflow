@@ -104,6 +104,9 @@ SUBMISSION_VARIABLES=(
 	STEP1_CONFIG_DIR
 	SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE
 	SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN
+	SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE
+	SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN
+	SHIFT_TARGET_MOMENT_FIT
 	COLLISION_YEAR
 	GEOMETRY
 	ERA
@@ -182,13 +185,26 @@ for variable_name in "${SUBMISSION_VARIABLES[@]}"; do
 	export "$variable_name"
 done
 
-for covariance_flag in SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN SHIFT_TARGET_DETAILED_MATERIAL SHIFT_TARGET_NUMERICAL_COVARIANCE; do
+for covariance_flag in SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN SHIFT_TARGET_MOMENT_FIT SHIFT_TARGET_DETAILED_MATERIAL SHIFT_TARGET_NUMERICAL_COVARIANCE; do
     [[ "${!covariance_flag}" == 0 || "${!covariance_flag}" == 1 ]] || {
         echo "Invalid $covariance_flag: expected 0 or 1" >&2; exit 2;
     }
 done
 if [[ "$SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
     echo "Target energy-loss Jacobian requires consistent backward covariance" >&2; exit 2
+fi
+if [[ "$SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
+    echo "Target ionization variance requires consistent backward covariance" >&2; exit 2
+fi
+
+if [[ "$SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
+    echo "Target field-gradient Jacobian requires consistent backward covariance" >&2; exit 2
+fi
+if [[ "$SHIFT_TARGET_MOMENT_FIT" == 1 ]]; then
+    for required in SHIFT_TARGET_DETAILED_MATERIAL SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE; do
+        [[ "${!required}" == 1 ]] || { echo "Target moment fit requires $required=1" >&2; exit 2; }
+    done
+    [[ "$SHIFT_TARGET_NUMERICAL_COVARIANCE" == 0 ]] || { echo "Target moment fit requires numerical covariance off" >&2; exit 2; }
 fi
 
 # Optional exact Step-3 chunk list for matched or incomplete input campaigns.

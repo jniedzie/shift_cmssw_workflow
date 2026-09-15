@@ -29,4 +29,28 @@ class Step4Contract(unittest.TestCase):
         self.assertIn('requires consistent backward covariance',result.stderr)
     def test_invalid_boolean_fails(self):
         self.assertNotEqual(self.check('0\n',SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN='yes').returncode,0)
+    def test_ionization_variance_contract(self):
+        self.assertEqual(self.check('0\n',SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE='1').returncode,0)
+        self.assertNotEqual(self.check('0\n',SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE='yes').returncode,0)
+        result=self.check('0\n',SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE='1',
+            SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN='0',SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE='0')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('ionization variance requires consistent backward covariance',result.stderr)
+    def test_field_gradient_contract(self):
+        self.assertEqual(self.check('0\n',SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN='1').returncode,0)
+        self.assertNotEqual(self.check('0\n',SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN='yes').returncode,0)
+        result=self.check('0\n',SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN='1',
+            SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN='0',SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE='0')
+        self.assertNotEqual(result.returncode,0)
+        self.assertIn('field-gradient Jacobian requires consistent backward covariance',result.stderr)
+    def test_moment_fit_contract(self):
+        flags=dict(SHIFT_TARGET_MOMENT_FIT='1', SHIFT_TARGET_DETAILED_MATERIAL='1',
+            SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE='1', SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN='1',
+            SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN='1', SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE='1',
+            SHIFT_TARGET_NUMERICAL_COVARIANCE='0')
+        self.assertEqual(self.check('0\n',**flags).returncode,0)
+        for name in flags:
+            with self.subTest(flag=name):
+                changed=dict(flags); changed[name]='yes' if name=='SHIFT_TARGET_MOMENT_FIT' else str(1-int(flags[name]))
+                self.assertNotEqual(self.check('0\n',**changed).returncode,0)
 if __name__=='__main__': unittest.main()

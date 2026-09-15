@@ -179,6 +179,33 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
         1) TARGET_ENERGY_JACOBIAN_CMSSW=True ;;
         *) echo "Invalid SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN" >&2; exit 1 ;;
     esac
+    case "$SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE" in
+        0) TARGET_IONIZATION_CMSSW=False ;;
+        1) TARGET_IONIZATION_CMSSW=True ;;
+        *) echo "Invalid SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE" >&2; exit 1 ;;
+    esac
+    case "$SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN" in
+        0) TARGET_FIELD_GRADIENT_CMSSW=False ;;
+        1) TARGET_FIELD_GRADIENT_CMSSW=True ;;
+        *) echo "Invalid SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN" >&2; exit 1 ;;
+    esac
+    case "$SHIFT_TARGET_MOMENT_FIT" in
+        0) TARGET_MOMENT_CMSSW=False ;;
+        1) TARGET_MOMENT_CMSSW=True ;;
+        *) echo "Invalid SHIFT_TARGET_MOMENT_FIT" >&2; exit 1 ;;
+    esac
+    if [[ "$SHIFT_TARGET_MOMENT_FIT" == 1 ]]; then
+        for required in SHIFT_TARGET_DETAILED_MATERIAL SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE; do
+            [[ "${!required}" == 1 ]] || { echo "Target moment fit requires $required=1" >&2; exit 1; }
+        done
+        [[ "$SHIFT_TARGET_NUMERICAL_COVARIANCE" == 0 ]] || { echo "Target moment fit requires numerical covariance off" >&2; exit 1; }
+    fi
+    if [[ "$SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
+        echo "Target field-gradient Jacobian requires consistent backward covariance" >&2; exit 1
+    fi
+    if [[ "$SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
+        echo "Target ionization variance requires consistent backward covariance" >&2; exit 1
+    fi
     if [[ "$SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN" == 1 && "$SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIANCE" != 1 ]]; then
         echo "Target energy-loss Jacobian requires consistent backward covariance" >&2; exit 1
     fi
@@ -228,7 +255,7 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, targetUseDetailedMaterialPropagation=${TARGET_DETAILED_CMSSW}, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}, useVertexConstrainedRefit=${USE_VERTEX_REFIT_CMSSW}); process.shiftMuonTable.lssTransport.geant4eMaximumPathLengthCm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM}); process.shiftMuonTable.lssTransport.geant4eMaximumStepLengthMm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM}); process.shiftMuonTable.targetUseNumericalTransportCovariance = cms.bool(${TARGET_NUMERICAL_CMSSW}); process.shiftMuonTable.targetUseConsistentBackwardCovariance = cms.bool(${TARGET_CONSISTENT_CMSSW}); process.shiftMuonTable.targetUseMeanEnergyLossJacobian = cms.bool(${TARGET_ENERGY_JACOBIAN_CMSSW}); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, targetUseDetailedMaterialPropagation=${TARGET_DETAILED_CMSSW}, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}, useVertexConstrainedRefit=${USE_VERTEX_REFIT_CMSSW}); process.shiftMuonTable.lssTransport.geant4eMaximumPathLengthCm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM}); process.shiftMuonTable.lssTransport.geant4eMaximumStepLengthMm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM}); process.shiftMuonTable.targetUseNumericalTransportCovariance = cms.bool(${TARGET_NUMERICAL_CMSSW}); process.shiftMuonTable.targetUseConsistentBackwardCovariance = cms.bool(${TARGET_CONSISTENT_CMSSW}); process.shiftMuonTable.targetUseMeanEnergyLossJacobian = cms.bool(${TARGET_ENERGY_JACOBIAN_CMSSW}); process.shiftMuonTable.targetUseUnquenchedIonizationVariance = cms.bool(${TARGET_IONIZATION_CMSSW}); process.shiftMuonTable.targetUseFieldGradientJacobian = cms.bool(${TARGET_FIELD_GRADIENT_CMSSW}); process.shiftMuonTable.targetUseForwardRefit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetUseMomentFit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetForwardMaxIterations = cms.uint32(32); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
