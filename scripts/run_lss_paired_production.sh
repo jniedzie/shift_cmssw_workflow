@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible IR1/ATLAS proxy comparison; caller controls sample size.
 set -euo pipefail
-mode="${1:?control, material, or combined}"
+mode="${1:?control, material, field, or combined}"
 campaign="${2:?new campaign name}"
 shift 2
 workflow_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +22,7 @@ export SHIFT_LSS_MATERIAL_MODE=none SHIFT_LSS_FIELD_MODE=none
 case "$mode" in
   control) ;;
   material) export SHIFT_LSS_MATERIAL_MODE=external ;;
+  field) export SHIFT_LSS_FIELD_MODE=ir1_atlas_proxy ;;
   combined) export SHIFT_LSS_MATERIAL_MODE=external SHIFT_LSS_FIELD_MODE=ir1_atlas_proxy ;;
   *) echo "Unknown mode: $mode" >&2; exit 2 ;;
 esac
