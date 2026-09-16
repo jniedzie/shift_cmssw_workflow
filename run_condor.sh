@@ -210,8 +210,8 @@ fi
 # Optional exact Step-3 chunk list for matched or incomplete input campaigns.
 CHUNK_IDS=()
 if [[ -n "${CONDOR_CHUNKS_FILE:-}" ]]; then
-    [[ "$NORMALIZED_STEPS" == 4 && "$STEP4_INPUTS_PER_JOB" == 1 ]] || {
-        echo "Explicit chunks require Step 4 only and one input per job" >&2; exit 2;
+    [[ "$STEP4_INPUTS_PER_JOB" == 1 ]] || {
+        echo "Explicit chunks require STEP4_INPUTS_PER_JOB=1" >&2; exit 2;
     }
     [[ -r "$CONDOR_CHUNKS_FILE" ]] || { echo "Unreadable chunk list" >&2; exit 2; }
     mapfile -t CHUNK_IDS < "$CONDOR_CHUNKS_FILE"
