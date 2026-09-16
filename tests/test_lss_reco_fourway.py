@@ -106,6 +106,27 @@ with open(os.environ['LSS_TEST_CALLS'], 'a') as stream:
         self.assertIn('Missing required Step-3 input', result.stderr)
         self.assertFalse(self.calls_path.exists())
 
+    def test_field_reco_reuses_v3_without_simulation_or_overwriting_v3(self):
+        source = self.input('field', 3, 0)
+        self.input('field', 3, 1)
+        result = self.run_wrapper('field-reco')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, = self.calls()
+        self.assertEqual(row['argv'], ['field', 'lssPaired_field_10k_2023_v4',
+                                      '--steps', '4', '--check'])
+        self.assertEqual(row['chunks'], ['0', '1'])
+        self.assertEqual(row['env']['STEP3_DIR'], str(source / 'samples/step3'))
+        self.assertEqual(row['env']['STEP1_CONFIG_DIR'], str(source / 'configs/step1'))
+        for flag in FIT_FLAGS:
+            self.assertEqual(row['env'][flag], '1')
+
+    def test_field_reco_missing_aod_fails_before_submission(self):
+        self.input('field', 3, 0)
+        result = self.run_wrapper('field-reco')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing required Step-3 input', result.stderr)
+        self.assertFalse(self.calls_path.exists())
+
     def test_fullchain_modes_clear_inherited_paths(self):
         paths = ('SAMPLE_DIR', 'SAMPLES_DIR', 'CONFIG_BASE_DIR', 'WORKDIR', 'LOG_DIR',
                  'STEP1_DIR', 'STEP2_DIR', 'STEP3_DIR', 'STEP4_DIR',

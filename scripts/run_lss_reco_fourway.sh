@@ -3,19 +3,22 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $(basename "$0") control|material|field|combined [--check]"
+  echo "Usage: $(basename "$0") control|material|field|combined|field-reco [--check]"
   echo "Defaults to 1000 chunks of 10 events; N_JOBS may select a smaller prefix."
   echo "CHUNK_START may skip an already validated prefix for control or combined."
   echo "Control and combined reuse existing simulation; material and field run Steps 1-4."
+  echo "field-reco reuses field v3 AOD and writes corrected Step 4 to field v4."
 }
 [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
 mode="$1"
+field_reco=0
 check_only=0
 if [[ $# == 2 ]]; then
   [[ "$2" == --check ]] || { usage >&2; exit 2; }
   check_only=1
 fi
 case "$mode" in
+  field-reco) mode=field; field_reco=1; campaign=lssPaired_field_10k_2023_v4 ;;
   control|material|field) campaign="lssPaired_${mode}_10k_2023_v3" ;;
   combined) campaign=lssPaired_materialField_10k_2023_v3 ;;
   *) usage >&2; exit 2 ;;
@@ -28,7 +31,7 @@ chunk_start="${CHUNK_START:-0}"
 [[ "$chunk_start" =~ ^(0|[1-9][0-9]*)$ ]] && (( chunk_start < requested_jobs )) || {
   echo "CHUNK_START must be an integer from 0 through N_JOBS-1" >&2; exit 2;
 }
-if [[ "$mode" == material || "$mode" == field ]]; then
+if [[ "$mode" == material || ( "$mode" == field && "$field_reco" == 0 ) ]]; then
   [[ "$chunk_start" == 0 ]] || { echo "CHUNK_START is supported for Step-4-only reuse" >&2; exit 2; }
 fi
 [[ "${N_EVENTS:-10}" == 10 && "${STEP4_INPUTS_PER_JOB:-1}" == 1 ]] || {
@@ -146,7 +149,7 @@ if (( ! check_only )); then
   export -f cmsenv
 fi
 
-if [[ "$mode" == material || "$mode" == field ]]; then
+if [[ "$mode" == material || ( "$mode" == field && "$field_reco" == 0 ) ]]; then
   # Changed transport changes SimHits, digis and AOD: no upstream stage from
   # another material/field mode is reusable. Existing valid outputs in this
   # same campaign are reused by the stage scripts.
@@ -163,8 +166,9 @@ import re
 import sys
 
 base, mode, count, destination = Path(sys.argv[1]), sys.argv[2], int(sys.argv[3]), Path(sys.argv[4])
-stem = 'control' if mode == 'control' else 'materialField'
-primary = base / f'lssPaired_{stem}_10k_2023_v2'
+stem = {'control': 'control', 'combined': 'materialField', 'field': 'field'}[mode]
+version = 3 if mode == 'field' else 2
+primary = base / f'lssPaired_{stem}_10k_2023_v{version}'
 fallback = base / 'lssPaired_control_10k_2023_v1'
 groups = {'primary': [], 'fallback': []}
 
@@ -220,6 +224,8 @@ submit_group() {
     source="$SAMPLE_BASE/$SAMPLE_NAME/lssPaired_control_10k_2023_v1"
   elif [[ "$mode" == control ]]; then
     source="$SAMPLE_BASE/$SAMPLE_NAME/lssPaired_control_10k_2023_v2"
+  elif [[ "$mode" == field ]]; then
+    source="$SAMPLE_BASE/$SAMPLE_NAME/lssPaired_field_10k_2023_v3"
   else
     source="$SAMPLE_BASE/$SAMPLE_NAME/lssPaired_materialField_10k_2023_v2"
   fi
