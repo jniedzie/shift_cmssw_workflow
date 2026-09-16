@@ -692,6 +692,28 @@ cmsRun PhysicsTools/ShiftMuonSegments/python/test_shiftMuonSegments_cfg.py \
   outputFile=shiftMuonSegments_test.root
 ```
 
+## Isolated fixed-target GEN pilots (2023 preparation)
+
+The physics contract and readiness gates are in the workspace
+`SHIFT_ANALYSIS.md`. These pilots do not use or modify the live campaign,
+build CMSSW, simulate the detector, run reconstruction, or submit Condor jobs.
+Enter the existing CMSSW runtime and run, from this workflow directory:
+
+```bash
+python3 scripts/run_fixed_target_gen.py --sample qcd --lower 1 --upper 5 \
+  --events 20 --seed 13579 --output /absolute/new/output/directory
+```
+
+Use `--sample dy --lower 2 --upper 5` for an mHat-binned dimuon pilot;
+`--sample jpsi --lower 1 --upper 5` selects direct-J/psi hard-process pThat.
+Bounds are in GeV. Use distinct seeds for independent samples/chunks.
+Existing output directories are refused; event count is capped at 10000.
+The output includes `manifest.json`, `contract.json`, `resolved_cfg.py`,
+`cmsRun.log`, `audit.log`, `validation.json` and `gen.root`.
+A passing audit establishes GEN integrity only, not a production-ready
+2023 model, sample exclusivity, normalization, or detector acceptance.
+Read failed logs before retrying; retain failed directories as evidence.
+
 ## Run with Condor
 
 Submit the full chain or selected stages with:
