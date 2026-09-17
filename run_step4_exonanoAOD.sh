@@ -214,6 +214,26 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 		1) USE_VERTEX_REFIT_CMSSW=True ;;
 		*) echo "ERROR: SHIFT_USE_VERTEX_CONSTRAINED_REFIT must be 0 or 1 (got '$SHIFT_USE_VERTEX_CONSTRAINED_REFIT')" >&2; exit 1 ;;
 	esac
+	case "$SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT" in
+		0) MATERIAL_AWARE_VERTEX_TRANSPORT_PYTHON="; process.shiftMuonTable.useMaterialAwareVertexTransport = cms.bool(False)" ;;
+		1) MATERIAL_AWARE_VERTEX_TRANSPORT_PYTHON="; process.shiftMuonTable.useMaterialAwareVertexTransport = cms.bool(True)" ;;
+		*) echo "ERROR: SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT must be 0 or 1 (got '$SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT')" >&2; exit 1 ;;
+	esac
+	case "$SHIFT_USE_FORWARD_COMMON_VERTEX_FIT" in
+		0) FORWARD_COMMON_VERTEX_FIT_CMSSW=False ;;
+		1) FORWARD_COMMON_VERTEX_FIT_CMSSW=True ;;
+		*) echo "ERROR: SHIFT_USE_FORWARD_COMMON_VERTEX_FIT must be 0 or 1 (got '$SHIFT_USE_FORWARD_COMMON_VERTEX_FIT')" >&2; exit 1 ;;
+	esac
+	if [[ "$SHIFT_USE_FORWARD_COMMON_VERTEX_FIT" == 1 ]]; then
+		[[ "$SHIFT_USE_VERTEX_CONSTRAINED_REFIT" == 1 && "$SHIFT_TARGET_DETAILED_MATERIAL" == 1 ]] || {
+			echo "ERROR: forward common-vertex fit requires vertex refit and detailed target material" >&2; exit 1;
+		}
+	fi
+	VERTEX_FIT_PYTHON="${MATERIAL_AWARE_VERTEX_TRANSPORT_PYTHON}; process.shiftMuonTable.useForwardCommonVertexFit = cms.bool(${FORWARD_COMMON_VERTEX_FIT_CMSSW})"
+	if [[ "$SHIFT_USE_FORWARD_COMMON_VERTEX_FIT" == 1 ]]; then
+		# Keep this diagnostic downstream of established track and pair selection.
+		VERTEX_FIT_PYTHON+="; process.shiftMuonTable.useMaterialAwarePcaTransport = cms.bool(False)"
+	fi
 	case "$SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS" in
 		0) DETAILED_REFIT_MATERIAL_CMSSW=False ;;
 		1) DETAILED_REFIT_MATERIAL_CMSSW=True ;;
@@ -255,7 +275,7 @@ if [[ -n "${AOD_TO_EXONANO_CUSTOMISE:-}" ]]; then
 	fi
 	CUSTOMISE_COMMAND_ARGS+=(
 		--customise_commands
-		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, targetUseDetailedMaterialPropagation=${TARGET_DETAILED_CMSSW}, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}, useVertexConstrainedRefit=${USE_VERTEX_REFIT_CMSSW}); process.shiftMuonTable.lssTransport.geant4eMaximumPathLengthCm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM}); process.shiftMuonTable.lssTransport.geant4eMaximumStepLengthMm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM}); process.shiftMuonTable.targetUseNumericalTransportCovariance = cms.bool(${TARGET_NUMERICAL_CMSSW}); process.shiftMuonTable.targetUseConsistentBackwardCovariance = cms.bool(${TARGET_CONSISTENT_CMSSW}); process.shiftMuonTable.targetUseMeanEnergyLossJacobian = cms.bool(${TARGET_ENERGY_JACOBIAN_CMSSW}); process.shiftMuonTable.targetUseUnquenchedIonizationVariance = cms.bool(${TARGET_IONIZATION_CMSSW}); process.shiftMuonTable.targetUseFieldGradientJacobian = cms.bool(${TARGET_FIELD_GRADIENT_CMSSW}); process.shiftMuonTable.targetUseForwardRefit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetUseMomentFit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetForwardMaxIterations = cms.uint32(32); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
+		"from ${CUSTOMISE_MODULE} import ${CUSTOMISE_FUNCTION}; process = ${CUSTOMISE_FUNCTION}(process, targetUseDetailedMaterialPropagation=${TARGET_DETAILED_CMSSW}, useDetailedMaterialPropagation=${SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW}, directionalRefitUseDetailedMaterialEffects=${DETAILED_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffects=${GEOMETRY_REFIT_MATERIAL_CMSSW}, directionalRefitUseGeometryMaterialEffectsInFitter=${GEOMETRY_REFIT_FITTER_CMSSW}, directionalRefitUseGeometryMaterialEffectsInSmoother=${GEOMETRY_REFIT_SMOOTHER_CMSSW}, directionalRefitUseGeometryTargetMaterialEffects=${GEOMETRY_TARGET_MATERIAL_CMSSW}, enableHcalDiagnostics=${HCAL_DIAGNOSTICS_CMSSW}, enableZDCDiagnostics=${ZDC_DIAGNOSTICS_CMSSW}, augmentDTHits=${AUGMENT_DT_CMSSW}, augmentTrackerHits=${AUGMENT_TRACKER_CMSSW}, useExtendedTiming=${EXTENDED_TIMING_CMSSW}, useVertexConstrainedRefit=${USE_VERTEX_REFIT_CMSSW}); process.shiftMuonTable.lssTransport.geant4eMaximumPathLengthCm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM}); process.shiftMuonTable.lssTransport.geant4eMaximumStepLengthMm = cms.double(${SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM}); process.shiftMuonTable.targetUseNumericalTransportCovariance = cms.bool(${TARGET_NUMERICAL_CMSSW}); process.shiftMuonTable.targetUseConsistentBackwardCovariance = cms.bool(${TARGET_CONSISTENT_CMSSW}); process.shiftMuonTable.targetUseMeanEnergyLossJacobian = cms.bool(${TARGET_ENERGY_JACOBIAN_CMSSW}); process.shiftMuonTable.targetUseUnquenchedIonizationVariance = cms.bool(${TARGET_IONIZATION_CMSSW}); process.shiftMuonTable.targetUseFieldGradientJacobian = cms.bool(${TARGET_FIELD_GRADIENT_CMSSW}); process.shiftMuonTable.targetUseForwardRefit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetUseMomentFit = cms.bool(${TARGET_MOMENT_CMSSW}); process.shiftMuonTable.targetForwardMaxIterations = cms.uint32(32); process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(${SHIFT_REFIT_SEED_MOMENTUM_SCALE}); process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(${SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE}); process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(${USE_SECOND_ITERATION_CMSSW}); process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(${SHIFT_REFIT_ENERGY_LOSS_SCALE}); process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(${LOG_GEOMETRY_COMPARISON_CMSSW})${VERTEX_FIT_PYTHON}${SHIFT_LSS_RECONSTRUCTION_PYTHON}${GROUPED_SOURCE_COMMAND}"
 	)
 elif [[ -n "$GROUPED_SOURCE_COMMAND" ]]; then
 	CUSTOMISE_COMMAND_ARGS+=(--customise_commands "${GROUPED_SOURCE_COMMAND#; }")
@@ -267,6 +287,8 @@ echo "Directional refit seed momentum scale: $SHIFT_REFIT_SEED_MOMENTUM_SCALE"
 echo "Directional refit second-pass seed error rescale: $SHIFT_REFIT_SECOND_SEED_ERROR_RESCALE"
 echo "Directional refit use second iteration: $SHIFT_REFIT_USE_SECOND_ITERATION"
 echo "Reconstructed-vertex refit: $SHIFT_USE_VERTEX_CONSTRAINED_REFIT"
+echo "Material-aware common-vertex transport: $SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT"
+echo "Forward common-vertex diagnostic fit: $SHIFT_USE_FORWARD_COMMON_VERTEX_FIT"
 echo "Directional refit energy-loss scale: $SHIFT_REFIT_ENERGY_LOSS_SCALE"
 echo "Directional refit detailed material effects: $SHIFT_REFIT_DETAILED_MATERIAL_EFFECTS"
 echo "Directional refit geometry mean-loss material effects: $SHIFT_REFIT_GEOMETRY_MATERIAL_EFFECTS"

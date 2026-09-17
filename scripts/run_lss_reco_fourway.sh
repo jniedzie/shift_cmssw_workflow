@@ -3,15 +3,18 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $(basename "$0") control|material|field|combined|field-reco [--check]"
+  echo "Usage: $(basename "$0") control|material|field|combined|field-reco|combined-reco|combined-forward-reco [--check]"
   echo "Defaults to 1000 chunks of 10 events; N_JOBS may select a smaller prefix."
   echo "CHUNK_START may skip an already validated prefix for control or combined."
   echo "Control and combined reuse existing simulation; material and field run Steps 1-4."
-  echo "field-reco reuses field v3 AOD and writes corrected Step 4 to field v4."
+  echo "field-reco and combined-reco reuse AOD and write Step 4 to their existing v4 campaigns."
+  echo "combined-forward-reco writes separate forward-fit diagnostics to v5; canonical columns are unchanged."
 }
 [[ $# -ge 1 && $# -le 2 ]] || { usage >&2; exit 2; }
 mode="$1"
 field_reco=0
+combined_reco=0
+forward_reco=0
 check_only=0
 if [[ $# == 2 ]]; then
   [[ "$2" == --check ]] || { usage >&2; exit 2; }
@@ -19,6 +22,8 @@ if [[ $# == 2 ]]; then
 fi
 case "$mode" in
   field-reco) mode=field; field_reco=1; campaign=lssPaired_field_10k_2023_v4 ;;
+  combined-reco) mode=combined; combined_reco=1; campaign=lssPaired_materialField_10k_2023_v4 ;;
+  combined-forward-reco) mode=combined; forward_reco=1; campaign=lssPaired_materialField_10k_2023_v5 ;;
   control|material|field) campaign="lssPaired_${mode}_10k_2023_v3" ;;
   combined) campaign=lssPaired_materialField_10k_2023_v3 ;;
   *) usage >&2; exit 2 ;;
@@ -59,6 +64,8 @@ export SHIFT_TARGET_DETAILED_MATERIAL=1 SHIFT_TARGET_CONSISTENT_BACKWARD_COVARIA
 export SHIFT_TARGET_MEAN_ENERGY_LOSS_JACOBIAN=1 SHIFT_TARGET_FIELD_GRADIENT_JACOBIAN=1
 export SHIFT_TARGET_UNQUENCHED_IONIZATION_VARIANCE=1 SHIFT_TARGET_MOMENT_FIT=1
 export SHIFT_TARGET_NUMERICAL_COVARIANCE=0 SHIFT_USE_VERTEX_CONSTRAINED_REFIT=1
+export SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT=$combined_reco
+export SHIFT_USE_FORWARD_COMMON_VERTEX_FIT=$forward_reco
 unset SAMPLE_DIR SAMPLES_DIR CONFIG_BASE_DIR WORKDIR LOG_DIR CROSS_SECTION_FILE
 unset STEP1_DIR STEP2_DIR STEP3_DIR STEP4_DIR
 unset STEP1_CONFIG_DIR STEP2_CONFIG_DIR STEP3_CONFIG_DIR STEP4_CONFIG_DIR
@@ -67,16 +74,13 @@ unset GEOMETRY ERA CONDITIONS BEAMSPOT HLT_MENU
 
 # Never silently keep a Step-4 result made with an older target-fit recipe.
 # ROOT integrity/event-count validation remains the stage script's job.
-python3 - "$SAMPLE_BASE/$SAMPLE_NAME/$campaign" "$mode" "$chunk_start" <<'PY'
+python3 - "$SAMPLE_BASE/$SAMPLE_NAME/$campaign" "$mode" "$chunk_start" "$combined_reco" "$forward_reco" <<'PY'
 import ast
 from pathlib import Path
 import sys
 
-campaign, mode = Path(sys.argv[1]), sys.argv[2]
-for chunk in range(int(sys.argv[3])):
-    output = campaign / 'samples/step4' / f'events_NanoAOD_part_{chunk:04d}.root'
-    if not output.is_file() or output.stat().st_size == 0:
-        raise SystemExit(f'Cannot skip missing prefix output: {output}')
+campaign, mode, combined_reco = Path(sys.argv[1]), sys.argv[2], bool(int(sys.argv[4]))
+forward_reco = bool(int(sys.argv[5]))
 required = {
     'targetUseNumericalTransportCovariance': False,
     'targetUseConsistentBackwardCovariance': True,
@@ -92,6 +96,15 @@ required = {
     'directionalRefitEnergyLossScale': 1.0,
     'directionalRefitLogGeometryMaterialComparison': False,
 }
+if combined_reco:
+    required['useMaterialAwareVertexTransport'] = True
+if forward_reco:
+    required.update(useForwardCommonVertexFit=True, useMaterialAwareVertexTransport=False,
+                    useMaterialAwarePcaTransport=False)
+for chunk in range(int(sys.argv[3])):
+    output = campaign / 'samples/step4' / f'events_NanoAOD_part_{chunk:04d}.root'
+    if not output.is_file() or output.stat().st_size == 0:
+        raise SystemExit(f'Cannot skip missing prefix output: {output}')
 required_customisation = {
     'targetUseDetailedMaterialPropagation': True,
     'useDetailedMaterialPropagation': mode in ('material', 'combined'),
@@ -119,11 +132,14 @@ for output in sorted((campaign / 'samples/step4').glob('events_NanoAOD_part_*.ro
         raise SystemExit(f'Existing output has no archived configuration: {output}')
     tree = ast.parse(config.read_text())
     values, customisations, contract = {}, [], None
+    forward_value = False
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign) and len(node.targets) == 1:
             target = node.targets[0]
             if isinstance(target, ast.Attribute) and target.attr in required:
                 values[target.attr] = scalar(node.value)
+            if isinstance(target, ast.Attribute) and target.attr == 'useForwardCommonVertexFit':
+                forward_value = scalar(node.value)
             if isinstance(target, ast.Attribute) and target.attr == 'shiftLssWorkflowContract':
                 contract = {item.arg: scalar(item.value) for item in node.value.keywords
                             if item.arg in ('materialMode', 'fieldMode')}
@@ -133,7 +149,7 @@ for output in sorted((campaign / 'samples/step4').glob('events_NanoAOD_part_*.ro
         'materialMode': 'external' if mode in ('material', 'combined') else 'none',
         'fieldMode': 'ir1_atlas_proxy' if mode in ('field', 'combined') else 'none',
     }
-    if (values != required or len(customisations) != 1
+    if (values != required or forward_value != forward_reco or len(customisations) != 1
             or customisations[0] != required_customisation
             or (mode != 'control' and contract != expected_contract)
             or (mode == 'control' and contract not in (None, expected_contract))):

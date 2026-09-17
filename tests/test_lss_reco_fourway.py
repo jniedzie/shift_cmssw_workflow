@@ -67,6 +67,39 @@ with open(os.environ['LSS_TEST_CALLS'], 'a') as stream:
     def calls(self):
         return [json.loads(line) for line in self.calls_path.read_text().splitlines()]
 
+    def archived_combined_output(self, version, forward):
+        campaign = self.campaign(f'lssPaired_materialField_10k_2023_v{version}')
+        output = campaign / 'samples/step4/events_NanoAOD_part_0000.root'
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b'worker performs ROOT validation')
+        config = campaign / 'configs/step4/events_NanoAOD_part_0000_cfg.py'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('''
+process = customise(process, targetUseDetailedMaterialPropagation=True,
+    useDetailedMaterialPropagation=True, directionalRefitUseDetailedMaterialEffects=False,
+    directionalRefitUseGeometryMaterialEffects=False, directionalRefitUseGeometryMaterialEffectsInFitter=False,
+    directionalRefitUseGeometryMaterialEffectsInSmoother=False, directionalRefitUseGeometryTargetMaterialEffects=False,
+    enableHcalDiagnostics=False, enableZDCDiagnostics=False, augmentDTHits=True,
+    augmentTrackerHits=False, useExtendedTiming=False, useVertexConstrainedRefit=True)
+process.shiftMuonTable.targetUseNumericalTransportCovariance = cms.bool(False)
+process.shiftMuonTable.targetUseConsistentBackwardCovariance = cms.bool(True)
+process.shiftMuonTable.targetUseMeanEnergyLossJacobian = cms.bool(True)
+process.shiftMuonTable.targetUseUnquenchedIonizationVariance = cms.bool(True)
+process.shiftMuonTable.targetUseFieldGradientJacobian = cms.bool(True)
+process.shiftMuonTable.targetUseForwardRefit = cms.bool(True)
+process.shiftMuonTable.targetUseMomentFit = cms.bool(True)
+process.shiftMuonTable.targetForwardMaxIterations = cms.uint32(32)
+process.shiftMuonTable.directionalRefitSeedMomentumScale = cms.double(1.0)
+process.shiftMuonTable.directionalRefitSecondSeedErrorRescale = cms.double(100.0)
+process.shiftMuonTable.directionalRefitUseSecondIteration = cms.bool(False)
+process.shiftMuonTable.directionalRefitEnergyLossScale = cms.double(1.0)
+process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(False)
+process.shiftMuonTable.useMaterialAwareVertexTransport = cms.bool(False)
+process.shiftMuonTable.useMaterialAwarePcaTransport = cms.bool(False)
+process.shiftLssWorkflowContract = cms.PSet(materialMode=cms.string('external'), fieldMode=cms.string('ir1_atlas_proxy'))
+''' + f'process.shiftMuonTable.useForwardCommonVertexFit = cms.bool({forward})\n')
+        return config
+
     def test_control_reuses_exact_chunks_and_final_flags(self):
         primary = self.input('control', 2, 0)
         fallback = self.input('control', 1, 1)
@@ -126,6 +159,101 @@ with open(os.environ['LSS_TEST_CALLS'], 'a') as stream:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Missing required Step-3 input', result.stderr)
         self.assertFalse(self.calls_path.exists())
+
+    def test_combined_reco_reuses_aod_and_enables_only_vertex_transport(self):
+        source = self.input('materialField', 2, 0)
+        self.input('materialField', 2, 1)
+        result = self.run_wrapper('combined-reco')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, = self.calls()
+        self.assertEqual(row['argv'], ['combined', 'lssPaired_materialField_10k_2023_v4',
+                                      '--steps', '4', '--check'])
+        self.assertEqual(row['chunks'], ['0', '1'])
+        self.assertEqual(row['env']['STEP3_DIR'], str(source / 'samples/step3'))
+        self.assertEqual(row['env']['SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT'], '1')
+        self.assertEqual(row['env']['SHIFT_USE_VERTEX_CONSTRAINED_REFIT'], '1')
+        self.assertEqual(row['env']['SHIFT_USE_FORWARD_COMMON_VERTEX_FIT'], '0')
+
+    def test_forward_reco_uses_new_campaign_and_fixed_diagnostic_recipe(self):
+        source = self.input('materialField', 2, 0)
+        self.input('materialField', 2, 1)
+        # Existing v4 artifacts must not be inspected, reused, or modified.
+        previous = self.campaign('lssPaired_materialField_10k_2023_v4') / 'samples/step4/events_NanoAOD_part_0000.root'
+        previous.parent.mkdir(parents=True)
+        previous.write_bytes(b'preserve old v4 pilot')
+        result = self.run_wrapper('combined-forward-reco',
+                                  SHIFT_USE_FORWARD_COMMON_VERTEX_FIT='0',
+                                  SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT='1',
+                                  SHIFT_USE_VERTEX_CONSTRAINED_REFIT='0')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        row, = self.calls()
+        self.assertEqual(row['argv'], ['combined', 'lssPaired_materialField_10k_2023_v5', '--steps', '4', '--check'])
+        self.assertEqual(row['chunks'], ['0', '1'])
+        self.assertEqual(row['env']['STEP3_DIR'], str(source / 'samples/step3'))
+        self.assertEqual(row['env']['STEP1_CONFIG_DIR'], str(source / 'configs/step1'))
+        self.assertEqual(row['env']['N_EVENTS'], '10')
+        self.assertEqual(row['env']['STEP4_INPUTS_PER_JOB'], '1')
+        self.assertEqual(row['env']['SHIFT_USE_FORWARD_COMMON_VERTEX_FIT'], '1')
+        self.assertEqual(row['env']['SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT'], '0')
+        self.assertEqual(row['env']['SHIFT_USE_VERTEX_CONSTRAINED_REFIT'], '1')
+        self.assertEqual(previous.read_bytes(), b'preserve old v4 pilot')
+
+    def test_forward_reco_requires_every_v2_input(self):
+        self.input('materialField', 2, 0)
+        result = self.run_wrapper('combined-forward-reco')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Missing required Step-3 input', result.stderr)
+        self.assertFalse(self.calls_path.exists())
+
+    def test_forward_reco_accepts_only_its_archived_recipe(self):
+        self.input('materialField', 2, 0)
+        self.input('materialField', 2, 1)
+        config = self.archived_combined_output(5, True)
+        good = config.read_text()
+        result = self.run_wrapper('combined-forward-reco')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for before, after in (
+                ('useForwardCommonVertexFit = cms.bool(True)', 'useForwardCommonVertexFit = cms.bool(False)'),
+                ('useMaterialAwareVertexTransport = cms.bool(False)', 'useMaterialAwareVertexTransport = cms.bool(True)'),
+                ('useMaterialAwarePcaTransport = cms.bool(False)', 'useMaterialAwarePcaTransport = cms.bool(True)')):
+            with self.subTest(changed=before):
+                config.write_text(good.replace(before, after))
+                result = self.run_wrapper('combined-forward-reco')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('incompatible', result.stderr)
+        self.assertEqual(len(self.calls()), 1)
+
+    def test_ordinary_campaign_rejects_forward_fit_output(self):
+        self.input('materialField', 2, 0)
+        self.input('materialField', 2, 1)
+        self.archived_combined_output(3, True)
+        result = self.run_wrapper('combined')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('incompatible', result.stderr)
+        self.assertFalse(self.calls_path.exists())
+
+    def test_submission_preflight_rejects_invalid_forward_settings(self):
+        environment = {key: value for key, value in os.environ.items() if not key.startswith('SHIFT_')}
+        environment.update(SAMPLE_BASE=str(self.base), TRIGGER_SCENARIO='none', PILEUP_MODE='none',
+                           SHIFT_USE_VERTEX_CONSTRAINED_REFIT='1', SHIFT_TARGET_DETAILED_MATERIAL='1')
+        for flags, error in (
+                ({'SHIFT_USE_FORWARD_COMMON_VERTEX_FIT': 'invalid'}, 'expected 0 or 1'),
+                ({'SHIFT_USE_FORWARD_COMMON_VERTEX_FIT': '1', 'SHIFT_USE_VERTEX_CONSTRAINED_REFIT': '0'},
+                 'requires vertex refit'),
+                ({'SHIFT_USE_FORWARD_COMMON_VERTEX_FIT': '1', 'SHIFT_TARGET_DETAILED_MATERIAL': '0'},
+                 'requires vertex refit')):
+            with self.subTest(flags=flags):
+                result = subprocess.run([str(WORKFLOW / 'run_condor.sh'), '--steps', '4', '--check'],
+                                        env=dict(environment, **flags), capture_output=True, text=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(error, result.stderr)
+
+    def test_ordinary_modes_keep_material_aware_vertex_transport_off(self):
+        self.input('materialField', 2, 0)
+        self.input('materialField', 2, 1)
+        result = self.run_wrapper('combined')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls()[0]['env']['SHIFT_USE_MATERIAL_AWARE_VERTEX_TRANSPORT'], '0')
 
     def test_fullchain_modes_clear_inherited_paths(self):
         paths = ('SAMPLE_DIR', 'SAMPLES_DIR', 'CONFIG_BASE_DIR', 'WORKDIR', 'LOG_DIR',
