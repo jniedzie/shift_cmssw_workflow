@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Fail-closed GEN ownership and unfiltered-weight audit before publication.
+"""Fail-closed GEN ownership and normalization audit before publication.
 
-Only the two explicitly defined 1--5 GeV LO samples are supported. This is MC
+Only the explicitly defined 1--5 GeV LO samples are supported. This is MC
 bookkeeping, never an analysis selection. No reconstructed content is read.
 """
 import argparse
@@ -13,6 +13,9 @@ from pathlib import Path
 
 QCD_CODES = set(range(111, 117)) | set(range(121, 125))
 JPSI_CODES = set(range(401, 411)) | {441}
+QCD_PROCESS = 'QCD_FixedTarget_pThat_1to5GeV_13p6TeV'
+QCD_MU_PROCESS = 'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV'
+JPSI_PROCESS = 'Charmonium_FixedTarget_pThat_1to5GeV_13p6TeV'
 
 
 def main():
@@ -26,8 +29,9 @@ def main():
     parser.add_argument('--fragment', required=True)
     parser.add_argument('--output', required=True)
     args = parser.parse_args()
-    expected = {'QCD_FixedTarget_pThat_1to5GeV_13p6TeV': QCD_CODES,
-                'Charmonium_FixedTarget_pThat_1to5GeV_13p6TeV': JPSI_CODES}[args.process]
+    expected = {QCD_PROCESS: QCD_CODES, QCD_MU_PROCESS: QCD_CODES,
+                JPSI_PROCESS: JPSI_CODES}[args.process]
+    filtered = args.process == QCD_MU_PROCESS
 
     def get(event, label, kind):
         handle = Handle(kind)
@@ -38,6 +42,8 @@ def main():
 
     codes, particles = Counter(), Counter()
     identities, weights, pthats = set(), [], []
+    selected_muons = []
+    timing_residuals, source_shift_residuals = [], []
     for event in Events(args.input):
         aux = event.eventAuxiliary()
         identity = (int(aux.run()), int(aux.luminosityBlock()), int(aux.event()))
@@ -59,7 +65,55 @@ def main():
         for p in get(event, 'genParticles', 'std::vector<reco::GenParticle>'):
             if abs(p.pdgId()) == 443:
                 particles['jpsi_record_entries'] += 1
-    if len(weights) != args.events:
+        if filtered:
+            hepmc = get(event, ('generator', 'unsmeared'), 'edm::HepMCProduct').GetEvent()
+            shifted_hepmc = get(event, 'shiftEventTime', 'edm::HepMCProduct').GetEvent()
+            applied_shift = float(get(event, ('shiftEventTime', 'appliedShiftCtMm'), 'double')[0])
+            source_x = float(get(event, ('shiftEventTime', 'sourceXmm'), 'double')[0])
+            source_y = float(get(event, ('shiftEventTime', 'sourceYmm'), 'double')[0])
+            source_z = float(get(event, ('shiftEventTime', 'sourceZmm'), 'double')[0])
+            source_ct = float(get(event, ('shiftEventTime', 'sourceCtBeforeMm'), 'double')[0])
+            raw_source_vertex = hepmc.signal_process_vertex()
+            if not raw_source_vertex:
+                raw_source_vertex = hepmc.vertices_begin().__deref__()
+            raw_source = raw_source_vertex.position()
+            vtx_smear = (source_x - raw_source.x(), source_y - raw_source.y(),
+                         source_z - raw_source.z(), source_ct - raw_source.t())
+            source_shift_residuals.append(applied_shift + source_z)
+            event_muons = []
+            particle = hepmc.particles_begin()
+            particles_end = hepmc.particles_end()
+            while particle != particles_end:
+                p = particle.__deref__()
+                particle.__preinc__()
+                vertex = p.production_vertex()
+                if abs(p.pdg_id()) != 13 or p.status() != 1 or vertex is None:
+                    continue
+                momentum, position = p.momentum(), vertex.position()
+                rho = math.hypot(position.x(), position.y())
+                if (momentum.eta() < 0 and momentum.eta() > -10 and
+                        0 <= position.z() <= 151000 and rho <= 8000):
+                    shifted_particle = shifted_hepmc.barcode_to_particle(p.barcode())
+                    if shifted_particle is None or shifted_particle.production_vertex() is None:
+                        raise ValueError('Selected muon is missing after the SHIFT time transformation')
+                    shifted_position = shifted_particle.production_vertex().position()
+                    spatial_residual = max(abs(shifted_position.x() - position.x() - vtx_smear[0]),
+                                           abs(shifted_position.y() - position.y() - vtx_smear[1]),
+                                           abs(shifted_position.z() - position.z() - vtx_smear[2]))
+                    if spatial_residual > 1.e-8:
+                        raise ValueError('SHIFT time transformation changed a selected muon vertex position')
+                    timing_residuals.append(shifted_position.t() - position.t() - vtx_smear[3] - applied_shift)
+                    event_muons.append(dict(pdg_id=p.pdg_id(), p_GeV=momentum.rho(),
+                        pt_GeV=momentum.perp(), eta=momentum.eta(),
+                        production_rho_mm=rho, production_z_mm=position.z(),
+                        production_ct_mm=position.t()))
+            if not event_muons:
+                raise ValueError('Saved mu-enriched event does not satisfy the declared filter')
+            selected_muons.extend(event_muons)
+            particles['filter_eligible_muons'] += len(event_muons)
+    if filtered and not weights:
+        raise ValueError(f'No events passed the muon filter in {args.events} attempts')
+    if not filtered and len(weights) != args.events:
         raise ValueError(f'Expected {args.events} generated events, got {len(weights)}')
     runs = []
     for run in Runs(args.input):
@@ -81,16 +135,52 @@ def main():
                 record[key] = dict(n=int(stat.n()), sum=stat.sum(), sum2=stat.sum2())
             lumis.append(record)
     if not lumis or sum(p['nPassPos'] for p in lumis) != args.events:
-        raise ValueError('Lumi generator denominator does not match output count')
+        raise ValueError('Lumi generator denominator does not match attempted count')
     if any(p['nTotalPos'] != p['nPassPos'] or p['nTotalNeg'] or p['nPassNeg'] for p in lumis):
-        raise ValueError('Unexpected generator filtering or negative weights')
+        raise ValueError('Unexpected internal generator filtering or negative weights')
+    filter_records = []
+    for lumi in Lumis(args.input):
+        info = get(lumi, 'genFilterEfficiencyProducer', 'GenFilterInfo')
+        filter_records.append(dict(
+            pass_positive=int(info.numPassPositiveEvents()),
+            pass_negative=int(info.numPassNegativeEvents()),
+            total_positive=int(info.numTotalPositiveEvents()),
+            total_negative=int(info.numTotalNegativeEvents()),
+            sum_pass_weights=info.sumPassWeights(), sum_pass_weights2=info.sumPassWeights2(),
+            sum_weights=info.sumWeights(), sum_weights2=info.sumWeights2()))
+    attempted = sum(x['total_positive'] + x['total_negative'] for x in filter_records)
+    accepted = sum(x['pass_positive'] + x['pass_negative'] for x in filter_records)
+    if attempted != args.events or accepted != len(weights):
+        raise ValueError('External-filter bookkeeping does not match attempted/accepted counts')
+    if any(x['pass_negative'] or x['total_negative'] for x in filter_records):
+        raise ValueError('Unexpected negative weights in external-filter bookkeeping')
+    efficiency = accepted / attempted
+    efficiency_error = math.sqrt(efficiency * (1. - efficiency) / attempted)
+    if filtered and (max(map(abs, timing_residuals)) > 1.e-8 or
+                     max(map(abs, source_shift_residuals)) > 1.e-8):
+        raise ValueError('SHIFT time transformation is inconsistent with nominal source timing')
     report = dict(schema='shift-production-gen-v1', process=args.process, chunk=args.chunk,
-        input=args.input, events=len(weights), sum_weights=sum(weights),
+        input=args.input, events=len(weights), attempted_events=attempted,
+        accepted_events=accepted, sum_weights=sum(weights),
         sum_weights_squared=sum(w*w for w in weights), hard_process_codes=dict(codes),
         pthat_min=min(pthats), pthat_max=max(pthats), particle_counts=dict(particles),
-        runs=runs, lumi_processes=lumis, generated_filter_efficiency=1.,
-        normalization_scope='unfiltered LO primary-process definition; no luminosity assumed',
-        forced_decay=('none' if expected == QCD_CODES else '443 -> 13 -13; convention must be audited'),
+        runs=runs, lumi_processes=lumis, external_filter_records=filter_records,
+        generated_filter_efficiency=efficiency, filter_efficiency_error=efficiency_error,
+        normalization_scope=('filtered LO primary-process definition; no luminosity assumed'
+                             if filtered else 'unfiltered LO primary-process definition; no luminosity assumed'),
+        forced_decay=('443 -> 13 -13; convention must be audited' if expected == JPSI_CODES else 'none'),
+        decay_policy=('Pythia pi/K/KL decays inside rho<8000 mm, |z|<151000 mm'
+                      if filtered else 'CMS lifetime cutoff'),
+        generator_filter=('status-1 muon, -10<eta<0, '
+                          '0<=production z<=151000 mm, rho<=8000 mm'
+                          if filtered else 'none'),
+        selected_muon_ranges=({key: [min(x[key] for x in selected_muons),
+                                      max(x[key] for x in selected_muons)]
+                               for key in selected_muons[0]} if selected_muons else {}),
+        max_selected_muon_timing_residual_mm=(max(map(abs, timing_residuals))
+                                                if timing_residuals else None),
+        max_nominal_source_shift_residual_mm=(max(map(abs, source_shift_residuals))
+                                               if source_shift_residuals else None),
         physics_valid=False,
         identity_min=list(min(identities)), identity_max=list(max(identities)),
         fragment_sha256=hashlib.sha256(Path(args.fragment).read_bytes()).hexdigest(),

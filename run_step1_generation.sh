@@ -184,9 +184,11 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_step1_part${PART}_seed${GENERATOR_SEED}_cfg.py"
 # Distinct QCD chunks must remain mergeable. Existing J/psi identities are
 # unchanged; seed separation alone does not make EDM event identities unique.
-if [[ "$PROCESS" == QCD_FixedTarget_pThat_1to5GeV_13p6TeV ]]; then
+case "$PROCESS" in
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV)
 	printf '\nprocess.source.firstRun = cms.untracked.uint32(%s)\n' "$((10#$CHUNK + 1))" >> "$LOCAL_CONFIG"
-fi
+	;;
+esac
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
 	echo "WARNING: could not archive Step 1 config at $CONFIG_SNAPSHOT; continuing with local config" >&2
 fi
@@ -197,14 +199,16 @@ if ! output_is_valid "$LOCAL_OUTPUT"; then
 	echo "ERROR: Step 1 cmsRun returned successfully but did not produce a valid local output: $LOCAL_OUTPUT" >&2
 	exit 1
 fi
-if [[ "$PROCESS" == QCD_FixedTarget_pThat_1to5GeV_13p6TeV ]]; then
+case "$PROCESS" in
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV)
 	python3 "$WORKFLOW_ROOT/scripts/audit_generation_chunk.py" "$LOCAL_OUTPUT" \
 		--process "$PROCESS" --events "$N_EVENTS" --chunk "$CHUNK" \
 		--config "$LOCAL_CONFIG" --fragment "$FRAGMENT" \
 		--output "$LOCAL_STEP1_DIR/generation_part${PART}.json"
 	mkdir -p "$SAMPLE_DIR/generation_metadata"
 	cp "$LOCAL_STEP1_DIR/generation_part${PART}.json" "$SAMPLE_DIR/generation_metadata/part${PART}.json"
-fi
+	;;
+esac
 stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
 
 LOG_SNAPSHOT="$LOG_DIR/step1_events_part${PART}_seed${GENERATOR_SEED}.log"

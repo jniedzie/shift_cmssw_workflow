@@ -745,6 +745,44 @@ This requires complete generator metadata, but is not a downstream ROOT/job
 completeness audit. Validate all four stages before plotting. Do not normalize
 from the legacy first-worker `cross_sections.txt` file.
 
+### Mu-enriched QCD pilot
+
+The isolated mu-enriched preset applies the CMS HardQCD plus long-lived-hadron
+decay plus generator-muon-filter mechanism to the fixed-target source. It is a
+bounded machinery pilot, not an approved production campaign:
+
+```bash
+set -a
+source config/campaigns/qcd_mu_enriched_pilot_2023.env
+set +a
+CMSSW_PREPARED=1 N_EVENTS=10 ./run_step1_generation.sh 0 10
+```
+
+The fragment selects at least one status-1 generator muon moving from the
+source toward CMS, with no generator momentum threshold. Step 1
+records both attempted and accepted event counts through `GenFilterInfo`; the
+accepted-event weight is based on the attempted denominator. Do not add this
+sample to inclusive QCD: it is a filtered subset. Do not scale or submit the
+preset until the decay corridor, timing, material-interaction limitation and
+normalization audit have been reviewed with the CMS LSS geometry.
+
+The currently authorized 10k machinery campaign runs **Step 1 only**; it does
+not test reconstruction:
+
+```bash
+set -a
+source config/campaigns/qcd_mu_enriched_10k_2023.env
+set +a
+./run_condor.sh --steps 1 --check
+./run_condor.sh --steps 1 --prebuilt --keep-logs
+```
+
+This is 1000 chunks of 10 attempts; the filter discards any event without a
+qualifying muon before simulation/output. The Step-1 audit rejects any saved
+event without a filter-eligible muon and records the attempted/pass denominator
+per chunk. Do not proceed to Steps 2--4 until generator production itself has
+been completed and reviewed.
+
 ### General submission
 
 Submit the full chain or selected stages with:

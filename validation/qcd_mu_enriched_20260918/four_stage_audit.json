@@ -1,0 +1,30 @@
+{
+  "step1": {
+    "path": "/eos/home-j/jniedzie/shift_cmssw/qcd/QCD_MuEnriched_FixedTarget_pThat_1to5GeV_ATLASproxy_pilot_2023_v1/samples/step1/events_step1_part0000.root",
+    "events": 10,
+    "bytes": 404618,
+    "sha256": "5f59b857d26faeb6e7447e6d76643c04e72278450a949778c5d51f01140b577d"
+  },
+  "step2": {
+    "path": "/eos/home-j/jniedzie/shift_cmssw/qcd/QCD_MuEnriched_FixedTarget_pThat_1to5GeV_ATLASproxy_pilot_2023_v1/samples/step2/events_step2_part0000.root",
+    "events": 10,
+    "bytes": 1732254,
+    "sha256": "8845bb14fc95c164cac86ca6b9975c967138fef41a301ce1af98405a1d8417bd"
+  },
+  "step3": {
+    "path": "/eos/home-j/jniedzie/shift_cmssw/qcd/QCD_MuEnriched_FixedTarget_pThat_1to5GeV_ATLASproxy_pilot_2023_v1/samples/step3/events_AOD_part0000.root",
+    "events": 10,
+    "bytes": 3821853,
+    "sha256": "952bd338f5264e2996e460009761886d668e00aae06c15898cb66b0fe308248e"
+  },
+  "step4": {
+    "path": "/eos/home-j/jniedzie/shift_cmssw/qcd/QCD_MuEnriched_FixedTarget_pThat_1to5GeV_ATLASproxy_pilot_2023_v1/samples/step4/events_NanoAOD_part_0000.root",
+    "events": 10,
+    "bytes": 1335845,
+    "sha256": "327d2f64edf6887a70639cd20d58949be979a94f6460d62cdea082a0291ccc37",
+    "muons": 0,
+    "dimuon_vertices": 0
+  },
+  "physics_valid": false,
+  "reconstructed_mass_read": false
+}

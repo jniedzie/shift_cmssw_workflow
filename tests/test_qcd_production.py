@@ -29,9 +29,43 @@ class QcdProductionTest(unittest.TestCase):
         self.assertIn("'Charmonium:all = off'", text)
         self.assertIn("'SoftQCD:all = off'", text)
 
+    def test_mu_enriched_fragment_uses_explicit_shift_corridor(self):
+        text = (ROOT/'fragments/QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV_pythia8_cff.py').read_text()
+        for required in ("'ParticleDecays:limitTau0 = off'",
+                         "'ParticleDecays:limitCylinder = on'",
+                         "'ParticleDecays:xyMax = 8000.'",
+                         "'ParticleDecays:zMax = 151000.'",
+                         '"MCSmartSingleParticleFilter"',
+                         'ProductionFilterSequence = cms.Sequence(generator * mugenfilter)'):
+            self.assertIn(required, text)
+        self.assertNotIn('filterEfficiency=', text)
+        self.assertNotIn('crossSection=', text)
+        self.assertIn('MinP=cms.untracked.vdouble(0., 0.)', text)
+        self.assertIn('MinPt=cms.untracked.vdouble(0., 0.)', text)
+        self.assertIn('MinEta=cms.untracked.vdouble(-10., -10.)', text)
+        self.assertIn('MaxEta=cms.untracked.vdouble(0., 0.)', text)
+
     def test_cross_sections_are_averaged_not_added(self):
         result = combine(self.records(), 2)
         self.assertEqual(result['cross_section_pb'], 110.)
+        self.assertEqual(result['event_weight_pb_by_chunk'], {'0':5., '1':6.})
+
+    def test_filtered_normalization_uses_attempted_denominator(self):
+        records = self.records()
+        for record, accepted in zip(records, (2, 4)):
+            record['process'] = 'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV'
+            record['attempted_events'] = 10
+            record['accepted_events'] = accepted
+            record['events'] = accepted
+            record['sum_weights'] = float(accepted)
+            record['sum_weights_squared'] = float(accepted)
+            record['generated_filter_efficiency'] = accepted/10.
+        result = combine(records, 2)
+        self.assertEqual(result['attempted_events'], 20)
+        self.assertEqual(result['accepted_events'], 6)
+        self.assertAlmostEqual(result['filter_efficiency'], .3)
+        self.assertEqual(result['inclusive_cross_section_pb'], 110.)
+        self.assertEqual(result['selected_cross_section_pb'], 34.)
         self.assertEqual(result['event_weight_pb_by_chunk'], {'0':5., '1':6.})
 
     def test_incomplete_or_duplicate_chunks_fail(self):
@@ -46,6 +80,15 @@ class QcdProductionTest(unittest.TestCase):
             records[0][key] = value
             with self.assertRaises(ValueError):
                 combine(records, 2)
+
+    def test_inconsistent_filtered_efficiency_fails(self):
+        records = self.records()
+        for record in records:
+            record['process'] = 'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV'
+            record['attempted_events'] = 20
+            record['accepted_events'] = 10
+        with self.assertRaises(ValueError):
+            combine(records, 2)
 
 
 if __name__ == '__main__':
