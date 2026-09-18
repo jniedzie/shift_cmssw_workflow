@@ -716,6 +716,37 @@ Read failed logs before retrying; retain failed directories as evidence.
 
 ## Run with Condor
 
+### QCD machinery test
+
+Use the isolated preset; it does not change the default J/psi campaign:
+
+```bash
+set -a
+source config/campaigns/qcd_machinery_2023.env
+set +a
+./run_condor.sh --check
+# Only after a successful bounded step 1--4 test and runtime preparation:
+./run_condor.sh --prebuilt --keep-logs
+```
+
+This is 1000 x 10 unfiltered pThat 1--5 GeV QCD events under `qcd/`, with
+provisional ATLAS proxy material/field and no pileup/trigger conditioning.
+The canonical physics scope and ownership rules are in `SHIFT_ANALYSIS.md`.
+The prepared-release check rejects a missing or changed generator fragment.
+Step 1 audits QCD ownership and saves per-chunk normalization metadata before
+publishing the ROOT file. After completion, in the campaign directory:
+
+```bash
+python3 /absolute/workflow/scripts/collect_generation_metadata.py \
+  generation_metadata --expected-chunks 1000 --output qcd_normalization.json
+```
+
+This requires complete generator metadata, but is not a downstream ROOT/job
+completeness audit. Validate all four stages before plotting. Do not normalize
+from the legacy first-worker `cross_sections.txt` file.
+
+### General submission
+
 Submit the full chain or selected stages with:
 
 ```bash

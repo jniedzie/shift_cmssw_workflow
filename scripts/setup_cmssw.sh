@@ -137,6 +137,10 @@ if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
 	fi
 else
 	echo "[setup_cmssw] Using prebuilt CMSSW release"
+	if ! cmp -s "$FRAGMENT" "$LINK_TARGET"; then
+		setup_error "prebuilt generator fragment is missing or differs from this workflow snapshot: $LINK_TARGET"
+		return 1 2>/dev/null || exit 1
+	fi
 fi
 cd "$WORKFLOW_ROOT"
 
