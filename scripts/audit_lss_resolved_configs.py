@@ -7,6 +7,7 @@ import io
 import json
 import math
 import runpy
+import subprocess
 import sys
 from pathlib import Path
 
@@ -105,13 +106,28 @@ def audit_runtime(process, resolved, path, is_step4):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("step1", type=Path, help="resolved Step 1 Python configuration")
-    parser.add_argument("step4", type=Path, help="resolved Step 4 Python configuration")
+    parser.add_argument("step4", type=Path, nargs='?', help="resolved Step 4 Python configuration")
+    parser.add_argument('--inspect-stage', choices=('1', '4'), help=argparse.SUPPRESS)
     args = parser.parse_args()
 
-    step1 = load_process(args.step1)
-    step4 = load_process(args.step4)
-    step1_contract = contract(step1, args.step1)
-    step4_contract = contract(step4, args.step4)
+    if args.inspect_stage:
+        process = load_process(args.step1)
+        resolved = contract(process, args.step1)
+        audit_runtime(process, resolved, args.step1, args.inspect_stage == '4')
+        print(json.dumps(resolved, sort_keys=True))
+        return
+    if args.step4 is None:
+        parser.error('step4 is required')
+    # CMSSW stores era choices globally. A fully expanded dumpPython snapshot
+    # has no era declaration, and cannot share an interpreter with a cmsDriver
+    # configuration that declares an era. Inspect each in a fresh interpreter;
+    # retain all contract and runtime checks before comparing the results.
+    def inspect(path, stage):
+        return json.loads(subprocess.check_output(
+            [sys.executable, str(Path(__file__).resolve()), str(path),
+             '--inspect-stage', stage], text=True))
+    step1_contract = inspect(args.step1, '1')
+    step4_contract = inspect(args.step4, '4')
     if step1_contract != step4_contract:
         differing = [
             name for name in CONTRACT_FIELDS if step1_contract[name] != step4_contract[name]
@@ -120,8 +136,6 @@ def main():
     if step1_contract["materialMode"] == "none" and step1_contract["fieldMode"] == "none":
         raise RuntimeError("both LSS material and field are disabled")
 
-    audit_runtime(step1, step1_contract, args.step1, False)
-    audit_runtime(step4, step4_contract, args.step4, True)
     print(json.dumps({"status": "ok", **step1_contract}, sort_keys=True))
 
 

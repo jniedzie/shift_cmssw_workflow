@@ -783,6 +783,162 @@ event without a filter-eligible muon and records the attempted/pass denominator
 per chunk. Do not proceed to Steps 2--4 until generator production itself has
 been completed and reviewed.
 
+### Bounded pThat and early-exit pilots (2026-09-21)
+
+The later user authorization includes full-chain mu-enriched QCD and J/psi
+sampling tests, plus recovery of the original QCD campaign. It supersedes the
+Step-1-only scope above for these explicitly named machinery tests, not for
+final CMS-LSS physics production. The canonical plan and results are in
+`../SHIFT_ANALYSIS.md`.
+
+`scripts/prepare_sampling_scan.py OUTPUT --template RESOLVED_STEP1_CFG` freezes
+a workflow snapshot and prepares separate `smoke.sub`, `gen.sub` and `full.sub`
+Condor manifests. It is a dated, CERN-specific pilot launcher, not a general
+central-production interface. Use a fresh output and fresh campaign tags for
+a new study; the runner refuses an existing per-chunk report directory.
+Inspect the generated manifest before submission. No shared release build is
+performed. Verify the frozen Step-1 geometry, conditions and source settings
+and run the bounded four-stage smoke before submitting the full manifest.
+
+The present manifest requests five Born pThat bins (1--2, 2--5, 5--10,
+10--20, 20--infinity GeV), separately for direct J/psi and mu-enriched QCD:
+5000 GEN attempts plus ten full-chain chunks of 20 attempts in each bin.
+Preserve original seeds for failed-job recovery, retain failed evidence, and
+explicitly select any replacement report so it is not counted twice.
+
+`summarize_sampling_scan.py MANIFEST --output SUMMARY` aggregates only
+validated reports and records missing/failed chunks. Its hypothetical
+generator-muon, detector-hit and reconstructed-muon gates do **not** filter
+events. `audit_sampling_gen_bins.py SUMMARY --output AUDIT`, run in the CMSSW
+environment, independently checks saved GEN ROOT files and Born bin ownership.
+`audit_campaign_event_counts.py CAMPAIGN --chunks N --all-stages --output AUDIT`
+checks the original campaign's four-stage ROOT identities against each chunk's
+generation metadata. All reconstructed reads have explicit mass-free branch
+allowlists.
+
+The stored Pythia pThat can move below a configured bin edge after constituent
+masses are assigned. The production audit reconstructs the Born sampling pThat
+from the hard-process record; do not loosen bin bounds or throw away these
+events based only on the stored value. `pythia_pthat.py` supports only the
+validated built-in HardQCD and direct-charmonium process codes. The nominal
+J/psi 0--1 fragment is not valid low-pT coverage with the default divergence
+cutoff. Neither setting that cutoff to zero nor mixing arbitrary SoftQCD and
+HardQCD samples is an approved solution.
+
+These pilots keep `physics_valid=false` and `normalization_ready=false`.
+They use the ATLAS proxy with no pileup/trigger. In particular, a zero-SimHit
+gate saves no transport CPU and must not be assumed safe for noise, pileup or
+fake vertices. Rejected events need identity, weight, denominator and reason
+bookkeeping even when their analysis branches are empty.
+
+The sampling runner also exports the standard campaign `cross_sections.txt`
+after the Step-1 audit, using the existing GenXsecAnalyzer log parser. Its
+complete per-run estimates remain in `sampling_pilot/*/part*/report.json`.
+The text file is first-successful-job bookkeeping, not an average of chunks.
+For the September 21 J/psi bins, the missing text files in both `scan` and
+`analysis1k_chunk50` campaigns were recovered from the existing 5000-attempt
+GEN-only estimates after matching every target generator configuration.
+`cross_sections.provenance.json` records the source, full-precision estimate,
+uncertainty and checksums. No rerun or event-file modification was needed.
+The GEN estimate event count is **not** the reconstructed-sample normalization
+denominator. No extra branching fraction or detector efficiency was applied;
+the forced-decay normalization convention remains provisional.
+
+### Weighted GEN replay pilots
+
+The bounded September 21 follow-up reuses saved GEN instead of regenerating
+collisions. `prepare_weighted_sampling.py REPORT --output LEDGER` selects a
+fixed prefix of framework attempts, keeping all events with two forward
+stable GEN muons above 10 GeV and a deterministic random 10% of the rest.
+Both values are explicit options. The nonzero floor is mandatory. An
+independent check in the old QCD sample showed that a hard 20 GeV cut loses
+two of its three both-both events; neither 10 nor 20 GeV is approved as a
+lossless veto. These variables are MC sampling inputs, never data cuts.
+
+The ledger retains every upstream saved identity, every upstream-absent
+identity, sampling probability, selected flag, inverse probability and sums
+of weights and squared weights. `validate_sampling_ledger.py` recomputes all
+choices and requires an exact partition of the parent attempts. The selected
+events are replayed by `run_sampling_replay.py` through unchanged simulation
+and Steps 2--4, with an exact shifted-HepMC signature check. The split SIM
+path must retain CMS's `PPSTransportTask`; it cannot be dropped with generation.
+
+`prepare_replay_jobs.py` prepares the explicitly bounded CERN pilot manifest;
+submit only after an independent four-stage smoke audit. Keep source GEN and
+ledger digests fixed. The pilot's default 500-attempt prefixes and five-event
+chunks are test sizes, not a production-efficiency recommendation.
+`summarize_sampling_replay.py` checks completeness, probabilities and weights
+before reporting usable totals. `audit_sampling_stage_identities.py` then
+opens every ROOT stage and checks exact identities. `write_sampling_bookkeeping.py`
+writes one compact JSONL record per parent attempt: unprocessed events have
+null reconstruction, not a fabricated physical zero.
+`audit_sampling_replay_counts.py MANIFEST BOOKKEEPING --output AUDIT`, run
+inside the CMSSW environment, independently checks Nano muon/topology counts
+and every bookkeeping state without enabling any mass branch. Require all
+selected chunks to have completed before the final audit. If an exact retry
+uses a separate campaign, record it in the manifest's `chunk_campaigns`
+mapping; never count both the original and replacement.
+
+`compare_sampling_cost.py BASELINE_SUMMARY REPLAY_SUMMARY --output COST`
+compares only complete matching bins and scales the baseline to the same
+number of parent attempts. Its output is a recorded successful-stage wall-time
+comparison, not a matched-event CPU benchmark or a precision improvement.
+The first complete 611-event pilot gave roughly 1.4 times lower recorded
+stage cost but no both-both vertices. Do not scale production on timing alone.
+
+**Do not normalize replay output using ordinary Nano `genWeight` or by
+summing its inherited parent GEN run/lumi counters.** The per-event sampling
+factor is 1/probability for selected events and zero for unselected entries;
+the denominator is the unique parent ledger, counted once. Cross-section
+weights and luminosity are separate. Sidecar weighting must be integrated
+and independently validated before production analysis. Never add a replay
+subset to its parent as a separate background. All current replay outputs
+remain `physics_valid=false` and `normalization_ready=false`.
+
+### Larger-chunk September 21 follow-up
+
+The explicitly authorized expansion is frozen under
+`validation/sampling_scan_20260921_v10` in the workspace. It uses 50 selected
+QCD events per chunk (6336 events from three 5000-attempt GEN parents), and
+50 J/psi attempts per chunk (1000 attempts per Born pThat bin in 1--2, 2--5,
+5--10, 10--20 and 20--infinity). Clusters are 17387638 and 17387641.
+The external stage allowance is six hours; detector transport guards are
+unchanged. Do not edit the frozen configuration or rebuild the shared release.
+
+`prepare_expanded_sampling.py OUTPUT --template CFG` prepares this bounded
+study, not a generic production campaign. Only `replay.sub` and `jpsi.sub`
+are its submission manifests; do not submit the generic freezer's other
+default manifests. The expanded QCD population contains the previous
+500-attempt prefixes and is not additive independent statistics.
+
+After completion, summarize and audit the exact manifests. For J/psi,
+`merge_sampling_nano.py SUMMARY --sample jpsi --campaign-tag analysis1k_chunk50
+--output MERGE_REPORT` publishes only complete bins, verifying schema,
+identities and mass-free topology counts before and after merging. Existing
+aggregates are never overwritten. It preserves compressed ROOT baskets;
+a bounded parallel-merge test checked 20 exact event identities and topology
+counts. Use explicit file lists, not a glob over old and new merges.
+
+For the original recovered QCD campaign, `merge_complete_qcd.py` verifies
+every source chunk against its generation metadata and writes a separate
+complete aggregate. An older merged file exists but omits recovered events.
+Do not delete inputs just because a merge exists. Preserve normalization,
+sampling ledgers, seeds, configs, input manifests and validation reports.
+The detailed read-only retention proposal is `v10/RETENTION.md`; no cleanup
+is part of the generation submission.
+
+Implementation checkpoint (2026-09-21): the sampling/replay launchers, Born
+pThat audit, exact-identity and merge checks, cross-section export, and
+non-deleting storage inventory/retirement helpers are versioned together.
+`audit_lss_resolved_configs.py` loads Step 1 and Step 4 in separate Python
+processes to avoid CMSSW's global-era collision; all existing material/field
+contract checks remain mandatory. The retention helpers only inventory,
+archive metadata or propose explicit file lists; they do not remove data.
+Before this checkpoint, 43 focused tests passed across sampling, weighted
+sampling, Born pThat, cross-section export, QCD generation, fixed-target
+settings, Step-4 chunk contracts and the paired LSS launcher. This test result
+does not promote the provisional campaigns to physics-ready production.
+
 ### General submission
 
 Submit the full chain or selected stages with:

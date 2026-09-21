@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from pythia_pthat import from_hepmc
 
 QCD_CODES = set(range(111, 117)) | set(range(121, 125))
 JPSI_CODES = set(range(401, 411)) | {441}
@@ -41,7 +42,7 @@ def main():
         return handle.product()
 
     codes, particles = Counter(), Counter()
-    identities, weights, pthats = set(), [], []
+    identities, weights, pthats, born_pthats = set(), [], [], []
     selected_muons = []
     timing_residuals, source_shift_residuals = [], []
     for event in Events(args.input):
@@ -57,8 +58,13 @@ def main():
         if not math.isfinite(weight) or weight != 1.:
             raise ValueError('This unfiltered LO normalization contract requires unit weights')
         bins = list(info.binningValues())
-        if not bins or not math.isfinite(bins[0]) or not 1.-1.e-8 <= bins[0] <= 5.+1.e-8:
-            raise ValueError(f'Unexpected generated pThat: {bins}')
+        if not bins or not math.isfinite(bins[0]) or bins[0] < 0:
+            raise ValueError(f'Invalid generated pThat: {bins}')
+        hepmc = get(event, ('generator', 'unsmeared'), 'edm::HepMCProduct').GetEvent()
+        born = from_hepmc(hepmc, code, bins[0])
+        if not 1.-1.e-8 <= born <= 5.+1.e-8:
+            raise ValueError(f'Unexpected Born sampling pThat: {born}; stored={bins[0]}')
+        born_pthats.append(born)
         codes[code] += 1
         weights.append(weight)
         pthats.append(bins[0])
@@ -164,6 +170,8 @@ def main():
         accepted_events=accepted, sum_weights=sum(weights),
         sum_weights_squared=sum(w*w for w in weights), hard_process_codes=dict(codes),
         pthat_min=min(pthats), pthat_max=max(pthats), particle_counts=dict(particles),
+        born_pthat_min=min(born_pthats), born_pthat_max=max(born_pthats),
+        pthat_bin_definition='Born phase-space pThat before final constituent-mass assignment',
         runs=runs, lumi_processes=lumis, external_filter_records=filter_records,
         generated_filter_efficiency=efficiency, filter_efficiency_error=efficiency_error,
         normalization_scope=('filtered LO primary-process definition; no luminosity assumed'
