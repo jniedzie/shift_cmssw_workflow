@@ -7,7 +7,9 @@ ambiguous empty intersections fail closed instead of silently losing material.
 """
 
 from contextlib import contextmanager
+import hashlib
 import importlib
+import json
 
 import numpy as np
 
@@ -49,9 +51,113 @@ def conservative_lattice_candidates(fluka_registry, region_names=None):
     return result
 
 
+def validated_lattice_exclusions(source_registry, raw_preflight):
+    """Validate a complete two-backend report before any diagnostic exclusion.
+
+    Null means agreement of the two recorded CSG backends, not independent
+    native-FLUKA proof. BLCKHOLE means an explicitly absorbing source region;
+    excluding it is only an unvalidated diagnostic transport policy.
+    """
+    from fluka_region_preflight import resolve_raw_region_classifications
+
+    if not isinstance(raw_preflight, dict):
+        raise LatticeConversionError("raw_preflight must be a resolved classification report")
+    names = list(source_registry.regionDict)
+    if not names:
+        raise LatticeConversionError("exclusion validation requires a non-empty complete source registry")
+    if raw_preflight.get("primary_backend") != "cgal_sm" or raw_preflight.get("secondary_backend") != "pycsg":
+        raise LatticeConversionError("exclusions require distinct cgal_sm and pycsg classifications")
+
+    def labels(report, key, *, allow_missing=False):
+        value = report.get(key, [] if allow_missing else None)
+        if not isinstance(value, list) or any(not isinstance(name, str) or not name for name in value):
+            raise LatticeConversionError(f"invalid classification list: {key}")
+        if len(value) != len(set(value)):
+            raise LatticeConversionError(f"duplicate classification labels: {key}")
+        return set(value)
+
+    def classification(report, expected, description, *, allow_empty_minimal=False):
+        if not isinstance(report, dict):
+            raise LatticeConversionError(f"missing {description} classification")
+        minimal = allow_empty_minimal and not expected
+        if report.get("passed", True if minimal else None) is not True:
+            raise LatticeConversionError(f"{description} classification did not pass")
+        groups = {key: labels(report, key, allow_missing=minimal and key == "blackhole_regions")
+                  for key in ("blackhole_regions", "non_null_regions", "source_null_regions")}
+        errors = report.get("evaluation_errors")
+        if not isinstance(errors, list) or errors:
+            raise LatticeConversionError(f"{description} evaluation errors cannot authorize exclusions")
+        flattened = [name for values in groups.values() for name in values]
+        if len(flattened) != len(set(flattened)) or set(flattened) != set(expected):
+            raise LatticeConversionError(f"{description} classes do not exactly partition requested source labels")
+        counts = {"requested_region_count": len(expected),
+                  "evaluated_region_count": len(expected) - len(groups["blackhole_regions"]),
+                  "evaluation_error_count": 0}
+        counts.update({key.replace("regions", "region_count"): len(values) for key, values in groups.items()})
+        for key, count in counts.items():
+            value = report.get(key, count if minimal else None)
+            if type(value) is not int or value != count:
+                raise LatticeConversionError(f"{description} count mismatch: {key}")
+        return groups
+
+    primary = raw_preflight.get("primary_classification")
+    primary_groups = classification(primary, set(names), "primary")
+    secondary = raw_preflight.get("secondary_classification")
+    secondary_groups = classification(secondary, primary_groups["source_null_regions"], "secondary",
+                                      allow_empty_minimal=True)
+    if secondary.get("backend", "pycsg") != "pycsg" or primary.get("backend", "cgal_sm") != "cgal_sm":
+        raise LatticeConversionError("nested classification backend identity mismatch")
+    if secondary_groups["blackhole_regions"]:
+        raise LatticeConversionError("secondary classification cannot relabel an ordinary region as blackhole")
+    declared_blackholes = set()
+    for name in names:
+        assignment = source_registry.assignmas.get(name)
+        if isinstance(assignment, (list, tuple)):
+            assignment = assignment[0] if assignment else None
+        if assignment == "BLCKHOLE":
+            declared_blackholes.add(name)
+    if primary_groups["blackhole_regions"] != declared_blackholes:
+        raise LatticeConversionError("blackhole classifications do not match exact source BLCKHOLE assignments")
+    try:
+        recomputed = resolve_raw_region_classifications(primary, secondary, names)
+    except (KeyError, TypeError, ValueError) as error:
+        raise LatticeConversionError(f"cannot validate resolved raw classification: {error}") from error
+    for key, value in recomputed.items():
+        if key in {"primary_classification", "secondary_classification"}:
+            continue
+        if (key.endswith("_count") and type(raw_preflight.get(key)) is not int) or raw_preflight.get(key) != value:
+            raise LatticeConversionError(f"resolved classification inconsistent with its two backends: {key}")
+    if raw_preflight.get("passed") is not True or raw_preflight.get("evaluation_errors") or raw_preflight.get(
+            "deferred_null_validation_regions"):
+        raise LatticeConversionError("unresolved or deferred classifications cannot authorize exclusions")
+    agreed_nulls = primary_groups["source_null_regions"] & secondary_groups["source_null_regions"]
+    if set(raw_preflight["source_null_regions"]) != agreed_nulls:
+        raise LatticeConversionError("source-null exclusions lack agreement of both backends")
+    try:
+        fingerprint = hashlib.sha256(json.dumps(raw_preflight, sort_keys=True, separators=(",", ":"),
+                                                allow_nan=False).encode()).hexdigest()
+    except (TypeError, ValueError) as error:
+        raise LatticeConversionError("raw classification report must be finite JSON data") from error
+    exclusions = {name: {"name": name, "reason": "confirmed_two_backend_source_null",
+                         "primary_backend": "cgal_sm", "secondary_backend": "pycsg"}
+                  for name in sorted(agreed_nulls)}
+    exclusions.update({name: {"name": name, "reason": "diagnostic_blackhole_exclusion",
+                              "source_assignment": "BLCKHOLE", "absorbing_not_empty": True,
+                              "transport_equivalence_validated": False}
+                       for name in sorted(declared_blackholes)})
+    return exclusions, {"raw_preflight_report_provided": True, "raw_preflight_report_sha256": fingerprint,
+                        "complete_source_partition_validated": True,
+                        "source_region_count": len(names), "confirmed_source_null_count": len(agreed_nulls),
+                        "diagnostic_blackhole_exclusion_count": len(declared_blackholes),
+                        "exclusion_count": len(exclusions), "production_ready": False,
+                        "blackhole_policy": "explicit absorbing regions omitted only for diagnostic geometry",
+                        "blackhole_transport_equivalence_validated": False,
+                        "source_null_native_fluka_equivalence_validated": False}
+
+
 @contextmanager
 def lattice_conversion_guard(report, *, converter_module=None, source_registry=None,
-                             cell_bounds_provider=region_bounds):
+                             cell_bounds_provider=region_bounds, raw_preflight=None):
     """Install and restore a fail-closed, source-independent lattice converter.
 
     ``source_registry`` should be the complete source registry when the caller
@@ -60,6 +166,9 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
     supplied by pyg4ometry.  ``cell_bounds_provider`` may supply independently
     certified analytic/LP finite bounds for cells bounded by oblique planes.
     A mesh-derived bounds provider is not safe and must not be passed here.
+    ``raw_preflight`` optionally supplies a complete resolved two-backend raw
+    classification. Only validated source-null and exactly assigned BLCKHOLE
+    labels may then be excluded, with every per-cell exclusion recorded.
     """
     from pyg4ometry import config, fluka, geant4, transformation
 
@@ -70,6 +179,15 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
                    "source_bound_clipping": False, "exact_cell_clipping": True,
                    "coverage_scope": "complete_source_registry" if source_registry is not None else "converter_registry_only",
                    "independent_navigation_validation_required": True, "passed": False, "lattices": []})
+    exclusions = {}
+    if raw_preflight is not None:
+        if source_registry is None:
+            raise LatticeConversionError("raw exclusions require an explicit complete source_registry")
+        exclusions, exclusion_report = validated_lattice_exclusions(source_registry, raw_preflight)
+        report["candidate_exclusion_validation"] = exclusion_report
+    else:
+        report["candidate_exclusion_validation"] = {"raw_preflight_report_provided": False,
+                                                     "exclusion_count": 0}
 
     def placement_matrix(placement):
         return _rigid_matrix(_affine(transformation.tbxyz2matrix(
@@ -85,7 +203,8 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
     def convert_impl(greg, freg, world, region_zone_aabbs, region_lvs):
         del region_zone_aabbs  # Tessellated extents must never select or clip prototypes.
         source = source_registry if source_registry is not None else freg
-        candidates = conservative_lattice_candidates(source)
+        eligible_names = sorted(set(source.regionDict) - set(exclusions))
+        candidates = conservative_lattice_candidates(source, eligible_names)
         placements = {}
         for item in world.daughterVolumes:
             if item.name.endswith("_pv") and item.name[:-3] in region_lvs:
@@ -99,7 +218,9 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
         for cell_name, lattice in sorted(source.latticeDict.items()):
             candidate_names = candidates[cell_name]
             record = {"cell": cell_name, "candidate_names": candidate_names,
-                      "analytically_rejected_count": len(source.regionDict) - len(candidate_names),
+                      "analytically_rejected_count": len(eligible_names) - len(candidate_names),
+                      "preclassification_excluded_candidates": [exclusions[name] for name in sorted(exclusions)],
+                      "exclusion_stage": "before_analytic_preselection",
                       "placements": [], "passed": False}
             records.append(record)
             if not candidate_names:
@@ -178,7 +299,8 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
 
     def contents(freg, ignored_mesh_bounds):
         del ignored_mesh_bounds
-        return conservative_lattice_candidates(freg)
+        source = source_registry if source_registry is not None else freg
+        return conservative_lattice_candidates(source, sorted(set(source.regionDict) - set(exclusions)))
 
     converter._convertLatticeCells, converter._getContentsOfLatticeCells = convert, contents
     try:

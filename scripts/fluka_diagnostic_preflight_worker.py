@@ -31,6 +31,7 @@ def main():
         from fluka_region_preflight import classify_raw_regions
         from fluka_pycsg_compatibility import pycsg_compatibility_guard
         from fluka_halfspace_bounds import halfspace_bounds_guard
+        from fluka_primitive_fidelity import primitive_fidelity_guard
 
         regions = json.loads(args.regions_json.read_text())
         if not isinstance(regions, list) or not all(isinstance(name, str) for name in regions):
@@ -43,11 +44,12 @@ def main():
                                ("worker", Path(__file__)),
                                ("halfspace_bounds", Path(__file__).with_name("fluka_halfspace_bounds.py")),
                                ("analytic_bounds", Path(__file__).with_name("fluka_analytic_bounds.py")),
+                               ("primitive_fidelity", Path(__file__).with_name("fluka_primitive_fidelity.py")),
                                ("pycsg_compatibility", Path(__file__).with_name("fluka_pycsg_compatibility.py")))
         }
         result["argv"] = sys.argv
         result["python_version"] = sys.version
-        with normalized_orthogonality_guard(ledger), full_conversion_guards(args.world_dimensions_mm), pycsg_compatibility_guard() as compatibility, halfspace_bounds_guard(result.setdefault("halfspace_bounds", {})):
+        with normalized_orthogonality_guard(ledger), full_conversion_guards(args.world_dimensions_mm), pycsg_compatibility_guard() as compatibility, halfspace_bounds_guard(result.setdefault("halfspace_bounds", {})), primitive_fidelity_guard(result.setdefault("primitive_fidelity", {})):
             result["pycsg_compatibility"] = compatibility
             with args.output.with_suffix(".reader.log").open("w") as log, redirect_stdout(log), redirect_stderr(log):
                 registry = Reader(str(args.normalized_deck)).flukaregistry

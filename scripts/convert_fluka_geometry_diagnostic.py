@@ -29,6 +29,7 @@ from fluka_material_fidelity import audit_material_cards, material_fidelity_guar
 from fluka_material_reachability import material_reachability
 from fluka_halfspace_bounds import halfspace_bounds_guard, certified_region_bounds
 from fluka_lattice_conversion import lattice_conversion_guard
+from fluka_primitive_fidelity import primitive_fidelity_guard
 from ir1_fluka_geometry import (
     ProxyModelError,
     _install_raw_zone_aabb_fallback,
@@ -336,7 +337,7 @@ def run_conversion(args, report):
     material_fidelity = report["material_fidelity"] = {}
     material_roots = set()
     with material_fidelity_guard(material_fidelity, required_materials=material_roots), normalized_orthogonality_guard(roundoff_acceptances), full_conversion_guards(
-            args.world_dimensions_mm, performance_report=performance) as skipped, halfspace_bounds_guard(report.setdefault("halfspace_bounds", {})):
+            args.world_dimensions_mm, performance_report=performance) as skipped, halfspace_bounds_guard(report.setdefault("halfspace_bounds", {})), primitive_fidelity_guard(report.setdefault("primitive_fidelity", {})):
         reader_module = importlib.import_module("pyg4ometry.fluka.reader")
         make_body = reader_module._make_body
 
@@ -422,7 +423,8 @@ def run_conversion(args, report):
             else:
                 with lattice_conversion_guard(report.setdefault("lattice_conversion", {}),
                                               converter_module=converter, source_registry=registry,
-                                              cell_bounds_provider=certified_region_bounds):
+                                              cell_bounds_provider=certified_region_bounds,
+                                              raw_preflight=preflight if report["full_source_requested"] else None):
                     converted = converter.fluka2Geant4(registry, regions=preflight["conversion_candidate_regions"])
                 # Upstream historically suppresses some lattice exceptions.
                 # A returned registry alone is not evidence of completion.
@@ -503,6 +505,7 @@ def main(argv=None):
                                "fluka_boolean_normalization.py", "fluka_material_fidelity.py",
                                "fluka_material_reachability.py", "fluka_analytic_bounds.py",
                                "fluka_halfspace_bounds.py", "fluka_lattice_conversion.py",
+                               "fluka_primitive_fidelity.py",
                                "fluka_pycsg_compatibility.py")},
               "world_dimensions_mm": list(args.world_dimensions_mm),
               "field_conversion_validated": False, "cmssw_installation_modified": False,

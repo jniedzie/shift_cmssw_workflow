@@ -1,5 +1,6 @@
 import importlib
 import importlib.util
+from copy import deepcopy
 import json
 from pathlib import Path
 import shutil
@@ -55,14 +56,115 @@ class GenericLatticeTest(unittest.TestCase):
         lattice = fluka.Lattice(cell, transform, flukaregistry=registry)
         return registry, lattice
 
-    def convert(self, registry, *, report=None, regions=None):
+    def convert(self, registry, *, report=None, regions=None, raw_preflight=None):
         from convert_ir1_fluka_geometry_full import full_conversion_guards
         report = {} if report is None else report
         with full_conversion_guards((2000, 2000, 2000), performance_report={}):
-            with self.guard(report, source_registry=registry):
+            with self.guard(report, source_registry=registry, raw_preflight=raw_preflight):
                 converted = self.converter.fluka2Geant4(registry, regions=regions,
                     worldDimensions=[2000, 2000, 2000], withLengthSafety=False)
         return converted, report
+
+    def exclusion_fixture(self):
+        from fluka_region_preflight import classify_raw_regions, resolve_raw_region_classifications
+        registry, _ = self.fixture()
+        null_body = self.fluka.RPP("nullbody", -3, 3, -3, 3, -3, 3, flukaregistry=registry)
+        self.region(registry, "EMPTY", null_body, null_body)
+        black_body = self.fluka.RPP("blackbody", -5, 5, -5, 5, -5, 5, flukaregistry=registry)
+        self.region(registry, "ABSORBER", black_body)
+        registry.assignma("BLCKHOLE", "ABSORBER")
+        names = list(registry.regionDict)
+        primary = classify_raw_regions(registry, names, timeout_seconds=5, include_bounds=True)
+        # This tiny exact same-box subtraction is null independently of CSG
+        # backend. Backend cross-check semantics, not an actual backend switch,
+        # are the target of this unit fixture; complete-deck pilots do both.
+        secondary = classify_raw_regions(registry, primary["source_null_regions"], timeout_seconds=5,
+                                         include_bounds=True)
+        secondary["backend"] = "pycsg"
+        report = resolve_raw_region_classifications(primary, secondary, names)
+        return registry, report
+
+    def test_validated_null_and_exact_blackhole_exclusions_are_explicit(self):
+        registry, preflight = self.exclusion_fixture()
+        converted, report = self.convert(registry, regions=["FIRST"], raw_preflight=preflight)
+        self.assertEqual(report["placement_count"], 1)
+        self.assertIn("CELL__FIRST_lattice_pv", converted.physicalVolumeDict)
+        excluded = {entry["name"]: entry for entry in report["lattices"][0]["preclassification_excluded_candidates"]}
+        self.assertEqual(set(excluded), {"EMPTY", "ABSORBER"})
+        self.assertEqual(excluded["EMPTY"]["reason"], "confirmed_two_backend_source_null")
+        self.assertTrue(excluded["ABSORBER"]["absorbing_not_empty"])
+        self.assertFalse(excluded["ABSORBER"]["transport_equivalence_validated"])
+        provenance = report["candidate_exclusion_validation"]
+        self.assertTrue(provenance["complete_source_partition_validated"])
+        self.assertEqual(len(provenance["raw_preflight_report_sha256"]), 64)
+
+    def test_without_report_null_and_blackhole_candidates_are_not_excluded(self):
+        registry, _ = self.exclusion_fixture()
+        with self.assertRaisesRegex(self.error, "unconverted possible prototypes"):
+            self.convert(registry, regions=["FIRST"])
+
+    def test_exclusions_require_complete_source_registry_not_selected_subset(self):
+        from fluka_lattice_conversion import validated_lattice_exclusions
+        registry, preflight = self.exclusion_fixture()
+        with self.assertRaisesRegex(self.error, "explicit complete source_registry"):
+            with self.guard({}, raw_preflight=preflight):
+                pass
+        del registry.regionDict["EMPTY"]
+        with self.assertRaisesRegex(self.error, "exactly partition"):
+            validated_lattice_exclusions(registry, preflight)
+
+    def test_top_level_lists_cannot_forge_nonempty_source_null_exclusions(self):
+        from fluka_lattice_conversion import validated_lattice_exclusions
+        registry, valid = self.exclusion_fixture()
+        forged = deepcopy(valid)
+        forged["source_null_regions"].append("FIRST")
+        forged["source_null_region_count"] += 1
+        forged["non_null_regions"].remove("FIRST")
+        forged["non_null_region_count"] -= 1
+        forged["conversion_candidate_regions"].remove("FIRST")
+        forged["conversion_candidate_region_count"] -= 1
+        with self.assertRaisesRegex(self.error, "inconsistent with its two backends"):
+            validated_lattice_exclusions(registry, forged)
+
+    def test_blackhole_exclusion_requires_exact_material_assignment(self):
+        from fluka_lattice_conversion import validated_lattice_exclusions
+        registry, report = self.exclusion_fixture()
+        registry.assignma("IRON", "ABSORBER")
+        with self.assertRaisesRegex(self.error, "exact source BLCKHOLE assignments"):
+            validated_lattice_exclusions(registry, report)
+
+    def test_unknown_duplicate_mismatched_backend_and_ambiguous_reports_rejected(self):
+        from fluka_lattice_conversion import validated_lattice_exclusions
+        registry, valid = self.exclusion_fixture()
+        mutations = [
+            lambda r: r["primary_classification"]["source_null_regions"].append("UNKNOWN"),
+            lambda r: r["primary_classification"]["source_null_regions"].append("EMPTY"),
+            lambda r: r["secondary_classification"]["source_null_regions"].clear(),
+            lambda r: r["primary_classification"]["evaluation_errors"].append({"name": "EMPTY", "error": "failed"}),
+            lambda r: r["secondary_classification"].update(backend="cgal_sm"),
+            lambda r: r.update(deferred_null_validation_regions=["EMPTY"], deferred_null_validation_region_count=1),
+            lambda r: r.update(requested_region_count=1),
+            lambda r: r["primary_classification"].update(requested_region_count=3.0),
+        ]
+        for index, mutation in enumerate(mutations):
+            with self.subTest(index=index):
+                report = deepcopy(valid)
+                mutation(report)
+                with self.assertRaises(self.error):
+                    validated_lattice_exclusions(registry, report)
+
+    def test_backend_disagreement_retains_region_and_cannot_authorize_exclusion(self):
+        from fluka_lattice_conversion import validated_lattice_exclusions
+        from fluka_region_preflight import resolve_raw_region_classifications
+        registry, preflight = self.exclusion_fixture()
+        primary = deepcopy(preflight["primary_classification"])
+        secondary = deepcopy(preflight["secondary_classification"])
+        secondary.update(source_null_regions=[], source_null_region_count=0,
+                         non_null_regions=["EMPTY"], non_null_region_count=1)
+        resolved = resolve_raw_region_classifications(primary, secondary, list(registry.regionDict))
+        exclusions, provenance = validated_lattice_exclusions(registry, resolved)
+        self.assertNotIn("EMPTY", exclusions)
+        self.assertEqual(provenance["confirmed_source_null_count"], 0)
 
     def test_enclosed_prototype_is_discovered_and_retains_offset(self):
         registry, _ = self.fixture()
