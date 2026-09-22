@@ -85,6 +85,13 @@ LINK_DIR="$CMSSW_SRC/$PYTHIA_FRAGMENT_DIR/python"
 LINK_TARGET="$LINK_DIR/$PYTHIA_FRAGMENT_NAME"
 PACKAGE_DIR="$CMSSW_SRC/$PYTHIA_FRAGMENT_DIR"
 [[ -f "$FRAGMENT" ]] || { setup_error "workflow fragment is missing: $FRAGMENT"; return 1 2>/dev/null || exit 1; }
+if [[ "${WORKFLOW_LOCAL_GENERATOR:-0}" == 1 ]]; then
+	[[ "${CMSSW_PREPARED:-0}" == 1 ]] || {
+		setup_error "job-local generator requires CMSSW_PREPARED=1; prepare compiled plugins separately"
+		return 1 2>/dev/null || exit 1
+	}
+	echo "[setup_cmssw] Using frozen workflow fragment; no shared CMSSW registration or build"
+else
 if [[ "${CMSSW_PREPARED:-0}" != 1 ]] && ! mkdir -p "$LINK_DIR"; then
 	setup_error "cannot create CMSSW fragment directory: $LINK_DIR"; return 1 2>/dev/null || exit 1
 fi
@@ -141,6 +148,7 @@ else
 		setup_error "prebuilt generator fragment is missing or differs from this workflow snapshot: $LINK_TARGET"
 		return 1 2>/dev/null || exit 1
 	fi
+fi
 fi
 cd "$WORKFLOW_ROOT"
 

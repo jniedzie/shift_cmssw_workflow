@@ -6,7 +6,7 @@ WORKFLOW_ROOT="$SCRIPT_DIR"
 
 usage() {
 	cat <<EOF
-Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt] [--keep-logs] [--check]
+Usage: $(basename "$0") [--steps LIST] [--force] [--prebuilt] [--keep-logs] [--check] [--dry-run FILE]
        $(basename "$0") --force-steps LIST [--prebuilt] [--keep-logs]
 
 Submit all configured jobs, running only the selected workflow steps.
@@ -21,6 +21,8 @@ Condor log directory and, when no older workflow jobs are active, from EOS.
 --keep-logs disables this automatic cleanup.
 --check validates configuration and trigger inputs without building, cleaning,
 or contacting Condor.
+--dry-run FILE freezes a prebuilt workflow and writes parsed Condor classads to
+FILE without submitting jobs, rebuilding CMSSW, or cleaning old logs.
 
 Examples:
   $(basename "$0") --steps 3,4
@@ -33,6 +35,7 @@ FORCE_SELECTED=0
 USE_PREBUILT=0
 KEEP_LOGS=0
 CHECK_ONLY=0
+DRY_RUN_FILE=""
 while (( $# )); do
 	case "$1" in
 		--steps)
@@ -61,6 +64,13 @@ while (( $# )); do
 		--check)
 			CHECK_ONLY=1
 			shift
+			;;
+		--dry-run)
+			[[ $# -ge 2 && "$2" == /* ]] || { echo "--dry-run requires an absolute output file" >&2; exit 2; }
+			DRY_RUN_FILE="$2"
+			USE_PREBUILT=1
+			KEEP_LOGS=1
+			shift 2
 			;;
 		-h|--help)
 			usage
@@ -98,6 +108,13 @@ configure_shift_lss
 # identity, pileup, and reconstruction settings must be serialized rather than
 # inherited.
 SUBMISSION_VARIABLES=(
+	GEN_PTHAT_MIN
+	GEN_PTHAT_MAX
+	GENERATOR_SEED
+	SIMULATION_SEED
+	WORKFLOW_LOCAL_GENERATOR
+	CLEANUP_PREVIOUS_STEP
+	ENABLE_EXONANOAOD
 	SHIFT_TARGET_DETAILED_MATERIAL
 	SHIFT_TARGET_NUMERICAL_COVARIANCE
 	STEP3_DIR
@@ -186,6 +203,20 @@ SUBMISSION_VARIABLES=(
 for variable_name in "${SUBMISSION_VARIABLES[@]}"; do
 	export "$variable_name"
 done
+
+export PROCESS STEP4_INPUTS_PER_JOB N_EVENTS N_JOBS
+python3 "$SCRIPT_DIR/scripts/unfiltered_qcd_contract.py" --check
+if [[ "$CLEANUP_PREVIOUS_STEP" == 1 ]]; then
+	[[ "$NORMALIZED_STEPS" == 1,2,3,4 && "$FORCE_SELECTED" == 0 ]] || {
+		echo "Retirement requires the full ordered chain without --force; retries resume from validated checkpoints" >&2; exit 2;
+	}
+fi
+if [[ -n "$CONDOR_MAX_RUNTIME_SECONDS" ]]; then
+	[[ "$CONDOR_MAX_RUNTIME_SECONDS" =~ ^[1-9][0-9]*$ && -z "${CONDOR_JOB_FLAVOUR:-}" ]] || {
+		echo "Use a positive CONDOR_MAX_RUNTIME_SECONDS or a JobFlavour, not both" >&2; exit 2;
+	}
+fi
+[[ "$CONDOR_REQUEST_DISK_MB" =~ ^[1-9][0-9]*$ ]] || { echo "Invalid disk request" >&2; exit 2; }
 
 case "$SHIFT_USE_FORWARD_COMMON_VERTEX_FIT" in
     0|1) ;;
@@ -429,6 +460,8 @@ mkdir -p "$SNAPSHOT_ROOT"
 rsync -a \
 	--exclude=.git \
 	--exclude=/condor/logs \
+	--exclude='/condor/*_logs' \
+	--exclude=__pycache__ \
 	--exclude=/condor/runtime_snapshots \
 	"$WORKFLOW_ROOT/" "$SNAPSHOT_ROOT/"
 chmod -R a-w "$SNAPSHOT_ROOT"
@@ -470,12 +503,19 @@ if [[ "$KEEP_LOGS" == 0 ]]; then
 else
 	echo "Keeping logs from older jobs (--keep-logs)"
 fi
+SUBMIT_ARGS=(-append "request_disk = $CONDOR_REQUEST_DISK_MB MB")
+if [[ -n "$DRY_RUN_FILE" ]]; then
+	[[ ! -e "$DRY_RUN_FILE" ]] || { echo "Refusing existing dry-run output" >&2; exit 2; }
+	SUBMIT_ARGS+=(-dry-run "$DRY_RUN_FILE")
+fi
 if [[ -n "${CONDOR_JOB_FLAVOUR:-}" ]]; then
 	case "$CONDOR_JOB_FLAVOUR" in
 		espresso|microcentury|longlunch|workday|tomorrow|testmatch|nextweek) ;;
 		*) echo "Invalid CONDOR_JOB_FLAVOUR: $CONDOR_JOB_FLAVOUR" >&2; exit 2 ;;
 	esac
-	condor_submit -append "+JobFlavour = \"$CONDOR_JOB_FLAVOUR\"" "$submit_file"
+	condor_submit "${SUBMIT_ARGS[@]}" -append "+JobFlavour = \"$CONDOR_JOB_FLAVOUR\"" "$submit_file"
+elif [[ -n "$CONDOR_MAX_RUNTIME_SECONDS" ]]; then
+	condor_submit "${SUBMIT_ARGS[@]}" -append "+MaxRuntime = $CONDOR_MAX_RUNTIME_SECONDS" "$submit_file"
 else
-	condor_submit "$submit_file"
+	condor_submit "${SUBMIT_ARGS[@]}" "$submit_file"
 fi

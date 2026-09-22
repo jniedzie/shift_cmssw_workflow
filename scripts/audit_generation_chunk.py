@@ -16,7 +16,9 @@ QCD_CODES = set(range(111, 117)) | set(range(121, 125))
 JPSI_CODES = set(range(401, 411)) | {441}
 QCD_PROCESS = 'QCD_FixedTarget_pThat_1to5GeV_13p6TeV'
 QCD_MU_PROCESS = 'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV'
+QCD_UNFILTERED_PROCESS = 'QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV'
 JPSI_PROCESS = 'Charmonium_FixedTarget_pThat_1to5GeV_13p6TeV'
+JPSI_UNFILTERED_PROCESS = 'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV'
 
 
 def main():
@@ -29,9 +31,13 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--fragment', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--lower', type=float, default=1.)
+    parser.add_argument('--upper', type=float, default=5.)
     args = parser.parse_args()
-    expected = {QCD_PROCESS: QCD_CODES, QCD_MU_PROCESS: QCD_CODES,
-                JPSI_PROCESS: JPSI_CODES}[args.process]
+    if not math.isfinite(args.lower) or args.lower < 1 or not math.isfinite(args.upper) or not (args.upper == -1 or args.upper > args.lower):
+        raise ValueError('Invalid or unvalidated Born pThat range')
+    expected = {QCD_PROCESS: QCD_CODES, QCD_MU_PROCESS: QCD_CODES, QCD_UNFILTERED_PROCESS: QCD_CODES,
+                JPSI_PROCESS: JPSI_CODES, JPSI_UNFILTERED_PROCESS: JPSI_CODES}[args.process]
     filtered = args.process == QCD_MU_PROCESS
 
     def get(event, label, kind):
@@ -62,7 +68,7 @@ def main():
             raise ValueError(f'Invalid generated pThat: {bins}')
         hepmc = get(event, ('generator', 'unsmeared'), 'edm::HepMCProduct').GetEvent()
         born = from_hepmc(hepmc, code, bins[0])
-        if not 1.-1.e-8 <= born <= 5.+1.e-8:
+        if born < args.lower-1.e-8 or (args.upper != -1 and born > args.upper+1.e-8):
             raise ValueError(f'Unexpected Born sampling pThat: {born}; stored={bins[0]}')
         born_pthats.append(born)
         codes[code] += 1
@@ -119,8 +125,11 @@ def main():
             particles['filter_eligible_muons'] += len(event_muons)
     if filtered and not weights:
         raise ValueError(f'No events passed the muon filter in {args.events} attempts')
-    if not filtered and len(weights) != args.events:
-        raise ValueError(f'Expected {args.events} generated events, got {len(weights)}')
+    if not filtered and not 0 < len(weights) <= args.events:
+        raise ValueError(f'Invalid generated count {len(weights)} for {args.events} requested slots')
+    if any(run != args.chunk+1 or lumi != 1 or not 1 <= event <= args.events
+           for run, lumi, event in identities):
+        raise ValueError('Event identities outside the requested chunk/source slots')
     runs = []
     for run in Runs(args.input):
         info = get(run, 'generator', 'GenRunInfoProduct')
@@ -140,7 +149,8 @@ def main():
                 stat = getattr(p, key)()
                 record[key] = dict(n=int(stat.n()), sum=stat.sum(), sum2=stat.sum2())
             lumis.append(record)
-    if not lumis or sum(p['nPassPos'] for p in lumis) != args.events:
+    expected_generated = args.events if filtered else len(weights)
+    if not lumis or sum(p['nPassPos'] for p in lumis) != expected_generated:
         raise ValueError('Lumi generator denominator does not match attempted count')
     if any(p['nTotalPos'] != p['nPassPos'] or p['nTotalNeg'] or p['nPassNeg'] for p in lumis):
         raise ValueError('Unexpected internal generator filtering or negative weights')
@@ -156,7 +166,7 @@ def main():
             sum_weights=info.sumWeights(), sum_weights2=info.sumWeights2()))
     attempted = sum(x['total_positive'] + x['total_negative'] for x in filter_records)
     accepted = sum(x['pass_positive'] + x['pass_negative'] for x in filter_records)
-    if attempted != args.events or accepted != len(weights):
+    if attempted != expected_generated or accepted != len(weights):
         raise ValueError('External-filter bookkeeping does not match attempted/accepted counts')
     if any(x['pass_negative'] or x['total_negative'] for x in filter_records):
         raise ValueError('Unexpected negative weights in external-filter bookkeeping')
@@ -166,6 +176,8 @@ def main():
                      max(map(abs, source_shift_residuals)) > 1.e-8):
         raise ValueError('SHIFT time transformation is inconsistent with nominal source timing')
     report = dict(schema='shift-production-gen-v1', process=args.process, chunk=args.chunk,
+        framework_requested_events=args.events,
+        generator_failed_framework_slots=args.events-expected_generated,
         input=args.input, events=len(weights), attempted_events=attempted,
         accepted_events=accepted, sum_weights=sum(weights),
         sum_weights_squared=sum(w*w for w in weights), hard_process_codes=dict(codes),
@@ -178,7 +190,7 @@ def main():
                              if filtered else 'unfiltered LO primary-process definition; no luminosity assumed'),
         forced_decay=('443 -> 13 -13; convention must be audited' if expected == JPSI_CODES else 'none'),
         decay_policy=('Pythia pi/K/KL decays inside rho<8000 mm, |z|<151000 mm'
-                      if filtered else 'CMS lifetime cutoff'),
+                      if filtered or args.process == QCD_UNFILTERED_PROCESS else 'CMS lifetime cutoff'),
         generator_filter=('status-1 muon, -10<eta<0, '
                           '0<=production z<=151000 mm, rho<=8000 mm'
                           if filtered else 'none'),
@@ -189,7 +201,9 @@ def main():
                                                 if timing_residuals else None),
         max_nominal_source_shift_residual_mm=(max(map(abs, source_shift_residuals))
                                                if source_shift_residuals else None),
-        physics_valid=False,
+        physics_valid=False, normalization_ready=False,
+        configured_pthat_bounds=[args.lower, args.upper],
+        event_ids=[list(identity) for identity in sorted(identities)],
         identity_min=list(min(identities)), identity_max=list(max(identities)),
         fragment_sha256=hashlib.sha256(Path(args.fragment).read_bytes()).hexdigest(),
         config_sha256=hashlib.sha256(Path(args.config).read_bytes()).hexdigest())

@@ -716,6 +716,224 @@ Read failed logs before retrying; retain failed directories as evidence.
 
 ## Run with Condor
 
+### Unfiltered QCD and J/psi production (2026-09-21)
+
+#### September 22 incident: mandatory gates before the next large submission
+
+**Recovery implementation (September 22):** exact delimited provenance matching
+replaces the seed-matching wildcard. On TERM/INT the chain stops and waits for
+its child process group before releasing its lock. Hard-kill locks still fail
+closed; verified abandoned locks are archived by the explicit recovery tool,
+never automatically stolen. The affected chunks' existing configs, logs and
+checkpoints are copied to `chain_metadata/partNNNN/recovery_before_20260922_v1/`.
+
+The recovery bootstrap is transferred by Condor. It downloads a SHA256-pinned
+runtime/workflow bundle once from EOS, relocates CMSSW in worker scratch, and
+rejects AFS entries in runtime import/library/search paths. Its local compiled
+library fingerprint matches the original production. A ten-worker/two-event
+canary precedes the 326-row missing-chunk recovery manifest. The recovery uses
+one cluster for all six bins/processes, with `max_materialize=50`, `max_idle=50`
+and failed jobs held rather than blindly retried. This bounds the total number
+of materialized (therefore running) jobs across this recovery, not 50 per bin.
+See the [HTCondor submission reference](https://htcondor.readthedocs.io/en/lts/man-pages/condor_submit.html#max_materialize).
+`bigbird21.cern.ch` is the chosen alternate scheduler; account identity and
+CERN's central limits are unchanged. Query/submit that scheduler explicitly.
+Do not submit the old six full campaign scripts again.
+
+The three Step-1 errors were 249 valid generated events from 250 requested
+framework slots. Exact-seed GEN-only replay reproduced all three cases, including
+the missing source identities and matching 249/249 external-filter and GEN-lumi
+counters. The audit now records `framework_requested_events` and
+`generator_failed_framework_slots` separately; it still requires unit weights,
+unfiltered valid generated events, exact IDs, process ownership and bin bounds.
+No seeds or physics settings are changed to obtain a favorable event count.
+Downstream stages must preserve the actual generated count/identities. Combine
+cross sections using the actual generated-event denominator, not the requested
+250 times job count. A completed campaign can therefore contain slightly fewer
+events than its name suggests; final merge checks must use the metadata total.
+
+The September 21 launch submitted 1320 jobs at once against a shared AFS
+workflow/CMSSW installation. CERN IT reported about 1608 concurrent jobs for
+the account, excessive AFS load, a temporary account ceiling of 1206, and
+automatic eviction/release of some jobs. The ceiling is an account-wide
+maximum, **not** a safe target for this workflow. The supplied IT message says
+it clears within a day after the load returns to normal; its current value
+must be rechecked rather than assumed. On September 22 `condor_q` could not
+find the bigbird14 schedd, and `condor_userprio` returned no matching user row.
+
+Do not repeat this launch pattern or automatically retry failed campaigns.
+Before recovery or another large production:
+
+- Restore a reliable scheduler view and check the account ceiling and all
+  other campaigns. Query failures mean unknown state, not an empty queue.
+- Stage a frozen, relocatable runtime and workflow into worker-local scratch
+  using a supported transfer/archive mechanism. Keep the standard release on
+  CVMFS where appropriate; validate the local custom CMSSW overlay, plugin
+  lookup, geometry data and Python imports. Merely copying scripts, leaving
+  symlinks or library paths pointing to AFS, is not sufficient.
+- Avoid repeated shared-tree scans and runtime setup per stage. The current
+  setup sources the shared CMSSW area and scans its library metadata for a
+  fingerprint. Keep integrity checks, but perform them on the staged runtime.
+  Log redirection to EOS protects AFS space; it does not eliminate AFS reads.
+- Use a **global** concurrency limit across QCD, J/psi and other SHIFT bins,
+  not one independent limit per submitted cluster. First validate 10 canary
+  workers end to end, then use a provisional ceiling of 50 concurrent SHIFT
+  workers, or less if the available account headroom is smaller. These are
+  conservative operational starting points, not CERN-certified safe rates.
+  Increase only after checking measured load and, if needed, consulting IT.
+  Do not evade the account ceiling by changing schedds/accounts.
+- Explicitly test eviction/restart and multiple simultaneous chunks before
+  scaling. Graceful termination should clean only an owned lock. Hard-kill
+  recovery must prove the old owner is gone before clearing its exact lock;
+  preserve the fail-closed behavior when ownership or scheduler state is unknown.
+- Fix provenance selection to match the delimited chunk ID, not arbitrary
+  digits later in the filename. The current `*part*NNNN*` pattern also matches
+  seed digits; single-chunk smoke tests missed this. Add multi-chunk tests with
+  realistic seeded filenames, including 0000/0001/0039/0390.
+- Keep lightweight Condor scheduler logs on supported storage. Stage payload
+  data/logs locally and publish to EOS with bounded transfers. Never put bulk
+  event output on AFS. Validate full-job disk needs before staging a runtime.
+
+The supplied IT email refers to KB0003076 for storage best practices. Its
+linked CERN service-portal article and the public batch file-transfer page
+were not accessible in this session; do not claim their contents were verified.
+The actions above are based on the incident logs and this workflow's code.
+
+Current evidence: all six clusters have terminal records, with 994 successful
+and 326 failed jobs. Of the failures, 201 have explicit "Vacated by StackStorm
+due to high AFS usage" records followed by a stale-lock failure, 122 have
+ambiguous provenance matches, and three have Step-1 subprocess failures.
+No bin is complete. Do not publish a survivors-only merge as a full sample:
+the missing jobs are not established to be a physics-independent subsample.
+Fix/validate recovery, resume only missing chunks, then re-audit all outputs
+and combine complete cross sections before merging. Detailed chunk sets and
+event-log hashes are in
+`../validation/qcd_unfiltered_20260921/terminal_audit_20260922.json`.
+
+The new `config/campaigns/qcd_unfiltered_2023.env` replaces selective replay for
+future QCD campaigns. It runs every generated event through the ordinary four
+stages: no `mugenfilter`, two-muon momentum preference, or random 10% selection.
+The new `QCD_UnfilteredDecays` fragment preserves the previous pi/K/KL decay
+corridor, CMS common/CP5 settings, beam/source configuration, nominal physical
+timing, and HardQCD-versus-direct-charmonium ownership. Removing acceptance
+filters does **not** remove phase-space bin boundaries, decay physics, or
+process separation. The historical fragments and replay outputs are unchanged
+for reproducibility. They do not become unfiltered samples retroactively.
+
+Use a fresh shell for each bin. `QCD_BIN` accepts `1to2`, `2to5`, `5to10`,
+`10to20`, and `20to-1`; the last two need their own runtime sizing before large
+production. `0to1` is deliberately rejected pending a validated low-pT model.
+The same default fragment is configured with explicit `GEN_PTHAT_MIN/MAX`;
+the resolved config and generator audit record and check the actual Born bin.
+Bin-specific seed bases are independent of the previous sampling campaigns.
+
+```bash
+set -a
+QCD_BIN=1to2
+N_JOBS=1                  # Set the agreed campaign size only before submission.
+source config/campaigns/qcd_unfiltered_2023.env
+set +a
+./run_condor.sh --check
+# Parses a real submit description, but does NOT submit or rebuild:
+./run_condor.sh --dry-run /absolute/new/path/condor_1to2.ad
+# Only after explicit production approval:
+# ./run_condor.sh --prebuilt --keep-logs
+```
+
+Defaults are 250 events/job, one CPU, 4000 MB memory, 10000 MB scratch disk and
+`+MaxRuntime=50400` (14 hours). Specify either `CONDOR_MAX_RUNTIME_SECONDS` or
+`CONDOR_JOB_FLAVOUR`, not both. The 250-event choice is an estimate from the
+128 completed 50-event QCD replay jobs: stage wall time per event averaged
+77, 81 and 107 seconds in 1--2, 2--5 and 5--10 respectively; the maximum was
+148 seconds/event. Linear extrapolation gives about 5.4, 5.6 and 7.4 hours/job,
+with 10.3 hours at the observed slowest rate, before additional audit/I/O costs.
+Condor recorded a maximum 2686 MB resident-memory estimate. Events are streamed,
+so increasing events/job chiefly affects time and disk, not simultaneous event
+memory. These are sizing estimates, not a completed 250-event benchmark or a
+promise that the whole campaign finishes overnight. Available slots and long
+event tails still matter. Stage resource reports record actual peak RSS/time.
+
+`WORKFLOW_LOCAL_GENERATOR=1` loads the frozen fragment in a temporary Python
+package and lets cmsDriver inline it into the archived config. It requires a
+prebuilt CMSSW runtime, never installs symlinks or rebuilds shared libraries,
+and works while unrelated frozen campaigns run. All production settings are
+captured in the usual immutable workflow snapshot and Condor environment.
+
+#### Optional rolling intermediate retention
+
+`CLEANUP_PREVIOUS_STEP=1` is enabled in this new profile only; the global default
+is zero. It is implemented by `scripts/run_condor_job.sh` and
+`scripts/run_retiring_chain.py`, not by standalone `run_stepN` invocations.
+Currently it requires the new unfiltered QCD or J/psi process, the complete non-forced
+1,2,3,4 chain, one input per Step-4 job, ordinary NanoAOD, and no pileup/trigger
+or shared same-SimHit input. Unsupported combinations fail before submission.
+
+After Step N succeeds, its **published** ROOT file is copied back, checked for
+zombie/recovered flags, all event identities, full expected count, unit weights,
+and essential stage products. Nano validation reads only IDs, weights and
+muon/vertex counts, never mass. The exact identity set must match the original
+generator metadata and predecessor. Config/log snapshots and a durable
+checkpoint are required before deleting that chunk's Step N-1 ROOT file.
+No broad deletion or recursive campaign cleanup is used; all configs, logs,
+seeds, generation cross sections/counters, per-stage hashes, resource reports,
+and deletion receipts remain. At completion only the Step-4 event file remains.
+
+The full-chain worker resumes from its highest validated checkpoint. It does
+not regenerate earlier outputs deliberately retired by this option. A corrupt
+or missing latest checkpoint, changed physics settings, or a concurrent chunk
+lock causes a fail-closed stop. A hard-killed worker can leave
+`chain_metadata/partNNNN/active.lock`; verify the old worker is truly gone before
+explicitly removing that exact stale lock. Never clear another running job's
+lock. `--force` is disallowed: recovery after loss of the last retained output
+requires an explicit new campaign/controlled regeneration from saved seeds.
+
+Unfiltered production audits require valid generated = saved = processed events and
+unit `genWeight`. There is no sampling sidecar correction. Keep the usual
+histogram `genWeight` fill and normalize a complete bin by its cross section
+divided by its complete generated-event count. Preserve per-chunk generator
+metadata and combine cross-section estimates (do not sum them or rely on the
+first-worker text estimate). The existing `collect_generation_metadata.py`
+supports the new process and rejects mixed pThat bins. Before interpreting
+physics yields, the ATLAS-proxy, low-pT coverage, trigger and decay-model
+validation gates still apply.
+
+After the full campaign is complete, export its combined estimate without
+overwriting the earlier first-worker file:
+
+```bash
+python3 scripts/collect_generation_metadata.py "$SAMPLE_DIR/generation_metadata" \
+  --expected-chunks "$N_JOBS" --output "$SAMPLE_DIR/normalization_complete.json" \
+  --cross-section-output "$SAMPLE_DIR/cross_sections_complete.txt"
+```
+
+Use the combined cross section with the ordinary complete-sample denominator;
+no per-chunk or sampling weight is necessary for the new unfiltered sample.
+This metadata collector does not replace the final Step-4 completeness and
+ROOT integrity audit before merging/plotting.
+
+The analogous `config/campaigns/jpsi_unfiltered_2023.env` accepts `JPSI_BIN`
+in `1to2`, `2to5`, `5to10`, with independent seeds and the same resources and
+retention checks. Its `Charmonium_Unfiltered` fragment reproduces the direct
+charmonium channels, forced 443 dimuon decay, CMS common/CP5 lifetime policy,
+and beam/source settings used by the existing binned J/psi GEN pilots. It
+does not inherit the old inclusive fragment's `limitTau0=off`, tiny resonance
+width cutoff, or stable-muon override. The forced decay is the signal model,
+not a muon-acceptance filter; its absolute branching-fraction convention stays
+explicitly provisional in metadata. Do not apply an extra branching fraction
+without auditing that convention. The collector supports this process too.
+
+For the authorized September 21 overnight run, the selected sizes are
+100,000 QCD and 10,000 J/psi events **per bin** in these first three bins,
+respectively 400 and 40 jobs of 250 events. Previous J/psi jobs averaged about
+82, 100 and 96 seconds/event; the largest observed rate was 146 seconds/event.
+High-pThat bins have longer unfinished tails and are not included in this
+scale-up. The 0--1 GeV model remains unresolved and is not submitted.
+
+Full worker transcripts are written under EOS `chain_metadata/partNNNN/`,
+in addition to retained stage logs/configs. AFS Condor output contains only
+short progress/checkpoint messages to avoid exhausting the tight AFS quota.
+Historical productions/logs are not deleted by this setup.
+
 ### QCD machinery test
 
 Use the isolated preset; it does not change the default J/psi campaign:
@@ -938,6 +1156,44 @@ Before this checkpoint, 43 focused tests passed across sampling, weighted
 sampling, Born pThat, cross-section export, QCD generation, fixed-target
 settings, Step-4 chunk contracts and the paired LSS launcher. This test result
 does not promote the provisional campaigns to physics-ready production.
+
+### Weighted QCD replay merges and cross sections
+
+`merge_sampling_replay.py MANIFEST --audit-directory AUDIT_DIRECTORY` publishes
+one complete NanoAOD per replay bin. The audit directory must contain successful
+`summary.json`, `four_stage_audit.json`, `bookkeeping_audit.json` and the full
+`bookkeeping.jsonl`, produced by the replay summarizer and the independent
+identity/bookkeeping audits above. It recomputes ledger decisions, checks every
+source Nano against its report and sampling chunk, checks schemas and duplicate
+identities, and verifies the complete merged union. Published ROOT files are
+reopened; copied artifacts are checksum-verified. Existing outputs are refused.
+No reconstructed mass values are enabled or inspected.
+
+The campaign root receives `cross_sections.txt` from the original parent GEN
+log, full-precision `cross_sections.json`, `sampling_ledger.json`, keyed
+`sampling_weights.jsonl`, all-parent `sampling_bookkeeping.jsonl`, and
+`NORMALIZATION_README.txt`. The merge's adjacent JSON records their paths and
+digests. This helper currently accepts only complete single-run QCD parents,
+not parent prefixes, and verifies weighted and unweighted parent filter counts
+against the generator log. No generator rerun is needed.
+
+For the September 21 expanded samples, each bin has 5000 unique parent attempts.
+Use `event_weight_pb = sigma_before_filter_pb / 5000 / sampling_probability`.
+The equivalent filtered-sample expression uses `sigma_after_filter_pb` divided
+by the upstream saved-event count, **not** the number selected for simulation.
+Never apply the filter efficiency a second time or divide by the realized sum
+of inverse sampling probabilities. Join the weight sidecar using all three
+event identifiers `(run, luminosityBlock, event)`; multiply by luminosity in
+inverse pb only when computing event yields. For uncertainties, accumulate
+squared event weights as well as their sum.
+
+The current histogrammer does not yet consume this sidecar. A merged ROOT file
+and ordinary `cross_sections.txt` are therefore not sufficient for correctly
+weighted plots with that application. Native `genWeight` and inherited Runs
+counters are unchanged and must not be used as sampling-aware weights or
+denominators. Keep `physics_valid=false` and `normalization_ready=false` until
+analysis integration and the existing geometry/physics gates are validated.
+Do not combine these outputs with the overlapping older 500-attempt replays.
 
 ### General submission
 

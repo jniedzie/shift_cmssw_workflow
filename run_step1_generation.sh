@@ -160,6 +160,19 @@ if [[ -e "$OUTPUT" ]]; then
 	rm -f -- "$OUTPUT"
 fi
 
+DRIVER_FRAGMENT="$PYTHIA_CONFIG"
+if [[ "$WORKFLOW_LOCAL_GENERATOR" == 1 ]]; then
+	mkdir "$LOCAL_STEP1_DIR/ShiftWorkflowGenerator"
+	touch "$LOCAL_STEP1_DIR/ShiftWorkflowGenerator/__init__.py"
+	cp "$FRAGMENT" "$LOCAL_STEP1_DIR/ShiftWorkflowGenerator/fragment_cff.py"
+	export PYTHONPATH="$LOCAL_STEP1_DIR${PYTHONPATH:+:$PYTHONPATH}"
+	DRIVER_FRAGMENT="ShiftWorkflowGenerator/fragment_cff.py"
+fi
+PTHAT_CUSTOMISE=""
+if [[ -n "$GEN_PTHAT_MIN" || -n "$GEN_PTHAT_MAX" ]]; then
+	python3 "$WORKFLOW_ROOT/scripts/unfiltered_qcd_contract.py" --check
+	PTHAT_CUSTOMISE="; process.generator.PythiaParameters.processParameters.extend(['PhaseSpace:pTHatMin = ${GEN_PTHAT_MIN}', 'PhaseSpace:pTHatMax = ${GEN_PTHAT_MAX}'])"
+fi
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED (configured base: $GENERATOR_SEED_BASE, chunk: $CHUNK)"
 echo "Geant4 random seed: $SIMULATION_SEED (configured base: $SIMULATION_SEED_BASE, chunk: $CHUNK)"
@@ -167,7 +180,7 @@ echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DI
 echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
 echo "SHIFT LSS material/field modes: $SHIFT_LSS_MATERIAL_MODE/$SHIFT_LSS_FIELD_MODE"
 [[ -z "${SHIFT_LSS_CONTRACT_SHA256:-}" ]] || echo "SHIFT LSS contract SHA-256: $SHIFT_LSS_CONTRACT_SHA256"
-cmsDriver.py "$PYTHIA_CONFIG" \
+cmsDriver.py "$DRIVER_FRAGMENT" \
 	--step GEN,SIM \
 	--conditions "$CONDITIONS" \
 	--beamspot "$BEAMSPOT" \
@@ -181,11 +194,15 @@ cmsDriver.py "$PYTHIA_CONFIG" \
 	--no_exec \
 	-n "$N_EVENTS"
 
+if [[ -n "$PTHAT_CUSTOMISE" ]]; then
+	printf '\n%s\n' "${PTHAT_CUSTOMISE#; }" >> "$LOCAL_CONFIG"
+fi
+
 CONFIG_SNAPSHOT="$CONFIG_DIR/events_step1_part${PART}_seed${GENERATOR_SEED}_cfg.py"
 # Distinct QCD chunks must remain mergeable. Existing J/psi identities are
 # unchanged; seed separation alone does not make EDM event identities unique.
 case "$PROCESS" in
-	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV)
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV)
 	printf '\nprocess.source.firstRun = cms.untracked.uint32(%s)\n' "$((10#$CHUNK + 1))" >> "$LOCAL_CONFIG"
 	;;
 esac
@@ -200,10 +217,11 @@ if ! output_is_valid "$LOCAL_OUTPUT"; then
 	exit 1
 fi
 case "$PROCESS" in
-	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV)
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV)
 	python3 "$WORKFLOW_ROOT/scripts/audit_generation_chunk.py" "$LOCAL_OUTPUT" \
 		--process "$PROCESS" --events "$N_EVENTS" --chunk "$CHUNK" \
 		--config "$LOCAL_CONFIG" --fragment "$FRAGMENT" \
+		--lower "${GEN_PTHAT_MIN:-1}" --upper "${GEN_PTHAT_MAX:-5}" \
 		--output "$LOCAL_STEP1_DIR/generation_part${PART}.json"
 	mkdir -p "$SAMPLE_DIR/generation_metadata"
 	cp "$LOCAL_STEP1_DIR/generation_part${PART}.json" "$SAMPLE_DIR/generation_metadata/part${PART}.json"

@@ -30,6 +30,18 @@ if [[ ! -r "$WORKFLOW_ROOT/config/workflow.env" ]]; then
 	exit 1
 fi
 source "$WORKFLOW_ROOT/config/workflow.env"
+if [[ "$CLEANUP_PREVIOUS_STEP" == 1 ]]; then
+	[[ "$SELECTED_STEPS" == 1,2,3,4 && "$FORCE_SELECTED" == 0 ]] || {
+		echo "Retirement requires a full-chain, non-forced invocation" >&2; exit 2;
+	}
+	# Export resolved defaults as well as campaign overrides for the audit contract.
+	set -a
+	source "$WORKFLOW_ROOT/config/workflow.env"
+	set +a
+	source /cvmfs/cms.cern.ch/cmsset_default.sh
+	source "$WORKFLOW_ROOT/scripts/setup_cmssw.sh"
+	exec python3 "$WORKFLOW_ROOT/scripts/run_retiring_chain.py" --chunk "$CHUNK" --events "$N_EVENTS"
+fi
 mkdir -p "$STEP1_DIR" "$STEP2_DIR" "$STEP3_DIR" "$STEP4_DIR" "$LOG_DIR" \
 	"$STEP1_CONFIG_DIR" "$STEP2_CONFIG_DIR" "$STEP3_CONFIG_DIR" "$STEP4_CONFIG_DIR"
 
