@@ -30,6 +30,7 @@ def main():
         from convert_ir1_fluka_geometry_full import full_conversion_guards
         from fluka_region_preflight import classify_raw_regions
         from fluka_pycsg_compatibility import pycsg_compatibility_guard
+        from fluka_halfspace_bounds import halfspace_bounds_guard
 
         regions = json.loads(args.regions_json.read_text())
         if not isinstance(regions, list) or not all(isinstance(name, str) for name in regions):
@@ -40,11 +41,13 @@ def main():
             for name, path in (("normalized_deck", args.normalized_deck),
                                ("regions", args.regions_json),
                                ("worker", Path(__file__)),
+                               ("halfspace_bounds", Path(__file__).with_name("fluka_halfspace_bounds.py")),
+                               ("analytic_bounds", Path(__file__).with_name("fluka_analytic_bounds.py")),
                                ("pycsg_compatibility", Path(__file__).with_name("fluka_pycsg_compatibility.py")))
         }
         result["argv"] = sys.argv
         result["python_version"] = sys.version
-        with normalized_orthogonality_guard(ledger), full_conversion_guards(args.world_dimensions_mm), pycsg_compatibility_guard() as compatibility:
+        with normalized_orthogonality_guard(ledger), full_conversion_guards(args.world_dimensions_mm), pycsg_compatibility_guard() as compatibility, halfspace_bounds_guard(result.setdefault("halfspace_bounds", {})):
             result["pycsg_compatibility"] = compatibility
             with args.output.with_suffix(".reader.log").open("w") as log, redirect_stdout(log), redirect_stderr(log):
                 registry = Reader(str(args.normalized_deck)).flukaregistry

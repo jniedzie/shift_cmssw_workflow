@@ -55,6 +55,57 @@ class MaterialFidelityTest(unittest.TestCase):
         with self.assertRaisesRegex(MaterialFidelityError, "authoritative molar mass"):
             self.convert()
 
+    def test_explicit_dependency_selection_does_not_export_unused_isotope(self):
+        carbon = self.freg.materials["CARBON"]
+        self.flu.Material("UNUSED_ISO", 6, 2.0, massNumber=13, flukaregistry=self.freg)
+        self.flu.Compound("MIX", 2.0, [(carbon, 1.0)], "mass", flukaregistry=self.freg)
+        before = dict(self.freg.materials)
+        with material_fidelity_guard(self.ledger, required_materials=["MIX"]):
+            result = self.converter.makeFlukaToG4MaterialsMap(self.freg, self.greg)
+        self.assertEqual(set(result), {"MIX", "CARBON"})
+        self.assertEqual(dict(self.freg.materials), before)
+        self.assertIn("UNUSED_ISO", self.ledger["dependency_selection"]["unused_definitions_not_exported"])
+        with material_fidelity_guard({}, required_materials=["UNUSED_ISO"]):
+            with self.assertRaisesRegex(MaterialFidelityError, "authoritative molar mass"):
+                self.converter.makeFlukaToG4MaterialsMap(self.freg, self.g4.Registry())
+
+    def test_dependency_selection_rejects_stale_constituent_definition(self):
+        carbon = self.freg.materials["CARBON"]
+        self.flu.Compound("MIX", 2.0, [(carbon, 1.0)], "mass", flukaregistry=self.freg)
+        self.flu.Material("CARBON", 8, 3.0, atomicMass=17.0, flukaregistry=self.freg)
+        with material_fidelity_guard({}, required_materials=["MIX"]):
+            with self.assertRaisesRegex(MaterialFidelityError, "differs from the current registry"):
+                self.converter.makeFlukaToG4MaterialsMap(self.freg, self.greg)
+
+    def test_dependency_selection_rejects_deep_stale_binding(self):
+        carbon = self.freg.materials["CARBON"]
+        old_inner = self.flu.Compound("INNER", 2.0, [(carbon, 1.0)], "mass", flukaregistry=self.freg)
+        self.flu.Compound("OUTER", 2.0, [(old_inner, 1.0)], "mass", flukaregistry=self.freg)
+        replacement = self.flu.Material("CARBON", 8, 3.0, atomicMass=17.0, flukaregistry=self.freg)
+        # Same immediate INNER signature, but OUTER still points to the old
+        # nested carbon definition while the registry now exports oxygen.
+        self.freg.materials["INNER"] = self.flu.Compound("INNER", 2.0, [(replacement, 1.0)], "mass")
+        with material_fidelity_guard({}, required_materials=["OUTER"]):
+            with self.assertRaisesRegex(MaterialFidelityError, "differs from the current registry"):
+                self.converter.makeFlukaToG4MaterialsMap(self.freg, self.greg)
+
+    def test_dependency_selection_rejects_cyclic_stale_object_graph(self):
+        carbon = self.freg.materials["CARBON"]
+        old_inner = self.flu.Compound("INNER", 2.0, [(carbon, 1.0)], "mass", flukaregistry=self.freg)
+        self.flu.Compound("OUTER", 2.0, [(old_inner, 1.0)], "mass", flukaregistry=self.freg)
+        old_inner.fractions = [(old_inner, 1.0)]
+        self.freg.materials["INNER"] = self.flu.Compound("INNER", 2.0, [(carbon, 1.0)], "mass")
+        with material_fidelity_guard({}, required_materials=["OUTER"]):
+            with self.assertRaisesRegex(MaterialFidelityError, "cyclic constituent object"):
+                self.converter.makeFlukaToG4MaterialsMap(self.freg, self.greg)
+
+    def test_explicit_material_roots_reject_mixed_and_empty_names(self):
+        for roots in ([], ["CARBON", 1], [""], 3):
+            with self.subTest(roots=roots):
+                with material_fidelity_guard({}, required_materials=roots):
+                    with self.assertRaises(MaterialFidelityError):
+                        self.converter.makeFlukaToG4MaterialsMap(self.freg, self.greg)
+
     def test_predefined_name_override_uses_actual_z_and_mass(self):
         self.flu.Material("CARBON", 8, 3.0, atomicMass=17.25, flukaregistry=self.freg)
         result = self.convert()

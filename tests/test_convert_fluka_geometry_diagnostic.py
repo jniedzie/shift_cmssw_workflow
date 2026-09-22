@@ -173,13 +173,33 @@ class DiagnosticConversionSmokeTest(unittest.TestCase):
             self.assertEqual(report["geometry"]["coverage"]["converted_regions"], ["BOXREG"])
             elements = {item.get("name"): item for item in
                         ET.parse(output / "geometry_diagnostic.gdml").findall("./materials/element")}
-            self.assertEqual(elements["CARBON_element"].get("Z"), "6")
+            self.assertNotIn("CARBON_element", elements)  # No unused library materials.
+            self.assertEqual(report["material_fidelity"]["dependency_selection"]["dependency_order"], ["IRON"])
             self.assertAlmostEqual(float(elements["IRON_element"].find("atom").get("value")), 55.845)
             self.assertFalse(report["material_fidelity"]["native_material_semantics_validated"])
             secondary = run_secondary_region_preflight(output / "normalized_geometry_diagnostic.inp",
                                                        ["BOXREG"], output, 10.0, (100, 100, 100))
             self.assertEqual(secondary["backend"], "pycsg")
             self.assertEqual(secondary["non_null_regions"], ["BOXREG"])
+
+    def test_unused_isotope_stays_in_inventory_but_not_export(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            source = directory / "unused.inp"
+            source.write_text("GEOBEGIN                                                              COMBNAME\n"
+                              "0 0\nRPP box -1 1 -1 1 -1 1\nEND\nBOXREG 5 +box\nEND\nGEOEND\n"
+                              f"{'MATERIAL':<10}{3:>10}{'':>10}{1:>10}{'':>10}{'':>10}{6:>10}LITHIUM6\n"
+                              f"{'ASSIGNMA':<10}{'IRON':>10}{'BOXREG':>10}\nSTOP\n")
+            output = directory / "output"
+            self.assertEqual(main(["--input", str(source), "--output-dir", str(output),
+                                   "--world-dimensions-mm", "100,100,100", "--geometry-only",
+                                   "--ordinary-regions-only"]), 0)
+            report = json.loads((output / "conversion_report.json").read_text())
+            self.assertEqual(report["material_reachability"]["unused_isotopes"], ["LITHIUM6"])
+            self.assertIn("LITHIUM6", report["registry"]["parsed_materials"])
+            self.assertNotIn("LITHIUM6", (output / "geometry_diagnostic.gdml").read_text())
+            self.assertEqual(report["omitted_lattice_cells"], [])
+            self.assertFalse(report["production_ready"])
 
     def test_missing_isotope_mass_stops_before_gdml_export(self):
         with tempfile.TemporaryDirectory() as temporary:

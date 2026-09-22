@@ -26,13 +26,14 @@ from convert_ir1_fluka_geometry_full import (
 )
 from fluka_region_preflight import classify_raw_regions, resolve_raw_region_classifications
 from fluka_material_fidelity import audit_material_cards, material_fidelity_guard
+from fluka_material_reachability import material_reachability
+from fluka_halfspace_bounds import halfspace_bounds_guard, certified_region_bounds
+from fluka_lattice_conversion import lattice_conversion_guard
 from ir1_fluka_geometry import (
     ProxyModelError,
-    _install_lattice_aabb_workaround,
     _install_raw_zone_aabb_fallback,
     audit_gdml_material_references,
     expand_predefined_materials,
-    install_axis_aligned_plane_box_lowering,
     install_exact_half_space_preservation,
     normalized_deck,
     summarize_preflight_omissions,
@@ -333,8 +334,9 @@ def run_conversion(args, report):
     performance = {}
     roundoff_acceptances = report["orthogonality_roundoff_acceptances"] = []
     material_fidelity = report["material_fidelity"] = {}
-    with material_fidelity_guard(material_fidelity), normalized_orthogonality_guard(roundoff_acceptances), full_conversion_guards(
-            args.world_dimensions_mm, performance_report=performance) as skipped:
+    material_roots = set()
+    with material_fidelity_guard(material_fidelity, required_materials=material_roots), normalized_orthogonality_guard(roundoff_acceptances), full_conversion_guards(
+            args.world_dimensions_mm, performance_report=performance) as skipped, halfspace_bounds_guard(report.setdefault("halfspace_bounds", {})):
         reader_module = importlib.import_module("pyg4ometry.fluka.reader")
         make_body = reader_module._make_body
 
@@ -362,6 +364,12 @@ def run_conversion(args, report):
                                         for keyword in sorted({card.keyword for card in reader.cards})}
         report["material_assignment_audit"] = audit_material_assignments(reader)
         report["material_card_audit"] = audit_material_cards(reader.cards)
+        report["material_reachability"] = material_reachability(report["registry"])
+        # Include every source assignment, not just the selected ordinary
+        # regions: a lattice can instantiate any prototype's material.
+        material_roots.update(report["material_reachability"]["direct_material_regions"])
+        material_roots.update(card["material"] for card in
+                              report["material_assignment_audit"]["lattice_cell_assignment_cards"])
         report["parser_passed"] = True
         if not registry.regionDict:
             raise ProxyModelError("parser returned no FLUKA regions")
@@ -396,21 +404,34 @@ def run_conversion(args, report):
         if not report["raw_source_world_bounds"]["passed"]:
             raise ProxyModelError("source-region bounds exceed the diagnostic world or are missing")
         report["stage"] = "conversion"
-        original_lattice = _install_lattice_aabb_workaround(converter)
-        preserved, lowered = [], []
+        preserved = []
         original_halfspaces = install_exact_half_space_preservation(converter, preserved)
-        original_boxes = install_axis_aligned_plane_box_lowering(converter, lowered, preserved)
         original_bounds = None
         fallbacks = []
         try:
             original_bounds, fallbacks = _install_raw_zone_aabb_fallback(converter, preflight)
-            converted = converter.fluka2Geant4(registry, regions=preflight["conversion_candidate_regions"])
+            if args.ordinary_regions_only:
+                # This explicit diagnostic mode cannot claim full-model coverage.
+                report["omitted_lattice_cells"] = sorted(registry.latticeDict)
+                original_lattice = converter._convertLatticeCells
+                converter._convertLatticeCells = lambda *unused: None
+                try:
+                    converted = converter.fluka2Geant4(registry, regions=preflight["conversion_candidate_regions"])
+                finally:
+                    converter._convertLatticeCells = original_lattice
+            else:
+                with lattice_conversion_guard(report.setdefault("lattice_conversion", {}),
+                                              converter_module=converter, source_registry=registry,
+                                              cell_bounds_provider=certified_region_bounds):
+                    converted = converter.fluka2Geant4(registry, regions=preflight["conversion_candidate_regions"])
+                # Upstream historically suppresses some lattice exceptions.
+                # A returned registry alone is not evidence of completion.
+                if not report["lattice_conversion"]["passed"]:
+                    raise ProxyModelError("lattice conversion did not complete its explicit coverage gate")
         finally:
             if original_bounds is not None:
                 converter._getRegionZoneAABBs = original_bounds
-            converter._filterHalfSpaces = original_boxes
             converter._filterHalfSpaces = original_halfspaces
-            converter._getTransformedCellRegionAABB = original_lattice
         expanded = expand_predefined_materials(converted)
         gdml = args.output_dir / "geometry_diagnostic.gdml"
         writer = Writer()
@@ -426,7 +447,7 @@ def run_conversion(args, report):
             "coverage": coverage, "omission_audit": omissions,
             "material_reference_audit": material_audit, "expanded_materials": expanded,
             "binary_union_lowering": lowering, "halfspace_preservation": preserved,
-            "axis_aligned_plane_boxes": lowered, "raw_zone_aabb_fallback": fallbacks,
+            "raw_zone_aabb_fallback": fallbacks,
             "null_only_body_count": len(skipped), "meshing_optimization": performance,
         }
         if material_audit["undefined_material_count"]:
@@ -437,6 +458,8 @@ def run_conversion(args, report):
         # the historical converter permits an omitted diagnostic region.
         report["unresolved_deferred_regions"] = preflight["deferred_null_validation_regions"]
         report["conversion_passed"] = True
+        report["full_model_exported"] = (report["full_source_requested"] and
+                                         not args.ordinary_regions_only)
         report["stage"] = "converted_diagnostic"
 
 
@@ -448,6 +471,8 @@ def parse_args(argv=None):
     parser.add_argument("--geometry-only", action="store_true", required=True)
     parser.add_argument("--omit-field-map-includes", action="store_true")
     parser.add_argument("--parse-only", action="store_true")
+    parser.add_argument("--ordinary-regions-only", action="store_true",
+                        help="explicitly omit ALL lattice cells for a limited geometry diagnostic")
     parser.add_argument("--regions", type=lambda value: value.split(","))
     parser.add_argument("--region-timeout-seconds", type=float, default=60.0)
     return parser.parse_args(argv)
@@ -476,6 +501,8 @@ def main(argv=None):
                                "convert_ir1_fluka_geometry_full.py", "ir1_fluka_geometry.py",
                                "fluka_region_preflight.py", "fluka_region_preflight_worker.py",
                                "fluka_boolean_normalization.py", "fluka_material_fidelity.py",
+                               "fluka_material_reachability.py", "fluka_analytic_bounds.py",
+                               "fluka_halfspace_bounds.py", "fluka_lattice_conversion.py",
                                "fluka_pycsg_compatibility.py")},
               "world_dimensions_mm": list(args.world_dimensions_mm),
               "field_conversion_validated": False, "cmssw_installation_modified": False,

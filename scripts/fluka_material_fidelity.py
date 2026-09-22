@@ -14,6 +14,9 @@ from contextlib import contextmanager
 import importlib
 import inspect
 import math
+from types import SimpleNamespace
+
+from fluka_material_reachability import dependency_closure
 
 
 class MaterialFidelityError(ValueError):
@@ -60,7 +63,7 @@ def audit_material_cards(cards):
 
 
 @contextmanager
-def material_fidelity_guard(ledger):
+def material_fidelity_guard(ledger, *, required_materials=None):
     """Use source registry element properties, with explicit unresolved gates.
 
     Natural-element defaults outside pyg4ometry's FLUKA builtin table retain
@@ -69,6 +72,11 @@ def material_fidelity_guard(ledger):
     FLUKA.  A selected isotope without an explicit molar mass is rejected:
     nucleon count is NOT the molar mass.  Explicit WHAT(2) is preserved, but
     native FLUKA's effective value still requires validation.
+
+    When explicit required material names are supplied, export only their
+    complete dependency closure. Unused definitions stay in the source and
+    are inventoried; unsupported USED isotopes still fail. None audits all
+    definitions as before. No registry is mutated by this selection.
     """
     upstream = importlib.import_module("pyg4ometry.convert.fluka2g4materials")
     conversion = importlib.import_module("pyg4ometry.convert.fluka2Geant4")
@@ -191,7 +199,56 @@ def material_fidelity_guard(ledger):
                    massNumber=card.what6, atomicMass=card.what2, flukaregistry=registry)
 
     def make_map(freg, greg):
-        return Converter(freg, greg).g4materials
+        if required_materials is None:
+            selected = freg
+        else:
+            signatures, visiting = {}, set()
+
+            def signature(material):
+                identity = id(material)
+                if identity in visiting:
+                    raise MaterialFidelityError(
+                        f"{material.name}: cyclic constituent object binding; native material semantics must be resolved")
+                if identity not in signatures:
+                    visiting.add(identity)
+                    try:
+                        signatures[identity] = (
+                            type(material).__name__,
+                            tuple(getattr(material, key, None) for key in
+                                  ("atomicNumber", "atomicMass", "massNumber", "density", "fractionType")),
+                            tuple((part.name, float(weight), signature(part))
+                                  for part, weight in getattr(material, "fractions", [])))
+                    finally:
+                        visiting.remove(identity)
+                return signatures[identity]
+
+            try:
+                root_names = list(required_materials)
+            except TypeError as error:
+                raise MaterialFidelityError("explicit material roots must be a collection of names") from error
+            if not root_names or not all(isinstance(name, str) and name for name in root_names):
+                raise MaterialFidelityError("explicit material roots must be nonempty valid names")
+            roots = sorted(set(root_names))
+            graph = {name: {"components": [{"material": part.name} for part, _ in
+                                          getattr(material, "fractions", [])]}
+                     for name, material in freg.materials.items()}
+            ordered, paths = dependency_closure(graph, roots)
+            ledger["dependency_selection"] = {
+                "required_materials": roots,
+                "dependency_order": ordered,
+                "dependency_witness": paths,
+                "unused_definitions_not_exported": sorted(set(graph) - set(ordered)),
+                "source_definitions_modified": False,
+                "native_material_properties_validated": False,
+            }
+            for name in ordered:
+                for part, _ in getattr(freg.materials[name], "fractions", []):
+                    if signature(part) != signature(freg.materials[part.name]):
+                        raise MaterialFidelityError(
+                            f"{name}: constituent {part.name} differs from the current registry definition; "
+                            "native repeated-definition semantics must be resolved")
+            selected = SimpleNamespace(materials={name: freg.materials[name] for name in ordered})
+        return Converter(selected, greg).g4materials
 
     flu.Material.fromCard = from_card
     upstream.makeFlukaToG4MaterialsMap = make_map
