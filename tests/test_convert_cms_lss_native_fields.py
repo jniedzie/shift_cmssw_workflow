@@ -56,7 +56,9 @@ class NativeFieldConversionTest(unittest.TestCase):
                 "#include /external/MB.inp\n"
                 "#include /external/MAP.inp\n"
                 "FREE\n"
+                "MGNCREAT 2 20 0 0 0 0 DIPOLE\n"
                 "MGNFIELD 1.5 ROT 0 CELL 0 0 MAP\n"
+                "MGNFIELD -0.3 ROT 0 CELL2 0 0 DIPOLE\n"
                 "ROT-DEFI 1000 0 0 0 0 -10 ROT\n"
                 "LATTICE CELL 0 CELL CELL\n",
                 encoding="ascii")
@@ -71,7 +73,11 @@ class NativeFieldConversionTest(unittest.TestCase):
                 archive.writestr("MAP.inp", native)
             manifest = convert_native_fields(source, "deck.inp", output)
             self.assertEqual(set(manifest["maps"]), {"MAP"})
-            self.assertEqual(manifest["inline_analytic_fields"], [])
+            self.assertEqual(manifest["inline_analytic_fields"], ["DIPOLE"])
+            self.assertEqual(
+                manifest["inline_analytic_definitions"]["DIPOLE"]["field_expression"],
+                "Bx=0, By=MGNFIELD.WHAT(1) tesla, Bz=0",
+            )
             self.assertTrue(manifest["maps"]["MAP"]["roundtrip_metadata_equal"])
             self.assertTrue(manifest["maps"]["MAP"]["roundtrip_numeric_arrays_equal"])
             self.assertEqual(manifest["unresolved_includes"], ["MB.inp"])

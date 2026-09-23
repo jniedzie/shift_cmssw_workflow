@@ -168,7 +168,7 @@ def native_map_summary(cards):
         result["metadata_status"] = "unsupported-number-of-field-definitions"
         return result, values
     first = [finite_number(value) for value in primaries[0]["what"]]
-    types = {4: "QUAD", 200: "INTER2D", 204: "QUADINT", 202: "KICKINT"}
+    types = {2: "DIPOLE", 4: "QUAD", 200: "INTER2D", 204: "QUADINT", 202: "KICKINT"}
     symmetry = {0: "NONE", 2: "X", 10: "Y", 12: "XY"}
     if first[0] not in types or first[4] not in symmetry or first[5] != 0:
         result["metadata_status"] = "unsupported-field-type-or-symmetry"

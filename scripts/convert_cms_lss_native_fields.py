@@ -152,6 +152,28 @@ def convert_native_fields(source_dir, deck_name, output_dir):
             "roundtrip_numeric_arrays_equal": roundtrip["numeric_arrays_equal"],
         }
 
+    inline_definitions = {}
+    for name in sorted(inline):
+        cards = [card for card in deck["native_field_definitions"]
+                 if card["sdum"] == name]
+        summary, values = native_map_summary(cards)
+        if values or summary.get("metadata_status") != "supported-comparison-subset":
+            raise FieldTranslationError(
+                f"{name}: inline field is outside the supported analytic subset"
+            )
+        metadata = summary["metadata"]
+        if metadata["type"] != "DIPOLE" or any(metadata[key] != 0.0 for key in
+                                                ("azimuth_degrees", "bend_radius_cm", "sagitta_cm")):
+            raise FieldTranslationError(
+                f"{name}: inline field is not a straight local-Y analytic dipole"
+            )
+        inline_definitions[name] = {
+            "cards": summary["cards"],
+            "metadata": metadata,
+            "field_expression": "Bx=0, By=MGNFIELD.WHAT(1) tesla, Bz=0",
+            "reference": "https://flukafiles.web.cern.ch/manual/chapters/description_input/description_options/mgncreat.html",
+        }
+
     deck_bytes = (source_dir / deck_name).read_bytes()
     unresolved_includes = [item["basename"] for item in deck["include_resolution"]
                            if item["resolution"] != "available-by-basename"]
@@ -164,6 +186,7 @@ def convert_native_fields(source_dir, deck_name, output_dir):
         "source_archive_sha256": sha256(archive_path.read_bytes()),
         "referenced_fields": referenced,
         "inline_analytic_fields": sorted(set(referenced) & inline),
+        "inline_analytic_definitions": inline_definitions,
         "maps": maps,
         "assignments": deck["native_field_assignments"],
         "unresolved_includes": unresolved_includes,
