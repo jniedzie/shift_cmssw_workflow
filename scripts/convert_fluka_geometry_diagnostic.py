@@ -410,7 +410,11 @@ def run_conversion(args, report):
         original_bounds = None
         fallbacks = []
         try:
-            original_bounds, fallbacks = _install_raw_zone_aabb_fallback(converter, preflight)
+            original_bounds, fallbacks = _install_raw_zone_aabb_fallback(
+                converter,
+                preflight,
+                use_validated_preflight_bounds=True,
+            )
             if args.ordinary_regions_only:
                 # This explicit diagnostic mode cannot claim full-model coverage.
                 report["omitted_lattice_cells"] = sorted(registry.latticeDict)

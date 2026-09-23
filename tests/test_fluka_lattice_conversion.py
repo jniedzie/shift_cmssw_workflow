@@ -208,6 +208,90 @@ class GenericLatticeTest(unittest.TestCase):
         with self.assertRaisesRegex(self.error, "no possible source prototypes"):
             self.convert(registry)
 
+    def test_matching_container_subtraction_certifies_empty_intersection(self):
+        from fluka_lattice_conversion import matching_container_empty_intersection
+        registry = self.fluka.FlukaRegistry()
+        outer = self.fluka.RPP("outer", -20, 20, -20, 20, -20, 20,
+                               flukaregistry=registry)
+        subtracted = self.fluka.RCC("prototype_container", [5, 0, -1], [0, 0, 2], 1,
+                                    flukaregistry=registry)
+        prototype_zone = self.fluka.Zone()
+        prototype_zone.addIntersection(outer)
+        prototype_zone.addSubtraction(subtracted)
+        prototype = self.fluka.Region("BACKGROUND")
+        prototype.addZone(prototype_zone)
+        cell_body = self.fluka.RCC("physical_cell", [0, 0, -1], [0, 0, 2], 1,
+                                   flukaregistry=registry)
+        cell_zone = self.fluka.Zone()
+        cell_zone.addIntersection(cell_body)
+        cell = self.fluka.Region("CELL")
+        cell.addZone(cell_zone)
+        physical_to_prototype = self.np.identity(4)
+        physical_to_prototype[0, 3] = 5
+        proof = matching_container_empty_intersection(
+            prototype, cell, physical_to_prototype)
+        self.assertEqual(proof["method"], "matching_rigid_container_subtraction")
+        self.assertEqual(proof["zone_pair_proofs"][0]["primitive_type"], "RCC")
+        self.assertLessEqual(proof["zone_pair_proofs"][0]["maximum_parameter_residual_mm"], 1e-8)
+        physical_to_prototype[0, 3] = 5.01
+        self.assertIsNone(matching_container_empty_intersection(
+            prototype, cell, physical_to_prototype))
+
+    def test_cell_subtracted_cylinder_certifies_enclosed_prototype_empty(self):
+        from fluka_lattice_conversion import (
+            subtracted_cell_contains_prototype_empty_intersection,
+        )
+        registry = self.fluka.FlukaRegistry()
+        prototype_pipe = self.fluka.ZCC("small_pipe", 0, 28.3, 1.7,
+                                        flukaregistry=registry)
+        prototype_limiter = self.fluka.RCC("finite_piece", [0, 0, -10], [0, 0, 20], 100,
+                                           flukaregistry=registry)
+        prototype_zone = self.fluka.Zone()
+        prototype_zone.addIntersection(prototype_pipe)
+        prototype_zone.addIntersection(prototype_limiter)
+        prototype = self.fluka.Region("PIPE")
+        prototype.addZone(prototype_zone)
+        cell_outer = self.fluka.RCC("cell_outer", [0, 0, -20], [0, 0, 40], 50,
+                                    flukaregistry=registry)
+        cell_hole = self.fluka.ZCC("cell_hole", 0, 0, 45,
+                                   flukaregistry=registry)
+        cell_zone = self.fluka.Zone()
+        cell_zone.addIntersection(cell_outer)
+        cell_zone.addSubtraction(cell_hole)
+        cell = self.fluka.Region("CELL")
+        cell.addZone(cell_zone)
+        proof = subtracted_cell_contains_prototype_empty_intersection(
+            prototype, cell, self.np.identity(4))
+        self.assertEqual(proof["method"],
+                         "prototype_positive_cylinder_inside_cell_subtraction")
+        self.assertAlmostEqual(proof["zone_pair_proofs"][0]["radial_containment_margin_mm"], 15)
+        cell_hole.radius = 29.9
+        self.assertIsNone(subtracted_cell_contains_prototype_empty_intersection(
+            prototype, cell, self.np.identity(4)))
+
+    def test_matching_infinite_cylinder_container_is_supported(self):
+        from fluka_lattice_conversion import matching_container_empty_intersection
+        registry = self.fluka.FlukaRegistry()
+        outer = self.fluka.RPP("outer_box", -20, 20, -20, 20, -20, 20,
+                               flukaregistry=registry)
+        prototype_hole = self.fluka.ZCC("prototype_hole", 5, -2, 3,
+                                        flukaregistry=registry)
+        prototype_zone = self.fluka.Zone()
+        prototype_zone.addIntersection(outer)
+        prototype_zone.addSubtraction(prototype_hole)
+        prototype = self.fluka.Region("BACKGROUND")
+        prototype.addZone(prototype_zone)
+        cell_body = self.fluka.ZCC("cell_body", 0, -2, 3,
+                                   flukaregistry=registry)
+        cell_zone = self.fluka.Zone()
+        cell_zone.addIntersection(cell_body)
+        cell = self.fluka.Region("CELL")
+        cell.addZone(cell_zone)
+        transform = self.np.identity(4)
+        transform[0, 3] = 5
+        proof = matching_container_empty_intersection(prototype, cell, transform)
+        self.assertEqual(proof["zone_pair_proofs"][0]["primitive_type"], "ZCC")
+
     def test_refined_disjoint_proof_removes_broad_false_candidate(self):
         from fluka_lattice_conversion import conservative_lattice_candidates
         registry, _ = self.fixture()
@@ -246,6 +330,26 @@ class GenericLatticeTest(unittest.TestCase):
         item = report["lattices"]["CELL"]
         self.assertEqual(item["unresolved_refinement_count"], 1)
         self.assertEqual(item["unresolved_refinements"][0]["name"], "FIRST")
+
+    def test_refinement_is_cached_across_lattice_cells(self):
+        from fluka_lattice_conversion import conservative_lattice_candidates
+        registry, _ = self.fixture()
+        registry.latticeDict["CELL_COPY"] = registry.latticeDict["CELL"]
+        calls = []
+
+        def counting_bounds(region):
+            calls.append(region.name)
+            return self.np.array([1., -1., -1.]), self.np.array([3., 1., 1.])
+
+        report = {}
+        result = conservative_lattice_candidates(
+            registry,
+            refinement_bounds_provider=counting_bounds,
+            refinement_report=report,
+        )
+        self.assertEqual(result, {"CELL": ["FIRST"], "CELL_COPY": ["FIRST"]})
+        self.assertEqual(calls, ["FIRST"])
+        self.assertEqual(report["unique_refinement_count"], 1)
 
     def test_missing_selected_prototype_is_not_silently_omitted(self):
         registry, _ = self.fixture(multiple=True)

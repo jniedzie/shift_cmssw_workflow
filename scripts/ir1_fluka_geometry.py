@@ -17,6 +17,8 @@ import sys
 import tempfile
 import xml.etree.ElementTree as ET
 
+import numpy as np
+
 from fluka_region_preflight import (
     classify_raw_regions,
     resolve_raw_region_classifications,
@@ -700,11 +702,14 @@ def _install_raw_zone_aabb_fallback(
     converter_module,
     raw_preflight,
     padding_mm=RAW_ZONE_AABB_PADDING_MM,
+    use_validated_preflight_bounds=False,
 ):
-    """Reuse independently meshed raw-zone bounds when CGAL loses a zone.
+    """Reuse validated raw-zone bounds as a fallback or explicit fast path.
 
     The fallback only supplies the finite minimisation box.  The converted
-    Boolean still comes from the length-safety-adjusted FLUKA source.
+    Boolean still comes from the length-safety-adjusted FLUKA source.  The
+    explicit fast path requires the complete resolved raw preflight and is a
+    performance optimization, not an independent geometry validation.
     """
 
     from pyg4ometry.fluka import AABB
@@ -725,6 +730,53 @@ def _install_raw_zone_aabb_fallback(
     fallback_details = []
 
     def region_zone_aabbs(flukareg, regions, quadric_region_aabbs):
+        if use_validated_preflight_bounds:
+            if quadric_region_aabbs:
+                raise ProxyModelError("validated raw-zone bounds cannot be mixed with quadric overrides")
+            primary = raw_preflight.get("primary_classification", {})
+            if (raw_preflight.get("passed") is not True
+                    or raw_preflight.get("primary_backend") != "cgal_sm"
+                    or raw_preflight.get("secondary_backend") != "pycsg"
+                    or primary.get("passed") is not True
+                    or primary.get("evaluation_errors")
+                    or raw_preflight.get("evaluation_errors")
+                    or raw_preflight.get("deferred_null_validation_regions")):
+                raise ProxyModelError("raw preflight is not complete enough to reuse its zone bounds")
+            primary_bounds = primary.get("zone_bounds_mm", {})
+            secondary_bounds = secondary.get("zone_bounds_mm", {})
+            result = {}
+            for name in regions:
+                if name not in flukareg.regionDict:
+                    raise ProxyModelError(f"selected region is absent from the conversion registry: {name}")
+                independent = primary_bounds.get(name, secondary_bounds.get(name))
+                if not isinstance(independent, list) or len(independent) != len(flukareg.regionDict[name].zones):
+                    raise ProxyModelError(f"validated raw-zone bounds are incomplete for {name}")
+                resolved = []
+                null_zone_count = 0
+                for zone_index, bound in enumerate(independent):
+                    if bound is None:
+                        # The validated backend found this union member empty.
+                        # Preserve the converter's normal null-zone filtering;
+                        # a non-null region may legitimately contain both empty
+                        # and non-empty zones.
+                        resolved.append(None)
+                        null_zone_count += 1
+                        continue
+                    if not isinstance(bound, list) or len(bound) != 2:
+                        raise ProxyModelError(f"validated raw-zone bound is null or malformed for {name} zone {zone_index}")
+                    lower, upper = map(np.asarray, bound)
+                    if (lower.shape != (3,) or upper.shape != (3,)
+                            or not np.isfinite([lower, upper]).all() or np.any(lower >= upper)):
+                        raise ProxyModelError(f"validated raw-zone bound is nonfinite or empty for {name} zone {zone_index}")
+                    resolved.append(AABB(lower - padding_mm, upper + padding_mm))
+                result[name] = resolved
+                if null_zone_count == len(resolved):
+                    raise ProxyModelError(f"validated raw-zone bounds make selected region {name} entirely null")
+                fallback_details.append({"name": name,
+                                         "reused_zone_count": len(resolved) - null_zone_count,
+                                         "validated_null_zone_count": null_zone_count,
+                                         "mode": "validated_raw_preflight_bounds"})
+            return result
         result = original(flukareg, regions, quadric_region_aabbs)
         selected = set(regions)
         for name in secondary["non_null_regions"]:

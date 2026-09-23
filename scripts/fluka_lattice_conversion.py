@@ -9,6 +9,7 @@ ambiguous empty intersections fail closed instead of silently losing material.
 from contextlib import contextmanager
 import hashlib
 import importlib
+from itertools import product
 import json
 
 import numpy as np
@@ -18,6 +19,9 @@ from fluka_analytic_bounds import bounds_are_disjoint, region_bounds, transform_
 
 class LatticeConversionError(RuntimeError):
     pass
+
+
+MATCHING_CONTAINER_TOLERANCE_MM = 1.0e-8
 
 
 def _affine(rotation, translation):
@@ -39,6 +43,222 @@ def _rigid_matrix(matrix, description):
     return matrix
 
 
+def _primitive_signature(body, outer_matrix):
+    """Return source-analytic geometry for supported rigid container bodies."""
+    kind = type(body).__name__
+    if kind not in {"RPP", "RCC", "XCC", "YCC", "ZCC"}:
+        return None
+    try:
+        matrix = _rigid_matrix(np.asarray(outer_matrix) @ body.transform.to4DMatrix(),
+                               f"body {body.name}")
+    except LatticeConversionError:
+        return None
+    if kind == "RPP":
+        corners = np.asarray(list(product(*zip(np.asarray(body.lower, dtype=float),
+                                               np.asarray(body.upper, dtype=float)))))
+        points = (matrix[:3, :3] @ corners.T).T + matrix[:3, 3]
+        order = np.lexsort((points[:, 2], points[:, 1], points[:, 0]))
+        return kind, points[order]
+    if kind == "RCC":
+        face = np.asarray(body.face, dtype=float)
+        end = face + np.asarray(body.direction, dtype=float)
+        points = (matrix[:3, :3] @ np.asarray([face, end]).T).T + matrix[:3, 3]
+        return kind, points, float(body.radius)
+    if kind in {"XCC", "YCC", "ZCC"}:
+        axis_index = {"XCC": 0, "YCC": 1, "ZCC": 2}[kind]
+        transverse = [index for index in range(3) if index != axis_index]
+        point = np.zeros(3)
+        point[transverse] = [float(getattr(body, "xyz"[index])) for index in transverse]
+        axis = np.zeros(3)
+        axis[axis_index] = 1
+        transformed_point = matrix[:3, :3] @ point + matrix[:3, 3]
+        transformed_axis = matrix[:3, :3] @ axis
+        return kind, transformed_point, transformed_axis, float(body.radius)
+    return None
+
+
+def _matching_primitive(first, second, tolerance_mm):
+    if first is None or second is None or first[0] != second[0]:
+        return None
+    if first[0] == "RPP":
+        residual = float(np.max(np.abs(first[1] - second[1])))
+    elif first[0] == "RCC":
+        direct = float(np.max(np.abs(first[1] - second[1])))
+        reversed_endpoints = float(np.max(np.abs(first[1] - second[1][::-1])))
+        residual = max(min(direct, reversed_endpoints), abs(first[2] - second[2]))
+    elif first[0] in {"XCC", "YCC", "ZCC"}:
+        first_axis = first[2] / np.linalg.norm(first[2])
+        second_axis = second[2] / np.linalg.norm(second[2])
+        parallel_residual = 1.0 - abs(float(np.dot(first_axis, second_axis)))
+        if parallel_residual > 1.0e-12:
+            return None
+        delta = first[1] - second[1]
+        line_distance = float(np.linalg.norm(delta - np.dot(delta, second_axis) * second_axis))
+        residual = max(line_distance, abs(first[3] - second[3]))
+    else:
+        return None
+    return residual if residual <= tolerance_mm else None
+
+
+def _cylinder_geometry(signature):
+    if signature is None:
+        return None
+    if signature[0] == "RCC":
+        vector = signature[1][1] - signature[1][0]
+        length = float(np.linalg.norm(vector))
+        if not np.isfinite(length) or length <= 0:
+            return None
+        return signature[1][0], vector / length, (0.0, length), signature[2]
+    if signature[0] in {"XCC", "YCC", "ZCC"}:
+        axis = signature[2] / np.linalg.norm(signature[2])
+        return signature[1], axis, (-np.inf, np.inf), signature[3]
+    return None
+
+
+def _cylinder_contains(outer, inner, tolerance_mm):
+    outer_cylinder, inner_cylinder = _cylinder_geometry(outer), _cylinder_geometry(inner)
+    if outer_cylinder is None or inner_cylinder is None:
+        return None
+    outer_point, outer_axis, outer_interval, outer_radius = outer_cylinder
+    inner_point, inner_axis, inner_interval, inner_radius = inner_cylinder
+    parallel_residual = 1.0 - abs(float(np.dot(outer_axis, inner_axis)))
+    if parallel_residual > 1.0e-12:
+        return None
+    delta = inner_point - outer_point
+    transverse_distance = float(np.linalg.norm(delta - np.dot(delta, outer_axis) * outer_axis))
+    radial_margin = outer_radius - transverse_distance - inner_radius
+    if radial_margin < -tolerance_mm:
+        return None
+    if np.isfinite(outer_interval).all():
+        if not np.isfinite(inner_interval).all():
+            return None
+        inner_end = inner_point + inner_axis * inner_interval[1]
+        projections = [float(np.dot(point - outer_point, outer_axis))
+                       for point in (inner_point, inner_end)]
+        axial_margin = min(min(projections) - outer_interval[0],
+                           outer_interval[1] - max(projections))
+        if axial_margin < -tolerance_mm:
+            return None
+    else:
+        axial_margin = None
+    return {
+        "parallel_axis_residual": parallel_residual,
+        "transverse_distance_mm": transverse_distance,
+        "radial_containment_margin_mm": radial_margin,
+        "axial_containment_margin_mm": axial_margin,
+        "outer_axially_unbounded": axial_margin is None,
+    }
+
+
+def matching_container_empty_intersection(prototype_region, cell_region,
+                                          physical_to_prototype,
+                                          tolerance_mm=MATCHING_CONTAINER_TOLERANCE_MM):
+    """Prove a prototype/cell intersection empty through matching containers.
+
+    A cell union is wholly inside a positive primitive in each of its zones.
+    If every prototype-zone/cell-zone pair subtracts an analytically identical
+    primitive, their intersection contains no material. Only RPP, RCC and
+    axis-cylinder containers under proper rigid transforms are currently
+    certifiable; everything else remains unresolved and is retained.
+    """
+    if not np.isfinite(tolerance_mm) or tolerance_mm <= 0:
+        raise ValueError("tolerance_mm must be finite and positive")
+    matrix = _rigid_matrix(physical_to_prototype, "physical-to-prototype transform")
+    if not prototype_region.zones or not cell_region.zones:
+        return None
+    proofs = []
+    for prototype_zone_index, prototype_zone in enumerate(prototype_region.zones):
+        subtractors = [(operation.body, _primitive_signature(operation.body, np.identity(4)))
+                       for operation in prototype_zone.subtractions
+                       if not hasattr(operation.body, "intersections")]
+        if not subtractors:
+            return None
+        for cell_zone_index, cell_zone in enumerate(cell_region.zones):
+            witness = None
+            for cell_operation in cell_zone.intersections:
+                if hasattr(cell_operation.body, "intersections"):
+                    continue
+                cell_signature = _primitive_signature(cell_operation.body, matrix)
+                for subtractor, subtractor_signature in subtractors:
+                    residual = _matching_primitive(cell_signature, subtractor_signature, tolerance_mm)
+                    if residual is not None:
+                        witness = {
+                            "prototype_zone_index": prototype_zone_index,
+                            "cell_zone_index": cell_zone_index,
+                            "cell_positive_body": cell_operation.body.name,
+                            "prototype_subtracted_body": subtractor.name,
+                            "primitive_type": type(subtractor).__name__,
+                            "maximum_parameter_residual_mm": residual,
+                        }
+                        break
+                if witness is not None:
+                    break
+            if witness is None:
+                return None
+            proofs.append(witness)
+    return {
+        "method": "matching_rigid_container_subtraction",
+        "tolerance_mm": tolerance_mm,
+        "zone_pair_proofs": proofs,
+    }
+
+
+def subtracted_cell_contains_prototype_empty_intersection(
+        prototype_region, cell_region, physical_to_prototype,
+        tolerance_mm=MATCHING_CONTAINER_TOLERANCE_MM):
+    """Prove emptiness when a cell subtraction contains each prototype zone."""
+    if not np.isfinite(tolerance_mm) or tolerance_mm <= 0:
+        raise ValueError("tolerance_mm must be finite and positive")
+    matrix = _rigid_matrix(physical_to_prototype, "physical-to-prototype transform")
+    if not prototype_region.zones or not cell_region.zones:
+        return None
+    proofs = []
+    for prototype_zone_index, prototype_zone in enumerate(prototype_region.zones):
+        positive = [(operation.body, _primitive_signature(operation.body, np.identity(4)))
+                    for operation in prototype_zone.intersections
+                    if not hasattr(operation.body, "intersections")]
+        if not positive:
+            return None
+        for cell_zone_index, cell_zone in enumerate(cell_region.zones):
+            subtractors = [(operation.body, _primitive_signature(operation.body, matrix))
+                           for operation in cell_zone.subtractions
+                           if not hasattr(operation.body, "intersections")]
+            witness = None
+            for subtractor, outer_signature in subtractors:
+                for body, inner_signature in positive:
+                    containment = _cylinder_contains(outer_signature, inner_signature, tolerance_mm)
+                    if containment is not None:
+                        witness = {
+                            "prototype_zone_index": prototype_zone_index,
+                            "cell_zone_index": cell_zone_index,
+                            "prototype_positive_body": body.name,
+                            "cell_subtracted_body": subtractor.name,
+                            "prototype_primitive_type": type(body).__name__,
+                            "cell_primitive_type": type(subtractor).__name__,
+                            **containment,
+                        }
+                        break
+                if witness is not None:
+                    break
+            if witness is None:
+                return None
+            proofs.append(witness)
+    return {
+        "method": "prototype_positive_cylinder_inside_cell_subtraction",
+        "tolerance_mm": tolerance_mm,
+        "zone_pair_proofs": proofs,
+    }
+
+
+def certified_empty_lattice_intersection(prototype_region, cell_region,
+                                         physical_to_prototype):
+    """Return a narrow analytic empty-intersection proof, or ``None``."""
+    return (matching_container_empty_intersection(
+                prototype_region, cell_region, physical_to_prototype)
+            or subtracted_cell_contains_prototype_empty_intersection(
+                prototype_region, cell_region, physical_to_prototype))
+
+
 def conservative_lattice_candidates(fluka_registry, region_names=None, *,
                                     refinement_bounds_provider=None,
                                     refinement_report=None):
@@ -53,6 +273,7 @@ def conservative_lattice_candidates(fluka_registry, region_names=None, *,
     bounds = {name: region_bounds(fluka_registry.regionDict[name]) for name in names}
     result = {}
     details = {}
+    refinement_cache = {}
     for name, lattice in sorted(fluka_registry.latticeDict.items()):
         matrix = _rigid_matrix(lattice.getTransform().to4DMatrix(), f"lattice {name}")
         cell_bounds = transform_bounds(region_bounds(lattice.cellRegion), matrix)
@@ -62,14 +283,23 @@ def conservative_lattice_candidates(fluka_registry, region_names=None, *,
             if refinement_bounds_provider is None:
                 retained.append(region)
                 continue
-            try:
-                refined = refinement_bounds_provider(fluka_registry.regionDict[region])
-                values = np.asarray(refined, dtype=float)
-                if values.shape != (2, 3) or np.isnan(values).any():
-                    raise ValueError("invalid refinement bounds")
-            except (ArithmeticError, ValueError) as error:
+            if region not in refinement_cache:
+                try:
+                    refined = refinement_bounds_provider(fluka_registry.regionDict[region])
+                    values = np.asarray(refined, dtype=float)
+                    if values.shape != (2, 3) or np.isnan(values).any():
+                        raise ValueError("invalid refinement bounds")
+                    refinement_cache[region] = (refined, values, None)
+                except (ArithmeticError, ValueError) as error:
+                    refinement_cache[region] = (
+                        None,
+                        None,
+                        f"{type(error).__name__}: {error}",
+                    )
+            refined, values, refinement_error = refinement_cache[region]
+            if refinement_error is not None:
                 retained.append(region)
-                unresolved.append({"name": region, "error": f"{type(error).__name__}: {error}"})
+                unresolved.append({"name": region, "error": refinement_error})
                 continue
             if bounds_are_disjoint(refined, cell_bounds):
                 rejected.append({"name": region, "reason": "certified_refined_bounds_disjoint",
@@ -93,6 +323,7 @@ def conservative_lattice_candidates(fluka_registry, region_names=None, *,
         refinement_report.update({"schema": "shift-lattice-candidate-refinement-v1",
                                   "strict_disjoint_bounds_only": True,
                                   "unresolved_candidates_retained": True,
+                                  "unique_refinement_count": len(refinement_cache),
                                   "lattices": details})
     return result
 
@@ -278,7 +509,7 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
                       "candidate_refinement": refinement["lattices"][cell_name],
                       "preclassification_excluded_candidates": [exclusions[name] for name in sorted(exclusions)],
                       "exclusion_stage": "before_analytic_preselection",
-                      "placements": [], "passed": False}
+                      "certified_empty_intersections": [], "placements": [], "passed": False}
             records.append(record)
             if not candidate_names:
                 raise LatticeConversionError(f"lattice {cell_name} has no possible source prototypes")
@@ -303,25 +534,66 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
             record["physical_to_prototype_matrix"] = physical_to_prototype.tolist()
             for prototype_name in candidate_names:
                 prototype_lv = region_lvs[prototype_name]
+                empty_proof = certified_empty_lattice_intersection(
+                    source.regionDict[prototype_name], lattice.cellRegion, physical_to_prototype)
+                if empty_proof is not None:
+                    record["certified_empty_intersections"].append({
+                        "prototype": prototype_name,
+                        "proof": empty_proof,
+                    })
+                    continue
                 prototype_to_model = placement_matrix(placements[prototype_name])
                 cell_to_prototype_local = np.linalg.inv(prototype_to_model) @ physical_to_prototype @ cell_to_physical
+                prototype_local_to_cell = np.linalg.inv(cell_to_prototype_local)
                 stem = f"{cell_name}__{prototype_name}_lattice"
                 clipped = geant4.solid.Intersection(unique_name(stem + "_clip_solid", greg),
                     prototype_lv.solid, cell_solid,
                     [transformation.matrix2tbxyz(cell_to_prototype_local[:3, :3]),
                      cell_to_prototype_local[:3, 3].tolist()], greg)
-                item = {"prototype": prototype_name, "clip_matrix": cell_to_prototype_local.tolist()}
+                item = {
+                    "prototype": prototype_name,
+                    "cell_local_to_prototype_local_matrix": cell_to_prototype_local.tolist(),
+                    "clip_operand_order": "prototype_then_cell",
+                }
                 record["placements"].append(item)
                 try:
                     mesh = clipped.mesh()
                     volume = abs(float(mesh.volume()))
                     if mesh.isNull() or not np.isfinite(volume) or volume <= 0:
                         raise ValueError("empty or non-positive intersection mesh")
-                except Exception as error:
-                    item["unresolved_intersection"] = f"{type(error).__name__}: {error}"
-                    raise LatticeConversionError(
-                        f"lattice {cell_name}, prototype {prototype_name}: intersection has no positive mesh witness; "
-                        "cannot omit a potentially non-empty analytic solid") from error
+                    placement_matrix_for_clip = np.linalg.inv(physical_to_prototype) @ prototype_to_model
+                except Exception as first_error:
+                    # CGAL can lose a small cell when the first operand is a
+                    # much larger background region. Intersection is
+                    # commutative, so retry the same exact solids in the cell's
+                    # local frame before declaring the analytic candidate
+                    # unresolved.
+                    reversed_clipped = geant4.solid.Intersection(
+                        unique_name(stem + "_cell_first_clip_solid", greg),
+                        cell_solid, prototype_lv.solid,
+                        [transformation.matrix2tbxyz(prototype_local_to_cell[:3, :3]),
+                         prototype_local_to_cell[:3, 3].tolist()], greg)
+                    try:
+                        reversed_mesh = reversed_clipped.mesh()
+                        reversed_volume = abs(float(reversed_mesh.volume()))
+                        if reversed_mesh.isNull() or not np.isfinite(reversed_volume) or reversed_volume <= 0:
+                            raise ValueError("empty or non-positive reversed intersection mesh")
+                    except Exception as second_error:
+                        item["unresolved_intersection"] = {
+                            "prototype_then_cell": f"{type(first_error).__name__}: {first_error}",
+                            "cell_then_prototype": f"{type(second_error).__name__}: {second_error}",
+                        }
+                        raise LatticeConversionError(
+                            f"lattice {cell_name}, prototype {prototype_name}: intersection has no positive mesh "
+                            "witness in either exact operand order; cannot omit a potentially non-empty analytic "
+                            "solid") from second_error
+                    clipped, mesh, volume = reversed_clipped, reversed_mesh, reversed_volume
+                    placement_matrix_for_clip = cell_to_physical
+                    item.update({
+                        "clip_operand_order": "cell_then_prototype",
+                        "prototype_then_cell_failure": f"{type(first_error).__name__}: {first_error}",
+                        "prototype_local_to_cell_local_matrix": prototype_local_to_cell.tolist(),
+                    })
                 # Mesh success is recorded but does not replace the analytic solid.
                 item["diagnostic_mesh_volume_mm3"] = volume
                 original_meshing = config.doMeshing
@@ -333,10 +605,15 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
                     config.doMeshing = original_meshing
                 prototype_to_physical = np.linalg.inv(physical_to_prototype) @ prototype_to_model
                 pv = geant4.PhysicalVolume(
-                    list(transformation.reverse(transformation.matrix2tbxyz(prototype_to_physical[:3, :3]))),
-                    prototype_to_physical[:3, 3].tolist(), lv,
+                    list(transformation.reverse(transformation.matrix2tbxyz(placement_matrix_for_clip[:3, :3]))),
+                    placement_matrix_for_clip[:3, 3].tolist(), lv,
                     unique_name(stem + "_pv", greg), world, greg)
-                item.update({"placement_name": pv.name, "prototype_to_physical_matrix": prototype_to_physical.tolist()})
+                item.update({"placement_name": pv.name,
+                             "prototype_to_physical_matrix": prototype_to_physical.tolist(),
+                             "clip_local_to_physical_matrix": placement_matrix_for_clip.tolist()})
+            if not record["placements"]:
+                raise LatticeConversionError(
+                    f"lattice {cell_name} has no non-empty source prototype placements")
             record["passed"] = True
         report.update({"passed": True, "lattice_count": len(records),
                        "placement_count": sum(len(record["placements"]) for record in records)})

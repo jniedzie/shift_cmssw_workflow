@@ -265,6 +265,95 @@ class Ir1FlukaGeometryTest(unittest.TestCase):
             details, [{"name": "Recovered", "replaced_zone_count": 1}]
         )
 
+    def test_complete_validated_raw_bounds_bypass_repeated_meshing(self):
+        converter = SimpleNamespace()
+        converter._getRegionZoneAABBs = lambda *unused: self.fail(
+            "validated fast path must not repeat source meshing"
+        )
+        registry = SimpleNamespace(regionDict={
+            "FIRST": SimpleNamespace(zones=[object(), object()]),
+        })
+        preflight = {
+            "passed": True,
+            "primary_backend": "cgal_sm",
+            "secondary_backend": "pycsg",
+            "evaluation_errors": [],
+            "deferred_null_validation_regions": [],
+            "primary_classification": {
+                "passed": True,
+                "evaluation_errors": [],
+                "zone_bounds_mm": {"FIRST": [
+                    [[1., 2., 3.], [4., 5., 6.]],
+                    [[7., 8., 9.], [10., 11., 12.]],
+                ]},
+            },
+            "secondary_classification": {"non_null_regions": [], "zone_bounds_mm": {}},
+        }
+        original, details = _install_raw_zone_aabb_fallback(
+            converter,
+            preflight,
+            padding_mm=0.5,
+            use_validated_preflight_bounds=True,
+        )
+        try:
+            result = converter._getRegionZoneAABBs(registry, ["FIRST"], {})
+        finally:
+            converter._getRegionZoneAABBs = original
+        self.assertEqual(list(result["FIRST"][0].lower), [0.5, 1.5, 2.5])
+        self.assertEqual(list(result["FIRST"][1].upper), [10.5, 11.5, 12.5])
+        self.assertEqual(details, [{"name": "FIRST", "reused_zone_count": 2,
+                                    "validated_null_zone_count": 0,
+                                    "mode": "validated_raw_preflight_bounds"}])
+
+    def test_validated_raw_bounds_preserve_empty_union_members(self):
+        converter = SimpleNamespace(_getRegionZoneAABBs=lambda *unused: self.fail(
+            "validated fast path must not repeat source meshing"))
+        registry = SimpleNamespace(regionDict={
+            "MIXED": SimpleNamespace(zones=[object(), object()]),
+        })
+        preflight = {
+            "passed": True,
+            "primary_backend": "cgal_sm",
+            "secondary_backend": "pycsg",
+            "evaluation_errors": [],
+            "deferred_null_validation_regions": [],
+            "primary_classification": {
+                "passed": True,
+                "evaluation_errors": [],
+                "zone_bounds_mm": {"MIXED": [None, [[1., 2., 3.], [4., 5., 6.]]]},
+            },
+            "secondary_classification": {"non_null_regions": [], "zone_bounds_mm": {}},
+        }
+        original, details = _install_raw_zone_aabb_fallback(
+            converter, preflight, use_validated_preflight_bounds=True,
+        )
+        try:
+            result = converter._getRegionZoneAABBs(registry, ["MIXED"], {})
+        finally:
+            converter._getRegionZoneAABBs = original
+        self.assertIsNone(result["MIXED"][0])
+        self.assertEqual(details, [{"name": "MIXED", "reused_zone_count": 1,
+                                    "validated_null_zone_count": 1,
+                                    "mode": "validated_raw_preflight_bounds"}])
+
+    def test_raw_bound_fast_path_fails_closed_on_incomplete_report(self):
+        converter = SimpleNamespace(_getRegionZoneAABBs=lambda *unused: {})
+        preflight = {"secondary_classification": {"non_null_regions": [], "zone_bounds_mm": {}}}
+        original, _ = _install_raw_zone_aabb_fallback(
+            converter,
+            preflight,
+            use_validated_preflight_bounds=True,
+        )
+        try:
+            with self.assertRaisesRegex(ProxyModelError, "not complete enough"):
+                converter._getRegionZoneAABBs(
+                    SimpleNamespace(regionDict={}),
+                    [],
+                    {},
+                )
+        finally:
+            converter._getRegionZoneAABBs = original
+
     def test_frozen_source_checksums(self):
         observed = verify_source_bundle(MODEL)
         self.assertEqual(len(observed), 8)
