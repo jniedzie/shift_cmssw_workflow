@@ -208,6 +208,45 @@ class GenericLatticeTest(unittest.TestCase):
         with self.assertRaisesRegex(self.error, "no possible source prototypes"):
             self.convert(registry)
 
+    def test_refined_disjoint_proof_removes_broad_false_candidate(self):
+        from fluka_lattice_conversion import conservative_lattice_candidates
+        registry, _ = self.fixture()
+        self.assertEqual(conservative_lattice_candidates(registry), {"CELL": ["FIRST"]})
+        report = {}
+
+        def certified_far_away(_region):
+            return (self.np.array([10000., 10000., 10000.]),
+                    self.np.array([10001., 10001., 10001.]))
+
+        refined = conservative_lattice_candidates(
+            registry,
+            refinement_bounds_provider=certified_far_away,
+            refinement_report=report,
+        )
+        self.assertEqual(refined, {"CELL": []})
+        item = report["lattices"]["CELL"]
+        self.assertEqual(item["certified_disjoint_count"], 1)
+        self.assertEqual(item["certified_disjoint_candidates"][0]["name"], "FIRST")
+        self.assertTrue(report["strict_disjoint_bounds_only"])
+
+    def test_failed_refinement_retains_candidate(self):
+        from fluka_lattice_conversion import conservative_lattice_candidates
+        registry, _ = self.fixture()
+        report = {}
+
+        def unresolved(_region):
+            raise ValueError("no finite certificate")
+
+        refined = conservative_lattice_candidates(
+            registry,
+            refinement_bounds_provider=unresolved,
+            refinement_report=report,
+        )
+        self.assertEqual(refined, {"CELL": ["FIRST"]})
+        item = report["lattices"]["CELL"]
+        self.assertEqual(item["unresolved_refinement_count"], 1)
+        self.assertEqual(item["unresolved_refinements"][0]["name"], "FIRST")
+
     def test_missing_selected_prototype_is_not_silently_omitted(self):
         registry, _ = self.fixture(multiple=True)
         report = {}

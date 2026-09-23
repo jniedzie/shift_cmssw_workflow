@@ -39,15 +39,61 @@ def _rigid_matrix(matrix, description):
     return matrix
 
 
-def conservative_lattice_candidates(fluka_registry, region_names=None):
-    """Select possible prototypes, including enclosed and curved components."""
+def conservative_lattice_candidates(fluka_registry, region_names=None, *,
+                                    refinement_bounds_provider=None,
+                                    refinement_report=None):
+    """Select possible prototypes, including enclosed and curved components.
+
+    The first pass uses cheap source-analytic bounds and can only reject strict
+    AABB separation. An optional stricter provider may then prove additional
+    candidates disjoint. If that provider cannot certify a finite bound, the
+    candidate is retained.
+    """
     names = sorted(fluka_registry.regionDict if region_names is None else region_names)
     bounds = {name: region_bounds(fluka_registry.regionDict[name]) for name in names}
     result = {}
+    details = {}
     for name, lattice in sorted(fluka_registry.latticeDict.items()):
         matrix = _rigid_matrix(lattice.getTransform().to4DMatrix(), f"lattice {name}")
         cell_bounds = transform_bounds(region_bounds(lattice.cellRegion), matrix)
-        result[name] = [region for region in names if not bounds_are_disjoint(bounds[region], cell_bounds)]
+        broad = [region for region in names if not bounds_are_disjoint(bounds[region], cell_bounds)]
+        retained, rejected, unresolved = [], [], []
+        for region in broad:
+            if refinement_bounds_provider is None:
+                retained.append(region)
+                continue
+            try:
+                refined = refinement_bounds_provider(fluka_registry.regionDict[region])
+                values = np.asarray(refined, dtype=float)
+                if values.shape != (2, 3) or np.isnan(values).any():
+                    raise ValueError("invalid refinement bounds")
+            except (ArithmeticError, ValueError) as error:
+                retained.append(region)
+                unresolved.append({"name": region, "error": f"{type(error).__name__}: {error}"})
+                continue
+            if bounds_are_disjoint(refined, cell_bounds):
+                rejected.append({"name": region, "reason": "certified_refined_bounds_disjoint",
+                                 "bounds_mm": values.tolist()})
+            else:
+                retained.append(region)
+        result[name] = retained
+        details[name] = {
+            "broad_candidate_count": len(broad),
+            "retained_candidate_count": len(retained),
+            "certified_disjoint_count": len(rejected),
+            "certified_disjoint_candidates": rejected,
+            "unresolved_refinement_count": len(unresolved),
+            "unresolved_refinements": unresolved,
+            "refinement_enabled": refinement_bounds_provider is not None,
+            "refinement_provider": (None if refinement_bounds_provider is None else
+                                    getattr(refinement_bounds_provider, "__name__",
+                                            type(refinement_bounds_provider).__name__)),
+        }
+    if refinement_report is not None:
+        refinement_report.update({"schema": "shift-lattice-candidate-refinement-v1",
+                                  "strict_disjoint_bounds_only": True,
+                                  "unresolved_candidates_retained": True,
+                                  "lattices": details})
     return result
 
 
@@ -157,7 +203,8 @@ def validated_lattice_exclusions(source_registry, raw_preflight):
 
 @contextmanager
 def lattice_conversion_guard(report, *, converter_module=None, source_registry=None,
-                             cell_bounds_provider=region_bounds, raw_preflight=None):
+                             cell_bounds_provider=region_bounds,
+                             prototype_bounds_provider=None, raw_preflight=None):
     """Install and restore a fail-closed, source-independent lattice converter.
 
     ``source_registry`` should be the complete source registry when the caller
@@ -165,6 +212,9 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
     raise an error.  Without it, completeness is only relative to the registry
     supplied by pyg4ometry.  ``cell_bounds_provider`` may supply independently
     certified analytic/LP finite bounds for cells bounded by oblique planes.
+    ``prototype_bounds_provider`` may tighten the initial broad prototype
+    bounds. It is used only for strict disjointness proofs; unresolved bounds
+    retain the candidate.
     A mesh-derived bounds provider is not safe and must not be passed here.
     ``raw_preflight`` optionally supplies a complete resolved two-backend raw
     classification. Only validated source-null and exactly assigned BLCKHOLE
@@ -204,7 +254,13 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
         del region_zone_aabbs  # Tessellated extents must never select or clip prototypes.
         source = source_registry if source_registry is not None else freg
         eligible_names = sorted(set(source.regionDict) - set(exclusions))
-        candidates = conservative_lattice_candidates(source, eligible_names)
+        refinement = {}
+        candidates = conservative_lattice_candidates(
+            source,
+            eligible_names,
+            refinement_bounds_provider=prototype_bounds_provider,
+            refinement_report=refinement,
+        )
         placements = {}
         for item in world.daughterVolumes:
             if item.name.endswith("_pv") and item.name[:-3] in region_lvs:
@@ -219,6 +275,7 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
             candidate_names = candidates[cell_name]
             record = {"cell": cell_name, "candidate_names": candidate_names,
                       "analytically_rejected_count": len(eligible_names) - len(candidate_names),
+                      "candidate_refinement": refinement["lattices"][cell_name],
                       "preclassification_excluded_candidates": [exclusions[name] for name in sorted(exclusions)],
                       "exclusion_stage": "before_analytic_preselection",
                       "placements": [], "passed": False}
@@ -300,7 +357,11 @@ def lattice_conversion_guard(report, *, converter_module=None, source_registry=N
     def contents(freg, ignored_mesh_bounds):
         del ignored_mesh_bounds
         source = source_registry if source_registry is not None else freg
-        return conservative_lattice_candidates(source, sorted(set(source.regionDict) - set(exclusions)))
+        return conservative_lattice_candidates(
+            source,
+            sorted(set(source.regionDict) - set(exclusions)),
+            refinement_bounds_provider=prototype_bounds_provider,
+        )
 
     converter._convertLatticeCells, converter._getContentsOfLatticeCells = convert, contents
     try:

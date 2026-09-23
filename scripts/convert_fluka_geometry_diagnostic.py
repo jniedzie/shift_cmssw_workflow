@@ -424,6 +424,7 @@ def run_conversion(args, report):
                 with lattice_conversion_guard(report.setdefault("lattice_conversion", {}),
                                               converter_module=converter, source_registry=registry,
                                               cell_bounds_provider=certified_region_bounds,
+                                              prototype_bounds_provider=certified_region_bounds,
                                               raw_preflight=preflight if report["full_source_requested"] else None):
                     converted = converter.fluka2Geant4(registry, regions=preflight["conversion_candidate_regions"])
                 # Upstream historically suppresses some lattice exceptions.
