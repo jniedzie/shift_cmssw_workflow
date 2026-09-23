@@ -41,7 +41,14 @@ def _integer(value, label):
 
 
 def audit_material_cards(cards):
-    """Report ambiguities without choosing native duplicate/override semantics."""
+    """Resolve repeated named MATERIAL cards using FLUKA's override rule.
+
+    FLUKA permits a later MATERIAL definition to override an earlier named
+    definition.  Keep the complete history visible, and record the effective
+    last card rather than treating an intentional override as an ambiguity.
+    Compound object binding is checked separately by ``material_fidelity_guard``;
+    a stale constituent still fails closed there.
+    """
     definitions = {}
     unsupported = []
     for index, card in enumerate(cards):
@@ -56,7 +63,22 @@ def audit_material_cards(cards):
             unsupported.append({"name": card.sdum, "what5": alternate,
                                 "reason": "alternate ionisation material not converted"})
     duplicates = {name: values for name, values in definitions.items() if len(values) > 1}
+    resolutions = {
+        name: {
+            "superseded_card_indices": [item["card_index"] for item in values[:-1]],
+            "effective_card_index": values[-1]["card_index"],
+            "effective_what": values[-1]["what"],
+            "all_definitions_identical": all(
+                item["what"] == values[-1]["what"] for item in values[:-1]
+            ),
+        }
+        for name, values in duplicates.items()
+    }
     return {"duplicate_material_definitions": duplicates,
+            "duplicate_material_resolutions": resolutions,
+            "duplicate_material_definitions_resolved": True,
+            "redefinition_policy": "last named MATERIAL card overrides earlier definitions",
+            "redefinition_reference": "FLUKA MATERIAL manual notes 4-5 and name-based redefinition example",
             "unsupported_material_options": unsupported,
             "native_material_semantics_validated": False,
             "production_ready": False}

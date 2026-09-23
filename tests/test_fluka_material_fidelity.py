@@ -149,11 +149,18 @@ class MaterialFidelityTest(unittest.TestCase):
                 with self.assertRaises(MaterialFidelityError):
                     self.convert()
 
-    def test_duplicate_cards_reported_without_selecting_winner(self):
+    def test_duplicate_cards_report_last_definition_as_effective(self):
         cards = [self.flu.Card("MATERIAL", what1=6, what3=density, sdum="DUP")
                  for density in (1.0, 2.0)]
         audit = audit_material_cards(cards)
         self.assertEqual(len(audit["duplicate_material_definitions"]["DUP"]), 2)
+        self.assertTrue(audit["duplicate_material_definitions_resolved"])
+        self.assertEqual(audit["duplicate_material_resolutions"]["DUP"], {
+            "superseded_card_indices": [0],
+            "effective_card_index": 1,
+            "effective_what": [6, None, 2.0, None, None, None],
+            "all_definitions_identical": False,
+        })
         self.assertFalse(audit["native_material_semantics_validated"])
         self.assertEqual([card.what3 for card in cards], [1.0, 2.0])
 
