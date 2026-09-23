@@ -16,8 +16,9 @@ reused.  --force removes and recreates outputs for every selected step;
 --force-steps LIST is shorthand for --steps LIST --force.
 --prebuilt skips the submission-side SCRAM build after one explicit successful
 build, allowing several configuration-only scans to share the same libraries.
-Before submitting, logs from completed older jobs are removed from the local
-Condor log directory and, when no older workflow jobs are active, from EOS.
+Before submitting, inactive Condor logs across this workflow's campaign
+directories are removed after an account-wide queue check. EOS payload logs
+are retained as checkpoint/provenance evidence.
 --keep-logs disables this automatic cleanup.
 --check validates configuration and trigger inputs without building, cleaning,
 or contacting Condor.
@@ -497,7 +498,7 @@ printf 'Trigger: scenario=%s, timeline=%s, BX range=%s..%s, seed=%s, rules=%s, r
 	"$TRIGGER_TIMELINE_SEED" "$TRIGGER_RULE_MODE" "$TRIGGER_REFERENCE_SLOT_MODE" \
 	"$PIGGYBACK_FILTER_RECONSTRUCTION" "$PIGGYBACK_FILTER_LEVEL"
 if [[ "$KEEP_LOGS" == 0 ]]; then
-	echo "Cleaning old Condor and payload logs before submission..."
+	echo "Cleaning inactive Condor logs across campaigns; retaining EOS provenance..."
 	"$WORKFLOW_ROOT/scripts/cleanup_condor_logs.sh" \
 		"$CONDOR_LOG_DIR" "$LOG_DIR" "$WORKFLOW_ROOT/scripts/run_condor_job.sh"
 else

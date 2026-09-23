@@ -736,6 +736,21 @@ one cluster for all six bins/processes, with `max_materialize=50`, `max_idle=50`
 and failed jobs held rather than blindly retried. This bounds the total number
 of materialized (therefore running) jobs across this recovery, not 50 per bin.
 See the [HTCondor submission reference](https://htcondor.readthedocs.io/en/lts/man-pages/condor_submit.html#max_materialize).
+After 35 successful recovery jobs were independently reopened on September 22,
+the user requested more parallelism. The live recovery factory 1960281 was
+raised to `JobMaterializeLimit=100` at 11:17 CERN using `condor_qedit`, while
+`JobMaterializeMaxIdle=50` and all runtime/physics inputs were kept unchanged.
+At 11:25 CERN the user explicitly approved releasing all remaining recovery
+jobs: the live cap was raised again to **326**, with the idle throttle still
+50. Readback showed 100 running, 50 idle and zero held immediately after the
+edit. This overrides the earlier 100 cap for this factory only; actual running
+concurrency remains subject to CERN allocation and account limits.
+The original 50-cap submit file remains an immutable historical record.
+This is a monitored-by-snapshot, provisional increment for the scratch-staged
+recovery, not a new general default or a verified CERN-safe AFS load threshold.
+The current numeric account ceiling remains unverified; central enforcement
+must not be bypassed. See `../validation/qcd_unfiltered_20260921/RECOVERY_20260922.md`
+for the evidence and exact current-vs-original scheduling distinction.
 `bigbird21.cern.ch` is the chosen alternate scheduler; account identity and
 CERN's central limits are unchanged. Query/submit that scheduler explicitly.
 Do not submit the old six full campaign scripts again.
@@ -1195,7 +1210,56 @@ denominators. Keep `physics_valid=false` and `normalization_ready=false` until
 analysis integration and the existing geometry/physics gates are validated.
 Do not combine these outputs with the overlapping older 500-attempt replays.
 
+### Complete unfiltered production merges
+
+After the scheduler and factory drain, reconcile original terminal records,
+recovery exits and expected chunk IDs. `scripts/merge_unfiltered_production.py`
+merges a complete QCD or J/psi bin without modifying its source chunks:
+
+```bash
+python3 scripts/merge_unfiltered_production.py /absolute/campaign/path \
+  --chunks 400 --date 20260923 --report-directory /absolute/audit/directory
+```
+
+Use 40 chunks for the September 21 10k J/psi bins. The helper requires every
+four-stage checkpoint, unchanged config/log and generator metadata hashes,
+no active lock, exact disjoint generated IDs, unit weights and a common schema.
+It stages inputs/merges in local temporary storage, checks the merged union,
+checksum-verifies publication and independently reopens the EOS result.
+Only IDs, weights, counts and topology labels are read, never mass values.
+Existing outputs/normalization files are refused rather than overwritten.
+
+The single `samples/step4_merged/ntuple_complete_<events>events_<date>.root`
+has an adjacent audit JSON. `normalization_complete.json` and
+`cross_sections_complete.txt` are published at campaign level. Use those
+combined estimates and actual event counts; the original `cross_sections.txt`
+may contain only the first worker's estimate and is preserved as provenance.
+Ordinary `genWeight` filling plus the combined cross section divided by the
+actual full event count is the unfiltered-sample convention. Do not reuse
+old weighted-replay cross sections or sampling corrections. ATLAS-proxy,
+no-pileup/no-trigger and forced-decay normalization limitations remain.
+This helper does not silently omit failed jobs; an explicitly approved partial
+merge needs a separate recorded chunk list and missing-sample qualification.
+
 ### General submission
+
+**September 22 log retention correction:** automatic pre-submission cleanup
+now scans all campaign directories under this checkout's `condor/logs`, not
+only the newly selected campaign. It queries all schedulers for the account;
+active cluster IDs and explicit output/error/event-log paths are protected,
+including jobs using frozen wrapper paths. Failed, malformed, or warning-bearing
+queue responses skip cleanup. Symlinks, unrecognized filenames and files
+created/changed during the check are not removed. `--keep-logs` still opts out;
+check/dry-run modes do not clean. Do not routinely pass `--keep-logs` for new
+production once incident evidence has been recorded.
+
+EOS payload logs are retained even after jobs finish: the retiring chain hashes
+them as checkpoint provenance. Deleting them would break validated resumption.
+The September 22 manual AFS cleanup removes only inactive scheduler logs, not
+those EOS records or the live recovery logs. Future recovery submissions that
+bypass `run_condor.sh` must explicitly invoke the same pre-submission cleanup
+or perform an equivalent checked inventory. Do not edit a running recovery
+bootstrap or its frozen bundle to change log retention.
 
 Submit the full chain or selected stages with:
 
