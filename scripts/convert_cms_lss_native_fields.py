@@ -175,8 +175,22 @@ def convert_native_fields(source_dir, deck_name, output_dir):
         }
 
     deck_bytes = (source_dir / deck_name).read_bytes()
-    unresolved_includes = [item["basename"] for item in deck["include_resolution"]
-                           if item["resolution"] != "available-by-basename"]
+    unresolved_include_details = []
+    for item in deck["include_resolution"]:
+        if item["resolution"] == "available-by-basename":
+            continue
+        unresolved_include_details.append({
+            "basename": item["basename"],
+            "line": item["line"],
+            "resolution": item["resolution"],
+            # This describes the generated payload's explicit dependency graph,
+            # not the unknown contents or native semantics of a missing file.
+            "consumed_by_converted_payload": False,
+            "filename_stem_is_assigned_field": item["direct_assignment_to_filename_stem"],
+        })
+    resolved_referenced = sorted(set(maps) | set(inline_definitions))
+    if resolved_referenced != referenced:
+        raise FieldTranslationError("internal error: translated field dependency closure is incomplete")
     manifest = {
         "schema": "shift-cms-lss-native-field-maps-v1",
         "production_ready": False,
@@ -189,11 +203,22 @@ def convert_native_fields(source_dir, deck_name, output_dir):
         "inline_analytic_definitions": inline_definitions,
         "maps": maps,
         "assignments": deck["native_field_assignments"],
-        "unresolved_includes": unresolved_includes,
+        "payload_dependency_closure": {
+            "status": "pass",
+            "assigned_fields": referenced,
+            "resolved_archive_fields": sorted(maps),
+            "resolved_inline_fields": sorted(inline_definitions),
+            "missing_assigned_fields": [],
+            "unresolved_includes_not_consumed": [
+                item["basename"] for item in unresolved_include_details
+            ],
+        },
+        "unresolved_includes": [item["basename"] for item in unresolved_include_details],
+        "unresolved_include_details": unresolved_include_details,
         "limitations": [
             "No FLUKA-to-CMSSW coordinate transform has been selected.",
             "Field support domains and native interpolation boundaries require independent validation.",
-            "The absent MB.inp include remains unresolved even though field MB is not assigned.",
+            "Missing includes are not consumed by the emitted payload, but their unknown contents prevent an unchanged native-deck parse and full native-equivalence claim.",
         ],
     }
     manifest_path = output_dir / "field_manifest.json"

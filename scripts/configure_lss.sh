@@ -22,8 +22,8 @@ configure_shift_lss() {
 		*) echo "ERROR: SHIFT_LSS_MATERIAL_MODE must be none or external" >&2; return 1 ;;
 	esac
 	case "$SHIFT_LSS_FIELD_MODE" in
-		none|ir1_atlas_proxy) ;;
-		*) echo "ERROR: SHIFT_LSS_FIELD_MODE must be none or ir1_atlas_proxy" >&2; return 1 ;;
+		none|ir1_atlas_proxy|cms_ir5_2023_z1100) ;;
+		*) echo "ERROR: SHIFT_LSS_FIELD_MODE must be none, ir1_atlas_proxy, or cms_ir5_2023_z1100" >&2; return 1 ;;
 	esac
 	if [[ "$SHIFT_LSS_MATERIAL_MODE" == none && "$SHIFT_LSS_FIELD_MODE" == none ]]; then
 		return 0
@@ -137,9 +137,9 @@ PY
 		return 1
 	fi
 
-	if [[ "$SHIFT_LSS_FIELD_MODE" == ir1_atlas_proxy ]]; then
+	if [[ "$SHIFT_LSS_FIELD_MODE" != none ]]; then
 		if [[ -z "${SHIFT_LSS_FIELD_SCALE:-}" ]]; then
-			echo "ERROR: SHIFT_LSS_FIELD_SCALE is required for the provisional IR1/ATLAS field; its sign records the reviewed polarity" >&2
+			echo "ERROR: SHIFT_LSS_FIELD_SCALE is required for an LSS field; its sign records the reviewed polarity" >&2
 			return 1
 		fi
 		if ! python3 - "$SHIFT_LSS_FIELD_SCALE" <<'PY'
@@ -153,8 +153,16 @@ PY
 		then
 			return 1
 		fi
-		SHIFT_LSS_FIELD_IMPORT_PYTHON="; from PhysicsTools.ShiftMuonSegments.shiftLssIr1AtlasProxy_cff import shiftLssIr1AtlasProxyFieldElements"
-		SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssIr1AtlasProxyFieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+		case "$SHIFT_LSS_FIELD_MODE" in
+			ir1_atlas_proxy)
+				SHIFT_LSS_FIELD_IMPORT_PYTHON="; from PhysicsTools.ShiftMuonSegments.shiftLssIr1AtlasProxy_cff import shiftLssIr1AtlasProxyFieldElements"
+				SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssIr1AtlasProxyFieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+				;;
+			cms_ir5_2023_z1100)
+				SHIFT_LSS_FIELD_IMPORT_PYTHON="; from PhysicsTools.ShiftMuonSegments.shiftLssCmsIr5_2023Z1100_cff import shiftLssCmsIr5_2023Z1100FieldElements"
+				SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+				;;
+		esac
 		lss_audit_field_scale="$SHIFT_LSS_FIELD_SCALE"
 	fi
 

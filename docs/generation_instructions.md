@@ -37,11 +37,11 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `SHIFT_G4_MAX_TRACK_TIME_NS` | Central Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS` | Forward Geant4 transport guard, 5000 ns by default. |
 | `SHIFT_LSS_MATERIAL_MODE` | `none` or `external`; attaches the same explicitly transformed external material in Step 1 and Step 4. |
-| `SHIFT_LSS_FIELD_MODE` | `none` or provisional `ir1_atlas_proxy`; selects the same composite field for simulation and SHIFT reconstruction. |
+| `SHIFT_LSS_FIELD_MODE` | `none`, provisional `ir1_atlas_proxy`, or validated-payload candidate `cms_ir5_2023_z1100`; selects the same composite field for simulation and SHIFT reconstruction. |
 | `SHIFT_LSS_GDML_FILE`, `SHIFT_LSS_GDML_SHA256` | Installed CMSSW `FileInPath` and required frozen-artifact checksum for external material. |
 | `SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM` | Converter-recorded model coordinate of the recentered GDML origin. This keeps material aligned with fields. |
 | `SHIFT_LSS_MODEL_ORIGIN_CM`, `SHIFT_LSS_MODEL_TO_CMS` | CMS position of FLUKA `(0,0,0)` and the common proper rotation. There is deliberately no default transform. |
-| `SHIFT_LSS_FIELD_SCALE` | Required signed scale for the provisional field. Its sign records the reviewed polarity. |
+| `SHIFT_LSS_FIELD_SCALE` | Required signed scale for either external field payload. Its sign records the reviewed polarity. |
 | `TRIGGER_SCENARIO` | `piggyback_central` conditions production on an ordinary recorded central collision; `none` disables that contract. |
 | `TRIGGER_TIMELINE_MODE` | `none` or `zero_bias_proxy` for a correlated candidate-trigger sidecar. |
 | `TRIGGER_LIBRARY_JSONL`, `TRIGGER_L1_MENU_JSON` | Validated ZeroBias inputs used by the proxy. |

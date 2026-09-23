@@ -91,7 +91,7 @@ def audit_runtime(process, resolved, path, is_step4):
     elif material_mode != "none":
         raise RuntimeError(f"{path}: unsupported material mode {material_mode!r}")
 
-    if field_mode == "ir1_atlas_proxy":
+    if field_mode in ("ir1_atlas_proxy", "cms_ir5_2023_z1100"):
         require(process, "shiftLssMagneticField", path)
         require(process, "shiftLssFieldContract", path)
     elif field_mode != "none":

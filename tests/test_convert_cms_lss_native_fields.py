@@ -81,6 +81,21 @@ class NativeFieldConversionTest(unittest.TestCase):
             self.assertTrue(manifest["maps"]["MAP"]["roundtrip_metadata_equal"])
             self.assertTrue(manifest["maps"]["MAP"]["roundtrip_numeric_arrays_equal"])
             self.assertEqual(manifest["unresolved_includes"], ["MB.inp"])
+            self.assertEqual(manifest["payload_dependency_closure"], {
+                "status": "pass",
+                "assigned_fields": ["DIPOLE", "MAP"],
+                "resolved_archive_fields": ["MAP"],
+                "resolved_inline_fields": ["DIPOLE"],
+                "missing_assigned_fields": [],
+                "unresolved_includes_not_consumed": ["MB.inp"],
+            })
+            self.assertEqual(manifest["unresolved_include_details"], [{
+                "basename": "MB.inp",
+                "line": 1,
+                "resolution": "missing",
+                "consumed_by_converted_payload": False,
+                "filename_stem_is_assigned_field": False,
+            }])
             self.assertEqual(json.loads((output / "field_manifest.json").read_text())["maps"],
                              manifest["maps"])
             self.assertTrue((output / "MAP.dat").is_file())
