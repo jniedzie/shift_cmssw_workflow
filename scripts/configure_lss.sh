@@ -74,20 +74,28 @@ PY
 				return 1
 			fi
 		done
-		if [[ "$SHIFT_LSS_GDML_FILE" == /* || "$SHIFT_LSS_GDML_FILE" == *..* ||
-			! "$SHIFT_LSS_GDML_FILE" =~ ^[A-Za-z0-9_./+-]+$ ]]; then
-			echo "ERROR: SHIFT_LSS_GDML_FILE must be a safe CMSSW FileInPath" >&2
+		if [[ "$SHIFT_LSS_GDML_FILE" == *..* || ! "$SHIFT_LSS_GDML_FILE" =~ ^[A-Za-z0-9_./+-]+$ ]]; then
+			echo "ERROR: SHIFT_LSS_GDML_FILE must be a safe path" >&2
 			return 1
 		fi
-		if [[ -z "${CMSSW_SRC:-}" || ! -f "$CMSSW_SRC/$SHIFT_LSS_GDML_FILE" ]]; then
-			echo "ERROR: SHIFT_LSS_GDML_FILE is not installed under CMSSW src: ${CMSSW_SRC:-unset}/$SHIFT_LSS_GDML_FILE" >&2
+		if [[ "$SHIFT_LSS_GDML_FILE" == /* ]]; then
+			lss_gdml_path="$SHIFT_LSS_GDML_FILE"
+		else
+			if [[ -z "${CMSSW_SRC:-}" ]]; then
+				echo "ERROR: CMSSW_SRC is required for a relative SHIFT_LSS_GDML_FILE" >&2
+				return 1
+			fi
+			lss_gdml_path="${CMSSW_SRC:-}/$SHIFT_LSS_GDML_FILE"
+		fi
+		if [[ ! -f "$lss_gdml_path" ]]; then
+			echo "ERROR: LSS GDML file does not exist: $lss_gdml_path" >&2
 			return 1
 		fi
 		if [[ ! "$SHIFT_LSS_GDML_SHA256" =~ ^[0-9a-fA-F]{64}$ ]]; then
 			echo "ERROR: SHIFT_LSS_GDML_SHA256 must be a 64-character SHA-256 digest" >&2
 			return 1
 		fi
-		lss_gdml_checksum="$(sha256sum -- "$CMSSW_SRC/$SHIFT_LSS_GDML_FILE")"
+		lss_gdml_checksum="$(sha256sum -- "$lss_gdml_path")"
 		lss_gdml_checksum="${lss_gdml_checksum%% *}"
 		if [[ "${lss_gdml_checksum,,}" != "${SHIFT_LSS_GDML_SHA256,,}" ]]; then
 			echo "ERROR: installed LSS GDML checksum does not match SHIFT_LSS_GDML_SHA256" >&2
@@ -160,7 +168,22 @@ PY
 				;;
 			cms_ir5_2023_z1100)
 				SHIFT_LSS_FIELD_IMPORT_PYTHON="; from PhysicsTools.ShiftMuonSegments.shiftLssCmsIr5_2023Z1100_cff import shiftLssCmsIr5_2023Z1100FieldElements"
-				SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+				if [[ -n "${SHIFT_LSS_FIELD_DATA_DIRECTORY:-}" ]]; then
+					if [[ "$SHIFT_LSS_FIELD_DATA_DIRECTORY" != /* || "$SHIFT_LSS_FIELD_DATA_DIRECTORY" == *..* ||
+						! "$SHIFT_LSS_FIELD_DATA_DIRECTORY" =~ ^[A-Za-z0-9_./+-]+$ ]]; then
+						echo "ERROR: SHIFT_LSS_FIELD_DATA_DIRECTORY must be a safe absolute path" >&2
+						return 1
+					fi
+					for lss_map in MQXA.dat MQXB.dat MBXW.dat MQYana.dat; do
+						if [[ ! -f "$SHIFT_LSS_FIELD_DATA_DIRECTORY/$lss_map" ]]; then
+							echo "ERROR: missing LSS field map: $SHIFT_LSS_FIELD_DATA_DIRECTORY/$lss_map" >&2
+							return 1
+						fi
+					done
+					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE, dataDirectory='$SHIFT_LSS_FIELD_DATA_DIRECTORY')"
+				else
+					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+				fi
 				;;
 		esac
 		lss_audit_field_scale="$SHIFT_LSS_FIELD_SCALE"

@@ -59,6 +59,12 @@ the change.
 - The future CMS deck must pass the same fail-closed conversion, overlap, gap,
   material, transform, and transport gates without favorable special cases.
 
+## Private FLUKA and geometry payloads
+
+- Never add, stage, commit, or publish raw FLUKA decks, includes, field routines, field maps, source-checksum manifests, or production-generated GDML files in this repository.
+- Store such payloads only in `/afs/cern.ch/work/j/jniedzie/private/cms_lss_fluka_description`; copy and verify SHA-256 before deleting a working copy.
+- Check both `git ls-files` and `git status`: ignored or untracked payloads are not permission to publish them. Synthetic unit-test fixtures are allowed only when they contain no experiment geometry, map, or production payload.
+
 ## Workflow safety
 
 - Read `docs/generation_instructions.md` and the relevant timing/overlay note

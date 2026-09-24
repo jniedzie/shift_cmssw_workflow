@@ -84,7 +84,8 @@ def audit_runtime(process, resolved, path, is_step4):
             raise RuntimeError(
                 f"{path}: external-geometry rotation disagrees with workflow contract"
             )
-        if value(source.gdmlFile) != value(geometry_contract.gdmlFile):
+        configured_gdml = source.gdmlPath if hasattr(source, "gdmlPath") else source.gdmlFile
+        if value(configured_gdml) != value(geometry_contract.gdmlFile):
             raise RuntimeError(
                 f"{path}: external-geometry GDML disagrees with its resolved contract"
             )
