@@ -24,6 +24,10 @@ def main(directory):
     if contract["schema"] != "shift-gen-pilot-v1" or contract["detector_simulated"]:
         raise ValueError("Only GEN pilot products are accepted")
     path = str(out / "gen.root")
+    sample = contract["sample"]
+    parent_ids = {"chic": {10441, 20443, 445}, "psi2s": {100443}}
+    expected_codes = {"chic": set(range(411, 417)),
+                      "psi2s": set(range(401, 411)) | {441}}
     counts, codes = Counter(), Counter()
     identities = set()
     weights = []
@@ -36,7 +40,10 @@ def main(directory):
         identities.add(identity)
         info = product(event, "generator", "GenEventInfoProduct")
         weights.append(float(info.weight()))
-        codes[str(info.signalProcessID())] += 1
+        code = int(info.signalProcessID())
+        if sample in expected_codes and code not in expected_codes[sample]:
+            raise AssertionError(f"Unexpected feed-down hard process: {code}")
+        codes[str(code)] += 1
         hepmc = product(event, ("generator", "unsmeared"), "edm::HepMCProduct").GetEvent()
         beams = hepmc.beam_particles()
         a, b = beams.first.momentum(), beams.second.momentum()
@@ -53,6 +60,8 @@ def main(directory):
         maximum_timing_error = max(maximum_timing_error, abs(shift + source_z))
         particles = product(event, "genParticles", "std::vector<reco::GenParticle>")
         counts["events"] += 1
+        if sample in parent_ids and not any(abs(p.pdgId()) in parent_ids[sample] for p in particles):
+            raise AssertionError(f"Missing generated {sample} parent")
         for p in particles:
             if p.status() == 1:
                 counts[f"stable_abs_pdg_{abs(p.pdgId())}"] += 1

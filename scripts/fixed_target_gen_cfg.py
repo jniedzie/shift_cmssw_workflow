@@ -108,7 +108,9 @@ contract = dict(schema="shift-gen-pilot-v1", year=2023, sample=options.sample,
     cp5=list(pythia8CP5SettingsBlock.pythia8CP5Settings),
     process_settings=settings, beam_settings=beams,
     decay_policy="CMS lifetime cutoff; long-lived particles retained for transport",
-    forced_decay={"qcd": None, "jpsi": "443 -> 13 -13", "dy": "23 -> 13 -13"}[options.sample],
+    forced_decay={"qcd": None, "jpsi": "443 -> 13 -13",
+                  "chic": "443 -> 13 -13", "psi2s": "443 -> 13 -13",
+                  "dy": "23 -> 13 -13"}[options.sample],
     filtering="none", physics_valid=False, detector_simulated=False,
     normalization_ready=False, overlap_audit_complete=False)
 reference = Path("/cvmfs/cms.cern.ch/el8_amd64_gcc11/cms/cmssw/CMSSW_13_0_13/src/Configuration/Generator/python")

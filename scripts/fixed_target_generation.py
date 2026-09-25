@@ -19,6 +19,23 @@ def process_settings(sample, lower, upper):
                 f"23:mMin = {lower}",
                 f"PhaseSpace:mHatMin = {lower}", f"PhaseSpace:mHatMax = {upper}",
                 "23:onMode = off", "23:onIfMatch = 13 -13"]
+    if sample in ("chic", "psi2s"):
+        if lower <= 0:
+            raise ValueError("Standalone charmonium needs a positive pThat cutoff")
+        if sample == "psi2s":
+            channels = ["gg2ccbar(3S1)[3S1(1)]g", "gg2ccbar(3S1)[3S1(1)]gm"]
+            channels += [f"{initial}2ccbar(3S1)[{state}]{out}"
+                         for state in ("3S1(8)", "1S0(8)", "3PJ(8)")
+                         for initial, out in (("gg", "g"), ("qg", "q"), ("qqbar", "g"))]
+            switches = [f"Charmonium:{channel} = {{off,on}}" for channel in channels]
+        else:
+            channels = [f"{initial}2ccbar(3PJ)[{state}]{out}"
+                        for state in ("3PJ(1)", "3S1(8)")
+                        for initial, out in (("gg", "g"), ("qg", "q"), ("qqbar", "g"))]
+            switches = [f"Charmonium:{channel} = {{on,on,on}}" for channel in channels]
+        return switches + [f"PhaseSpace:pTHatMin = {lower}",
+                           f"PhaseSpace:pTHatMax = {upper}",
+                           "443:onMode = off", "443:onIfMatch = 13 -13"]
     if sample == "jpsi":
         channels = ["gg2ccbar(3S1)[3S1(1)]g", "gg2ccbar(3S1)[3S1(1)]gm"]
         channels += [f"{initial}2ccbar(3S1)[{state}]{out}"

@@ -26,7 +26,7 @@ def digest(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--sample", choices=("jpsi", "qcd", "dy"), required=True)
+    parser.add_argument("--sample", choices=("jpsi", "chic", "psi2s", "qcd", "dy"), required=True)
     parser.add_argument("--lower", type=float, required=True)
     parser.add_argument("--upper", type=float, required=True)
     parser.add_argument("--events", type=int, default=20)
