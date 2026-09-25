@@ -60,6 +60,8 @@ def read_events(path):
                 "index": index,
                 "topology": int(tree.ShiftMuon_topology[index]),
                 "gen_index": int(tree.ShiftMuon_genPartIdx[index]),
+                "hit_gen_index": int(branch_value(tree, "ShiftMuon_hitGenPartIdx", index, -1)),
+                "hit_truth_purity": branch_value(tree, "ShiftMuon_hitTruthPurity", index, -1.0),
                 "truth_matched": bool(branch_value(tree, "ShiftMuon_simTruthMatched", index, 0)),
                 "detector_points_m": [
                     [float(tree.ShiftMuon_entryX[index]) / 100.0,
@@ -100,23 +102,29 @@ def read_events(path):
 
 
 def select_event(events):
-    """Prefer the requested topology, then accept any valid mixed pair."""
+    """Prefer a high-purity, distinct truth pair crossing both endcaps."""
     fallback = None
     for event in events:
         if len(event["reco_muons"]) != 2:
             continue
         topologies = [muon["topology"] for muon in event["reco_muons"]]
+        hit_gen_indices = [muon["hit_gen_index"] for muon in event["reco_muons"]]
+        clean_truth_pair = (
+            min(hit_gen_indices) >= 0
+            and len(set(hit_gen_indices)) == 2
+            and all(muon["hit_truth_purity"] >= 0.8 for muon in event["reco_muons"])
+        )
         for vertex in event["vertices"]:
-            if sorted(vertex["muons"]) != [0, 1] or topologies[0] == topologies[1]:
+            if sorted(vertex["muons"]) != [0, 1]:
                 continue
-            if 2 in topologies:
+            if clean_truth_pair and topologies == [2, 2]:
                 return event, vertex
-            if fallback is None:
+            if clean_truth_pair and fallback is None:
                 fallback = (event, vertex)
     if fallback is not None:
         return fallback
     raise RuntimeError(
-        "no processed event has exactly two reconstructed muons with different topologies "
+        "no processed event has two distinct high-purity hit-truth-matched muons "
         "and a valid dimuon vertex"
     )
 
@@ -494,11 +502,13 @@ def main():
         draw_event(args.output_dir / name, meshes, event, vertex, tracks, mode)
         names.append(name)
     manifest = {
-        "geometry": "temporary ATLAS-side test model; not the final CMS-side LSS geometry",
+        "geometry_obj": str(args.geometry_obj),
         "nanoaod": str(args.nanoaod), "geant_tracks": str(args.geant_tracks),
         "selected_event": {"run": event["run"], "lumi": event["lumi"],
                            "event": event["event"], "topologies": [
                                TOPOLOGY_NAMES[muon["topology"]] for muon in event["reco_muons"]],
+                           "hit_gen_indices": [muon["hit_gen_index"] for muon in event["reco_muons"]],
+                           "hit_truth_purities": [muon["hit_truth_purity"] for muon in event["reco_muons"]],
                            "vertex_m": vertex["point_m"], "vertex_kind": vertex["kind"]},
         "outputs": names + summary_names, "stats": stats,
     }

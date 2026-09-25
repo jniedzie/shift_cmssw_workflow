@@ -30,6 +30,7 @@ python3 - <<'PY'
 import json, os
 print(json.dumps({key: os.environ[key] for key in (
     "SHIFT_LSS_MATERIAL_MODE", "SHIFT_LSS_FIELD_MODE",
+    "SHIFT_LSS_SYMMETRIC_TWO_SIDED",
     "SHIFT_LSS_SIMULATION_PYTHON", "SHIFT_LSS_RECONSTRUCTION_PYTHON",
     "GENERATOR_SEED", "SIMULATION_SEED", "COLLISION_YEAR",
     "PILEUP_MODE", "SHIFT_TIMING_MODE", "TRIGGER_SCENARIO",
@@ -41,7 +42,8 @@ PY
             env = dict(os.environ, LSS_TEST_WORKFLOW=str(WORKFLOW),
                        CMSSW_SRC=str(WORKFLOW.parent / "CMSSW_17_0_0_pre4/src"),
                        SHIFT_LSS_MATERIAL_MODE="external",
-                       SHIFT_LSS_FIELD_MODE="ir1_atlas_proxy")
+                       SHIFT_LSS_FIELD_MODE="ir1_atlas_proxy",
+                       SHIFT_LSS_SYMMETRIC_TWO_SIDED="true")
             result = subprocess.run(
                 [str(root / "scripts/run_lss_paired_production.sh"), mode,
                  "contract_test_no_submission", "--steps", "4"],
@@ -59,6 +61,7 @@ PY
                 resolved = self.resolve(mode)
                 self.assertEqual(resolved["SHIFT_LSS_MATERIAL_MODE"], material)
                 self.assertEqual(resolved["SHIFT_LSS_FIELD_MODE"], field)
+                self.assertEqual(resolved["SHIFT_LSS_SYMMETRIC_TWO_SIDED"], "False")
                 for stage in ("SIMULATION", "RECONSTRUCTION"):
                     source = resolved[f"SHIFT_LSS_{stage}_PYTHON"]
                     self.assertEqual("customiseShiftLssExternalGeometry" in source,

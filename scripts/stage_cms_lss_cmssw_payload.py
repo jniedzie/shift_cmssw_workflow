@@ -231,8 +231,14 @@ def stage_payload(*, geometry_gdml, finalization_report, root_audit, material_au
         raise PayloadStagingError("ROOT overlap/navigation gate failed")
     if not materials.get("passed") or materials.get("undefined_materials"):
         raise PayloadStagingError("material-reference gate failed")
-    if fields.get("payload_dependency_closure", {}).get("status") != "pass":
+    dependency_closure = fields.get("payload_dependency_closure", {})
+    if dependency_closure.get("status") != "pass":
         raise PayloadStagingError("field payload dependency closure is absent or failed")
+    unresolved_includes = dependency_closure.get("unresolved_includes_not_consumed", [])
+    if unresolved_includes:
+        raise PayloadStagingError(
+            "native includes remain unresolved: " + ", ".join(unresolved_includes)
+        )
     if domains.get("field_manifest_sha256") != fields_sha or not domains.get("domain_conversion_validated"):
         raise PayloadStagingError("field-domain lineage or validation gate failed")
     if (not closure.get("passed") or closure.get("field_domains_sha256") != domains_sha
@@ -298,9 +304,7 @@ def stage_payload(*, geometry_gdml, finalization_report, root_audit, material_au
                 "field_domains_sha256": domains_sha,
                 "coordinate_audit_sha256": _sha256(coordinate_audit),
             },
-            "unresolved_native_includes_not_consumed": fields[
-                "payload_dependency_closure"
-            ]["unresolved_includes_not_consumed"],
+            "unresolved_native_includes_not_consumed": unresolved_includes,
             "files": files,
             "remaining_gates": [
                 "Authoritative model-to-CMS basis, side, origin, and signed-field review.",

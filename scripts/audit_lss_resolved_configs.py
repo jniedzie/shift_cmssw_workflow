@@ -22,6 +22,7 @@ CONTRACT_FIELDS = (
     "artifactOriginInModelCm",
     "modelOriginCm",
     "modelToCms",
+    "symmetricTwoSided",
 )
 
 
@@ -83,6 +84,10 @@ def audit_runtime(process, resolved, path, is_step4):
         if finite_vector(source.modelToCms, 9, "model rotation") != model_to_cms:
             raise RuntimeError(
                 f"{path}: external-geometry rotation disagrees with workflow contract"
+            )
+        if value(source.symmetricTwoSided) != resolved["symmetricTwoSided"]:
+            raise RuntimeError(
+                f"{path}: external-geometry two-sided mode disagrees with workflow contract"
             )
         configured_gdml = source.gdmlPath if hasattr(source, "gdmlPath") else source.gdmlFile
         if value(configured_gdml) != value(geometry_contract.gdmlFile):

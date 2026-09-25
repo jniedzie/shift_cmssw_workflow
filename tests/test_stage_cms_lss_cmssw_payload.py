@@ -33,7 +33,7 @@ class CmsLssPayloadStagingTest(unittest.TestCase):
         write_json(field_manifest, {
             "maps": {"MAP": {"output": "MAP.dat", "output_sha256": digest(map_file)}},
             "payload_dependency_closure": {
-                "status": "pass", "unresolved_includes_not_consumed": ["UNUSED.inp"],
+                "status": "pass", "unresolved_includes_not_consumed": [],
             },
         })
         domains = root / "domains.json"
@@ -76,7 +76,7 @@ class CmsLssPayloadStagingTest(unittest.TestCase):
             self.assertTrue(report["staging_complete"])
             self.assertFalse(report["production_ready"])
             self.assertEqual(report["element_count"], 2)
-            self.assertEqual(report["unresolved_native_includes_not_consumed"], ["UNUSED.inp"])
+            self.assertEqual(report["unresolved_native_includes_not_consumed"], [])
             self.assertTrue((output / report["geometry_file_in_path"]).is_file())
             module = output / "PhysicsTools/ShiftMuonSegments/python/shiftLssCmsIr5_2023_cff.py"
             text = module.read_text()
@@ -108,6 +108,22 @@ class CmsLssPayloadStagingTest(unittest.TestCase):
             write_json(args["coordinate_audit"], closure)
             with self.assertRaisesRegex(PayloadStagingError, "lineage"):
                 stage_payload(**args)
+
+    def test_rejects_unresolved_native_include(self):
+        with tempfile.TemporaryDirectory() as directory:
+            args = self.inputs(Path(directory))
+            fields = json.loads(args["field_manifest"].read_text())
+            fields["payload_dependency_closure"]["unresolved_includes_not_consumed"] = ["MB.inp"]
+            write_json(args["field_manifest"], fields)
+            domains = json.loads(args["field_domains"].read_text())
+            domains["field_manifest_sha256"] = digest(args["field_manifest"])
+            write_json(args["field_domains"], domains)
+            closure = json.loads(args["coordinate_audit"].read_text())
+            closure["field_domains_sha256"] = digest(args["field_domains"])
+            write_json(args["coordinate_audit"], closure)
+            with self.assertRaisesRegex(PayloadStagingError, "MB.inp"):
+                stage_payload(**args)
+            self.assertFalse(args["output_dir"].exists())
 
     def test_rejects_existing_output(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -6,6 +6,7 @@
 configure_shift_lss() {
 	SHIFT_LSS_MATERIAL_MODE="${SHIFT_LSS_MATERIAL_MODE:-none}"
 	SHIFT_LSS_FIELD_MODE="${SHIFT_LSS_FIELD_MODE:-none}"
+	SHIFT_LSS_SYMMETRIC_TWO_SIDED="${SHIFT_LSS_SYMMETRIC_TWO_SIDED:-false}"
 	SHIFT_LSS_GEOMETRY_PYTHON=""
 	SHIFT_LSS_FIELD_IMPORT_PYTHON=""
 	SHIFT_LSS_FIELD_ELEMENTS_PYTHON="None"
@@ -25,6 +26,15 @@ configure_shift_lss() {
 		none|ir1_atlas_proxy|cms_ir5_2023_z1100) ;;
 		*) echo "ERROR: SHIFT_LSS_FIELD_MODE must be none, ir1_atlas_proxy, or cms_ir5_2023_z1100" >&2; return 1 ;;
 	esac
+	case "$SHIFT_LSS_SYMMETRIC_TWO_SIDED" in
+		true|True|1) SHIFT_LSS_SYMMETRIC_TWO_SIDED=True ;;
+		false|False|0) SHIFT_LSS_SYMMETRIC_TWO_SIDED=False ;;
+		*) echo "ERROR: SHIFT_LSS_SYMMETRIC_TWO_SIDED must be true or false" >&2; return 1 ;;
+	esac
+	if [[ "$SHIFT_LSS_SYMMETRIC_TWO_SIDED" == True && "$SHIFT_LSS_FIELD_MODE" == ir1_atlas_proxy ]]; then
+		echo "ERROR: symmetric two-sided field placement is implemented only for cms_ir5_2023_z1100" >&2
+		return 1
+	fi
 	if [[ "$SHIFT_LSS_MATERIAL_MODE" == none && "$SHIFT_LSS_FIELD_MODE" == none ]]; then
 		return 0
 	fi
@@ -122,7 +132,7 @@ PY
 		fi
 		# This is Python source passed as one quoted cmsDriver argument.
 		# shellcheck disable=SC2089
-		SHIFT_LSS_GEOMETRY_PYTHON="; from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry; process = customiseShiftLssExternalGeometry(process, gdmlFile='$SHIFT_LSS_GDML_FILE', artifactOriginInModelCm=($SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM), modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), minimumAbsZCm=$SHIFT_LSS_MINIMUM_ABS_Z_CM, detectorElementName='$SHIFT_LSS_DETECTOR_ELEMENT_NAME', overlapToleranceCm=$SHIFT_LSS_OVERLAP_TOLERANCE_CM, checkOverlaps=True)"
+		SHIFT_LSS_GEOMETRY_PYTHON="; from PhysicsTools.ShiftLssGeometry.shiftLssExternalGeometry_cff import customiseShiftLssExternalGeometry; process = customiseShiftLssExternalGeometry(process, gdmlFile='$SHIFT_LSS_GDML_FILE', artifactOriginInModelCm=($SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM), modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), minimumAbsZCm=$SHIFT_LSS_MINIMUM_ABS_Z_CM, detectorElementName='$SHIFT_LSS_DETECTOR_ELEMENT_NAME', symmetricTwoSided=$SHIFT_LSS_SYMMETRIC_TWO_SIDED, overlapToleranceCm=$SHIFT_LSS_OVERLAP_TOLERANCE_CM, checkOverlaps=True)"
 		SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW=True
 	fi
 
@@ -180,9 +190,9 @@ PY
 							return 1
 						fi
 					done
-					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE, dataDirectory='$SHIFT_LSS_FIELD_DATA_DIRECTORY')"
+					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE, dataDirectory='$SHIFT_LSS_FIELD_DATA_DIRECTORY', symmetricTwoSided=$SHIFT_LSS_SYMMETRIC_TWO_SIDED)"
 				else
-					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE)"
+					SHIFT_LSS_FIELD_ELEMENTS_PYTHON="shiftLssCmsIr5_2023Z1100FieldElements(modelOriginCm=($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=($SHIFT_LSS_MODEL_TO_CMS), fieldScale=$SHIFT_LSS_FIELD_SCALE, symmetricTwoSided=$SHIFT_LSS_SYMMETRIC_TWO_SIDED)"
 				fi
 				;;
 		esac
@@ -194,7 +204,7 @@ PY
 	fi
 	SHIFT_LSS_CONTRACT_SHA256="$(python3 - "$SHIFT_LSS_MATERIAL_MODE" "$SHIFT_LSS_FIELD_MODE" \
 		"$lss_audit_gdml_sha256" "$lss_audit_field_scale" "${SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM:-}" "$SHIFT_LSS_MODEL_ORIGIN_CM" \
-		"$SHIFT_LSS_MODEL_TO_CMS" "${SHIFT_LSS_MINIMUM_ABS_Z_CM:-}" \
+		"$SHIFT_LSS_MODEL_TO_CMS" "$SHIFT_LSS_SYMMETRIC_TWO_SIDED" "${SHIFT_LSS_MINIMUM_ABS_Z_CM:-}" \
 		"$SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM" "$SHIFT_LSS_GEANT4E_MOMENTUM_LIMIT_GEV" \
 		"$SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM" "$SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM" <<'PY'
 import hashlib
@@ -203,7 +213,7 @@ import sys
 
 contract = dict(zip((
     "material_mode", "field_mode", "gdml_sha256", "field_scale", "artifact_origin_in_model_cm", "model_origin_cm",
-    "model_to_cms", "minimum_abs_z_cm", "material_boundary_abs_z_cm",
+    "model_to_cms", "symmetric_two_sided", "minimum_abs_z_cm", "material_boundary_abs_z_cm",
     "geant4e_momentum_limit_gev", "geant4e_maximum_step_length_mm",
     "geant4e_maximum_path_length_cm",
 ), sys.argv[1:]))
@@ -211,14 +221,14 @@ payload = json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("as
 print(hashlib.sha256(payload).hexdigest())
 PY
 )"
-	SHIFT_LSS_AUDIT_PYTHON="; process.shiftLssWorkflowContract = cms.PSet(contractVersion=cms.uint32(2), contractSha256=cms.string('$SHIFT_LSS_CONTRACT_SHA256'), materialMode=cms.string('$SHIFT_LSS_MATERIAL_MODE'), fieldMode=cms.string('$SHIFT_LSS_FIELD_MODE'), gdmlSha256=cms.string('$lss_audit_gdml_sha256'), fieldScale=cms.string('$lss_audit_field_scale'), artifactOriginInModelCm=cms.string('${SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM:-}'), modelOriginCm=cms.vdouble($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=cms.vdouble($SHIFT_LSS_MODEL_TO_CMS))"
+	SHIFT_LSS_AUDIT_PYTHON="; process.shiftLssWorkflowContract = cms.PSet(contractVersion=cms.uint32(3), contractSha256=cms.string('$SHIFT_LSS_CONTRACT_SHA256'), materialMode=cms.string('$SHIFT_LSS_MATERIAL_MODE'), fieldMode=cms.string('$SHIFT_LSS_FIELD_MODE'), gdmlSha256=cms.string('$lss_audit_gdml_sha256'), fieldScale=cms.string('$lss_audit_field_scale'), artifactOriginInModelCm=cms.string('${SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM:-}'), modelOriginCm=cms.vdouble($SHIFT_LSS_MODEL_ORIGIN_CM), modelToCms=cms.vdouble($SHIFT_LSS_MODEL_TO_CMS), symmetricTwoSided=cms.bool($SHIFT_LSS_SYMMETRIC_TWO_SIDED))"
 	SHIFT_LSS_SIMULATION_PYTHON="$SHIFT_LSS_GEOMETRY_PYTHON$SHIFT_LSS_SIMULATION_PYTHON"
 	SHIFT_LSS_RECONSTRUCTION_PYTHON="$SHIFT_LSS_GEOMETRY_PYTHON$SHIFT_LSS_FIELD_IMPORT_PYTHON; from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseShiftLssTransport; process = customiseShiftLssTransport(process, fieldElements=$SHIFT_LSS_FIELD_ELEMENTS_PYTHON, materialBoundaryAbsZCm=$SHIFT_LSS_MATERIAL_BOUNDARY_ABS_Z_CM, geant4eMomentumLimitGeV=$SHIFT_LSS_GEANT4E_MOMENTUM_LIMIT_GEV, geant4eMaximumStepLengthMm=$SHIFT_LSS_GEANT4E_MAXIMUM_STEP_LENGTH_MM, geant4eMaximumPathLengthCm=$SHIFT_LSS_GEANT4E_MAXIMUM_PATH_LENGTH_CM)"
 	SHIFT_LSS_SIMULATION_PYTHON="$SHIFT_LSS_SIMULATION_PYTHON$SHIFT_LSS_AUDIT_PYTHON"
 	SHIFT_LSS_RECONSTRUCTION_PYTHON="$SHIFT_LSS_RECONSTRUCTION_PYTHON$SHIFT_LSS_AUDIT_PYTHON"
 	# The Python strings are data consumed inside quoted cmsDriver arguments.
 	# shellcheck disable=SC2090
-	export SHIFT_LSS_MATERIAL_MODE SHIFT_LSS_FIELD_MODE SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM SHIFT_LSS_MODEL_ORIGIN_CM SHIFT_LSS_MODEL_TO_CMS \
+	export SHIFT_LSS_MATERIAL_MODE SHIFT_LSS_FIELD_MODE SHIFT_LSS_SYMMETRIC_TWO_SIDED SHIFT_LSS_ARTIFACT_ORIGIN_IN_MODEL_CM SHIFT_LSS_MODEL_ORIGIN_CM SHIFT_LSS_MODEL_TO_CMS \
 		SHIFT_LSS_DETAILED_TARGET_PROPAGATION_CMSSW SHIFT_LSS_SIMULATION_PYTHON \
 		SHIFT_LSS_RECONSTRUCTION_PYTHON SHIFT_LSS_CONTRACT_SHA256
 }

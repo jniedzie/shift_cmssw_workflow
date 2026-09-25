@@ -342,6 +342,8 @@ def audit_bundle(source_dir, legacy_map_dir=None):
         raise IntakeError(f"source directory does not exist: {source_dir}")
     supplied, archives, decks = {}, {}, {}
     for path in sorted(source_dir.iterdir()):
+        if path.is_dir() and not path.is_symlink():
+            continue
         if path.is_symlink() or not path.is_file():
             raise IntakeError(f"expected regular supplied file: {path}")
         data = path.read_bytes()
@@ -370,6 +372,14 @@ def audit_bundle(source_dir, legacy_map_dir=None):
                 if legacy_map_dir is not None:
                     legacy = Path(legacy_map_dir) / (PurePosixPath(name).stem + ".dat")
                     assets[key]["legacy_comparison"] = legacy_map_comparison(legacy, summary, values)
+
+    # Provider includes can arrive as loose files beside the main decks rather
+    # than inside the field archive. Parse their native cards once so an
+    # absolute #include path can be resolved safely by basename.
+    loose_deck_cards = {}
+    for name, text in decks.items():
+        included_lines, _, _ = active_lines(text, name)
+        loose_deck_cards[name] = native_cards(included_lines, name)
     report = {
         "schema": "shift-cms-lss-source-intake", "schema_version": 1,
         "source_directory": str(source_dir), "production_ready": False,
@@ -412,16 +422,21 @@ def audit_bundle(source_dir, legacy_map_dir=None):
                 continue
             requested = raw[len("#include"):].strip().strip('"<>')
             basename = PurePosixPath(requested).name
-            candidates = [key for key, asset in assets.items()
-                          if PurePosixPath(asset["member"]).name == basename]
+            archive_candidates = [key for key, asset in assets.items()
+                                  if PurePosixPath(asset["member"]).name == basename]
+            loose_candidates = [candidate for candidate in decks
+                                if candidate != name and candidate == basename]
+            candidates = archive_candidates + loose_candidates
             item = {"line": number, "raw": raw, "requested_path": requested,
-                    "basename": basename, "archive_candidates": candidates,
+                    "basename": basename, "archive_candidates": archive_candidates,
+                    "loose_file_candidates": loose_candidates,
+                    "include_candidates": candidates,
                     "resolution": "available-by-basename" if len(candidates) == 1
                     else "missing" if not candidates else "ambiguous"}
             if len(candidates) == 1:
                 key = candidates[0]
                 item["field_asset_reference"] = key
-                cards.extend(asset_cards.get(key, []))
+                cards.extend(asset_cards.get(key, loose_deck_cards.get(key, [])))
             includes.append(item)
         definitions = [card for card in cards if card["card"] == "MGNCREAT"
                        and card["sdum"] not in ("&", "&&")]

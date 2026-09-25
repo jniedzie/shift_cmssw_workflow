@@ -71,6 +71,27 @@ class CmsLssIntakeTest(unittest.TestCase):
             report = audit_bundle(source)
             self.assertEqual(report["decks"]["deck.inp"]["unresolved_named_fields"], ["MISSING"])
 
+    def test_loose_include_resolves_by_basename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory)
+            (source / "generated_payload").mkdir()
+            (source / "generated_payload/ignored.txt").write_text("output\n")
+            (source / "2023.inp").write_text(
+                "#include /provider/model/MB.inp\n"
+                "MGNFIELD 1 0 0 region 0 0 MB\n")
+            (source / "MB.inp").write_text(
+                "FREE\nMGNCREAT , 4.0, 5.0, 9.7, 0.0, 2.0, , MB\nFIXED\n")
+            report = audit_bundle(source)
+            deck = report["decks"]["2023.inp"]
+            self.assertTrue(deck["preprocessing_complete"])
+            self.assertTrue(deck["source_complete"])
+            self.assertEqual(deck["unresolved_named_fields"], [])
+            include = deck["include_resolution"][0]
+            self.assertEqual(include["resolution"], "available-by-basename")
+            self.assertEqual(include["archive_candidates"], [])
+            self.assertEqual(include["loose_file_candidates"], ["MB.inp"])
+            self.assertEqual(include["field_asset_reference"], "MB.inp")
+
     def test_legacy_comparison_detects_numeric_and_metadata_mismatches(self):
         text = ("MGNCREAT , 204, 2.4, 0, 0, 0, , MAP\n"
                 "MGNCREAT , , , , 2, 1, , &\n"

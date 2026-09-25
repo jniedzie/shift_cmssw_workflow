@@ -19,6 +19,7 @@ python3 - <<'PY'
 import json, os
 print(json.dumps({name: os.environ[name] for name in (
     'SHIFT_LSS_FIELD_MODE',
+    'SHIFT_LSS_SYMMETRIC_TWO_SIDED',
     'SHIFT_LSS_SIMULATION_PYTHON',
     'SHIFT_LSS_RECONSTRUCTION_PYTHON',
     'SHIFT_LSS_CONTRACT_SHA256',
@@ -30,6 +31,7 @@ PY
             SHIFT_LSS_MATERIAL_MODE="none",
             SHIFT_LSS_FIELD_MODE="cms_ir5_2023_z1100",
             SHIFT_LSS_FIELD_SCALE="1.0",
+            SHIFT_LSS_SYMMETRIC_TWO_SIDED="true",
             SHIFT_LSS_MODEL_ORIGIN_CM="0,0,0",
             SHIFT_LSS_MODEL_TO_CMS="1,0,0,0,1,0,0,0,1",
         )
@@ -40,9 +42,11 @@ PY
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         resolved = json.loads(result.stdout)
         self.assertEqual(resolved["SHIFT_LSS_FIELD_MODE"], "cms_ir5_2023_z1100")
+        self.assertEqual(resolved["SHIFT_LSS_SYMMETRIC_TWO_SIDED"], "True")
         for stage in ("SIMULATION", "RECONSTRUCTION"):
             source = resolved[f"SHIFT_LSS_{stage}_PYTHON"]
             self.assertIn("shiftLssCmsIr5_2023Z1100FieldElements", source)
+            self.assertIn("symmetricTwoSided=True", source)
             self.assertNotIn("shiftLssIr1AtlasProxyFieldElements", source)
         self.assertRegex(resolved["SHIFT_LSS_CONTRACT_SHA256"], r"^[0-9a-f]{64}$")
 
@@ -62,6 +66,24 @@ PY
         )
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("SHIFT_LSS_FIELD_SCALE is required", result.stderr)
+
+    def test_symmetric_mode_rejects_the_single_sided_atlas_field_factory(self):
+        command = "source scripts/configure_lss.sh; configure_shift_lss"
+        env = dict(
+            os.environ,
+            SHIFT_LSS_MATERIAL_MODE="none",
+            SHIFT_LSS_FIELD_MODE="ir1_atlas_proxy",
+            SHIFT_LSS_FIELD_SCALE="1.0",
+            SHIFT_LSS_MODEL_ORIGIN_CM="0,0,0",
+            SHIFT_LSS_MODEL_TO_CMS="1,0,0,0,1,0,0,0,1",
+            SHIFT_LSS_SYMMETRIC_TWO_SIDED="true",
+        )
+        result = subprocess.run(
+            ["bash", "-c", command], cwd=WORKFLOW, env=env,
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("implemented only for cms_ir5_2023_z1100", result.stderr)
 
 
 if __name__ == "__main__":

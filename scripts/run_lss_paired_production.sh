@@ -19,6 +19,7 @@ export TRACE_PRIMARY_MUON_PATHS="${TRACE_PRIMARY_MUON_PATHS:-0}"
 export CONDOR_REQUEST_MEMORY_MB=4000
 export CONDOR_JOB_FLAVOUR=workday
 export SHIFT_LSS_MATERIAL_MODE=none SHIFT_LSS_FIELD_MODE=none
+export SHIFT_LSS_SYMMETRIC_TWO_SIDED=false
 case "$mode" in
   control) ;;
   material) export SHIFT_LSS_MATERIAL_MODE=external ;;
