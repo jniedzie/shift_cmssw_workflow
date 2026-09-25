@@ -22,13 +22,19 @@ def combine(records, expected_chunks):
     allowed = {'QCD_FixedTarget_pThat_1to5GeV_13p6TeV',
                'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV',
                'QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV',
-               'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV'}
+               'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV',
+               'QCD_SoftMpiPartition_FixedTarget_13p6TeV',
+               'Charmonium_SoftMpiPartition_FixedTarget_13p6TeV'}
     if len(processes) != 1 or not processes <= allowed:
         raise ValueError('Mixed or unsupported process definitions')
     process = next(iter(processes))
     filtered = process.startswith('QCD_MuEnriched_')
     forced_decay = ('443 -> 13 -13; convention must be audited'
                     if process.startswith('Charmonium_') else 'none')
+    mpi_partition = process.endswith('_SoftMpiPartition_FixedTarget_13p6TeV')
+    event_classes = {r.get('event_class') for r in records}
+    if mpi_partition and (len(event_classes) != 1 or None in event_classes):
+        raise ValueError('Mixed or missing SoftQCD/MPI event class')
     if any(r['schema'] != 'shift-production-gen-v1' or
            r['forced_decay'] != forced_decay or
            r['events'] <= 0 or r['sum_weights'] != r['events'] or
@@ -68,7 +74,10 @@ def combine(records, expected_chunks):
         filter_efficiency=efficiency,
         filter_efficiency_binomial_error=math.sqrt(efficiency*(1.-efficiency)/total_attempted),
         event_weight_pb_by_chunk={str(r['chunk']): x/total_attempted for r, x in zip(records, xsecs)},
-        normalization='generated-event-fraction mixture of independent identical-phase-space chunks',
+        normalization=('generated-event-fraction mixture of independent chunks whose internal Pythia cross section already includes the UserHook selection'
+                       if mpi_partition else
+                       'generated-event-fraction mixture of independent identical-phase-space chunks'),
+        event_class=(next(iter(event_classes)) if mpi_partition else None),
         warning='No luminosity, trigger, reconstruction or analysis efficiency multiplied in. Provisional geometry.',
         physics_valid=False)
 

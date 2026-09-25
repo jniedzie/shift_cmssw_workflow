@@ -1058,6 +1058,55 @@ J/psi 0--1 fragment is not valid low-pT coverage with the default divergence
 cutoff. Neither setting that cutoff to zero nor mixing arbitrary SoftQCD and
 HardQCD samples is an approved solution.
 
+### SoftQCD/MPI low-pT partition (2026-09-25)
+
+The production implementation for the 0--1 GeV bin uses Pythia 8's regulated,
+eikonalized `SoftQCD:nonDiffractive` model with the CP5 tune and
+`MultipartonInteractions:processLevel = 3`. Both QCD and direct-J/psi samples
+start from this identical model. They are complementary event classes:
+
+- `direct_jpsi` contains an MPI hard-process J/psi singlet or octet state
+  (PDG 443, 9940003, 9941003 or 9942003 with absolute Pythia status 23 or 33);
+- `qcd` contains every other non-diffractive event. Feed-down, nonprompt and
+  hadronization J/psi therefore stay in this class.
+
+Within each class, bins are half-open `[lower, upper)`. QCD uses Pythia's
+hardest-MPI pThat. Direct J/psi uses the maximum pT of its direct hard state.
+The final 20--infinity bin has no upper edge. This makes the two classes
+exhaustive and disjoint and gives every event exactly one bin. It also avoids a
+model switch at 1 GeV. Do not merge these samples with the older HardQCD or
+standalone Charmonium samples; those are separate diagnostics and overlap the
+same physical phase space.
+
+Source one class/bin in a fresh shell, then use the ordinary audited workflow:
+
+```bash
+cd /afs/cern.ch/work/j/jniedzie/private/shift_cmssw/shift_cmssw_workflow
+export MPI_PARTITION_SAMPLE=qcd       # qcd or jpsi
+export MPI_PARTITION_BIN=0to1         # 0to1, 1to2, 2to5, 5to10, 10to20, 20to-1
+source config/campaigns/soft_mpi_partition_2023.env
+source /cvmfs/cms.cern.ch/cmsset_default.sh
+./run_condor.sh --steps 1 --prebuilt --keep-logs
+```
+
+`ShiftMpiEventClassHook` retries Pythia parton level until the requested class
+and bin is found. Pythia's internal cross section already includes these vetoed
+trials; the external CMSSW filter efficiency remains one and must not be
+applied again. Direct J/psi is rare, so small validation jobs are required
+before choosing production chunk sizes. The J/psi fragment forces
+`443 -> mu+ mu-`; record that decay convention explicitly and do not multiply
+another generator-filter efficiency into its production cross section.
+
+Before normalization, collect every bin's per-chunk metadata and run
+`scripts/audit_soft_mpi_partition.py` over all 12 strata with an independent
+inclusive non-diffractive cross-section estimate. The audit requires both
+classes, all contiguous bins, one model/partition contract, no external filter
+loss, and statistical closure to the inclusive cross section. Until that
+full-suite closure passes, per-bin pilots remain
+`normalization_ready=false`. High-pT direct-J/psi rejection may be too slow for
+production; measure it before scaling rather than substituting the older hard
+samples.
+
 These pilots keep `physics_valid=false` and `normalization_ready=false`.
 They use the ATLAS proxy with no pileup/trigger. In particular, a zero-SimHit
 gate saves no transport CPU and must not be assumed safe for noise, pileup or

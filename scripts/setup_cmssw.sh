@@ -100,6 +100,27 @@ if [[ "${CMSSW_PREPARED:-0}" != 1 && ! -f "$PACKAGE_DIR/BuildFile.xml" ]]; then
 		setup_error "cannot install the CMSSW BuildFile: $PACKAGE_DIR/BuildFile.xml"; return 1 2>/dev/null || exit 1
 	fi
 fi
+PLUGIN_SOURCE_DIR="$WORKFLOW_ROOT/Configuration/GenProduction/plugins"
+PLUGIN_INSTALL_DIR="$PACKAGE_DIR/plugins"
+if [[ -d "$PLUGIN_SOURCE_DIR" ]]; then
+	if [[ "${CMSSW_PREPARED:-0}" != 1 ]]; then
+		mkdir -p "$PLUGIN_INSTALL_DIR" || {
+			setup_error "cannot create CMSSW plugin directory: $PLUGIN_INSTALL_DIR"; return 1 2>/dev/null || exit 1
+		}
+		for plugin_source in "$PLUGIN_SOURCE_DIR"/*; do
+			ln -sfn "$plugin_source" "$PLUGIN_INSTALL_DIR/$(basename "$plugin_source")" || {
+				setup_error "cannot link CMSSW plugin source: $plugin_source"; return 1 2>/dev/null || exit 1
+			}
+		done
+	else
+		for plugin_source in "$PLUGIN_SOURCE_DIR"/*; do
+			plugin_target="$PLUGIN_INSTALL_DIR/$(basename "$plugin_source")"
+			cmp -s "$plugin_source" "$plugin_target" || {
+				setup_error "prebuilt CMSSW plugin source is missing or differs: $plugin_target"; return 1 2>/dev/null || exit 1
+			}
+		done
+	fi
+fi
 if [[ "${CMSSW_PREPARED:-0}" != 1 ]] && ! ln -sfn "$FRAGMENT" "$LINK_TARGET"
 then
 	setup_error "cannot create the Pythia fragment symlink: $LINK_TARGET"; return 1 2>/dev/null || exit 1

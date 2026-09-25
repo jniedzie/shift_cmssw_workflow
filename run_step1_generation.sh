@@ -169,10 +169,18 @@ if [[ "$WORKFLOW_LOCAL_GENERATOR" == 1 ]]; then
 	DRIVER_FRAGMENT="ShiftWorkflowGenerator/fragment_cff.py"
 fi
 PTHAT_CUSTOMISE=""
-if [[ -n "$GEN_PTHAT_MIN" || -n "$GEN_PTHAT_MAX" ]]; then
+case "$PROCESS" in
+QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV)
 	python3 "$WORKFLOW_ROOT/scripts/unfiltered_qcd_contract.py" --check
-	PTHAT_CUSTOMISE="; process.generator.PythiaParameters.processParameters.extend(['PhaseSpace:pTHatMin = ${GEN_PTHAT_MIN}', 'PhaseSpace:pTHatMax = ${GEN_PTHAT_MAX}'])"
-fi
+	PTHAT_CUSTOMISE="; process.generator.UserCustomization[0].pTHatMin = cms.double(${GEN_PTHAT_MIN}); process.generator.UserCustomization[0].pTHatMax = cms.double(${GEN_PTHAT_MAX})"
+	;;
+*)
+	if [[ -n "$GEN_PTHAT_MIN" || -n "$GEN_PTHAT_MAX" ]]; then
+		python3 "$WORKFLOW_ROOT/scripts/unfiltered_qcd_contract.py" --check
+		PTHAT_CUSTOMISE="; process.generator.PythiaParameters.processParameters.extend(['PhaseSpace:pTHatMin = ${GEN_PTHAT_MIN}', 'PhaseSpace:pTHatMax = ${GEN_PTHAT_MAX}'])"
+	fi
+	;;
+esac
 echo "=== Step 1: GEN,SIM (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED (configured base: $GENERATOR_SEED_BASE, chunk: $CHUNK)"
 echo "Geant4 random seed: $SIMULATION_SEED (configured base: $SIMULATION_SEED_BASE, chunk: $CHUNK)"
@@ -202,7 +210,7 @@ CONFIG_SNAPSHOT="$CONFIG_DIR/events_step1_part${PART}_seed${GENERATOR_SEED}_cfg.
 # Distinct QCD chunks must remain mergeable. Existing J/psi identities are
 # unchanged; seed separation alone does not make EDM event identities unique.
 case "$PROCESS" in
-	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV)
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV)
 	printf '\nprocess.source.firstRun = cms.untracked.uint32(%s)\n' "$((10#$CHUNK + 1))" >> "$LOCAL_CONFIG"
 	;;
 esac
@@ -217,7 +225,7 @@ if ! output_is_valid "$LOCAL_OUTPUT"; then
 	exit 1
 fi
 case "$PROCESS" in
-	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV)
+	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV)
 	python3 "$WORKFLOW_ROOT/scripts/audit_generation_chunk.py" "$LOCAL_OUTPUT" \
 		--process "$PROCESS" --events "$N_EVENTS" --chunk "$CHUNK" \
 		--config "$LOCAL_CONFIG" --fragment "$FRAGMENT" \

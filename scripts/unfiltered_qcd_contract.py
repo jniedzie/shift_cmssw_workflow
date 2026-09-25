@@ -6,8 +6,16 @@ import os
 
 PROCESS = 'QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV'
 JPSI_PROCESS = 'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV'
-PROCESSES = {PROCESS, JPSI_PROCESS}
-BINS = {(1., 2.), (2., 5.), (5., 10.), (10., 20.), (20., -1.)}
+MPI_QCD_PROCESS = 'QCD_SoftMpiPartition_FixedTarget_13p6TeV'
+MPI_JPSI_PROCESS = 'Charmonium_SoftMpiPartition_FixedTarget_13p6TeV'
+MPI_PROCESSES = {
+    MPI_QCD_PROCESS: 'qcd',
+    MPI_JPSI_PROCESS: 'direct_jpsi',
+}
+HARD_PROCESSES = {PROCESS, JPSI_PROCESS}
+PROCESSES = HARD_PROCESSES | set(MPI_PROCESSES)
+HARD_BINS = {(1., 2.), (2., 5.), (5., 10.), (10., 20.), (20., -1.)}
+MPI_BINS = {(0., 1.)} | HARD_BINS
 
 
 def check(env):
@@ -17,8 +25,18 @@ def check(env):
     lower, upper = env.get('GEN_PTHAT_MIN', ''), env.get('GEN_PTHAT_MAX', '')
     if lower or upper or env.get('PROCESS') in PROCESSES:
         bounds = (float(lower), float(upper))
-        if env.get('PROCESS') not in PROCESSES or bounds not in BINS:
-            raise ValueError('Explicit bounds require an audited unfiltered process and a supported pThat bin >=1 GeV')
+        process = env.get('PROCESS')
+        if process not in PROCESSES:
+            raise ValueError('Explicit bounds require an audited production process')
+        supported = MPI_BINS if process in MPI_PROCESSES else HARD_BINS
+        if bounds not in supported:
+            raise ValueError('Unsupported pThat bin for the selected production process')
+        if process in MPI_PROCESSES:
+            expected_class = MPI_PROCESSES[process]
+            if env.get('GEN_EVENT_CLASS') != expected_class:
+                raise ValueError(f'{process} requires GEN_EVENT_CLASS={expected_class}')
+        elif env.get('GEN_EVENT_CLASS', ''):
+            raise ValueError('GEN_EVENT_CLASS is only valid for the MPI-partitioned processes')
         if any(not math.isfinite(v) for v in bounds):
             raise ValueError('Non-finite bounds')
         for key in ('N_EVENTS', 'N_JOBS'):

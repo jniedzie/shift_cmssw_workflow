@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fail-closed GEN ownership and normalization audit before publication.
 
-Only the explicitly defined 1--5 GeV LO samples are supported. This is MC
-bookkeeping, never an analysis selection. No reconstructed content is read.
+Supports the legacy hard-process samples and the complementary SoftQCD/MPI
+QCD and direct-J/psi classes. This is MC bookkeeping, never an analysis
+selection. No reconstructed content is read.
 """
 import argparse
 from collections import Counter
@@ -19,6 +20,10 @@ QCD_MU_PROCESS = 'QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV'
 QCD_UNFILTERED_PROCESS = 'QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV'
 JPSI_PROCESS = 'Charmonium_FixedTarget_pThat_1to5GeV_13p6TeV'
 JPSI_UNFILTERED_PROCESS = 'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV'
+MPI_QCD_PROCESS = 'QCD_SoftMpiPartition_FixedTarget_13p6TeV'
+MPI_JPSI_PROCESS = 'Charmonium_SoftMpiPartition_FixedTarget_13p6TeV'
+MPI_EVENT_CLASSES = {MPI_QCD_PROCESS: 'qcd', MPI_JPSI_PROCESS: 'direct_jpsi'}
+DIRECT_JPSI_IDS = {443, 9940003, 9941003, 9942003}
 
 
 def main():
@@ -34,10 +39,13 @@ def main():
     parser.add_argument('--lower', type=float, default=1.)
     parser.add_argument('--upper', type=float, default=5.)
     args = parser.parse_args()
-    if not math.isfinite(args.lower) or args.lower < 1 or not math.isfinite(args.upper) or not (args.upper == -1 or args.upper > args.lower):
-        raise ValueError('Invalid or unvalidated Born pThat range')
+    mpi_event_class = MPI_EVENT_CLASSES.get(args.process)
+    minimum_lower = 0. if mpi_event_class else 1.
+    if not math.isfinite(args.lower) or args.lower < minimum_lower or not math.isfinite(args.upper) or not (args.upper == -1 or args.upper > args.lower):
+        raise ValueError('Invalid or unvalidated generator-scale range')
     expected = {QCD_PROCESS: QCD_CODES, QCD_MU_PROCESS: QCD_CODES, QCD_UNFILTERED_PROCESS: QCD_CODES,
-                JPSI_PROCESS: JPSI_CODES, JPSI_UNFILTERED_PROCESS: JPSI_CODES}[args.process]
+                JPSI_PROCESS: JPSI_CODES, JPSI_UNFILTERED_PROCESS: JPSI_CODES,
+                MPI_QCD_PROCESS: {101}, MPI_JPSI_PROCESS: {101}}[args.process]
     filtered = args.process == QCD_MU_PROCESS
 
     def get(event, label, kind):
@@ -48,7 +56,7 @@ def main():
         return handle.product()
 
     codes, particles = Counter(), Counter()
-    identities, weights, pthats, born_pthats = set(), [], [], []
+    identities, weights, pthats, born_pthats, partition_scales = set(), [], [], [], []
     selected_muons = []
     timing_residuals, source_shift_residuals = [], []
     for event in Events(args.input):
@@ -67,10 +75,28 @@ def main():
         if not bins or not math.isfinite(bins[0]) or bins[0] < 0:
             raise ValueError(f'Invalid generated pThat: {bins}')
         hepmc = get(event, ('generator', 'unsmeared'), 'edm::HepMCProduct').GetEvent()
-        born = from_hepmc(hepmc, code, bins[0])
-        if born < args.lower-1.e-8 or (args.upper != -1 and born > args.upper+1.e-8):
-            raise ValueError(f'Unexpected Born sampling pThat: {born}; stored={bins[0]}')
-        born_pthats.append(born)
+        if mpi_event_class:
+            direct_scales = []
+            particle = hepmc.particles_begin()
+            particles_end = hepmc.particles_end()
+            while particle != particles_end:
+                p = particle.__deref__()
+                particle.__preinc__()
+                if abs(p.pdg_id()) in DIRECT_JPSI_IDS and abs(p.status()) in (23, 33):
+                    direct_scales.append(float(p.momentum().perp()))
+            has_direct_jpsi = bool(direct_scales)
+            if has_direct_jpsi != (mpi_event_class == 'direct_jpsi'):
+                raise ValueError('SoftQCD/MPI event-class ownership violation')
+            scale = max(direct_scales) if has_direct_jpsi else bins[0]
+            if scale < args.lower-1.e-8 or (args.upper != -1 and scale >= args.upper+1.e-8):
+                raise ValueError(f'Unexpected partition scale: {scale}; stored hardest-MPI pThat={bins[0]}')
+            partition_scales.append(scale)
+            particles['direct_jpsi_hard_states'] += len(direct_scales)
+        else:
+            born = from_hepmc(hepmc, code, bins[0])
+            if born < args.lower-1.e-8 or (args.upper != -1 and born > args.upper+1.e-8):
+                raise ValueError(f'Unexpected Born sampling pThat: {born}; stored={bins[0]}')
+            born_pthats.append(born)
         codes[code] += 1
         weights.append(weight)
         pthats.append(bins[0])
@@ -182,18 +208,35 @@ def main():
         accepted_events=accepted, sum_weights=sum(weights),
         sum_weights_squared=sum(w*w for w in weights), hard_process_codes=dict(codes),
         pthat_min=min(pthats), pthat_max=max(pthats), particle_counts=dict(particles),
-        born_pthat_min=min(born_pthats), born_pthat_max=max(born_pthats),
-        pthat_bin_definition='Born phase-space pThat before final constituent-mass assignment',
+        born_pthat_min=(min(born_pthats) if born_pthats else None),
+        born_pthat_max=(max(born_pthats) if born_pthats else None),
+        partition_scale_min=(min(partition_scales) if partition_scales else None),
+        partition_scale_max=(max(partition_scales) if partition_scales else None),
+        pthat_bin_definition=(
+            'half-open [lower,upper) max pT of direct hard J/psi states'
+            if mpi_event_class == 'direct_jpsi' else
+            'half-open [lower,upper) hardest-MPI pThat for the complementary no-direct-J/psi class'
+            if mpi_event_class == 'qcd' else
+            'Born phase-space pThat before final constituent-mass assignment'),
+        event_class=mpi_event_class,
+        mpi_model_contract=('pythia8-softqcd-nd-cp5-processlevel3-v1' if mpi_event_class else None),
+        partition_contract=('direct-hard-jpsi-status23or33-v1' if mpi_event_class else None),
         runs=runs, lumi_processes=lumis, external_filter_records=filter_records,
         generated_filter_efficiency=efficiency, filter_efficiency_error=efficiency_error,
-        normalization_scope=('filtered LO primary-process definition; no luminosity assumed'
-                             if filtered else 'unfiltered LO primary-process definition; no luminosity assumed'),
-        forced_decay=('443 -> 13 -13; convention must be audited' if expected == JPSI_CODES else 'none'),
+        normalization_scope=(
+            'Pythia-selected complementary SoftQCD/MPI event class and half-open scale bin; no luminosity assumed'
+            if mpi_event_class else
+            'filtered LO primary-process definition; no luminosity assumed'
+            if filtered else 'unfiltered LO primary-process definition; no luminosity assumed'),
+        forced_decay=('443 -> 13 -13; convention must be audited'
+                      if expected == JPSI_CODES or args.process == MPI_JPSI_PROCESS else 'none'),
         decay_policy=('Pythia pi/K/KL decays inside rho<8000 mm, |z|<151000 mm'
                       if filtered or args.process == QCD_UNFILTERED_PROCESS else 'CMS lifetime cutoff'),
         generator_filter=('status-1 muon, -10<eta<0, '
                           '0<=production z<=151000 mm, rho<=8000 mm'
-                          if filtered else 'none'),
+                          if filtered else
+                          f'Pythia parton-level UserHook: event_class={mpi_event_class}, half-open scale bin'
+                          if mpi_event_class else 'none'),
         selected_muon_ranges=({key: [min(x[key] for x in selected_muons),
                                       max(x[key] for x in selected_muons)]
                                for key in selected_muons[0]} if selected_muons else {}),

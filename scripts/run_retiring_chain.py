@@ -191,7 +191,7 @@ def main():
     try:
         (lock / 'owner.json').write_text(json.dumps(dict(pid=os.getpid(), host=os.uname().nodename,
                                                         cluster=os.environ.get('ClusterId'), time=time.time())))
-        keys = ('PROCESS', 'GEN_PTHAT_MIN', 'GEN_PTHAT_MAX', 'GENERATOR_SEED', 'SIMULATION_SEED',
+        keys = ('PROCESS', 'GEN_PTHAT_MIN', 'GEN_PTHAT_MAX', 'GEN_EVENT_CLASS', 'GENERATOR_SEED', 'SIMULATION_SEED',
                 'COLLISION_YEAR', 'ERA', 'GEOMETRY', 'CONDITIONS', 'BEAMSPOT', 'CMSSW_RUNTIME_FINGERPRINT')
         contract = {k: os.environ.get(k, '') for k in keys}
         contract.update({k: v for k, v in os.environ.items() if k.startswith('SHIFT_')})
