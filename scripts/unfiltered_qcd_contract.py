@@ -3,6 +3,7 @@
 import argparse
 import math
 import os
+from soft_mpi_model import edm_run_offset
 
 PROCESS = 'QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV'
 JPSI_PROCESS = 'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV'
@@ -15,13 +16,16 @@ MPI_PROCESSES = {
 HARD_PROCESSES = {PROCESS, JPSI_PROCESS}
 PROCESSES = HARD_PROCESSES | set(MPI_PROCESSES)
 HARD_BINS = {(1., 2.), (2., 5.), (5., 10.), (10., 20.), (20., -1.)}
-MPI_BINS = {(0., 1.)} | HARD_BINS
+MPI_BINS_ORDERED = ((0., 1.), (1., 2.), (2., 5.), (5., 10.), (10., 20.), (20., -1.))
+MPI_BINS = set(MPI_BINS_ORDERED)
 
 
 def check(env):
-    for name in ('WORKFLOW_LOCAL_GENERATOR', 'CLEANUP_PREVIOUS_STEP'):
+    for name in ('WORKFLOW_LOCAL_GENERATOR', 'CLEANUP_PREVIOUS_STEP', 'STEP1_GENERATION_ONLY'):
         if env.get(name, '0') not in ('0', '1'):
             raise ValueError(f'{name} must be 0 or 1')
+    if env.get('STEP1_GENERATION_ONLY') == '1' and env.get('PROCESS') not in MPI_PROCESSES:
+        raise ValueError('GEN-only mode is restricted to SoftQCD/MPI partition processes')
     lower, upper = env.get('GEN_PTHAT_MIN', ''), env.get('GEN_PTHAT_MAX', '')
     if lower or upper or env.get('PROCESS') in PROCESSES:
         bounds = (float(lower), float(upper))
@@ -35,6 +39,9 @@ def check(env):
             expected_class = MPI_PROCESSES[process]
             if env.get('GEN_EVENT_CLASS') != expected_class:
                 raise ValueError(f'{process} requires GEN_EVENT_CLASS={expected_class}')
+            expected_run_offset = edm_run_offset(expected_class, bounds)
+            if env.get('GEN_EVENT_RUN_OFFSET') != str(expected_run_offset):
+                raise ValueError(f'{process} bin {bounds} requires GEN_EVENT_RUN_OFFSET={expected_run_offset}')
         elif env.get('GEN_EVENT_CLASS', ''):
             raise ValueError('GEN_EVENT_CLASS is only valid for the MPI-partitioned processes')
         if any(not math.isfinite(v) for v in bounds):

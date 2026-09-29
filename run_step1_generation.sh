@@ -152,6 +152,19 @@ if [[ "$FORCE" -eq 1 && -e "$OUTPUT" ]]; then
 	rm -f -- "$OUTPUT"
 fi
 if output_is_valid "$OUTPUT"; then
+    case "$PROCESS" in
+        QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV)
+            metadata="$SAMPLE_DIR/generation_metadata/part${PART}.json"
+            [[ -f "$metadata" ]] || {
+                echo "ERROR: valid Step 1 ROOT lacks audited metadata; rerun this chunk with --force" >&2
+                exit 1
+            }
+            python3 "$WORKFLOW_ROOT/scripts/generation_publication.py" "$metadata" "$OUTPUT" || {
+                echo "ERROR: Step 1 ROOT/metadata pair is inconsistent; rerun this chunk with --force" >&2
+                exit 1
+            }
+            ;;
+    esac
 	echo "Step 1 output already exists and is valid: $OUTPUT"
 	exit 0
 fi
@@ -181,24 +194,46 @@ QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget
 	fi
 	;;
 esac
-echo "=== Step 1: GEN,SIM (Run 3) ==="
+if [[ "$PROCESS" == QCD_SoftMpiPartition_FixedTarget_13p6TeV ||
+      "$PROCESS" == Charmonium_SoftMpiPartition_FixedTarget_13p6TeV ]]; then
+    [[ "$CHUNK" =~ ^[0-9]{1,5}$ ]] || {
+        echo "SoftQCD/MPI chunks must be below 100000 to keep class/bin event IDs disjoint" >&2
+        exit 2
+    }
+fi
+if [[ "${STEP1_GENERATION_ONLY:-0}" == 1 ]]; then
+    case "$PROCESS" in
+        QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV) ;;
+        *) echo "GEN-only mode is restricted to SoftQCD/MPI partition processes" >&2; exit 2 ;;
+    esac
+    DRIVER_STEPS=GEN
+    DRIVER_DATATIER=GEN
+    CUSTOMISE_COMMANDS="from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process = customiseKeepShiftTruth(process); process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED})"
+else
+    DRIVER_STEPS=GEN,SIM
+    DRIVER_DATATIER=GEN-SIM
+    CUSTOMISE_COMMANDS="from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.TracePrimaryTracksForVisualization = cms.untracked.bool(${TRACE_PRIMARY_MUON_PATHS_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)${SHIFT_LSS_SIMULATION_PYTHON}"
+fi
+echo "=== Step 1: $DRIVER_STEPS (Run 3) ==="
 echo "Generator random seed: $GENERATOR_SEED (configured base: $GENERATOR_SEED_BASE, chunk: $CHUNK)"
-echo "Geant4 random seed: $SIMULATION_SEED (configured base: $SIMULATION_SEED_BASE, chunk: $CHUNK)"
-echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DIRECTION_Z bxOffset=$SHIFT_TIMING_BX_OFFSET phaseNs=$SHIFT_TIMING_PHASE_NS fixedOffsetNs=$SHIFT_TIMING_FIXED_OFFSET_NS modelVersion=$SHIFT_TIMING_MODEL_VERSION"
-echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
-echo "SHIFT LSS material/field modes: $SHIFT_LSS_MATERIAL_MODE/$SHIFT_LSS_FIELD_MODE"
-[[ -z "${SHIFT_LSS_CONTRACT_SHA256:-}" ]] || echo "SHIFT LSS contract SHA-256: $SHIFT_LSS_CONTRACT_SHA256"
+if [[ "$DRIVER_STEPS" == GEN,SIM ]]; then
+    echo "Geant4 random seed: $SIMULATION_SEED (configured base: $SIMULATION_SEED_BASE, chunk: $CHUNK)"
+    echo "SHIFT timing: mode=$SHIFT_TIMING_MODE beamDirectionZ=$SHIFT_TIMING_BEAM_DIRECTION_Z bxOffset=$SHIFT_TIMING_BX_OFFSET phaseNs=$SHIFT_TIMING_PHASE_NS fixedOffsetNs=$SHIFT_TIMING_FIXED_OFFSET_NS modelVersion=$SHIFT_TIMING_MODEL_VERSION"
+    echo "SHIFT Geant4 transport time limits: central=${SHIFT_G4_MAX_TRACK_TIME_NS} ns forward=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS} ns"
+    echo "SHIFT LSS material/field modes: $SHIFT_LSS_MATERIAL_MODE/$SHIFT_LSS_FIELD_MODE"
+    [[ -z "${SHIFT_LSS_CONTRACT_SHA256:-}" ]] || echo "SHIFT LSS contract SHA-256: $SHIFT_LSS_CONTRACT_SHA256"
+fi
 cmsDriver.py "$DRIVER_FRAGMENT" \
-	--step GEN,SIM \
+	--step "$DRIVER_STEPS" \
 	--conditions "$CONDITIONS" \
 	--beamspot "$BEAMSPOT" \
-	--datatier GEN-SIM \
+	--datatier "$DRIVER_DATATIER" \
 	--eventcontent FEVTDEBUG \
 	--geometry "$GEOMETRY" \
 	--era "$ERA" \
 	--fileout "file:$LOCAL_OUTPUT" \
 	--python_filename "$LOCAL_CONFIG" \
-	--customise_commands "from IOMC.ShiftEventTiming.shiftEventTiming_customise import customiseShiftEventTiming; process = customiseShiftEventTiming(process, timingMode='${SHIFT_TIMING_MODE}', beamDirectionZ=${SHIFT_TIMING_BEAM_DIRECTION_Z}, bxOffset=${SHIFT_TIMING_BX_OFFSET}, phaseNs=${SHIFT_TIMING_PHASE_NS}, fixedOffsetNs=${SHIFT_TIMING_FIXED_OFFSET_NS}, cmsReferenceZmm=${SHIFT_TIMING_CMS_REFERENCE_Z_MM}, bunchSpacingNs=${SHIFT_TIMING_BUNCH_SPACING_NS}, legacyOffsetCtMm=${SHIFT_TIMING_LEGACY_OFFSET_CT_MM}, modelVersion='${SHIFT_TIMING_MODEL_VERSION}', maxTrackTimeNs=${SHIFT_G4_MAX_TRACK_TIME_NS}, maxTrackTimeForwardNs=${SHIFT_G4_MAX_TRACK_TIME_FORWARD_NS}); from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import customiseKeepShiftTruth; process.RandomNumberGeneratorService.generator.initialSeed = cms.untracked.uint32(${GENERATOR_SEED}); process.RandomNumberGeneratorService.g4SimHits.initialSeed = cms.untracked.uint32(${SIMULATION_SEED}); process.g4SimHits.Generator.DebugMuonPrimaries = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonPrimaryFates = cms.untracked.bool(${DEBUG_MUON_PRIMARIES_CMS}); process.g4SimHits.TrackingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.DebugMuonTracking = cms.untracked.bool(${DEBUG_MUON_TRACKING_CMS}); process.g4SimHits.SteppingAction.TracePrimaryTracksForVisualization = cms.untracked.bool(${TRACE_PRIMARY_MUON_PATHS_CMS}); process.g4SimHits.SteppingAction.CMStoZDCtransport = cms.bool(${SHIFT_TO_CMS_TRANSPORT_CMS}); process.g4SimHits.MuonSD.DebugMuonHits = cms.untracked.bool(${DEBUG_MUON_HITS_CMS}); process = customiseKeepShiftTruth(process)${SHIFT_LSS_SIMULATION_PYTHON}" \
+	--customise_commands "$CUSTOMISE_COMMANDS" \
 	--no_exec \
 	-n "$N_EVENTS"
 
@@ -211,7 +246,7 @@ CONFIG_SNAPSHOT="$CONFIG_DIR/events_step1_part${PART}_seed${GENERATOR_SEED}_cfg.
 # unchanged; seed separation alone does not make EDM event identities unique.
 case "$PROCESS" in
 	QCD_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_MuEnriched_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_UnfilteredDecays_FixedTarget_pThat_1to5GeV_13p6TeV|Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6TeV|QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV)
-	printf '\nprocess.source.firstRun = cms.untracked.uint32(%s)\n' "$((10#$CHUNK + 1))" >> "$LOCAL_CONFIG"
+	printf '\nprocess.source.firstRun = cms.untracked.uint32(%s)\n' "$((10#$CHUNK + 1 + ${GEN_EVENT_RUN_OFFSET:-0}))" >> "$LOCAL_CONFIG"
 	;;
 esac
 if ! cp "$LOCAL_CONFIG" "$CONFIG_SNAPSHOT"; then
@@ -229,13 +264,27 @@ case "$PROCESS" in
 	python3 "$WORKFLOW_ROOT/scripts/audit_generation_chunk.py" "$LOCAL_OUTPUT" \
 		--process "$PROCESS" --events "$N_EVENTS" --chunk "$CHUNK" \
 		--config "$LOCAL_CONFIG" --fragment "$FRAGMENT" \
-		--lower "${GEN_PTHAT_MIN:-1}" --upper "${GEN_PTHAT_MAX:-5}" \
+		--generator-log "$LOCAL_LOG" --run-offset "${GEN_EVENT_RUN_OFFSET:-0}" \
+        --lower "${GEN_PTHAT_MIN:-1}" --upper "${GEN_PTHAT_MAX:-5}" \
 		--output "$LOCAL_STEP1_DIR/generation_part${PART}.json"
-	mkdir -p "$SAMPLE_DIR/generation_metadata"
-	cp "$LOCAL_STEP1_DIR/generation_part${PART}.json" "$SAMPLE_DIR/generation_metadata/part${PART}.json"
+	GEN_METADATA="$LOCAL_STEP1_DIR/generation_part${PART}.json"
 	;;
 esac
 stage_cmssw_output "$LOCAL_OUTPUT" "$OUTPUT"
+if [[ -n "${GEN_METADATA:-}" ]]; then
+    mkdir -p "$SAMPLE_DIR/generation_metadata"
+    final_metadata="$SAMPLE_DIR/generation_metadata/part${PART}.json"
+    staged_metadata="${final_metadata}.partial.$$"
+    python3 "$WORKFLOW_ROOT/scripts/generation_publication.py" \
+        "$GEN_METADATA" "$OUTPUT" --output "$LOCAL_STEP1_DIR/published_generation_part${PART}.json"
+    if ! cp -- "$LOCAL_STEP1_DIR/published_generation_part${PART}.json" "$staged_metadata" ||
+       ! cmp -s "$LOCAL_STEP1_DIR/published_generation_part${PART}.json" "$staged_metadata" ||
+       ! mv -f -- "$staged_metadata" "$final_metadata"; then
+        rm -f -- "$staged_metadata" 2>/dev/null || true
+        echo "ERROR: failed to publish audited GEN metadata" >&2
+        exit 1
+    fi
+fi
 
 LOG_SNAPSHOT="$LOG_DIR/step1_events_part${PART}_seed${GENERATOR_SEED}.log"
 if ! cp "$LOCAL_LOG" "$LOG_SNAPSHOT"; then

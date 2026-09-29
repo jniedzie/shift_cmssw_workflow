@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
 """Combine complete inclusive or mu-enriched QCD metadata without summing cross sections.
 
-Each independent chunk is a stratum weighted by its generated-event fraction.
-For later histograms, event weight in pb is sigma_chunk / N_all_generated.
-Multiply by a separately specified exposure in inverse pb only when justified.
+For legacy hard-process chunks, use the generated-event mixture. For
+fixed-accepted SoftQCD/MPI chunks, pool Pythia trials; each saved event has
+weight equal to its chunk trial exposure divided by all trials and that
+chunk's accepted-event count. Apply a separate exposure only when justified.
 """
 import argparse
 import json
 import math
 from pathlib import Path
+from soft_mpi_model import edm_run_offset
 
 
 def combine(records, expected_chunks):
+    if expected_chunks <= 0:
+        raise ValueError('Expected chunk count must be positive')
     if len(records) != expected_chunks or {r['chunk'] for r in records} != set(range(expected_chunks)):
         raise ValueError('Missing, duplicate, or unexpected chunks')
     if len({r['fragment_sha256'] for r in records}) != 1:
@@ -35,6 +39,15 @@ def combine(records, expected_chunks):
     event_classes = {r.get('event_class') for r in records}
     if mpi_partition and (len(event_classes) != 1 or None in event_classes):
         raise ValueError('Mixed or missing SoftQCD/MPI event class')
+    if mpi_partition:
+        event_class = next(iter(event_classes))
+        expected_offset = edm_run_offset(event_class, records[0]['configured_pthat_bounds'])
+        if any(r.get('edm_run_offset') != expected_offset or
+               not 0 <= int(r['chunk']) < 100000 for r in records):
+            raise ValueError('Invalid or overlapping class/bin EDM run namespace')
+    model_digests = {r.get('mpi_model_settings_sha256') for r in records}
+    if mpi_partition and (len(model_digests) != 1 or not next(iter(model_digests))):
+        raise ValueError('Mixed or missing SoftQCD/MPI source-model digest')
     if any(r['schema'] != 'shift-production-gen-v1' or
            r['forced_decay'] != forced_decay or
            r['events'] <= 0 or r['sum_weights'] != r['events'] or
@@ -62,6 +75,27 @@ def combine(records, expected_chunks):
     selected_sigma = sum(nsave*x for nsave, x in zip(accepted, xsecs))/total_attempted
     selected_sigma_error = math.sqrt(sum((nsave*x)**2 for nsave, x in zip(accepted, errors)))/total_attempted
     efficiency = total_accepted / total_attempted
+    pythia_trials = None
+    event_weight_by_chunk = {str(r['chunk']): x/total_attempted for r, x in zip(records, xsecs)}
+    if mpi_partition:
+        statistics = [r.get('pythia_process_statistics') for r in records]
+        if any(not stat or stat.get('accepted') != r['events'] or
+               stat.get('tried', 0) < stat.get('selected', 0) or
+               stat.get('selected', 0) < stat.get('accepted', 0) or
+               not math.isclose(stat.get('sigma_pb', 0), x, rel_tol=0.001)
+               for r, stat, x in zip(records, statistics, xsecs)):
+            raise ValueError('Missing or inconsistent Pythia trial statistics')
+        trials = [stat['tried'] for stat in statistics]
+        pythia_trials = sum(trials)
+        exposure = sum(n*x for n, x in zip(trials, xsecs))
+        exposure_error = math.sqrt(sum((n*e)**2 for n, e in zip(trials, errors)))
+        sigma = exposure/total_accepted  # underlying non-diffractive reference
+        sigma_error = exposure_error/total_accepted
+        selected_sigma = exposure/pythia_trials
+        selected_sigma_error = exposure_error/pythia_trials
+        event_weight_by_chunk = {
+            str(r['chunk']): n*x/(pythia_trials*r['events'])
+            for r, n, x in zip(records, trials, xsecs)}
     return dict(schema=('shift-jpsi-mixture-v1' if process.startswith('Charmonium_') else 'shift-qcd-mixture-v1'), process=process,
         forced_decay=forced_decay, normalization_ready=False,
         events=total_accepted, attempted_events=total_attempted, accepted_events=total_accepted,
@@ -73,8 +107,11 @@ def combine(records, expected_chunks):
         selected_cross_section_generator_stat_error_pb=selected_sigma_error,
         filter_efficiency=efficiency,
         filter_efficiency_binomial_error=math.sqrt(efficiency*(1.-efficiency)/total_attempted),
-        event_weight_pb_by_chunk={str(r['chunk']): x/total_attempted for r, x in zip(records, xsecs)},
-        normalization=('generated-event-fraction mixture of independent chunks whose internal Pythia cross section already includes the UserHook selection'
+        event_weight_pb_by_chunk=event_weight_by_chunk,
+        pythia_trials=pythia_trials,
+        mpi_model_settings_sha256=(next(iter(model_digests)) if mpi_partition else None),
+        edm_run_offset=(expected_offset if mpi_partition else None),
+        normalization=('Pythia-trial-weighted mixture of independent fixed-accepted-event chunks; internal cross sections already include UserHook selection'
                        if mpi_partition else
                        'generated-event-fraction mixture of independent identical-phase-space chunks'),
         event_class=(next(iter(event_classes)) if mpi_partition else None),
@@ -100,8 +137,9 @@ def main():
     with args.output.open('x') as stream:
         stream.write(json.dumps(report, indent=2) + '\n')
     if args.cross_section_output:
-        sigma = report['inclusive_cross_section_pb']
-        error = report['inclusive_cross_section_error_pb']
+        sigma = report['selected_cross_section_pb'] if report['event_class'] else report['inclusive_cross_section_pb']
+        error = (report['selected_cross_section_generator_stat_error_pb'] if report['event_class']
+                 else report['inclusive_cross_section_error_pb'])
         with args.cross_section_output.open('x') as stream:
             stream.write('# Combined complete unfiltered campaign; not the first-worker estimate\n')
             stream.write(f'{report["process"]} before_filter={sigma:.12g} +- {error:.12g} pb '

@@ -1078,22 +1078,53 @@ model switch at 1 GeV. Do not merge these samples with the older HardQCD or
 standalone Charmonium samples; those are separate diagnostics and overlap the
 same physical phase space.
 
-Source one class/bin in a fresh shell, then use the ordinary audited workflow:
+For generator-only event production, source one class/bin in a fresh shell.
+This campaign runs only GEN and audits the output before publishing it. The
+separate `soft_mpi_partition_2023.env` profile still requests GEN,SIM with the
+provisional LSS payload; it is for detector software checks, not validated
+CMS-detector physics production.
 
 ```bash
 cd /afs/cern.ch/work/j/jniedzie/private/shift_cmssw/shift_cmssw_workflow
 export MPI_PARTITION_SAMPLE=qcd       # qcd or jpsi
 export MPI_PARTITION_BIN=0to1         # 0to1, 1to2, 2to5, 5to10, 10to20, 20to-1
-source config/campaigns/soft_mpi_partition_2023.env
+set -a
+source config/campaigns/soft_mpi_gen_only_2023.env
+set +a
 source /cvmfs/cms.cern.ch/cmsset_default.sh
+./run_condor.sh --steps 1 --check
 ./run_condor.sh --steps 1 --prebuilt --keep-logs
 ```
+
+The GEN-only profile rejects Steps 2--4. Each class/bin has a separate
+campaign, seed range and 100000-run EDM identity range, so outputs from
+separate strata can be inspected together without duplicate run/event IDs.
+Chunk IDs must remain below 100000. Step 1 publishes audited metadata only
+after the ROOT file matches its recorded SHA-256; reruns verify that pair.
+Run all 12 strata for a complete non-diffractive partition. Use a bounded
+J/psi pilot to measure wall time before choosing `N_EVENTS` and `N_JOBS`.
+Do not use an unclosed per-bin pilot as a normalized sample.
+
+The September 25 bounded GEN validation is recorded in
+`validation/soft_mpi_genonly_20260925/readiness.json`. QCD pilots with 1000
+accepted events per bin give 63.074 mb in `[0,2)`; an independent 1000-event
+inclusive no-hook sample gives 62.752 mb from its QCD low-bin occupancy
+(0.34 standard deviations apart). Thirty accepted direct-J/psi events in each
+of `[0,1)` and `[1,2)` give about 18% generator uncertainty per bin and
+measure roughly 34,000 and 188,000 Pythia trials per accepted event,
+respectively. Those direct-J/psi pilots predate the disjoint run-number
+namespace and are validation samples only. The inclusive sample has too few
+trials to validate rare direct J/psi independently. Full 12-stratum closure
+and detector-physics validation remain separate gates.
 
 `ShiftMpiEventClassHook` retries Pythia parton level until the requested class
 and bin is found. Pythia's internal cross section already includes these vetoed
 trials; the external CMSSW filter efficiency remains one and must not be
-applied again. Direct J/psi is rare, so small validation jobs are required
-before choosing production chunk sizes. The J/psi fragment forces
+applied again. Step 1 records the Pythia tried/accepted counts from its log.
+When combining chunks that stop after a fixed number of accepted events,
+weight their cross-section estimates by *trials*, not accepted events.
+Direct J/psi is rare, so small validation jobs are required before choosing
+production chunk sizes. The J/psi fragment forces
 `443 -> mu+ mu-`; record that decay convention explicitly and do not multiply
 another generator-filter efficiency into its production cross section.
 
@@ -1101,11 +1132,12 @@ Before normalization, collect every bin's per-chunk metadata and run
 `scripts/audit_soft_mpi_partition.py` over all 12 strata with an independent
 inclusive non-diffractive cross-section estimate. The audit requires both
 classes, all contiguous bins, one model/partition contract, no external filter
-loss, and statistical closure to the inclusive cross section. Until that
-full-suite closure passes, per-bin pilots remain
-`normalization_ready=false`. High-pT direct-J/psi rejection may be too slow for
-production; measure it before scaling rather than substituting the older hard
-samples.
+loss, agreement of the source-model digest, and statistical closure to the
+inclusive cross section. The default gate also requires each bin's generator
+statistical uncertainty to be at most 20%. Until that full-suite closure
+passes, per-bin pilots remain `normalization_ready=false`. High-pT direct-J/psi
+rejection may be too slow for production; measure it before scaling rather
+than substituting the older hard samples.
 
 These pilots keep `physics_valid=false` and `normalization_ready=false`.
 They use the ATLAS proxy with no pileup/trigger. In particular, a zero-SimHit

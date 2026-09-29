@@ -18,7 +18,10 @@ class SoftMpiClosureTest(unittest.TestCase):
                     event_class=event_class, mpi_model_contract=MODEL_CONTRACT,
                     partition_contract=PARTITION_CONTRACT,
                     configured_pthat_bounds=list(bounds), chunk=chunk, events=10,
-                    generated_filter_efficiency=1.,
+                    edm_run_offset=(6*int(event_class == 'direct_jpsi') + chunk)*100000,
+                    generated_filter_efficiency=1., fragment_sha256=event_class,
+                    mpi_model_settings_sha256='a'*64,
+                    pythia_process_statistics=dict(tried=10, selected=10, accepted=10, sigma_pb=1.),
                     runs=[dict(internal_xsec_pb=1., error_pb=.1)]))
         return records
 
@@ -47,9 +50,32 @@ class SoftMpiClosureTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 audit(records)
 
+    def test_overlapping_edm_run_namespace_fails(self):
+        records = self.records()
+        records[6]['edm_run_offset'] = 0
+        with self.assertRaisesRegex(ValueError, 'EDM run namespace'):
+            audit(records)
+
+    def test_trial_weighting_for_fixed_accepted_event_chunks(self):
+        records = self.records()
+        second = copy.deepcopy(records[0])
+        second['chunk'] = 100
+        second['pythia_process_statistics'] = dict(tried=20, selected=20, accepted=10, sigma_pb=.5)
+        second['runs'] = [dict(internal_xsec_pb=.5, error_pb=.05)]
+        records.append(second)
+        result = audit(records)
+        self.assertAlmostEqual(result['bins'][0]['cross_section_pb'], 2./3.)
+        self.assertEqual(result['bins'][0]['pythia_trials'], 30)
+
     def test_failed_cross_section_closure_fails(self):
         with self.assertRaisesRegex(ValueError, 'closure failed'):
             audit(self.records(), inclusive_xsec_pb=20., inclusive_error_pb=.1)
+
+    def test_insufficient_bin_precision_blocks_readiness(self):
+        records = self.records()
+        records[0]['runs'][0]['error_pb'] = .5
+        with self.assertRaisesRegex(ValueError, 'Insufficient generator statistics'):
+            audit(records, inclusive_xsec_pb=12., inclusive_error_pb=.1)
 
 
 if __name__ == '__main__':

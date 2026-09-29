@@ -1,0 +1,150 @@
+{
+  "schema": "shift-soft-mpi-generator-readiness-v2",
+  "date_utc": "2026-09-25",
+  "scope": "CMSSW GEN-only SoftQCD/MPI partition; no detector or trigger claim",
+  "common_model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+  "independent_inclusive_reference": {
+    "definition": "Same SoftQCD:nonDiffractive and CP5 settings; no UserCustomization hook",
+    "pythia_trials": 1000,
+    "cross_section_pb": 65640000000.0,
+    "no_hook_class_bin_counts": [
+      {
+        "event_class": "qcd",
+        "bounds": [
+          0.0,
+          1.0
+        ],
+        "events": 773
+      },
+      {
+        "event_class": "qcd",
+        "bounds": [
+          1.0,
+          2.0
+        ],
+        "events": 183
+      },
+      {
+        "event_class": "qcd",
+        "bounds": [
+          2.0,
+          5.0
+        ],
+        "events": 44
+      }
+    ],
+    "config_sha256": "ee7aebe4867f67fc936e07bac2d61649ca03fc2c377ba1d48548feb1f7bfe06e",
+    "root_sha256": "fce782a104e534955de7e7d0996b3febc53d67edb143f02ec52f69ac8bf0ebd5"
+  },
+  "adjacent_lowpt_precision_pilots": [
+    {
+      "sample": "qcd",
+      "bin": "0to1",
+      "accepted_events": 1000,
+      "pythia_trials": 1315,
+      "selected_cross_section_pb": 49917152408.71248,
+      "generator_stat_error_pb": 772577761.5739137,
+      "relative_generator_stat_error": 0.015477200206618134,
+      "inferred_nondiffractive_cross_section_pb": 65641055417.45691,
+      "partition_scale_min_GeV": 0.20142263864943555,
+      "partition_scale_max_GeV": 0.9987291908122272,
+      "edm_run_offset": 0,
+      "publication_sha256": "58ce202ec7da9e5e5441a7bc0b675294d5dc3a6da72d494585787ae568850474",
+      "root_sha256": "58ce202ec7da9e5e5441a7bc0b675294d5dc3a6da72d494585787ae568850474",
+      "model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+      "validation_only_due_to_prior_run_namespace": false
+    },
+    {
+      "sample": "qcd",
+      "bin": "1to2",
+      "accepted_events": 1000,
+      "pythia_trials": 4989,
+      "selected_cross_section_pb": 13157156828.51419,
+      "generator_stat_error_pb": 372038014.14107853,
+      "relative_generator_stat_error": 0.02827647484863886,
+      "inferred_nondiffractive_cross_section_pb": 65641055417.4573,
+      "partition_scale_min_GeV": 1.0010563592264825,
+      "partition_scale_max_GeV": 1.9975881551182473,
+      "edm_run_offset": 100000,
+      "publication_sha256": "169a5bc2ec86a7e5cf4402ba552a20d13fec79b61d4106021a3ade72df77faa1",
+      "root_sha256": "169a5bc2ec86a7e5cf4402ba552a20d13fec79b61d4106021a3ade72df77faa1",
+      "model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+      "validation_only_due_to_prior_run_namespace": false
+    },
+    {
+      "sample": "jpsi",
+      "bin": "0to1",
+      "accepted_events": 30,
+      "pythia_trials": 1024169,
+      "selected_cross_section_pb": 1922760.464847458,
+      "generator_stat_error_pb": 351041.2849546061,
+      "relative_generator_stat_error": 0.18257151183023512,
+      "inferred_nondiffractive_cross_section_pb": 65641055417.41187,
+      "partition_scale_min_GeV": 0.03575076295117336,
+      "partition_scale_max_GeV": 0.9443635411715449,
+      "edm_run_offset": null,
+      "publication_sha256": null,
+      "root_sha256": "65d14072f568db8cfa13f68fff5989b5ee43ce3866d01140313fe3f0cd1dcb01",
+      "model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+      "validation_only_due_to_prior_run_namespace": true
+    },
+    {
+      "sample": "jpsi",
+      "bin": "1to2",
+      "accepted_events": 30,
+      "pythia_trials": 5625625,
+      "selected_cross_section_pb": 350046.73481185257,
+      "generator_stat_error_pb": 63909.327205873415,
+      "relative_generator_stat_error": 0.18257369902400086,
+      "inferred_nondiffractive_cross_section_pb": 65641055417.53094,
+      "partition_scale_min_GeV": 1.00039671617749,
+      "partition_scale_max_GeV": 1.99223236396096,
+      "edm_run_offset": null,
+      "publication_sha256": null,
+      "root_sha256": "fb296d5881e4926513bd5eab7e740812381688ed0b13a2513502037d98a70b64",
+      "model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+      "validation_only_due_to_prior_run_namespace": true
+    }
+  ],
+  "new_run_namespace_jpsi_smoke": {
+    "sample": "jpsi",
+    "bin": "1to2",
+    "accepted_events": 1,
+    "pythia_trials": 38606,
+    "selected_cross_section_pb": 1700281.1847235397,
+    "generator_stat_error_pb": 1700281.1847235397,
+    "relative_generator_stat_error": 1.0,
+    "inferred_nondiffractive_cross_section_pb": 65641055417.43697,
+    "partition_scale_min_GeV": 1.1373336444513675,
+    "partition_scale_max_GeV": 1.1373336444513675,
+    "edm_run_offset": 700000,
+    "publication_sha256": "5e834e6bc9f257d001a097635bdecaea302e6de8503cf037708d47a1e6cdc7c8",
+    "root_sha256": "5e834e6bc9f257d001a097635bdecaea302e6de8503cf037708d47a1e6cdc7c8",
+    "model_settings_sha256": "beee1ce696f234413947b912562ee0167f00841edccd1e011689919753a35de5",
+    "validation_only_due_to_prior_run_namespace": false
+  },
+  "qcd_lowpt_vs_independent_reference": {
+    "definition": "sum of QCD [0,1) and [1,2) selected cross sections vs no-hook QCD occupancy in [0,2)",
+    "no_hook_lowpt_events": 956,
+    "partition_sum_pb": 63074309237.22667,
+    "partition_generator_stat_error_pb": 857489755.9998,
+    "reference_pb": 62751840000.0,
+    "reference_binomial_error_pb": 425719807.1671086,
+    "pull": 0.3368339723602696,
+    "passed_5_sigma": true
+  },
+  "generator_only_step1_qcd_and_jpsi_passed": true,
+  "qcd_and_jpsi_condor_preflight_passed": true,
+  "qcd_condor_dry_run_passed": true,
+  "jpsi_condor_dry_run_passed": true,
+  "published_root_metadata_pair_verified": true,
+  "distinct_class_bin_edm_run_ranges_verified": true,
+  "lowpt_generator_validation_passed": true,
+  "full_partition_normalization_ready": false,
+  "detector_physics_ready": false,
+  "remaining_gates": [
+    "Run and audit all 12 class/bin strata with sufficient selected-event statistics before full partition normalization.",
+    "Produce direct-J/psi physics samples under the new disjoint run-number namespace; the 30-event precision pilots predate that namespace.",
+    "Validate the CMS IR5 material and field payload before GEN-SIM and detector/trigger physics production."
+  ]
+}

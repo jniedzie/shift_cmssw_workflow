@@ -102,6 +102,18 @@ done
 [[ -n "$NORMALIZED_STEPS" ]] || { echo "ERROR: no workflow steps selected" >&2; exit 2; }
 
 source "$SCRIPT_DIR/config/workflow.env"
+if [[ "${STEP1_GENERATION_ONLY:-0}" == 1 ]]; then
+    [[ "$NORMALIZED_STEPS" == 1 ]] || {
+        echo "GEN-only campaigns can run only Step 1; detector simulation requires a separate GEN-SIM campaign" >&2
+        exit 2
+    }
+    case "$PROCESS" in
+        QCD_SoftMpiPartition_FixedTarget_13p6TeV|Charmonium_SoftMpiPartition_FixedTarget_13p6TeV) ;;
+        *) echo "GEN-only mode is restricted to SoftQCD/MPI partition processes" >&2; exit 2 ;;
+    esac
+elif [[ "${STEP1_GENERATION_ONLY:-0}" != 0 ]]; then
+    echo "STEP1_GENERATION_ONLY must be 0 or 1" >&2; exit 2
+fi
 source "$SCRIPT_DIR/scripts/configure_lss.sh"
 configure_shift_lss
 
@@ -109,6 +121,8 @@ configure_shift_lss
 # identity, pileup, and reconstruction settings must be serialized rather than
 # inherited.
 SUBMISSION_VARIABLES=(
+	STEP1_GENERATION_ONLY
+	GEN_EVENT_RUN_OFFSET
 	GEN_PTHAT_MIN
 	GEN_PTHAT_MAX
 	GEN_EVENT_CLASS
@@ -267,6 +281,12 @@ if [[ -n "${CONDOR_CHUNKS_FILE:-}" ]]; then
         [[ "$chunk_id" =~ ^(0|[1-9][0-9]*)$ && -z "${CHUNKS_SEEN[$chunk_id]:-}" ]] || {
             echo "Invalid or duplicate chunk ID: $chunk_id" >&2; exit 2;
         }
+        if [[ "$PROCESS" == QCD_SoftMpiPartition_FixedTarget_13p6TeV ||
+              "$PROCESS" == Charmonium_SoftMpiPartition_FixedTarget_13p6TeV ]]; then
+            [[ ${#chunk_id} -le 5 ]] || {
+                echo "SoftQCD/MPI chunk IDs must be below 100000" >&2; exit 2;
+            }
+        fi
         CHUNKS_SEEN[$chunk_id]=1
     done
     [[ "${#CHUNK_IDS[@]}" == "$N_JOBS" ]] || { echo "Chunk list count differs from N_JOBS" >&2; exit 2; }

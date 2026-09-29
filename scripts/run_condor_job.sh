@@ -30,6 +30,10 @@ if [[ ! -r "$WORKFLOW_ROOT/config/workflow.env" ]]; then
 	exit 1
 fi
 source "$WORKFLOW_ROOT/config/workflow.env"
+if [[ "${STEP1_GENERATION_ONLY:-0}" == 1 && "$SELECTED_STEPS" != 1 ]]; then
+    echo "GEN-only campaigns can run only Step 1" >&2
+    exit 2
+fi
 if [[ "$CLEANUP_PREVIOUS_STEP" == 1 ]]; then
 	[[ "$SELECTED_STEPS" == 1,2,3,4 && "$FORCE_SELECTED" == 0 ]] || {
 		echo "Retirement requires a full-chain, non-forced invocation" >&2; exit 2;

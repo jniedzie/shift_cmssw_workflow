@@ -160,7 +160,9 @@ def merge(campaign, chunks, report_dir, date):
             raise ValueError('Reopened published output differs')
         with (temporary/'normalization_complete.json').open('x') as f:
             json.dump(norm, f, indent=2)
-        sigma, error = norm['cross_section_pb'], norm['inclusive_cross_section_error_pb']
+        sigma, error = norm['cross_section_pb'], norm[
+            'selected_cross_section_generator_stat_error_pb' if norm['event_class']
+            else 'inclusive_cross_section_error_pb']
         with (temporary/'cross_sections_complete.txt').open('x') as f:
             f.write('# Combined complete unfiltered sample; use actual generated event count\n')
             f.write(f'{norm["process"]} before_filter={sigma:.12g} +- {error:.12g} pb '

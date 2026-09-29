@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
 from audit_generation_chunk import QCD_CODES, JPSI_CODES
 from collect_generation_metadata import combine
+from unfiltered_qcd_contract import check
 
 
 class QcdProductionTest(unittest.TestCase):
@@ -16,6 +17,14 @@ class QcdProductionTest(unittest.TestCase):
             generated_filter_efficiency=1., forced_decay='none', sum_weights=10.,
             sum_weights_squared=10., runs=[dict(internal_xsec_pb=100.+20*i, error_pb=2.)])
             for i in range(2)]
+
+    def test_gen_only_restricted_to_soft_mpi(self):
+        with self.assertRaisesRegex(ValueError, 'GEN-only mode'):
+            check(dict(STEP1_GENERATION_ONLY='1', PROCESS='QCD_FixedTarget_pThat_1to5GeV_13p6TeV'))
+        self.assertTrue(check(dict(STEP1_GENERATION_ONLY='1',
+            PROCESS='QCD_SoftMpiPartition_FixedTarget_13p6TeV',
+            GEN_EVENT_CLASS='qcd', GEN_PTHAT_MIN='0', GEN_PTHAT_MAX='1',
+            GEN_EVENT_RUN_OFFSET='0')))
 
     def test_disjoint_primary_processes(self):
         self.assertFalse(QCD_CODES & JPSI_CODES)

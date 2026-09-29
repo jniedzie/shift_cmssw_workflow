@@ -12,6 +12,9 @@ import json
 import math
 from pathlib import Path
 from pythia_pthat import from_hepmc
+from generation_publication import sha256
+from soft_mpi_model import (DIRECT_JPSI_IDS, model_settings_digest,
+                            process_statistics)
 
 QCD_CODES = set(range(111, 117)) | set(range(121, 125))
 JPSI_CODES = set(range(401, 411)) | {441}
@@ -23,7 +26,6 @@ JPSI_UNFILTERED_PROCESS = 'Charmonium_Unfiltered_FixedTarget_pThat_1to5GeV_13p6T
 MPI_QCD_PROCESS = 'QCD_SoftMpiPartition_FixedTarget_13p6TeV'
 MPI_JPSI_PROCESS = 'Charmonium_SoftMpiPartition_FixedTarget_13p6TeV'
 MPI_EVENT_CLASSES = {MPI_QCD_PROCESS: 'qcd', MPI_JPSI_PROCESS: 'direct_jpsi'}
-DIRECT_JPSI_IDS = {443, 9940003, 9941003, 9942003}
 
 
 def main():
@@ -36,10 +38,14 @@ def main():
     parser.add_argument('--config', required=True)
     parser.add_argument('--fragment', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--generator-log', help='Required for SoftQCD/MPI trial accounting')
+    parser.add_argument('--run-offset', type=int, default=0, help='Class/bin EDM run namespace offset')
     parser.add_argument('--lower', type=float, default=1.)
     parser.add_argument('--upper', type=float, default=5.)
     args = parser.parse_args()
     mpi_event_class = MPI_EVENT_CLASSES.get(args.process)
+    if args.run_offset < 0 or args.run_offset + args.chunk + 1 > 4294967295:
+        raise ValueError('Invalid EDM run-number offset')
     minimum_lower = 0. if mpi_event_class else 1.
     if not math.isfinite(args.lower) or args.lower < minimum_lower or not math.isfinite(args.upper) or not (args.upper == -1 or args.upper > args.lower):
         raise ValueError('Invalid or unvalidated generator-scale range')
@@ -88,7 +94,7 @@ def main():
             if has_direct_jpsi != (mpi_event_class == 'direct_jpsi'):
                 raise ValueError('SoftQCD/MPI event-class ownership violation')
             scale = max(direct_scales) if has_direct_jpsi else bins[0]
-            if scale < args.lower-1.e-8 or (args.upper != -1 and scale >= args.upper+1.e-8):
+            if scale < args.lower or (args.upper != -1 and scale >= args.upper):
                 raise ValueError(f'Unexpected partition scale: {scale}; stored hardest-MPI pThat={bins[0]}')
             partition_scales.append(scale)
             particles['direct_jpsi_hard_states'] += len(direct_scales)
@@ -153,7 +159,7 @@ def main():
         raise ValueError(f'No events passed the muon filter in {args.events} attempts')
     if not filtered and not 0 < len(weights) <= args.events:
         raise ValueError(f'Invalid generated count {len(weights)} for {args.events} requested slots')
-    if any(run != args.chunk+1 or lumi != 1 or not 1 <= event <= args.events
+    if any(run != args.run_offset+args.chunk+1 or lumi != 1 or not 1 <= event <= args.events
            for run, lumi, event in identities):
         raise ValueError('Event identities outside the requested chunk/source slots')
     runs = []
@@ -165,6 +171,16 @@ def main():
         runs.append({'internal_xsec_pb': xs.value(), 'error_pb': xs.error()})
     if len(runs) != 1:
         raise ValueError('Expected exactly one generated run per chunk')
+    pythia_statistics, model_digest = None, None
+    if mpi_event_class:
+        if not args.generator_log:
+            raise ValueError('SoftQCD/MPI metadata requires the generator log')
+        pythia_statistics = process_statistics(args.generator_log)
+        if pythia_statistics['accepted'] != len(weights):
+            raise ValueError('Pythia accepted count differs from saved GEN events')
+        if not math.isclose(pythia_statistics['sigma_pb'], runs[0]['internal_xsec_pb'], rel_tol=0.001):
+            raise ValueError('Pythia log cross section differs from GenRunInfo')
+        model_digest = model_settings_digest(args.fragment, mpi_event_class)
     lumis = []
     for lumi in Lumis(args.input):
         info = get(lumi, 'generator', 'GenLumiInfoProduct')
@@ -219,6 +235,8 @@ def main():
             if mpi_event_class == 'qcd' else
             'Born phase-space pThat before final constituent-mass assignment'),
         event_class=mpi_event_class,
+        pythia_process_statistics=pythia_statistics,
+        mpi_model_settings_sha256=model_digest,
         mpi_model_contract=('pythia8-softqcd-nd-cp5-processlevel3-v1' if mpi_event_class else None),
         partition_contract=('direct-hard-jpsi-status23or33-v1' if mpi_event_class else None),
         runs=runs, lumi_processes=lumis, external_filter_records=filter_records,
@@ -245,11 +263,13 @@ def main():
         max_nominal_source_shift_residual_mm=(max(map(abs, source_shift_residuals))
                                                if source_shift_residuals else None),
         physics_valid=False, normalization_ready=False,
+        edm_run_offset=args.run_offset,
         configured_pthat_bounds=[args.lower, args.upper],
         event_ids=[list(identity) for identity in sorted(identities)],
         identity_min=list(min(identities)), identity_max=list(max(identities)),
         fragment_sha256=hashlib.sha256(Path(args.fragment).read_bytes()).hexdigest(),
-        config_sha256=hashlib.sha256(Path(args.config).read_bytes()).hexdigest())
+        config_sha256=hashlib.sha256(Path(args.config).read_bytes()).hexdigest(),
+        input_sha256=sha256(args.input))
     Path(args.output).write_text(json.dumps(report, indent=2) + '\n')
     print(f'Validated {len(weights)} GEN events, ownership, pThat and normalization inputs')
 
