@@ -18,11 +18,6 @@ payload_dir="${CMS_LSS_PAYLOAD_DIR:-$source_dir/cms_ir5_2023_z1100}"
 gdml="${CMS_LSS_GDML_FILE:-$payload_dir/geometry/lhc_ir5_2023_physical_z1100.gdml}"
 field_dir="${CMS_LSS_FIELD_DATA_DIRECTORY:-$payload_dir/field_maps}"
 
-[[ -f "$source_dir/MB.inp" ]] || {
-  echo "ERROR: required provider include is missing: $source_dir/MB.inp" >&2
-  exit 1
-}
-
 # Select the newest staged manifest which both closes all native includes and
 # describes the exact geometry/maps that will be used. An explicit override is
 # available when validated artifacts live elsewhere.
@@ -56,7 +51,7 @@ if not matches:
 print(matches[-1])
 PY
 )" || {
-    echo "ERROR: no MB-complete staged CMS payload matches $payload_dir" >&2
+    echo "ERROR: no complete staged CMS payload matches $payload_dir" >&2
     exit 1
   }
 fi
@@ -75,7 +70,7 @@ spec.loader.exec_module(module)
 source = module.audit_bundle(source_dir)
 deck = source["decks"].get("lhc_IR5_2023-2024.inp")
 if not deck or not deck["preprocessing_complete"] or not deck["source_complete"]:
-    raise SystemExit("CMS 2023 source deck is incomplete after resolving MB.inp")
+    raise SystemExit("CMS 2023 source deck has unresolved includes or field definitions")
 
 manifest = json.loads(manifest_path.read_text())
 if (manifest.get("staging_complete") is not True

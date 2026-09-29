@@ -57,6 +57,13 @@ Edit `config/workflow.env` before a run. The main controls are:
 | `PIGGYBACK_FILTER_RECONSTRUCTION`, `PIGGYBACK_FILTER_LEVEL` | Filter Step 3 to the decision report at `raw` or `persisted` level. Production defaults to persisted. |
 | `ENABLE_EXONANOAOD` | `0` for production NanoAOD; `1` only for an explicit EXO comparison. |
 
+The private CMS IR5 working decks no longer include the unused `MB.inp`, as
+confirmed by the provider on 2026-09-29. The comparison launcher audits the
+includes and named fields actually present in the selected deck. Missing
+required includes and incomplete staged payloads still stop submission.
+Original decks, revised-source checksums and validation evidence remain in the
+private CMS LSS source directory; see `../SHIFT_LHC_GEOMETRY.md` for the record.
+
 The supported production layout is deliberately canonical:
 
 ```text

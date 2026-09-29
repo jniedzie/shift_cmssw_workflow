@@ -14,16 +14,17 @@ WORKFLOW = Path(__file__).resolve().parents[1]
 
 
 class CmsLssV47LauncherTest(unittest.TestCase):
-    def fixture(self, root, unresolved=None):
+    def fixture(self, root, unresolved=None, missing_source_include=False):
         source = root / "source"
         payload = root / "payload"
         (payload / "geometry").mkdir(parents=True)
         (payload / "field_maps").mkdir()
         source.mkdir()
         (source / "lhc_IR5_2023-2024.inp").write_text(
-            "#include /provider/MB.inp\nMGNFIELD 1 0 0 region 0 0 MB\n")
-        (source / "MB.inp").write_text(
-            "FREE\nMGNCREAT , 4.0, 5.0, 9.7, 0.0, 2.0, , MB\nFIXED\n")
+            "#include /provider/MQXA.inp\nMGNFIELD 1 0 0 region 0 0 MQXA\n")
+        if not missing_source_include:
+            (source / "MQXA.inp").write_text(
+                "FREE\nMGNCREAT , 4.0, 5.0, 9.7, 0.0, 2.0, , MQXA\nFIXED\n")
         gdml = payload / "geometry/model.gdml"
         gdml.write_text("<gdml/>\n")
         maps = []
@@ -40,13 +41,13 @@ class CmsLssV47LauncherTest(unittest.TestCase):
         }))
         return source, payload, gdml, manifest
 
-    def run_launcher(self, unresolved=None):
+    def run_launcher(self, unresolved=None, missing_source_include=False):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             (root / "scripts").mkdir()
             shutil.copy2(WORKFLOW / "scripts/run_cms_lss_v47_comparison.sh", root / "scripts")
             shutil.copy2(WORKFLOW / "scripts/audit_cms_lss_source.py", root / "scripts")
-            source, payload, gdml, manifest = self.fixture(root, unresolved)
+            source, payload, gdml, manifest = self.fixture(root, unresolved, missing_source_include)
             boundary = root / "run_condor.sh"
             boundary.write_text('''#!/usr/bin/env bash
 set -euo pipefail
@@ -83,7 +84,7 @@ PY
                  "cms_lss_v47_contract_test", "--check"],
                 env=env, capture_output=True, text=True)
 
-    def test_exact_v47_recipe_with_cms_payload(self):
+    def test_exact_v47_recipe_with_cms_payload_without_mb_include(self):
         result = self.run_launcher()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout)
@@ -112,6 +113,11 @@ PY
         result = self.run_launcher(["MB.inp"])
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unresolved native includes", result.stderr)
+
+    def test_missing_required_source_include_is_rejected_before_submission(self):
+        result = self.run_launcher(missing_source_include=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unresolved includes or field definitions", result.stderr)
 
 
 if __name__ == "__main__":
