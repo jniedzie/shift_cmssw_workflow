@@ -15,6 +15,31 @@ from convert_cms_lss_native_fields import (  # noqa: E402
 
 
 class NativeFieldConversionTest(unittest.TestCase):
+    def test_rejects_incomplete_or_unsupported_inline_constant(self):
+        from audit_cms_lss_source import IntakeError
+        cases = [
+            ("MGNCREAT 1 0 0 0 0 0 VECTOR\n", "analytic subset"),
+            ("MGNCREAT 1 0 0 0 2 0 VECTOR\nMGNCREAT 1 0 0 0 0 0 &\n", "analytic subset"),
+            ("MGNCREAT 1 0 0 0 0 0 VECTOR\nMGNCREAT 1 0 0 2 2 0 &\n", "analytic subset"),
+            ("MGNCREAT 1 0 0 0 0 0 VECTOR\nMGNCREAT 1 0 0 0 0 0 &\n"
+             "MGNDATA 1 2 3 0 0 0 VECTOR\n", "analytic subset"),
+            ("MGNCREAT 1 0 0 0 0 0 VECTOR\nMGNCREAT nan 0 0 0 0 0 &\n", "non-finite"),
+            ("MGNCREAT 1 0 0 0 0 0 VECTOR\nMGNCREAT 1 0 0 0 0 0 &\n"
+             "MGNCREAT 0 1 0 0 0 0 &\n", "duplicate MGNCREAT continuation"),
+            # A discarded continuation used to silently emit an unrotated
+            # dipole. Retaining it must fail closed until rotation is supported.
+            ("MGNCREAT 2 0 0 0 0 0 VECTOR\nMGNCREAT 15 0 0 0 0 0 &\n", "supported straight"),
+        ]
+        for definition, message in cases:
+            with self.subTest(definition=definition), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory)
+                (source / "deck.inp").write_text(
+                    definition + "MGNFIELD -0.5 0 0 CELL 0 0 VECTOR\n")
+                with zipfile.ZipFile(source / "fields.zip", "w"):
+                    pass
+                with self.assertRaisesRegex((FieldTranslationError, IntakeError), message):
+                    convert_native_fields(source, "deck.inp", source / "converted")
+
     def test_lossless_two_component_map_and_analytic_quadrupole(self):
         mapped = (
             "MGNCREAT , 204, 2.4, 0, 0, 0, , MAP\n"

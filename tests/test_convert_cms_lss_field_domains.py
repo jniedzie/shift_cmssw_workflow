@@ -9,6 +9,36 @@ from convert_cms_lss_field_domains import FieldDomainError, convert_domains
 
 
 class FieldDomainConversionTest(unittest.TestCase):
+    def test_constant_bundle_to_domains_preserves_vector_scale_and_full_region(self):
+        import zipfile
+        from convert_cms_lss_native_fields import convert_native_fields
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            deck, _, geometry = self.fixture(directory)
+            deck.write_text(deck.read_text() +
+                            "MGNCREAT 1 0.5 0 0 0 0 SKEW\n"
+                            "MGNCREAT 2 -3 4 0 0 0 &\n"
+                            "MGNCREAT 1 0.25 0 0 0 0 OTHER\n"
+                            "MGNCREAT -1 0 0 0 0 0 &\n"
+                            "MGNFIELD -0.5 ROT 0 OUT 0 0 SKEW\n"
+                            "MGNFIELD 3 ROT 0 BOXCELL 0 0 OTHER\n")
+            with zipfile.ZipFile(root / "fields.zip", "w"):
+                pass
+            fields = convert_native_fields(root, deck.name, root / "converted")
+            self.assertEqual(fields["inline_analytic_fields"], ["OTHER", "SKEW"])
+            self.assertEqual(len(fields["inline_analytic_definitions"]["SKEW"]["cards"]), 2)
+            report = convert_domains(deck, root / "converted/field_manifest.json", geometry)
+            annulus, box = report["elements"]
+            self.assertEqual(annulus["field_model_tesla"], [-1.0, 1.5, -2.0])
+            self.assertEqual(box["field_model_tesla"], [-3.0, 0.0, 0.0])
+            self.assertEqual(annulus["origin_model_cm"], [0, 0, 10])
+            self.assertEqual(annulus["inner_radius_cm"], 1)
+            self.assertEqual(annulus["outer_radius_cm"], 5)
+            self.assertNotIn("analytic_core_clipped", annulus)
+            self.assertEqual(box["bounds_shape"], "box")
+            self.assertEqual(box["minimum_cm"], [-2, -4, -6])
+            self.assertFalse(report["production_ready"])
+
     def fixture(self, directory, region="OUT 5 +OUT -HOLE"):
         root = Path(directory)
         deck = root / "active.inp"

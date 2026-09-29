@@ -154,23 +154,26 @@ def convert_native_fields(source_dir, deck_name, output_dir):
 
     inline_definitions = {}
     for name in sorted(inline):
-        cards = [card for card in deck["native_field_definitions"]
-                 if card["sdum"] == name]
+        cards = deck["native_field_definition_groups"][name]
         summary, values = native_map_summary(cards)
         if values or summary.get("metadata_status") != "supported-comparison-subset":
             raise FieldTranslationError(
                 f"{name}: inline field is outside the supported analytic subset"
             )
         metadata = summary["metadata"]
-        if metadata["type"] != "DIPOLE" or any(metadata[key] != 0.0 for key in
+        if metadata["type"] not in ("DIPOLE", "CONSTANT") or any(metadata[key] != 0.0 for key in
                                                 ("azimuth_degrees", "bend_radius_cm", "sagitta_cm")):
             raise FieldTranslationError(
-                f"{name}: inline field is not a straight local-Y analytic dipole"
+                f"{name}: inline field is not a supported straight dipole or constant vector"
             )
         inline_definitions[name] = {
             "cards": summary["cards"],
             "metadata": metadata,
-            "field_expression": "Bx=0, By=MGNFIELD.WHAT(1) tesla, Bz=0",
+            "field_expression": (
+                "B=MGNFIELD.WHAT(1) * constant_field_tesla"
+                if metadata["type"] == "CONSTANT"
+                else "Bx=0, By=MGNFIELD.WHAT(1) tesla, Bz=0"
+            ),
             "reference": "https://flukafiles.web.cern.ch/manual/chapters/description_input/description_options/mgncreat.html",
         }
 

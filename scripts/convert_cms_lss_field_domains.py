@@ -187,9 +187,11 @@ def convert_domains(active_deck, field_manifest_path, geometry_report_path):
             element.update(type="flukaMap2D", map_file=manifest["maps"][name]["output"])
         elif name in manifest["inline_analytic_definitions"]:
             definition = manifest["inline_analytic_definitions"][name]
-            if definition["metadata"]["type"] != "DIPOLE":
+            field_type = definition["metadata"]["type"]
+            if field_type not in ("DIPOLE", "CONSTANT"):
                 raise FieldDomainError(f"{name}: unsupported inline analytic type")
-            core_radius = definition["metadata"]["core_radius_cm"]
+            core_radius = (definition["metadata"]["core_radius_cm"]
+                           if field_type == "DIPOLE" else 0.0)
             core_origin = definition["metadata"]["analytical_origin_cm"]
             if core_radius:
                 if (element["bounds_shape"] != "cylinderZ" or core_origin != [0.0, 0.0, 0.0] or
@@ -202,7 +204,14 @@ def convert_domains(active_deck, field_manifest_path, geometry_report_path):
                 element["minimum_cm"] = [-effective_outer, -effective_outer, element["minimum_cm"][2]]
                 element["maximum_cm"] = [effective_outer, effective_outer, element["maximum_cm"][2]]
                 element["analytic_core_clipped"] = effective_outer < assigned_domain["outer_radius_cm"]
-            element.update(type="uniform", field_model_tesla=[0.0, element["field_scale"], 0.0])
+            vector = (definition["metadata"]["constant_field_tesla"]
+                      if field_type == "CONSTANT" else [0.0, 1.0, 0.0])
+            if len(vector) != 3:
+                raise FieldDomainError(f"{name}: expected three constant field components")
+            field = [_number(str(value), name) * element["field_scale"] for value in vector]
+            if not all(math.isfinite(value) for value in field):
+                raise FieldDomainError(f"{name}: non-finite scaled field")
+            element.update(type="uniform", field_model_tesla=field)
         else:
             raise FieldDomainError(f"{name}: missing translated field definition")
         elements.append(element)

@@ -15,6 +15,27 @@ from audit_cms_lss_source import (
 
 
 class CmsLssIntakeTest(unittest.TestCase):
+    def test_constant_components_are_not_angles_or_normalized(self):
+        text = ("MGNCREAT 1 0.5 6 7 0 0 VECTOR\n"
+                "MGNCREAT 2 -3 4 0 0 0 &\n")
+        cards = native_cards(active_lines(text, "deck")[0], "deck")
+        summary, values = native_map_summary(cards)
+        self.assertEqual(values, [])
+        self.assertEqual(summary["metadata"]["type"], "CONSTANT")
+        self.assertEqual(summary["metadata"]["constant_field_tesla"], [2, -3, 4])
+        self.assertEqual(summary["metadata"]["core_radius_cm"], 0)
+        self.assertEqual(summary["metadata"]["azimuth_degrees"], 0)
+        self.assertEqual(summary["cards"], cards)
+
+    def test_field_continuations_do_not_cross_source_files(self):
+        from audit_cms_lss_source import native_field_definition_groups
+        first = native_cards([(1, "MGNCREAT 1 0 0 0 0 0 VECTOR")], "first")
+        orphan = native_cards([(1, "MGNCREAT 1 0 0 0 0 0 &")], "second")
+        with self.assertRaisesRegex(IntakeError, "orphan MGNCREAT continuation"):
+            native_field_definition_groups(first + orphan)
+        with self.assertRaisesRegex(IntakeError, "duplicate native field definition"):
+            native_field_definition_groups(first + first)
+
     def test_conditionals_do_not_enable_inactive_defines(self):
         source = "#define LHC\n#if LHC\n#define IR5\n#elif SPS\n#define WRONG\n#endif\n#if WRONG\nbad\n#else\ngood\n#endif\n"
         lines, definitions, _ = active_lines(source, "deck")

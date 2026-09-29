@@ -64,6 +64,15 @@ required includes and incomplete staged payloads still stop submission.
 Original decks, revised-source checksums and validation evidence remain in the
 private CMS LSS source directory; see `../SHIFT_LHC_GEOMETRY.md` for the record.
 
+The native field converter supports inline FLUKA `CONSTANT` fields, retaining
+their continuation-card components and applying the signed `MGNFIELD` scale.
+These fields fill their assigned region; the dipole core-radius cutoff does
+not apply. Missing vectors, unsupported symmetry/interpolation and ambiguous
+continuations are rejected. The bounded synthetic check
+`cmsRun tests/run_cms_lss_constant_field_validation_cfg.py`, run in the SHIFT
+CMSSW environment, exercises conversion through runtime field lookup. This
+support does not certify the complete 2025 geometry or its physical alignment.
+
 The supported production layout is deliberately canonical:
 
 ```text

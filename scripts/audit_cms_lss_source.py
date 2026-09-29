@@ -139,6 +139,30 @@ def is_named_assignment(card):
         re.fullmatch(r"[A-Za-z_][A-Za-z_0-9]*", card["sdum"]))
 
 
+def native_field_definition_groups(cards):
+    """Retain creation/data continuations with their field and source file."""
+    groups, creation_names, data_names = {}, {}, {}
+    for card in cards:
+        kind, source, name = card["card"], card["source"], card["sdum"]
+        if kind not in ("MGNCREAT", "MGNDATA"):
+            continue
+        names = creation_names if kind == "MGNCREAT" else data_names
+        if name in ("&", "&&"):
+            if source not in names:
+                raise IntakeError(f"{source}:{card['line']}: orphan {kind} continuation")
+            name = names[source]
+        else:
+            names[source] = name
+            if kind == "MGNCREAT":
+                if name in groups:
+                    raise IntakeError(f"duplicate native field definition {name}")
+                groups[name] = []
+        if name not in groups:
+            raise IntakeError(f"{source}:{card['line']}: data for undefined field {name}")
+        groups[name].append(card)
+    return groups
+
+
 def finite_number(value):
     number = float(value.replace("D", "E")) if value else 0.0
     if not math.isfinite(number):
@@ -168,7 +192,7 @@ def native_map_summary(cards):
         result["metadata_status"] = "unsupported-number-of-field-definitions"
         return result, values
     first = [finite_number(value) for value in primaries[0]["what"]]
-    types = {2: "DIPOLE", 4: "QUAD", 200: "INTER2D", 204: "QUADINT", 202: "KICKINT"}
+    types = {1: "CONSTANT", 2: "DIPOLE", 4: "QUAD", 200: "INTER2D", 204: "QUADINT", 202: "KICKINT"}
     symmetry = {0: "NONE", 2: "X", 10: "Y", 12: "XY"}
     if first[0] not in types or first[4] not in symmetry or first[5] != 0:
         result["metadata_status"] = "unsupported-field-type-or-symmetry"
@@ -179,6 +203,25 @@ def native_map_summary(cards):
         raise IntakeError("duplicate MGNCREAT continuation")
     extra = continuation.get("&", [0.0] * 6)
     bounds = continuation.get("&&", [0.0] * 6)
+    if first[0] == 1:
+        if "&" not in continuation:
+            result["metadata_status"] = "missing-constant-field-vector"
+            return result, values
+        if first[4] != 0 or any(extra[3:]) or "&&" in continuation or values:
+            result["metadata_status"] = "unsupported-constant-field-symmetry-or-grid"
+            return result, values
+        # CONSTANT uses WHAT(1:3) of '&' as components, not angles/curvature.
+        # MGNCREAT's core radius and offsets apply to DIPOLE--DECAPOLE only.
+        result.update(
+            metadata_status="supported-comparison-subset",
+            metadata={"type": "CONSTANT", "symmetry": "NONE",
+                      "constant_field_tesla": extra[:3],
+                      "core_radius_cm": 0.0, "analytical_origin_cm": [0.0, 0.0, 0.0],
+                      "azimuth_degrees": 0.0, "bend_radius_cm": 0.0, "sagitta_cm": 0.0,
+                      "x_grid": None, "y_grid": None},
+            metadata_reference=CREATE_MANUAL,
+        )
+        return result, values
     if extra[5] != 0 or bounds[2] != 0 or bounds[5] != 0:
         result["metadata_status"] = "unsupported-3d-grid"
         return result, values
@@ -470,6 +513,7 @@ def audit_bundle(source_dir, legacy_map_dir=None):
                                 and not (referenced - defined) and not missing_transforms),
             "preprocessing_complete": all(item["resolution"] == "available-by-basename" for item in includes),
             "native_field_definitions": definitions,
+            "native_field_definition_groups": native_field_definition_groups(cards),
             "native_field_assignments": assignments,
             "other_native_field_cards": [card for card in cards if card not in assignments
                                          and card not in definitions and card["card"] != "MGNDATA"],
