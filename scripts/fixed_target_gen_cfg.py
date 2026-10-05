@@ -29,6 +29,7 @@ for name, default, kind in (
     ("sourceZmm", 148000., VarParsing.varType.float),
     ("sourceSigmaZmm", 500., VarParsing.varType.float),
     ("seed", 13579, VarParsing.varType.int),
+    ("runNumber", 0, VarParsing.varType.int),
     ("maxEvents", 20, VarParsing.varType.int),
     ("outputDir", "", VarParsing.varType.string),
 ):
@@ -48,7 +49,9 @@ process = cms.Process("SHIFTGEN", Run3_2023)
 process.load("Configuration.StandardSequences.Services_cff")
 process.load("SimGeneral.HepPDTESSource.pythiapdt_cfi")
 process.maxEvents = cms.untracked.PSet(input=cms.untracked.int32(options.maxEvents))
-process.source = cms.Source("EmptySource", firstRun=cms.untracked.uint32(options.seed))
+if not 0 <= options.runNumber <= 4294967295:
+    raise ValueError("Invalid run-number namespace")
+process.source = cms.Source("EmptySource", firstRun=cms.untracked.uint32(options.runNumber or options.seed))
 process.options = cms.untracked.PSet(numberOfThreads=cms.untracked.uint32(1),
                                     numberOfStreams=cms.untracked.uint32(1),
                                     wantSummary=cms.untracked.bool(True))
@@ -100,7 +103,7 @@ process.MessageLogger.cerr.FwkReport.reportEvery = 100
 contract = dict(schema="shift-gen-pilot-v1", year=2023, sample=options.sample,
     bin_variable="mHat" if options.sample == "dy" else "pTHat",
     lower=options.lower, upper=options.upper, requested_events=options.maxEvents,
-    seed=options.seed, beam_energy_GeV=options.beamEnergy,
+    seed=options.seed, run_number=options.runNumber or options.seed, beam_energy_GeV=options.beamEnergy,
     source_z_mm=options.sourceZmm, source_sigma_z_mm=options.sourceSigmaZmm,
     source_model="provisional on-axis stationary proton target; no nuclear model",
     cmssw=os.environ.get("CMSSW_VERSION"),

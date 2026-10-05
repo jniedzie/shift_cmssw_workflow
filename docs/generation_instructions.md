@@ -1376,3 +1376,95 @@ For each production, validate the Condor event log and payload publication
 messages in addition to counting EOS files. Do not merge until every expected
 job has terminated normally and representative destination ROOT files have
 the expected trees, branches, and entries.
+
+#### Persistent GEN production tools
+
+These tools are retained for production, audit, and recovery. Campaign state
+and frozen deployments are separate from the source checkout.
+
+| Purpose | Entry points and supporting files in `scripts/` |
+| --- | --- |
+| Frozen ordinary GEN production | `freeze_shift_gen_runtime.py`, `prepare_shift_production_dag.py`, `submit_shift_production_dag.py`; `shift_production_plan.py`, `run_shift_production_bootstrap.sh`, `run_shift_production_node.py`. |
+| Rolling GEN recovery | `prepare_shift_rolling_resumption.py`, `run_shift_production_rolling_node.py`. Completed receipts and the original scientific manifest remain authoritative. |
+| Capacity monitoring and readback | `run_shift_production_monitor.py`, `run_shift_production_health_audit.py`, `run_shift_health_bootstrap.sh`; `shift_adaptive_capacity.py`, `shift_condor_native.py`. |
+| Fixed-trial weighted GEN | `prepare_shift_weighted_gen_manager.py`, `run_shift_weighted_gen.py`, `audit_shift_weighted_gen.py`, `gate_shift_weighted_gen.py`, `finalize_shift_weighted_gen.py`; `shift_weighted_gen_pre.py`, `shift_weighted_initial_admission.py`. |
+
+The fixed-trial weighted workflow replaces the standalone high-bin prototype.
+The obsolete `prepare_shift_high_bin_manager.py`, `run_shift_high_bin_probe.py`,
+and `audit_shift_high_bin_probes.py` source copies were removed during the
+2026-10-05 cleanup. Its frozen worker/auditor copies, receipts, logs, and
+recovery state remain under `../validation/high_bins_20261001/manager_v1/`.
+
+Deploy from reviewed source into a new frozen directory before launch. The
+monitor deployment uses the filenames `monitor.py`, `health_audit.py`, and
+`health_bootstrap.sh` for their corresponding `run_shift_*` source files;
+helper imports and deployment hashes must match. Committing source changes
+does not update an existing deployment. Never edit or relocate files used by
+live jobs. The weighted manager preparer retains the October 1 campaign
+recipe and external asset requirements; it is not a general campaign preset.
+
+Use `tmp/<YYYYMMDD-task>/` for one-off experiments, following `AGENTS.md` and
+`tmp/README.md`. Keep reusable tools and their regression tests in the paths
+listed above and in `tests/`.
+
+#### October 1 GEN scheduling and monitoring record
+
+The following is a dated deployment record, not current queue status. Query
+the queue and read the campaign state before acting on these job IDs.
+
+The GEN-only replacement removes the 50-job batch barrier and reuses exact
+completed receipts. The scientific manifest and runtime remain frozen. The
+user authorized increasing scheduling capacity gradually above 50; the earlier
+50-worker starting point is not a permanent limit for this campaign.
+
+`run_shift_production_monitor.py` runs as Condor scheduler job 12794348 using
+an absolute frozen deployment, Python `-I -S`, a singleton lock and native
+local Condor commands. It coordinates rolling controller 12793294 and the
+weighted high-bin GEN controller 12795644; prototype controller 12794350
+remains held with its evidence preserved. One shared budget grows
+through 50/75/100/150/200/300, with at least 20 minutes and ten new completed
+chunks between increases. Idle pressure, stale audits or uncertain queue
+coverage freeze growth. Verified failures or exhausted quota hold managers
+without cancelling workers. High-bin experimental failures affect only that
+manager. No schedd/account changes are used to evade capacity constraints.
+
+Read-only vanilla workers run `run_shift_production_health_audit.py`: quota,
+exact immutable receipts, unique event identities and representative ROOT
+readback, plus account-wide scheduler discovery through
+`tweetybird04.cern.ch` on the submission collector port. Execute hosts' default
+collector port 10040 has no submission ads. Scheduler jobs have refreshed AFS
+tokens but no Kerberos credentials, so they delegate remote coverage and EOS
+checks to these workers. `shift_condor_native.py` enforces clean command
+results, finite process-group timeouts and exactly one job per edit.
+
+The active worker category is prepared at 300; live DAGMan global caps are
+changed via `DAGMan_MaxJobs`/`DAGMan_MaxIdle`. HTCondor 24.12 does not update
+category `MAXJOBS` through those attributes. The category was raised by holding
+only DAGMan, validating the sole numeric DAG replacement, then recovering it;
+all 38 running workers retained their original start/run counters.
+`DAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE=false` protects existing workers when
+future admission caps are reduced. A controller recovery can reset its global
+caps from Arguments; the common monitor persists the same numeric limits in
+Arguments for recovery. Shared capacity reserves already submitted workers
+before granting another manager jobs. Zero would mean unlimited to DAGMan,
+so a manager with no available slot receives an owned capacity hold instead.
+Only that exact owned hold is automatically released; scientific and manual
+holds require review. Physics manifests, worker scripts and runtime hashes are unchanged.
+
+Live status, registry, frozen deployments, audits and the append-only changes
+journal are under `../validation/production_plan_20261001/manager_monitor/`.
+The high-bin standalone validation receipts are separate under
+`../validation/high_bins_20261001/manager_v1/`; they must not be counted as
+weighted GEN production. The separate `manager_v2/` graph runs fourteen
+closure/pilot nodes, an automatic scientific gate, fixed-trial high-bin
+production, and final effective-statistics accounting. The initial PRE barrier
+prevents any worker submission until the held controller is registered.
+Its publication contract is `shift-weighted-gen-receipt-v3`: positive event
+weights and zero accepted chunks are valid, fixed trial counts are authoritative,
+pilots are excluded from production normalization, and remote artifacts receive
+independent SHA-256 readback. Common audits reopen ROOT, ledger and resolved
+configuration for each active high bin using the pinned semantic validator.
+Storage reservation uses 1 GB per high worker, its ceiling of 80, ordinary
+workers' 250 MB bound, and the 50 GB free-space reserve. Consult
+`../SHIFT_ANALYSIS.md` for the remaining physics gates. These managers and
+monitoring continue after lxplus logout.

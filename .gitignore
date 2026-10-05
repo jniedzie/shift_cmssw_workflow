@@ -6,3 +6,7 @@ condor
 *.root
 jniedzie.cc
 docs/results
+
+# One-off scripts and disposable test outputs; keep the directory guide.
+/tmp/*
+!/tmp/README.md

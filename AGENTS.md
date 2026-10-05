@@ -9,6 +9,24 @@ or reconstruction.
 Always work directly on `main` in this repository. Do not create task branches
 or use Git worktrees unless the user explicitly overrides this policy.
 
+## Temporary scripts and cleanup
+
+- Put one-off probes, debugging scripts, generated test configurations, and
+  disposable outputs in `tmp/<YYYYMMDD-task>/` within this repository. Do not
+  put temporary scripts in the repository root, `scripts/`, or `tests/`.
+- Add a short note in each task directory stating its purpose, owner, and
+  when it is safe to remove. Contents of `tmp/` are ignored except its shared
+  `README.md`; do not force-add temporary files to Git.
+- Keep reusable workflow tools in `scripts/` and regression tests in `tests/`.
+  Promote a useful temporary script there only after review, documentation,
+  and appropriate validation.
+- Keep campaign state, frozen deployments, receipts, and persistent validation
+  evidence outside `tmp/`. Store private FLUKA/geometry payloads only in the
+  private directory required below, even during temporary tests.
+- Before cleanup, check references and running jobs. Remove only files known
+  to be disposable; never use a blanket cleanup on campaign state, data, logs,
+  or the repository. A directory named `tmp` is not proof it is unused.
+
 ## Non-negotiable physics objective
 
 The goal is to measure how well SHIFT muons can be triggered, recorded, and

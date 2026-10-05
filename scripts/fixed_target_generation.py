@@ -4,16 +4,17 @@ import math
 
 
 def process_settings(sample, lower, upper):
-    if not all(math.isfinite(x) for x in (lower, upper)) or not 0 <= lower < upper:
-        raise ValueError("Require finite 0 <= lower < upper")
+    if (not all(math.isfinite(x) for x in (lower, upper)) or lower < 0
+            or not (upper == -1 or upper > lower)):
+        raise ValueError("Require finite 0 <= lower < upper, or upper=-1")
     if sample == "qcd":
         if lower <= 0:
             raise ValueError("HardQCD needs a positive pThat cutoff; soft QCD is separate")
         return ["HardQCD:all = on", f"PhaseSpace:pTHatMin = {lower}",
                 f"PhaseSpace:pTHatMax = {upper}"]
     if sample == "dy":
-        if lower < 1:
-            raise ValueError("This perturbative DY pilot requires mHat >= 1 GeV")
+        if lower <= 2 * 0.1056583755:
+            raise ValueError("DY dimuons require mHat above the two-muon threshold")
         return ["WeakSingleBoson:ffbar2gmZ = on", "WeakZ0:gmZmode = 0",
                 # Particle-data default mMin=10 GeV otherwise excludes low-mass DY.
                 f"23:mMin = {lower}",

@@ -24,6 +24,14 @@ def main(directory):
     if contract["schema"] != "shift-gen-pilot-v1" or contract["detector_simulated"]:
         raise ValueError("Only GEN pilot products are accepted")
     path = str(out / "gen.root")
+    import ROOT
+    file = ROOT.TFile.Open(path)
+    if not file or file.IsZombie() or file.TestBit(ROOT.TFile.kRecovered):
+        raise AssertionError('Invalid or recovered GEN ROOT file')
+    tree = file.Get('Events')
+    if not tree or int(tree.GetEntries()) != contract['requested_events']:
+        raise AssertionError('GEN ROOT event count differs from request')
+    file.Close()
     sample = contract["sample"]
     parent_ids = {"chic": {10441, 20443, 445}, "psi2s": {100443}}
     expected_codes = {"chic": set(range(411, 417)),
@@ -32,9 +40,12 @@ def main(directory):
     identities = set()
     weights = []
     maximum_timing_error = 0.
+    generated_masses = []
     beam_summary = None
     for event in Events(path):
         identity = (event.eventAuxiliary().run(), event.eventAuxiliary().event())
+        if identity[0] != contract.get("run_number", contract["seed"]) or not 1 <= identity[1] <= contract["requested_events"]:
+            raise AssertionError("Event outside the requested source identity namespace")
         if identity in identities:
             raise AssertionError("Duplicate event identity")
         identities.add(identity)
@@ -59,6 +70,17 @@ def main(directory):
             raise AssertionError("Invalid source placement")
         maximum_timing_error = max(maximum_timing_error, abs(shift + source_z))
         particles = product(event, "genParticles", "std::vector<reco::GenParticle>")
+        if sample == 'dy':
+            if code != 221:
+                raise AssertionError(f'Unexpected DY process: {code}')
+            bosons = [p for p in particles if abs(p.pdgId()) == 23]
+            if not bosons:
+                raise AssertionError('Missing gamma*/Z record')
+            masses = [float(p.mass()) for p in bosons]
+            if any(not math.isfinite(m) or m < contract['lower']-1.e-7 or
+                   (contract['upper'] != -1 and m >= contract['upper']+1.e-7) for m in masses):
+                raise AssertionError('DY invariant mass outside the configured bin')
+            generated_masses.extend(masses)
         counts["events"] += 1
         if sample in parent_ids and not any(abs(p.pdgId()) in parent_ids[sample] for p in particles):
             raise AssertionError(f"Missing generated {sample} parent")
@@ -69,8 +91,8 @@ def main(directory):
                 counts[f"charmonium_record_abs_pdg_{abs(p.pdgId())}"] += 1
     if counts["events"] != contract["requested_events"] or maximum_timing_error > 1.e-7:
         raise AssertionError("Event count or physical time mismatch")
-    if not all(math.isfinite(w) for w in weights):
-        raise AssertionError("Nonfinite generator weights")
+    if not all(math.isfinite(w) and w == 1. for w in weights):
+        raise AssertionError("This LO GEN contract requires unit generator weights")
     run_info = []
     for run in Runs(path):
         info = product(run, "generator", "GenRunInfoProduct")
@@ -85,7 +107,8 @@ def main(directory):
         maximum_timing_error_mm=maximum_timing_error,
         beams=beam_summary,
         generator_filter="none", physics_valid=False, normalization_ready=False,
-        caveat="Cross-section/forced-decay convention and source/overlap validation remain open")
+        generated_mass_range=([min(generated_masses), max(generated_masses)] if generated_masses else None),
+        caveat="Cross-section/forced-decay convention and source/overlap validation remain open; sub-GeV DY continuum is provisional")
     (out / "validation.json").write_text(json.dumps(report, indent=2) + "\n")
     print("GEN products, event identities, weights and physical timing validated")
 
