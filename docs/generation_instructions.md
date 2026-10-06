@@ -1377,6 +1377,94 @@ messages in addition to counting EOS files. Do not merge until every expected
 job has terminated normally and representative destination ROOT files have
 the expected trees, branches, and entries.
 
+#### Persisted GEN to detector tiers and NanoAOD
+
+`scripts/prepare_shift_gen_to_nano.py` inventories exact ordinary and weighted
+GEN receipts and partitions their event identities into disjoint slices.
+`scripts/prepare_shift_ntuple_restart.py` freezes the bootstrap, fair bin order,
+storage policy and supervisor deployment. `scripts/freeze_shift_gen_runtime.py`
+packages the built runtime without rebuilding it or embedding private geometry
+payloads. `scripts/run_shift_gen_to_nano.py` preserves persisted physical time,
+GEN kinematics, event identities and weights while validating every downstream
+tier and the published Nano readback. Parent normalization ledgers remain
+authoritative. Current campaign evidence and readiness are recorded only in
+`../SHIFT_RECONSTRUCTION.md`.
+
+The inventory preparer accepts `--template-directory` to choose the archived
+Step 1-4 configuration directory; its default is the previously validated CMS
+IR5 recipe. Preparers record recipe and parent provenance. They do not grant
+permission to launch jobs or manufacture a user-approval record.
+
+`scripts/prepare_shift_detector_sample.py` prepares a representative detector
+sample from that complete GEN inventory. For each bin it fixes probabilities
+`p = min(1, c * abs(original_GEN_weight))` before one reproducible Bernoulli
+draw, using an explicit seed and all 256 SHA-256 bits. The expected count is
+set by `--target-events`; the realized count can differ. Do not redraw,
+top up or select events using reconstruction outcomes. The frozen plan and
+`sampling_events.jsonl.gz` retain exact selected identities, probabilities
+and parent normalization authorities. Job offsets address `selected_indices`
+rather than consecutive raw GEN entries.
+
+Sampled NanoAOD retains native `genWeight` and adds double-precision
+`shiftSamplingProbability`, `shiftSamplingWeight` (`1/p`),
+`shiftOriginalGenWeight` and `shiftSamplingGenWeight` (`original weight / p`).
+Use `shiftSamplingGenWeight` once with the full original GEN exposure/trial
+denominator. Native Nano `Runs` metadata is not that denominator, and neither
+sampling completion nor successful production establishes physics readiness.
+
+The launch preparer freezes the effective `--stage-timeouts` into the hashed
+bootstrap and passes them to the worker. Sample defaults scale with event
+count: ten-event jobs receive SIM/DIGIHLT/RECO/NANO budgets of
+7,200/1,800/5,400/5,400 seconds, a six-hour total limit and an independent
+1,800-second event-stall guard. Full-inventory defaults are retained; explicit
+stage and total-time overrides are recorded in the frozen launch policy.
+
+`scripts/run_shift_ntuple_controller.py` restores its submitted phase on
+restart and reconstructs exact successful counts. Individual failed/stalled
+workers are isolated in `worker_incidents.json`; healthy bins continue and
+missing outputs never count as complete. Confirmed global quota failures hold
+the campaign while both supervisors remain alive and publish separate
+heartbeats. Read-only scheduler queries receive batches of three bounded
+attempts and continue retrying with live unknown-state heartbeats. Read outages
+do not hold healthy workers or authorize capacity growth or other mutations;
+ambiguous submit/hold/edit commands are never blindly retried. One durable
+email marker prevents repeated alerts across repairs of the same campaign.
+
+After a scheduler outage, the watchdog reads the latest controller heartbeat
+before judging it stale. Quota results that arrived during the outage are
+inspected before the original polling deadline. A completed, expired audit
+can be preserved and refreshed after its terminal state is confirmed;
+pending or ambiguous audits must never be duplicated. Global stops include
+the durable IDs of unmaterialized recovery factories as well as visible jobs.
+
+Worker progress follows actual framework event records. The event-stall guard
+is separate from the measured absolute stage budget, and configuration
+resolution has its own deadline and log. Native XRootD clients run without
+CMSSW loader paths. Uploaded evidence and receipts must keep the same hashes
+through worker exit. Do not infer supervisor state from `condor_q` batch
+columns: inspect numeric `JobStatus` with `-nobatch`/JSON, plus the timestamp,
+phase and health in `controller_state.json` and `watchdog_state.json`.
+
+For deferred factories, queue age starts at `JobMaterializeDate` or a more
+recent idle transition, rather than the original factory submission date.
+CERN may remove resumed attempts whose old runtime accounting exceeded its
+wall-time policy: reconcile successful receipts, current exact job IDs and
+unmaterialized factory rows before preparing disjoint fresh attempts. Record
+their clusters, worker budgets and exact job IDs in `submission.json`.
+The supervisor watches those clusters and reserves their full allocation
+before they materialize; it returns that reservation when their receipts
+all pass. Preserve interrupted publication under a distinct EOS path with
+matching checksums before retrying a canonical destination.
+
+Capacity-only supervisor updates can use a separate frozen deployment and
+`--capacity-policy /absolute/deployment/capacity_policy.json`. The override
+accepts scheduling keys only; worker files, source selection and timeouts
+remain frozen. The supported concurrency ceiling is 1,000. An explicit
+`initial_workers` equal to `worker_ceiling` authorizes that allocation directly;
+Condor availability determines actual running slots. Keep the watchdog-first
+graceful handoff and reuse the recorded bulk cluster rather than resubmitting
+the queue. Preserve the new deployment path in campaign `submission.json`.
+
 #### Persistent GEN production tools
 
 These tools are retained for production, audit, and recovery. Campaign state
@@ -1388,6 +1476,9 @@ and frozen deployments are separate from the source checkout.
 | Rolling GEN recovery | `prepare_shift_rolling_resumption.py`, `run_shift_production_rolling_node.py`. Completed receipts and the original scientific manifest remain authoritative. |
 | Capacity monitoring and readback | `run_shift_production_monitor.py`, `run_shift_production_health_audit.py`, `run_shift_health_bootstrap.sh`; `shift_adaptive_capacity.py`, `shift_condor_native.py`. |
 | Fixed-trial weighted GEN | `prepare_shift_weighted_gen_manager.py`, `run_shift_weighted_gen.py`, `audit_shift_weighted_gen.py`, `gate_shift_weighted_gen.py`, `finalize_shift_weighted_gen.py`; `shift_weighted_gen_pre.py`, `shift_weighted_initial_admission.py`. |
+| GEN to validated detector tiers and NanoAOD | `prepare_shift_gen_to_nano.py`, `prepare_shift_ntuple_restart.py`, `run_shift_gen_to_nano.py`. The launch preparer owns the frozen bootstrap template. |
+| Weighted representative detector selection | `prepare_shift_detector_sample.py`; preserve its sampling plan, event ledger and full parent denominators. |
+| GEN-to-Nano supervision and quota | `run_shift_ntuple_controller.py`, `run_shift_quota_audit.py`; `shift_condor_native.py`. |
 
 The fixed-trial weighted workflow replaces the standalone high-bin prototype.
 The obsolete `prepare_shift_high_bin_manager.py`, `run_shift_high_bin_probe.py`,
