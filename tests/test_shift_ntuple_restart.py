@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import shutil
 from pathlib import Path
 import subprocess
 import sys
@@ -63,6 +64,35 @@ class RestartTests(unittest.TestCase):
                 self.assertEqual(policy['stage_timeouts_seconds'], expected_stages)
                 self.assertEqual(json.loads((root / 'bootstrap.json').read_text())['stage_timeouts_seconds'],
                                  expected_stages)
+
+    @unittest.skipUnless(shutil.which('condor_submit'), 'native Condor dry run unavailable')
+    def test_native_log_paths_cross_shard_boundary_and_have_bounded_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            self.campaign(root,sampled=True)
+            manifest=json.loads((root/'manifest.json').read_text())
+            manifest.update(jobs=501,events=501,events_per_job=1,strata={'qcd_10to20':501},
+                            sources=[dict(index=0,stratum='qcd_10to20',events=501)])
+            (root/'manifest.json').write_text(json.dumps(manifest))
+            (root/'jobs.txt').write_text(''.join(f'00000 {job} 1 {job}\n' for job in range(501)))
+            self.launch(root)
+            description=(root/'bulk.sub').read_text()
+            description='\n'.join(line for line in description.splitlines()
+                                  if not line.startswith(('max_materialize =','max_idle =')))+'\n'
+            (root/'logs_check.sub').write_text(description)
+            check=subprocess.run([shutil.which('condor_submit'),'-dry-run',str(root/'logs_check.ads'),
+                                 str(root/'logs_check.sub')],capture_output=True,text=True,timeout=30)
+            self.assertEqual(check.returncode,0,check.stdout+check.stderr)
+            logs=[]
+            for line in (root/'logs_check.ads').read_text().splitlines():
+                if line.startswith(('Out=','Err=')):
+                    logs.append(Path(json.loads(line.split('=',1)[1])))
+            self.assertEqual(len(logs),1002)
+            self.assertEqual(len(set(logs)),1002)
+            self.assertTrue(all((root/path.parent).is_dir() for path in logs))
+            self.assertEqual(sum(path.parent==Path('logs/g0') for path in logs),1000)
+            self.assertEqual(sum(path.parent==Path('logs/g1') for path in logs),2)
+            self.assertTrue((root/'logs/g1600').is_dir())
 
     def test_invalid_timeouts_fail_before_launch_files_are_written(self):
         for values in ('1,2,3', '1,2,3,0', '1,2,3,bad'):

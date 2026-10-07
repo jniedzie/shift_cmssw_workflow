@@ -64,7 +64,7 @@ def command(args, **kwargs):
         raise subprocess.CalledProcessError(code, args)
 
 
-def event_progress(log_path, report, tier, validated, stall_seconds):
+def event_progress(log_path, report, tier, validated, stall_seconds, expected_records=None):
     """Observe actual framework records, rather than refreshing a timer blindly."""
     offset, records, remainder = 0, 0, ''
     last_record = time.monotonic()
@@ -86,7 +86,18 @@ def event_progress(log_path, report, tier, validated, stall_seconds):
             records = max(observed)
             last_record = time.monotonic()
             report['stage_records_started'] = records
+            # The final record has started, but it and output closure may
+            # still take time. Keep scheduler telemetry consistent with the
+            # worker's absolute stage guard instead of a per-record timer.
+            if expected_records is not None and records >= expected_records:
+                deadline = report.get('stage_deadline_epoch', 0)
+                started = report.get('stage_started_epoch', time.time())
+                report['stage_timeout_seconds'] = max(stall_seconds, math.ceil(deadline-started))
             progress(report, tier, validated)
+        # The independent command deadline still bounds the last record and
+        # file finalisation, even though no further record is expected.
+        if expected_records is not None and records >= expected_records:
+            return
         if time.monotonic() - last_record > stall_seconds:
             raise TimeoutError(f'{tier} made no event progress for {stall_seconds} seconds; records started={records}')
     return poll
@@ -232,7 +243,9 @@ def progress(report, tier, validated_events):
     if not chirp and Path('/usr/libexec/condor/condor_chirp').is_file():
         chirp = '/usr/libexec/condor/condor_chirp'
     if os.environ.get('_CONDOR_SCRATCH_DIR') and not chirp:
-        raise RuntimeError('Live production telemetry requires condor_chirp')
+        report['telemetry_error'] = 'condor_chirp is unavailable'
+        Path('report.json').write_text(json.dumps(report, indent=2) + '\n')
+        return
     if not os.environ.get('_CONDOR_SCRATCH_DIR'):
         chirp = None
     if chirp:
@@ -247,7 +260,12 @@ def progress(report, tier, validated_events):
                 subprocess.run([chirp, 'set_job_attr', name, json.dumps(value)],
                                check=True, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except (subprocess.SubprocessError, OSError) as error:
-            raise RuntimeError('Live production telemetry failed: ' + str(error)) from error
+            # Chirp only supplies scheduler visibility.  It must not turn a
+            # successful detector job into a failure: worker-side stage and
+            # absolute deadlines remain independently enforced.
+            report['telemetry_error'] = str(error)
+            report['telemetry_error_epoch'] = time.time()
+            Path('report.json').write_text(json.dumps(report, indent=2) + '\n')
 
 
 def audit_nano(path, source_rows, probabilities=None):
@@ -462,7 +480,8 @@ def main():
             log_path = work / f'step{stage}.log'
             with log_path.open('w') as log:
                 command(['cmsRun', str(cfg)], timeout=limits[stage - 1], stdout=log, stderr=subprocess.STDOUT,
-                        on_poll=event_progress(log_path, report, tiers[stage], validated, args.event_stall_timeout))
+                        on_poll=event_progress(log_path, report, tiers[stage], validated,
+                                               args.event_stall_timeout, expected_records=args.count))
             report['stages'][str(stage)] = {'seconds': time.monotonic() - stage_start,
                                            'config_seconds': config_seconds,
                                            'config_sha256': sha(cfg), 'bytes': output.stat().st_size}

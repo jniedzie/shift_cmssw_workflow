@@ -135,9 +135,10 @@ def main():
                   absolute_limit_basis='Measured QCD20+ event tails up to1288s; absolute stage budgets are independent of the event-stall guard.')
     policy.update(worker_ceiling=args.worker_ceiling,initial_workers=args.initial_workers,
                   capacity_step=args.capacity_step,capacity_interval_seconds=args.capacity_interval,
-                  capacity_completions=args.capacity_completions,max_idle_workers=min(100,args.initial_workers),
+                  capacity_completions=args.capacity_completions,max_idle_workers=args.initial_workers,
                   adaptive_capacity=args.worker_ceiling > args.initial_workers,
-                  account_pool='tweetybird04.cern.ch',capacity_idle_fraction=0.25)
+                  account_pool='tweetybird04.cern.ch',capacity_idle_fraction=0.25,
+                  asynchronous_audits=True)
     if args.benchmark_cluster:
         policy['benchmark_cluster']=args.benchmark_cluster
     (root / 'policy.json').write_text(json.dumps(policy,indent=2)+'\n')
@@ -146,6 +147,13 @@ def main():
     (root / 'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
     for directory in ('logs','results'):
         (root / directory).mkdir(exist_ok=True)
+    # AFS directories have a bounded number of entries. Two flat log files
+    # per worker overflow for a roughly 20k-job production. Bound each shard
+    # to 500 identities and include the Condor attempt identity in filenames.
+    log_groups = {job // 500 for job in range(manifest['jobs'])}
+    log_groups.update(row['job'] // 500 for row in json.loads((root/'canaries.json').read_text()))
+    for group in sorted(log_groups):
+        (root/'logs'/f'g{group}').mkdir(exist_ok=True)
     scripts = Path(__file__).resolve().parent
     for name in ('run_shift_ntuple_controller.py','shift_condor_native.py','run_shift_quota_audit.py'):
         shutil.copy2(scripts / name, root / name)
@@ -200,7 +208,8 @@ def main():
     manifest.update(pilot_jobs=sorted(ids),pilot_events=sum(pilot_strata.values()),
                     pilot_strata=pilot_strata,pilot_sources=list(pilot_sources.values()))
     (root / 'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
-    common = f'''universe = vanilla
+    common = f'''log_group = int($(job) / 500)
+universe = vanilla
 initialdir = {root}
 executable = {root}/bootstrap.sh
 should_transfer_files = YES
@@ -229,8 +238,8 @@ log = events.log
         suffix=f'''arguments = {bootstrap_sha} $(source) $(skip) $(count) $(job) {mode}
 +ShiftNtupleCanary = {str(mode=='canary').lower()}
 +JobBatchName = "{tag}_{mode}"
-output = logs/{mode}$(job).out
-error = logs/{mode}$(job).err
+output = logs/g$INT(log_group)/{mode}$(job)_$(Cluster)_$(Process).out
+error = logs/g$INT(log_group)/{mode}$(job)_$(Cluster)_$(Process).err
 '''
         if mode=='production':
             suffix += f'max_materialize = {args.initial_workers}\nmax_idle = {policy["max_idle_workers"]}\n'

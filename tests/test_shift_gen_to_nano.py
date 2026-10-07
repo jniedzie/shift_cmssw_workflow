@@ -7,6 +7,7 @@ from unittest.mock import patch
 import sys
 import os
 import io
+import subprocess
 from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -143,6 +144,49 @@ class HandoffTests(unittest.TestCase):
                 with log.open('a') as stream: stream.write('1st record. Run 1, Event 2\n')
                 poll()
                 update.assert_called_once()
+
+    def test_completed_records_use_absolute_stage_limit_for_finalisation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'cmsRun.log'
+            log.write_text('Begin processing the 1st record. Run 1, Event 2\n')
+            with patch.object(worker.time, 'monotonic', side_effect=[0, 0, 1801]), \
+                 patch.object(worker, 'progress'):
+                poll = worker.event_progress(log, {}, 'NANO', {}, 1800, expected_records=1)
+                poll()
+                poll()  # closing the requested output is governed by the absolute limit
+
+    def test_final_record_telemetry_keeps_scheduler_and_worker_deadlines_consistent(self):
+        import run_shift_ntuple_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            log=Path(directory)/'cmsRun.log'
+            log.write_text('Begin processing the 1st record. Run 1, Event 2\n')
+            report=dict(stage_started_epoch=1000,stage_deadline_epoch=6400,stage_timeout_seconds=1800)
+            with patch.object(worker.time,'monotonic',return_value=0), \
+                 patch.object(worker.time,'time',return_value=1001),patch.object(worker,'progress') as update:
+                poll=worker.event_progress(log,report,'NANO',{},1800,expected_records=1)
+                poll()
+            self.assertEqual(report['stage_timeout_seconds'],5400)
+            update.assert_called_once()
+            ad=dict(JobStatus=2,JobCurrentStartDate=900,ShiftNtupleProgressEpoch=1001,
+                    ShiftNtupleStageTimeout=report['stage_timeout_seconds'],ShiftNtupleStageDeadlineEpoch=6400)
+            policy=dict(queue_timeout_seconds=7200,worker_timeout_seconds=21600,setup_timeout_seconds=1800)
+            self.assertIsNone(controller.problem(ad,3100,policy))
+            self.assertIn('stage wall-time',controller.problem(ad,6431,policy))
+
+    def test_telemetry_failure_is_recorded_without_aborting_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                report = {'source_stratum': 'qcd'}
+                with patch.dict(worker.os.environ, {'_CONDOR_SCRATCH_DIR': directory}), \
+                     patch.object(worker.shutil, 'which', return_value='/usr/bin/condor_chirp'), \
+                     patch.object(worker.subprocess, 'run', side_effect=subprocess.TimeoutExpired('chirp', 10)):
+                    worker.progress(report, 'SIM', {})
+                self.assertIn('telemetry_error', report)
+                self.assertTrue(Path('report.json').exists())
+            finally:
+                os.chdir(previous)
 
     def test_partition_has_no_missing_or_repeated_events(self):
         for events in (1, 20, 51, 1000, 11342):

@@ -4,6 +4,7 @@ import argparse
 from email.message import EmailMessage
 import fcntl
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -20,7 +21,11 @@ from shift_condor_native import NativeCondorError, parse_ads, query, run_condor
 MAX_WORKERS = 1000
 CAPACITY_POLICY_KEYS = {'worker_ceiling', 'initial_workers', 'capacity_step',
     'capacity_interval_seconds', 'capacity_completions', 'max_idle_workers',
-    'adaptive_capacity', 'capacity_idle_fraction'}
+    'adaptive_capacity', 'capacity_idle_fraction', 'asynchronous_audits'}
+
+
+class GlobalProductionError(RuntimeError):
+    """Verified campaign-wide unsafe condition, rather than a monitoring fault."""
 
 
 def read(path):
@@ -89,19 +94,24 @@ def problem(ad, now, policy):
         return 'Job removed or held: ' + str(ad)
     if status == 4 and (ad.get('ExitBySignal') or ad.get('ExitCode', 0) != 0):
         return 'Job exited unsuccessfully: ' + str(ad)
-    queued_at = max(ad.get('EnteredCurrentStatus', 0), ad.get('JobMaterializeDate', 0),
-                    ad.get('QDate', now))
+    queued_at = max(ad.get('EnteredCurrentStatus') or 0, ad.get('JobMaterializeDate') or 0,
+                    ad['QDate'] if ad.get('QDate') is not None else now)
     if status == 1 and now - queued_at > policy['queue_timeout_seconds']:
         return 'Job has waited in the queue too long: ' + str(ad)
     if status == 2:
-        start = ad.get('JobCurrentStartDate', now)
+        start = ad.get('JobCurrentStartDate') or now
         if now - start > policy['worker_timeout_seconds']:
             return 'Worker exceeded total time limit: ' + str(ad)
         deadline = ad.get('ShiftNtupleStageDeadlineEpoch')
-        if deadline is not None and deadline > 0 and now > deadline + 30:
+        if deadline is not None and deadline >= start and now > deadline + 30:
             return 'Worker exceeded its stage wall-time limit: ' + str(ad)
-        progress = ad.get('ShiftNtupleProgressEpoch', start)
-        limit = ad.get('ShiftNtupleStageTimeout', policy['setup_timeout_seconds'])
+        progress = ad.get('ShiftNtupleProgressEpoch') or start
+        limit = ad.get('ShiftNtupleStageTimeout') or policy['setup_timeout_seconds']
+        # ClassAds can retain telemetry from an earlier attempt.  Apply it
+        # only after this attempt has reported, otherwise use its setup guard.
+        if progress < start:
+            progress = start
+            limit = policy['setup_timeout_seconds']
         if now - progress > limit + 180:
             return 'Worker stopped making progress within its stage limit: ' + str(ad)
     return None
@@ -162,7 +172,7 @@ def quota(root, *, local_schedd=True, heartbeat=True):
             return result
 
 
-def _quota_attempt(root, *, local_schedd=True, heartbeat=True):
+def launch_quota_audit(root, *, local_schedd=True, persistent=False):
     # Scheduler hosts have no EOS client. Execute this small audit on a worker,
     # where the same EOS environment used by production has been verified.
     nonce = uuid.uuid4().hex
@@ -189,7 +199,10 @@ notification = Never
 request_cpus = 1
 request_memory = 512
 request_disk = 1000
+priority = 100
 +MaxRuntime = 300
++ShiftNtupleQuotaAudit = True
++ShiftNtupleAuditNonce = "{nonce}"
 +JobBatchName = "shift_ntuple_quota_audit"
 output = audit.out
 error = audit.err
@@ -198,6 +211,10 @@ on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 periodic_release = False
 queue 1
 ''')
+    pending = dict(folder=str(folder), nonce=nonce, cluster=None,
+                   submitted_at_epoch=time.time(), status='submitting')
+    if persistent:
+        save(root/'pending_quota.json', pending)
     response = run_condor(['/usr/bin/condor_submit','-terse',str(folder/'quota.sub')],
                           local_schedd=local_schedd,timeout=30,cwd=folder)
     match = re.fullmatch(r'(\d+)\.\d+\s*-\s*\d+\.\d+\s*',response)
@@ -205,6 +222,15 @@ queue 1
         raise RuntimeError('Ambiguous quota audit submission: '+response)
     cluster = int(match[1])
     save(folder/'submission.json',{'cluster':cluster,'nonce':nonce})
+    pending.update(cluster=cluster, status='pending')
+    if persistent:
+        save(root/'pending_quota.json', pending)
+    return pending
+
+
+def _quota_attempt(root, *, local_schedd=True, heartbeat=True):
+    pending = launch_quota_audit(root, local_schedd=local_schedd)
+    folder, cluster, nonce = Path(pending['folder']), pending['cluster'], pending['nonce']
     deadline = time.time()+900
     while True:
         if heartbeat:
@@ -244,6 +270,86 @@ queue 1
             run_condor(['/usr/bin/condor_hold',str(cluster)],local_schedd=local_schedd,timeout=30)
             raise TimeoutError('EOS quota audit did not finish within fifteen minutes')
         time.sleep(15)
+
+
+def refresh_quota(root):
+    """Poll one durable audit without delaying supervision or stopping workers.
+
+    A queued, failed or unavailable audit means unknown storage/account state.
+    It cannot establish an exhausted quota.  Preserve its evidence, freeze
+    growth, and retry only after the previous audit is confirmed terminal.
+    """
+    pending_path = root/'pending_quota.json'
+    pending = read(pending_path) if pending_path.exists() else {}
+    snapshot_path = root/'last_quota.json'
+    snapshot = read(snapshot_path) if snapshot_path.exists() else {}
+    now = time.time()
+    if pending.get('status') not in ('pending', 'submitting'):
+        checked = snapshot.get('quota_checked_at_epoch', snapshot.get('checked_at_epoch', 0)) or 0
+        if snapshot.get('complete') and now-checked < 300:
+            return snapshot
+        if now < pending.get('retry_after_epoch', 0):
+            return snapshot
+        try:
+            pending = launch_quota_audit(root, persistent=True)
+        except Exception as error:
+            # Submission may have succeeded despite a lost response.  Keep
+            # its nonce and reconcile the queue; never submit it blindly twice.
+            pending = read(pending_path) if pending_path.exists() else pending
+            pending.update(error=repr(error), checked_at_epoch=now)
+            save(pending_path, pending)
+            return snapshot
+    folder = Path(pending['folder'])
+    result_path = folder/'quota_result.json'
+    try:
+        if result_path.exists():
+            result = read(result_path)
+            if result.get('nonce') != pending['nonce']:
+                raise ValueError('Quota result nonce mismatch')
+            if not result.get('complete'):
+                raise ValueError('Quota observation failed: '+str(result.get('error')))
+            if any(type(result.get(key)) not in (int,float) or not math.isfinite(result[key])
+                   for key in ('free_bytes','free_files','checked_at_epoch')):
+                raise ValueError('Quota result has invalid numeric fields')
+            if not 0 <= now-result['checked_at_epoch'] <= 600:
+                raise ValueError('Quota result expired before collection')
+            save(snapshot_path, result)
+            pending.update(status='complete', checked_at_epoch=now)
+            save(pending_path, pending)
+            return result
+        if pending.get('cluster') is None:
+            ads = bounded_query(root, 'ShiftNtupleQuotaAudit == true && ShiftNtupleAuditNonce == '+json.dumps(pending['nonce']),
+                                ['ClusterId','JobStatus'], local_schedd=True,timeout=30)
+            clusters = {ad['ClusterId'] for ad in ads}
+            if len(clusters) != 1:
+                pending.update(error='Audit submission identity remains unknown', checked_at_epoch=now)
+                save(pending_path,pending)
+                return snapshot
+            pending['cluster'] = clusters.pop()
+            pending['status'] = 'pending'
+        ads = bounded_query(root, f'ClusterId == {pending["cluster"]}',
+                            ['JobStatus','HoldReason','JobCurrentStartDate'],local_schedd=True,timeout=30)
+        pending.update(checked_at_epoch=now, queue=ads)
+        if any(ad['JobStatus'] in (3,4,5) for ad in ads) or (
+                not ads and now-pending['submitted_at_epoch'] > 180):
+            pending.update(status='failed', error='Audit ended without a valid result', retry_after_epoch=now+60)
+        # An idle audit stays pending regardless of queue delay. Its own
+        # execute-side MaxRuntime bounds a running audit independently.
+        save(pending_path, pending)
+    except Exception as error:
+        pending.update(error=repr(error), checked_at_epoch=now)
+        # Invalid transferred output alone does not prove terminal state.
+        # Query it next time; preserve identity so no duplicate is submitted.
+        if result_path.exists():
+            try:
+                ads = bounded_query(root,f'ClusterId == {pending["cluster"]}', ['JobStatus'],
+                                    local_schedd=True,timeout=30) if pending.get('cluster') is not None else [{}]
+                if not ads or all(ad.get('JobStatus') in (3,4,5) for ad in ads):
+                    pending.update(status='failed', retry_after_epoch=now+60)
+            except NativeCondorError:
+                pass
+        save(pending_path,pending)
+    return snapshot
 
 
 def notify_once(root, recipient, reason):
@@ -308,7 +414,7 @@ def account_workers(root, policy):
     path=root/'last_quota.json'
     snapshot=read(path) if path.exists() else {}
     checked=snapshot.get('account_checked_at_epoch',snapshot.get('checked_at_epoch',0))
-    if time.time()-checked>600:
+    if time.time()-checked>600 and not policy.get('asynchronous_audits'):
         quota(root)
         snapshot=read(path) if path.exists() else {}
         checked=snapshot.get('account_checked_at_epoch',snapshot.get('checked_at_epoch',0))
@@ -342,11 +448,14 @@ def recovery_reservation(ads, submitted, completed=(), *, policy=None):
         identities = submitted.get('recovery_job_ids', {}).get(str(cluster))
         if identities and set(identities).issubset(completed):
             continue
+        # A finished recovery factory must not keep reserving its original
+        # peak allocation.  Reserve only the exact unfinished identities.
+        reserved = min(budget, len(set(identities) - set(completed))) if identities else budget
         live = sum(ad.get('ClusterId') == int(cluster) and
                    ad.get('_queried_schedd', schedd) == schedd and
                    ad.get('JobUniverse', 5) == 5 and ad.get('JobStatus') in LIVE_WORKER_STATES
                    for ad in ads)
-        extra += max(0, budget - live)
+        extra += max(0, reserved - live)
     return extra
 
 
@@ -396,7 +505,10 @@ def set_factory_budget(root, cluster, limit, max_idle):
     # future materialization while preserving all already running jobs.
     if not isinstance(limit,int) or not 0 <= limit <= MAX_WORKERS or not isinstance(max_idle,int) or max_idle < 1:
         raise ValueError('Factory budget must be 0 to 1000 with a positive idle allowance')
-    attributes={'JobMaterializeLimit':max(1,limit), 'JobMaterializeMaxIdle':min(100,max_idle,limit) if limit else 0}
+    # Held jobs count toward MaxIdle.  Allow the policy to expose the full
+    # bounded factory capacity, otherwise a small set of quarantined attempts
+    # can silently starve all remaining work.
+    attributes={'JobMaterializeLimit':max(1,limit), 'JobMaterializeMaxIdle':min(max_idle,limit) if limit else 0}
     command=['/usr/bin/condor_qedit',str(cluster)]
     for name,value in attributes.items():command.extend([name,str(value)])
     run_condor(command,local_schedd=True,timeout=30)
@@ -421,6 +533,27 @@ def record_capacity_wait(root, policy, other_workers):
     current=read(root/'controller_state.json') if (root/'controller_state.json').exists() else {}
     save(root/'controller_state.json',{**current,'checked_at_epoch':time.time(),
          'activity':'waiting_for_other_SHIFT_workers','capacity':waiting})
+
+
+def activate_deferred_recovery(root, policy, submitted, ads, covered):
+    """Admit registered recovery work only after the prior allocation drains."""
+    if not submitted.get('deferred_recovery_clusters'):
+        return submitted
+    schedd = policy.get('schedd_name', socket.getfqdn())
+    # The two snapshots can contain disjoint workers or equal numeric IDs on
+    # different schedds. Their union is conservative while cached jobs drain;
+    # taking only the larger count can admit work above the account ceiling.
+    allocated = {(ad.get('_queried_schedd',schedd), ad['ClusterId'], ad['ProcId'])
+                 for ad in [*ads,*covered] if ad.get('JobStatus') in LIVE_WORKER_STATES}
+    reserved_count = len(allocated)
+    for deferred in list(submitted.get('deferred_recovery_clusters',[])):
+        budget = submitted['recovery_worker_budgets'][str(deferred)]
+        if reserved_count+budget <= policy['worker_ceiling']:
+            set_factory_budget(root,int(deferred),budget,budget)
+            remaining = [value for value in submitted['deferred_recovery_clusters'] if value != deferred]
+            submitted = update_submission(root,deferred_recovery_clusters=remaining)
+            reserved_count += budget
+    return submitted
 
 
 def record_account_unknown(root, policy, error):
@@ -545,7 +678,7 @@ def supervise(root, policy=None):
         if cached.get('nonce') and cached.get('complete') and 0 <= time.time()-checked <= 600:
             free,files=cached['free_bytes'],cached['free_files']
             if free<manifest['minimum_free_bytes'] or files<manifest['minimum_free_files']:
-                raise RuntimeError('Preserved EOS audit reports exhausted safety headroom')
+                raise GlobalProductionError('Preserved EOS audit reports exhausted safety headroom')
             last_quota_check=checked
     expected = set(range(manifest['jobs'])) if phase == 'bulk' else set(
         manifest['pilot_jobs'] if phase == 'pilot' else submitted.get('canary_jobs', []))
@@ -560,13 +693,24 @@ def supervise(root, policy=None):
     capacity_state=None
     while True:
         now = time.time()
+        # Repairs can register disjoint recovery factories while this
+        # observer remains alive. Always query and reserve the current list.
+        submitted = read(root/'submission.json')
         if (root / 'stop_requested.json').exists():
-            raise RuntimeError('Campaign stop was requested by its watchdog')
-        if now - last_quota_check > 600:
+            raise GlobalProductionError('Campaign stop was explicitly requested')
+        if policy.get('asynchronous_audits'):
+            cached = refresh_quota(root)
+            checked = cached.get('quota_checked_at_epoch',cached.get('checked_at_epoch',0)) or 0
+            if cached.get('complete') and 0 <= now-checked <= 600:
+                free, files = cached['free_bytes'], cached['free_files']
+                if free < manifest['minimum_free_bytes'] or files < manifest['minimum_free_files']:
+                    raise GlobalProductionError(f'EOS safety headroom exhausted: free_bytes={free}, free_files={files}')
+                last_quota_check = checked
+        elif now - last_quota_check > 600:
             free, files = quota(root)
             now = time.time()
             if free < manifest['minimum_free_bytes'] or files < manifest['minimum_free_files']:
-                raise RuntimeError(f'EOS safety headroom exhausted: free_bytes={free}, free_files={files}')
+                raise GlobalProductionError(f'EOS safety headroom exhausted: free_bytes={free}, free_files={files}')
             last_quota_check = now
         # Reading tens of thousands of completed AFS receipts every minute
         # would itself delay the controller heartbeat. Completed IDs are final.
@@ -635,6 +779,9 @@ def supervise(root, policy=None):
                     capacity_state['factory_attributes']=set_factory_budget(root,cluster,*configuration)
                     factory_configuration=configuration
                 save(capacity_path,capacity_state)
+                # Fresh recovery factories can be queued without materializing
+                # workers until the previous allocation has actually drained.
+                submitted = activate_deferred_recovery(root,policy,submitted,ads,covered)
         elif phase=='bulk' and manifest.get('pilot_jobs') and set(completed) != expected:
             outstanding_pilot=sum(ad['JobStatus'] in (1,2) for ad in ads if ad['ClusterId']==submitted['pilot_cluster'])
             benchmark_ads=[]
@@ -659,7 +806,7 @@ def supervise(root, policy=None):
             if phase == 'bulk' or (phase == 'pilot' and set(completed) == set(range(manifest['jobs']))):
                 if any(stages[stratum][tier] != count for stratum, count in manifest['strata'].items()
                        for tier in ('GEN','SIM','DIGIHLT','RECO','NANO')):
-                    raise ValueError('Complete job receipts do not match the frozen event inventory')
+                    raise GlobalProductionError('Complete job receipts do not match the frozen event inventory')
                 save(root / 'production_complete.json', {'complete': True, 'events': manifest['events'],
                      'jobs': manifest['jobs'], 'completed_at_epoch': now, 'tier_events': stages})
                 save(root / 'controller_state.json', {'phase': 'complete', 'completed_at_epoch': now,
@@ -884,6 +1031,42 @@ def lock_supervisor(root, role):
     return stream
 
 
+def observe_with_recovery(root, policy, role):
+    """Restart a failed observer without interpreting its fault as worker failure.
+
+    Existing worker-side absolute/stall guards remain active. Only explicit
+    stops, verified storage exhaustion or inventory corruption can globally
+    stop the campaign. Submission intents still prevent duplicate launches.
+    """
+    while True:
+        try:
+            if role == 'watchdog':
+                watchdog(root, policy)
+            else:
+                supervise(root, policy)
+            return
+        except GlobalProductionError:
+            raise
+        except Exception as error:
+            path = root/(role+'_fault.json')
+            previous = read(path) if path.exists() else {}
+            fault = dict(error=repr(error), checked_at_epoch=time.time(),
+                         occurrence=previous.get('occurrence',0)+1,
+                         worker_action='none', retry_after_seconds=60)
+            save(path,fault)
+            state_path = root/(role+'_state.json')
+            state = read(state_path) if state_path.exists() else {}
+            state.update(checked_at_epoch=time.time(),health='unknown',attention_required=True,
+                         observer_error=repr(error), activity='restarting_observer_preserving_workers')
+            save(state_path,state)
+            try:
+                notify_once(root,policy['attention_email'],repr(error))
+            except Exception as mail_error:
+                fault['notification_error'] = repr(mail_error)
+                save(path,fault)
+            time.sleep(60)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('campaign', type=Path)
@@ -900,7 +1083,7 @@ def main():
     signal.signal(signal.SIGTERM, terminate)
     try:
         if args.watchdog:
-            watchdog(root, policy)
+            observe_with_recovery(root, policy, role)
         else:
             state = read(root / 'controller_state.json') if (root / 'controller_state.json').exists() else {}
             if state.get('phase') == 'blocked' or (root / 'stop_requested.json').exists():
@@ -909,13 +1092,11 @@ def main():
             mailer = shutil.which('sendmail') or '/usr/sbin/sendmail'
             save(root / 'notification_preflight.json', {'checked_at_epoch': time.time(), 'mailer': mailer,
                  'available': Path(mailer).is_file(), 'recipient': policy['attention_email']})
-            if not Path(mailer).is_file():
-                raise RuntimeError('Failure-email transport is unavailable on the controller host')
-            supervise(root, policy)
+            observe_with_recovery(root, policy, role)
     except ControllerHandoff as error:
         save(root / (role + '_handoff.json'), {'signal':error.args[0], 'handed_off_at_epoch':time.time(),
              'pid':os.getpid(), 'host':socket.gethostname()})
-    except BaseException as error:
+    except GlobalProductionError as error:
         stop(root, policy, repr(error))
         try:
             monitor_blocked(root, policy, role=role)

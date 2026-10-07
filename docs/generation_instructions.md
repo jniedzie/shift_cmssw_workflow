@@ -1437,6 +1437,30 @@ can be preserved and refreshed after its terminal state is confirmed;
 pending or ambiguous audits must never be duplicated. Global stops include
 the durable IDs of unmaterialized recovery factories as well as visible jobs.
 
+Bulk campaigns use `asynchronous_audits=True`. A single durable
+`pending_quota.json` records the audit nonce and submission identity before
+submission; every controller pass polls it without blocking worker checks.
+Quota workers have priority 100. An audit waiting for a slot has no queue
+deadline that can stop production. Failed or unavailable observations freeze
+capacity growth, preserve the last confirmed allocation and retry only after
+the audit is confirmed terminal. Ambiguous submissions retain their identity
+and are reconciled rather than repeated. Verified fresh quota exhaustion still
+stops the campaign. Validation/release gates continue to require verified quota.
+
+Observer exceptions are recorded in `controller_fault.json` or
+`watchdog_fault.json` and restart the observer after 60 seconds while keeping
+worker-side time limits active. Only an explicit campaign stop, confirmed
+storage exhaustion or a failed exact-inventory completion gate raises
+`GlobalProductionError` and holds the whole campaign. Null and previous-attempt
+telemetry use the current attempt's setup guard. Every controlled worker retry
+must clear previous stage timestamps before release, including Condor's own
+periodic-hold timestamps.
+
+When the last requested framework record starts, its processing and output
+closure use the existing absolute stage deadline. The worker publishes a
+matching scheduler timeout so the controller does not apply an obsolete
+per-record timeout while the final record or file close is still running.
+
 Worker progress follows actual framework event records. The event-stall guard
 is separate from the measured absolute stage budget, and configuration
 resolution has its own deadline and log. Native XRootD clients run without
@@ -1445,15 +1469,33 @@ through worker exit. Do not infer supervisor state from `condor_q` batch
 columns: inspect numeric `JobStatus` with `-nobatch`/JSON, plus the timestamp,
 phase and health in `controller_state.json` and `watchdog_state.json`.
 
+Production stdout/stderr use `logs/g<job-id // 500>/`, with the Condor cluster
+and process IDs included in filenames. Preparers create both ordinary and
+canary shards and use the native `$INT(log_group)` submit macro. This bounds
+each directory's entries instead of placing two files for every job into one
+AFS directory. An AFS `errno 27` output-transfer hold can affect a worker that
+already published a valid Nano: reconcile its canonical EOS `complete.json`,
+source descriptor and exact selected IDs, then verify the Nano and evidence
+hashes before restoring the status receipt and retiring the redundant held
+entry. Releasing it blindly may repeat work or collide with its completed
+canonical output. Preserve the full directory by renaming it, then create a
+writable replacement; do not delete campaign logs or payloads as a shortcut.
+
 For deferred factories, queue age starts at `JobMaterializeDate` or a more
 recent idle transition, rather than the original factory submission date.
 CERN may remove resumed attempts whose old runtime accounting exceeded its
 wall-time policy: reconcile successful receipts, current exact job IDs and
 unmaterialized factory rows before preparing disjoint fresh attempts. Record
 their clusters, worker budgets and exact job IDs in `submission.json`.
-The supervisor watches those clusters and reserves their full allocation
-before they materialize; it returns that reservation when their receipts
-all pass. Preserve interrupted publication under a distinct EOS path with
+The supervisor reloads recovery registrations every pass and reserves at most
+the number of unfinished recovery identities, including unmaterialized jobs.
+It returns that reservation as their receipts pass. A newly registered factory
+can use zero idle allowance and `deferred_recovery_clusters` to wait until the
+union of the live local queue and verified account snapshot has space for its allocation.
+Worker identities include the schedd so equal numeric IDs on different queues
+remain distinct; overlapping local records are counted once. The controller
+then activates the recovery factory without exceeding the combined ceiling.
+Preserve interrupted publication under a distinct EOS path with
 matching checksums before retrying a canonical destination.
 
 Capacity-only supervisor updates can use a separate frozen deployment and

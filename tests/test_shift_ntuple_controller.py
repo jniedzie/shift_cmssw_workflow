@@ -48,6 +48,16 @@ class ControllerTests(unittest.TestCase):
         self.assertIn('queue', controller.problem(dict(JobStatus=1, QDate=0), 7201, policy))
         self.assertIn('held', controller.problem(dict(JobStatus=5), 0, policy))
 
+    def test_cleared_and_previous_attempt_telemetry_use_current_setup_guard(self):
+        policy = dict(queue_timeout_seconds=7200, worker_timeout_seconds=21600, setup_timeout_seconds=1200)
+        for telemetry in (dict(ShiftNtupleProgressEpoch=None, ShiftNtupleStageTimeout=None,
+                               ShiftNtupleStageDeadlineEpoch=None),
+                          dict(ShiftNtupleProgressEpoch=1, ShiftNtupleStageTimeout=1,
+                               ShiftNtupleStageDeadlineEpoch=100)):
+            ad = dict(JobStatus=2, JobCurrentStartDate=10000, **telemetry)
+            self.assertIsNone(controller.problem(ad, 10001, policy))
+            self.assertIn('progress', controller.problem(ad, 11381, policy))
+
     def test_one_email_across_controller_restarts(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(controller.subprocess, 'run') as send:
             root = Path(directory)
@@ -218,7 +228,7 @@ class ControllerTests(unittest.TestCase):
         self.assertEqual(controller.recovery_reservation(live+[dict(ClusterId=4,JobStatus=5)]*10,submitted),150)
         self.assertEqual(controller.recovery_reservation([dict(ClusterId=4,JobStatus=2)]*200,submitted),0)
         submitted['recovery_job_ids']={'4':[10,11]}
-        self.assertEqual(controller.recovery_reservation([],submitted,{10}),200)
+        self.assertEqual(controller.recovery_reservation([],submitted,{10}),1)
         self.assertEqual(controller.recovery_reservation([],submitted,{10,11}),0)
 
     def test_recovery_reservation_distinguishes_equal_ids_on_other_schedds(self):
@@ -464,6 +474,15 @@ class ControllerTests(unittest.TestCase):
                     'JobMaterializeLimit','1000','JobMaterializeMaxIdle','100'])
                 with self.assertRaises(ValueError):controller.set_factory_budget(root,42,1001,100)
 
+    def test_factory_idle_allowance_can_reach_the_capacity_ceiling(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch.object(controller,'run_condor') as mutate,patch.object(controller,'query',return_value=[
+                    dict(JobMaterializeLimit=1000,JobMaterializeMaxIdle=1000)]):
+                controller.set_factory_budget(root,42,1000,1000)
+            self.assertEqual(mutate.call_args.args[0],['/usr/bin/condor_qedit','42',
+                'JobMaterializeLimit','1000','JobMaterializeMaxIdle','1000'])
+
     def test_zero_factory_budget_pauses_materialization_with_positive_limit(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory)
@@ -565,7 +584,7 @@ class ControllerTests(unittest.TestCase):
             self.campaign(root,submission=dict(canary_cluster=1,canary_jobs=[800000],pilot_cluster=2,bulk_cluster=3))
             for job in range(3):self.receipt(root,job,events=1)
             with patch.object(controller,'quota',return_value=(10**9,10**6)),patch.object(controller,'query',return_value=[]):
-                with self.assertRaisesRegex(ValueError,'frozen event inventory'):controller.supervise(root)
+                with self.assertRaisesRegex(controller.GlobalProductionError,'frozen event inventory'):controller.supervise(root)
             self.assertFalse((root/'production_complete.json').exists())
 
     def test_stop_pauses_whole_factory_and_only_campaign_workers(self):
@@ -606,6 +625,136 @@ class ControllerTests(unittest.TestCase):
             state=json.loads((root/'controller_state.json').read_text())
             self.assertEqual(state['phase'],'blocked')
             self.assertIn('scheduler read unavailable',state['stop_errors'][0])
+
+    def test_delayed_background_quota_audit_never_holds_production_or_duplicates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            def submit(command, **kwargs):
+                self.assertEqual(command[0], '/usr/bin/condor_submit')
+                self.assertIn('priority = 100', Path(command[-1]).read_text())
+                return '123.0 - 123.0\n'
+            with patch.object(controller,'run_condor',side_effect=submit) as commands, \
+                 patch.object(controller,'bounded_query',return_value=[dict(JobStatus=1)]), \
+                 patch.object(controller.time,'time',return_value=1000):
+                self.assertEqual(controller.refresh_quota(root), {})
+            with patch.object(controller,'run_condor') as mutate, \
+                 patch.object(controller,'bounded_query',return_value=[dict(JobStatus=1)]), \
+                 patch.object(controller.time,'time',return_value=3000):
+                self.assertEqual(controller.refresh_quota(root), {})
+                mutate.assert_not_called()
+            self.assertEqual(commands.call_count,1)
+            self.assertEqual(json.loads((root/'pending_quota.json').read_text())['status'],'pending')
+
+    def test_background_quota_failure_retries_only_after_confirmed_terminal_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); folder=root/'audit';folder.mkdir()
+            pending=dict(folder=str(folder),nonce='fixed',cluster=123,status='pending',submitted_at_epoch=1)
+            (root/'pending_quota.json').write_text(json.dumps(pending))
+            (folder/'quota_result.json').write_text(json.dumps(dict(nonce='fixed',complete=False,error='EOS read timeout')))
+            with patch.object(controller,'bounded_query',return_value=[dict(JobStatus=2)]), \
+                 patch.object(controller,'run_condor') as mutate:
+                controller.refresh_quota(root)
+                mutate.assert_not_called()
+            self.assertEqual(json.loads((root/'pending_quota.json').read_text())['status'],'pending')
+            with patch.object(controller,'bounded_query',return_value=[dict(JobStatus=5)]), \
+                 patch.object(controller,'run_condor') as mutate:
+                controller.refresh_quota(root)
+                controller.refresh_quota(root)
+                mutate.assert_not_called()
+            self.assertEqual(json.loads((root/'pending_quota.json').read_text())['status'],'failed')
+
+    def test_background_quota_accepts_verified_exhaustion_for_global_guard(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); folder=root/'audit';folder.mkdir()
+            pending=dict(folder=str(folder),nonce='fixed',cluster=123,status='pending',submitted_at_epoch=1)
+            (root/'pending_quota.json').write_text(json.dumps(pending))
+            result=dict(nonce='fixed',complete=True,checked_at_epoch=1000,free_bytes=0,free_files=10)
+            (folder/'quota_result.json').write_text(json.dumps(result))
+            with patch.object(controller.time,'time',return_value=1001):
+                self.assertEqual(controller.refresh_quota(root),result)
+            self.assertEqual(json.loads((root/'last_quota.json').read_text()),result)
+
+    def test_observer_fault_restarts_without_any_worker_hold(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);policy=dict(attention_email='jeremi.niedziela@cern.ch')
+            with patch.object(controller,'supervise',side_effect=[TypeError('bad telemetry'),None]) as observe, \
+                 patch.object(controller,'notify_once'),patch.object(controller,'stop') as stop, \
+                 patch.object(controller,'run_condor') as mutate,patch.object(controller.time,'sleep'):
+                controller.observe_with_recovery(root,policy,'controller')
+                self.assertEqual(observe.call_count,2)
+                stop.assert_not_called();mutate.assert_not_called()
+            fault=json.loads((root/'controller_fault.json').read_text())
+            self.assertEqual(fault['worker_action'],'none')
+            with patch.object(controller,'supervise',side_effect=controller.GlobalProductionError('verified exhausted quota')):
+                with self.assertRaises(controller.GlobalProductionError):
+                    controller.observe_with_recovery(root,policy,'controller')
+
+    def test_async_stale_account_coverage_does_not_call_blocking_quota(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(controller,'quota') as blocking:
+                with self.assertRaises(controller.NativeCondorError):
+                    controller.account_workers(Path(directory),dict(asynchronous_audits=True))
+                blocking.assert_not_called()
+
+    def test_deferred_recovery_waits_for_account_and_local_allocation_to_drain(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            submitted=dict(deferred_recovery_clusters=[42],recovery_worker_budgets={'42':6})
+            (root/'submission.json').write_text(json.dumps(submitted))
+            full=[dict(JobStatus=1,ClusterId=1,ProcId=i) for i in range(1000)];drained=full[:994]
+            with patch.object(controller,'set_factory_budget') as activate:
+                controller.activate_deferred_recovery(root,dict(worker_ceiling=1000),submitted,full,drained)
+                controller.activate_deferred_recovery(root,dict(worker_ceiling=1000),submitted,drained,full)
+                activate.assert_not_called()
+                result=controller.activate_deferred_recovery(root,dict(worker_ceiling=1000),submitted,drained,drained)
+                activate.assert_called_once_with(root,42,6,6)
+            self.assertEqual(result['deferred_recovery_clusters'],[])
+            self.assertEqual(json.loads((root/'submission.json').read_text())['deferred_recovery_clusters'],[])
+
+    def test_deferred_recovery_counts_union_of_changed_and_remote_worker_snapshots(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            submitted=dict(deferred_recovery_clusters=[42],recovery_worker_budgets={'42':6})
+            (root/'submission.json').write_text(json.dumps(submitted))
+            policy=dict(worker_ceiling=1000,schedd_name='ours')
+            current=[dict(ClusterId=1,ProcId=i,JobStatus=2) for i in range(994)]
+            # The cached global read lacks recently started local workers and
+            # includes equal numeric job IDs on a different schedd.
+            cached=([dict(ClusterId=1,ProcId=i,JobStatus=2,_queried_schedd='ours') for i in range(500)]+
+                    [dict(ClusterId=1,ProcId=i,JobStatus=2,_queried_schedd='other') for i in range(10)])
+            with patch.object(controller,'set_factory_budget') as activate:
+                controller.activate_deferred_recovery(root,policy,submitted,current,cached)
+                activate.assert_not_called()
+                controller.activate_deferred_recovery(root,policy,submitted,current,cached[:500])
+                activate.assert_called_once_with(root,42,6,6)
+
+    def test_bulk_monitoring_continues_during_background_audit_delay(self):
+        class EndCheck(BaseException):pass
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            self.campaign(root,pilot=False,submission=dict(bulk_cluster=42))
+            policy=json.loads((root/'policy.json').read_text());policy['asynchronous_audits']=True
+            with patch.object(controller,'refresh_quota',return_value={}), \
+                 patch.object(controller,'quota') as blocking, \
+                 patch.object(controller,'query',return_value=[dict(ClusterId=42,ProcId=0,JobStatus=2,
+                     ShiftNtupleJob=0,JobCurrentStartDate=1000,ShiftNtupleProgressEpoch=None,
+                     ShiftNtupleStageTimeout=None,ShiftNtupleStageDeadlineEpoch=None)]), \
+                 patch.object(controller,'run_condor') as mutate,patch.object(controller.time,'time',return_value=1000), \
+                 patch.object(controller.time,'sleep',side_effect=EndCheck):
+                with self.assertRaises(EndCheck):controller.supervise(root,policy)
+                blocking.assert_not_called();mutate.assert_not_called()
+            self.assertEqual(json.loads((root/'controller_state.json').read_text())['phase'],'bulk')
+            self.assertFalse((root/'stop_requested.json').exists())
+
+    def test_background_audit_ambiguous_submit_is_never_repeated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch.object(controller,'run_condor',return_value='lost submit response') as commands, \
+                 patch.object(controller,'bounded_query',return_value=[]):
+                controller.refresh_quota(root)
+                controller.refresh_quota(root)
+                self.assertEqual(commands.call_count,1)
+            self.assertEqual(json.loads((root/'pending_quota.json').read_text())['status'],'submitting')
 
     def test_scheduler_quota_check_delegates_to_execute_node(self):
         import time
