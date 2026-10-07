@@ -103,13 +103,20 @@ def problem(ad, now, policy):
         if now - start > policy['worker_timeout_seconds']:
             return 'Worker exceeded total time limit: ' + str(ad)
         deadline = ad.get('ShiftNtupleStageDeadlineEpoch')
-        if deadline is not None and deadline >= start and now > deadline + 30:
-            return 'Worker exceeded its stage wall-time limit: ' + str(ad)
         progress = ad.get('ShiftNtupleProgressEpoch') or start
+        reported = ad.get('ShiftNtupleProgressEpoch')
+        if (deadline is not None and deadline > 0 and deadline >= start and
+                reported is not None and reported >= start):
+            if now > deadline + 30:
+                return 'Worker exceeded its stage wall-time limit: ' + str(ad)
+            # Stage attributes arrive in separate chirps. A new short audit
+            # timeout can temporarily coexist with the previous event epoch.
+            # The worker independently enforces its per-event progress guard.
+            return None
         limit = ad.get('ShiftNtupleStageTimeout') or policy['setup_timeout_seconds']
         # ClassAds can retain telemetry from an earlier attempt.  Apply it
         # only after this attempt has reported, otherwise use its setup guard.
-        if progress < start:
+        if reported is None or reported < start:
             progress = start
             limit = policy['setup_timeout_seconds']
         if now - progress > limit + 180:
@@ -500,6 +507,21 @@ def capacity_plan(policy, previous, *, now, completed_jobs, ads, healthy,
     return state
 
 
+def query_factory(root, cluster, attributes=None):
+    """Read the factory itself, including before any workers materialize.
+
+    A verified empty result means the factory has retired. Query failures stay
+    unknown and retry without permitting worker or allocation changes.
+    """
+    attributes = attributes or ['ClusterId', 'JobMaterializeLimit', 'JobMaterializeMaxIdle']
+    def factory_reader(constraint, fields, **kwargs):
+        command = ['/usr/bin/condor_q', '-factory', '-constraint', constraint, '-json',
+                   '-attributes', ','.join(fields)]
+        return parse_ads(run_condor(command, **kwargs))
+    return recoverable_query(root, f'ClusterId == {cluster}', attributes,
+                             _reader=factory_reader, local_schedd=True, timeout=30)
+
+
 def set_factory_budget(root, cluster, limit, max_idle):
     # max_materialize <= 0 means unlimited. max_idle = 0 safely suspends
     # future materialization while preserving all already running jobs.
@@ -514,12 +536,7 @@ def set_factory_budget(root, cluster, limit, max_idle):
     run_condor(command,local_schedd=True,timeout=30)
     rows=recoverable_query(root,f'ClusterId == {cluster}',list(attributes),local_schedd=True,timeout=30)
     if not rows:
-        def factory_reader(constraint, fields, **kwargs):
-            command=['/usr/bin/condor_q','-factory','-constraint',constraint,'-json',
-                     '-attributes',','.join(fields)]
-            return parse_ads(run_condor(command,**kwargs))
-        rows=recoverable_query(root,f'ClusterId == {cluster}',list(attributes),_reader=factory_reader,
-                           local_schedd=True,timeout=30)
+        rows=query_factory(root,cluster,list(attributes))
     if not any(all(row.get(name)==value for name,value in attributes.items()) for row in rows):
         raise RuntimeError('Factory materialization budget was not confirmed')
     return attributes
@@ -606,18 +623,33 @@ def record_incident(root, policy, identity, reason, *, receipt=None, ad=None):
         notify_once(root, policy['attention_email'], reason)
 
 
-def resolve_incident(root, job):
+def resolve_incidents(root, jobs):
+    """Resolve a receipt batch with one ledger read, including queue identities."""
+    jobs = set(jobs)
     path = root / 'worker_incidents.json'
-    if not path.exists():
+    if not jobs or not path.exists():
         return
     ledger = read(path)
     changed = False
+    resolved_at = time.time()
     for record in ledger['jobs'].values():
-        if record.get('job') == job and record.get('active', True):
-            record.update(active=False, resolved_at_epoch=time.time())
+        if record.get('job') in jobs and record.get('active', True):
+            record.update(active=False, resolved_at_epoch=resolved_at)
             changed = True
     if changed:
         save(path, ledger)
+
+
+def receipt_heartbeat(root, phase, previous):
+    """Keep both receipt reading and validation visible to the watchdog."""
+    now = time.monotonic()
+    if now - previous > 30:
+        path = root / 'controller_state.json'
+        current = read(path) if path.exists() else {}
+        save(path, {**current, 'phase':phase, 'checked_at_epoch':time.time(),
+                    'activity':'reconciling preserved worker receipts'})
+        return now
+    return previous
 
 
 def active_incidents(root):
@@ -720,14 +752,12 @@ def supervise(root, policy=None):
             job = int(path.stem[6:])
             if job in expected and job not in completed:
                 receipts.append((job, read(path)))
-            if time.monotonic() - scan_heartbeat > 30:
-                current = read(root / 'controller_state.json') if (root / 'controller_state.json').exists() else {}
-                save(root / 'controller_state.json', {**current,'phase':phase,'checked_at_epoch':time.time(),
-                     'activity':'reconciling preserved worker receipts'})
-                scan_heartbeat = time.monotonic()
+            scan_heartbeat = receipt_heartbeat(root, phase, scan_heartbeat)
         if phase == 'canaries':
             receipts += [(row['job'], row) for row in proofs]
+        accepted_jobs = []
         for job, result in receipts:
+            scan_heartbeat = receipt_heartbeat(root, phase, scan_heartbeat)
             if job in completed:
                 continue
             if job not in expected:
@@ -739,10 +769,11 @@ def supervise(root, policy=None):
                 record_incident(root, policy, job, error, receipt=result)
                 continue
             completed[job] = result
-            resolve_incident(root, job)
+            accepted_jobs.append(job)
             for tier, count in result['validated_tier_events'].items():
                 stages[result['source_stratum']][tier] += count
             last_completion = now
+        resolve_incidents(root, accepted_jobs)
         attrs = ['ClusterId','ProcId','JobStatus','QDate','JobMaterializeDate','EnteredCurrentStatus','JobCurrentStartDate','HoldReason',
                  'ShiftNtupleJob','ShiftNtupleTier','ShiftNtupleProgressEpoch','ShiftNtupleStageTimeout',
                  'ShiftNtupleStageDeadlineEpoch','ShiftNtupleStratum','ShiftNtupleStageRecordsStarted',
@@ -775,9 +806,18 @@ def supervise(root, policy=None):
                     healthy=not incidents,quota_verified=time.time()-last_quota_check<=600,
                     account_verified=True,external=other_workers)
                 configuration=(capacity_state['factory_budget'],policy.get('max_idle_workers',100))
-                if configuration != factory_configuration:
+                main_factory_present = bool(query_factory(root, cluster))
+                capacity_state['main_factory_present'] = main_factory_present
+                if main_factory_present and configuration != factory_configuration:
                     capacity_state['factory_attributes']=set_factory_budget(root,cluster,*configuration)
                     factory_configuration=configuration
+                elif not main_factory_present:
+                    # Condor reaps an exhausted factory after its last proc
+                    # exits, while disjoint recovery factories may still run.
+                    # Its disappearance is not evidence of campaign completion.
+                    capacity_state.update(factory_budget=0, materialization_paused=True,
+                                          reason='main_factory_retired_recovery_observed')
+                    capacity_state.pop('factory_attributes', None)
                 save(capacity_path,capacity_state)
                 # Fresh recovery factories can be queued without materializing
                 # workers until the previous allocation has actually drained.
@@ -789,7 +829,7 @@ def supervise(root, policy=None):
                 benchmark_ads=recoverable_query(root,f'ClusterId == {policy["benchmark_cluster"]}',['JobStatus'],local_schedd=True,timeout=30)
             outstanding_bench=sum(ad['JobStatus'] in (1,2) for ad in benchmark_ads)
             limit=max(0,100-outstanding_pilot-outstanding_bench)
-            if limit!=factory_limit:
+            if limit!=factory_limit and query_factory(root, cluster):
                 set_factory_budget(root,cluster,limit,100)
                 factory_limit=limit
         now=time.time()

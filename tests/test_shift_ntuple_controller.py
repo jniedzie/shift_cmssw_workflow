@@ -53,10 +53,27 @@ class ControllerTests(unittest.TestCase):
         for telemetry in (dict(ShiftNtupleProgressEpoch=None, ShiftNtupleStageTimeout=None,
                                ShiftNtupleStageDeadlineEpoch=None),
                           dict(ShiftNtupleProgressEpoch=1, ShiftNtupleStageTimeout=1,
-                               ShiftNtupleStageDeadlineEpoch=100)):
+                               ShiftNtupleStageDeadlineEpoch=100),
+                          dict(ShiftNtupleProgressEpoch=None, ShiftNtupleStageTimeout=1,
+                               ShiftNtupleStageDeadlineEpoch=20000)):
             ad = dict(JobStatus=2, JobCurrentStartDate=10000, **telemetry)
             self.assertIsNone(controller.problem(ad, 10001, policy))
+            self.assertIsNone(controller.problem(ad, 11000, policy))
             self.assertIn('progress', controller.problem(ad, 11381, policy))
+
+    def test_current_absolute_deadline_survives_non_atomic_audit_telemetry(self):
+        policy = dict(queue_timeout_seconds=7200, worker_timeout_seconds=21600, setup_timeout_seconds=1800)
+        ad = dict(JobStatus=2, JobCurrentStartDate=1000, ShiftNtupleTier='NANO_AUDIT',
+                  ShiftNtupleProgressEpoch=2000, ShiftNtupleStageTimeout=900,
+                  ShiftNtupleStageDeadlineEpoch=4340)
+        self.assertIsNone(controller.problem(ad, 3440, policy))  # previous NANO epoch is 24 minutes old
+        self.assertIn('stage wall-time', controller.problem(ad, 4371, policy))
+        self.assertIn('total time', controller.problem(ad, 22601, policy))
+        self.assertIn('progress', controller.problem({**ad, 'ShiftNtupleStageDeadlineEpoch':None}, 3440, policy))
+        for prior in (None, 999):
+            stale = {**ad, 'ShiftNtupleProgressEpoch':prior, 'ShiftNtupleStageDeadlineEpoch':10000}
+            self.assertIsNone(controller.problem(stale, 1001, policy))
+            self.assertIn('progress', controller.problem(stale, 2981, policy))
 
     def test_one_email_across_controller_restarts(self):
         with tempfile.TemporaryDirectory() as directory, patch.object(controller.subprocess, 'run') as send:
@@ -65,6 +82,68 @@ class ControllerTests(unittest.TestCase):
             controller.notify_once(root, 'jeremi.niedziela@cern.ch', 'second failure')
             self.assertEqual(send.call_count, 1)
             self.assertEqual(json.loads((root / 'attention_email.json').read_text())['status'], 'accepted_by_local_mailer')
+
+    def test_large_receipt_batch_resolves_all_incident_identities_with_one_ledger_read(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / 'worker_incidents.json'
+            ledger = dict(updated_at_epoch=90, evidence='preserved', jobs={
+                '1':dict(job=1, active=True, first_seen_epoch=10, last_seen_epoch=80),
+                '42.7':dict(job=1, cluster=42, proc=7, first_seen_epoch=20, reason='old attempt'),
+                '2':dict(job=2, active=False, resolved_at_epoch=50, receipt={'job':2}),
+                '43.8':dict(job=20000, cluster=43, proc=8, active=True),
+                '43.9':dict(cluster=43, proc=9, active=True),
+            })
+            path.write_text(json.dumps(ledger))
+            with patch.object(controller, 'read', wraps=controller.read) as read, \
+                 patch.object(controller, 'save', wraps=controller.save) as save, \
+                 patch.object(controller, 'notify_once') as notify, \
+                 patch.object(controller.time, 'time', return_value=100):
+                controller.resolve_incidents(root, range(19500))
+                read.assert_called_once_with(path)
+                save.assert_called_once()
+                notify.assert_not_called()
+            expected = json.loads(json.dumps(ledger))
+            for identity in ('1', '42.7'):
+                expected['jobs'][identity].update(active=False, resolved_at_epoch=100)
+            self.assertEqual(json.loads(path.read_text()), expected)
+
+    def test_bulk_startup_resolves_successful_receipts_once_per_pass(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.campaign(root, pilot=False, submission=dict(bulk_cluster=42))
+            for job in range(3):
+                self.receipt(root, job)
+            with patch.object(controller, 'quota', return_value=(10**9, 10**6)), \
+                 patch.object(controller, 'query', return_value=[]), \
+                 patch.object(controller, 'resolve_incidents', wraps=controller.resolve_incidents) as resolve:
+                controller.supervise(root)
+                resolve.assert_called_once_with(root, [0, 1, 2])
+            self.assertTrue(json.loads((root / 'production_complete.json').read_text())['complete'])
+
+    def test_receipt_validation_refreshes_heartbeat_before_finishing_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.campaign(root, pilot=False, submission=dict(bulk_cluster=42))
+            for job in range(3):
+                self.receipt(root, job)
+            clock = [0]
+            validate = controller.validated_receipt
+            def slow_validation(result, job):
+                clock[0] += 31
+                return validate(result, job)
+            with patch.object(controller, 'quota', return_value=(10**9, 10**6)), \
+                 patch.object(controller, 'query', return_value=[]), \
+                 patch.object(controller, 'validated_receipt', side_effect=slow_validation), \
+                 patch.object(controller.time, 'monotonic', side_effect=lambda:clock[0]), \
+                 patch.object(controller.time, 'time', side_effect=lambda:1000+clock[0]), \
+                 patch.object(controller, 'save', wraps=controller.save) as save:
+                controller.supervise(root)
+            heartbeats = [call.args[1] for call in save.call_args_list
+                if call.args[0] == root / 'controller_state.json'
+                and call.args[1].get('activity') == 'reconciling preserved worker receipts']
+            self.assertEqual([row['checked_at_epoch'] for row in heartbeats], [1031, 1062])
+            self.assertTrue(all(row['phase'] == 'bulk' for row in heartbeats))
 
     def test_quota_gate_requires_every_bin_and_headroom(self):
         manifest = dict(strata={'dy':1000}, sources=[dict(stratum='dy',events=1000)], events_per_job=100,
@@ -503,6 +582,78 @@ class ControllerTests(unittest.TestCase):
             with patch.object(controller,'run_condor',side_effect=command),patch.object(controller,'query',return_value=[]):
                 self.assertEqual(controller.set_factory_budget(root,42,100,100)['JobMaterializeLimit'],100)
 
+    def test_factory_query_distinguishes_retired_from_unmaterialized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(controller, 'run_condor', side_effect=[
+                json.dumps([dict(ClusterId=42, JobMaterializeLimit=1, JobMaterializeMaxIdle=0)]), ''
+            ]) as query, patch.object(controller, 'query') as workers:
+                self.assertEqual(controller.query_factory(root, 42)[0]['ClusterId'], 42)
+                self.assertEqual(controller.query_factory(root, 42), [])
+                workers.assert_not_called()
+            for call in query.call_args_list:
+                self.assertEqual(call.args[0][:2], ['/usr/bin/condor_q', '-factory'])
+                self.assertIn('ClusterId == 42', call.args[0])
+
+    def test_retired_main_factory_keeps_recovery_monitoring_and_admission(self):
+        class EndCheck(BaseException):pass
+        for present in (False, True):
+            with self.subTest(unmaterialized_main_present=present), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                submitted = dict(bulk_cluster=42, recovery_clusters=[43, 44],
+                    recovery_worker_budgets={'43':1, '44':1}, recovery_job_ids={'43':[1], '44':[2]},
+                    deferred_recovery_clusters=[44])
+                _, policy = self.campaign(root, pilot=False, submission=submitted)
+                policy.update(self.adaptive_policy(), schedd_name='ours')
+                self.receipt(root, 0)
+                recovery = [dict(ClusterId=43, ProcId=0, JobStatus=2, ShiftNtupleJob=1,
+                    JobCurrentStartDate=1000, ShiftNtupleProgressEpoch=1000)]
+                factory = [dict(ClusterId=42, JobMaterializeLimit=1, JobMaterializeMaxIdle=0)] if present else []
+                with patch.object(controller, 'quota', return_value=(10**9, 10**6)), \
+                     patch.object(controller, 'query', return_value=recovery), \
+                     patch.object(controller, 'account_workers', return_value=recovery), \
+                     patch.object(controller, 'run_condor', return_value=json.dumps(factory)) as query, \
+                     patch.object(controller, 'set_factory_budget', return_value={}) as budget, \
+                     patch.object(controller.time, 'time', return_value=1000), \
+                     patch.object(controller.time, 'sleep', side_effect=EndCheck):
+                    with self.assertRaises(EndCheck):
+                        controller.supervise(root, policy)
+                self.assertEqual(query.call_args.args[0][:2], ['/usr/bin/condor_q', '-factory'])
+                self.assertEqual([call.args[1] for call in budget.call_args_list], [42, 44] if present else [44])
+                state = json.loads((root / 'controller_state.json').read_text())
+                self.assertEqual((state['phase'], state['completed_jobs'], state['queue']), ('bulk', 1, recovery))
+                self.assertEqual(state['capacity']['main_factory_present'], present)
+                if not present:
+                    self.assertEqual(state['capacity']['factory_budget'], 0)
+                    self.assertEqual(state['capacity']['reason'], 'main_factory_retired_recovery_observed')
+                self.assertEqual(json.loads((root / 'submission.json').read_text())['deferred_recovery_clusters'], [])
+                self.assertFalse((root / 'production_complete.json').exists())
+                self.assertFalse((root / 'stop_requested.json').exists())
+
+    def test_unknown_factory_query_preserves_workers_and_prior_capacity(self):
+        class EndCheck(BaseException):pass
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            _, policy = self.campaign(root, pilot=False, submission=dict(bulk_cluster=42))
+            policy.update(self.adaptive_policy())
+            previous = dict(main_factory_present=True, factory_budget=100)
+            (root / 'capacity_state.json').write_text(json.dumps(previous))
+            with patch.object(controller, 'quota', return_value=(10**9, 10**6)), \
+                 patch.object(controller, 'query', return_value=[]), \
+                 patch.object(controller, 'account_workers', return_value=[]), \
+                 patch.object(controller, 'run_condor', side_effect=controller.NativeCondorError('factory read unavailable')), \
+                 patch.object(controller, 'set_factory_budget') as budget, \
+                 patch.object(controller, 'activate_deferred_recovery') as activate, \
+                 patch.object(controller.time, 'sleep', side_effect=EndCheck):
+                with self.assertRaises(EndCheck):
+                    controller.supervise(root, policy)
+            budget.assert_not_called()
+            activate.assert_not_called()
+            self.assertEqual(json.loads((root / 'capacity_state.json').read_text()), previous)
+            self.assertEqual(json.loads((root / 'controller_state.json').read_text())['scheduler_state'], 'unknown')
+            self.assertFalse((root / 'production_complete.json').exists())
+            self.assertFalse((root / 'stop_requested.json').exists())
+
     def test_account_budget_counts_other_schedds_and_excludes_held_workers(self):
         ads=[dict(ClusterId=42,JobStatus=2,_queried_schedd='ours'),
              dict(ClusterId=42,JobStatus=2,_queried_schedd='other'),
@@ -550,7 +701,7 @@ class ControllerTests(unittest.TestCase):
             def query(constraint,attributes,**kwargs):
                 if 'JobMaterializeLimit' in attributes:return [dict(JobMaterializeLimit=150,JobMaterializeMaxIdle=100)]
                 return [dict(ClusterId=42,ProcId=10,JobStatus=2,ShiftNtupleJob=10)]
-            with patch.object(controller,'quota',return_value=(10**9,10**6)),patch.object(controller,'query',side_effect=query),patch.object(controller.time,'time',return_value=1200),patch.object(controller.time,'sleep',side_effect=EndCheck),patch.object(controller,'run_condor') as mutate:
+            with patch.object(controller,'quota',return_value=(10**9,10**6)),patch.object(controller,'query',side_effect=query),patch.object(controller,'query_factory',return_value=[dict(ClusterId=42)]),patch.object(controller.time,'time',return_value=1200),patch.object(controller.time,'sleep',side_effect=EndCheck),patch.object(controller,'run_condor') as mutate:
                 with self.assertRaises(EndCheck):controller.supervise(root)
             state=json.loads((root/'capacity_state.json').read_text())
             self.assertEqual(state['current_capacity'],150)

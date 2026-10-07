@@ -250,13 +250,15 @@ def progress(report, tier, validated_events):
         chirp = None
     if chirp:
         try:
-            for name, value in [('ShiftNtupleStageTimeout', report.get('stage_timeout_seconds', 900)),
+            # Chirp writes are separate scheduler updates. Refresh progress
+            # before shortening the timeout when entering a new stage.
+            for name, value in [('ShiftNtupleProgressEpoch', int(report['progress_epoch'])),
+                                ('ShiftNtupleStageTimeout', report.get('stage_timeout_seconds', 900)),
                                 ('ShiftNtupleStageDeadlineEpoch', int(report.get('stage_deadline_epoch', 0))),
                                 ('ShiftNtupleStratum', report['source_stratum']),
                                 ('ShiftNtupleStageRecordsStarted', report.get('stage_records_started', 0)),
                                 ('ShiftNtupleTier', tier),
-                                *[('ShiftNtuple'+key+'Events', count) for key, count in validated_events.items()],
-                                ('ShiftNtupleProgressEpoch', int(report['progress_epoch']))]:
+                                *[('ShiftNtuple'+key+'Events', count) for key, count in validated_events.items()]]:
                 subprocess.run([chirp, 'set_job_attr', name, json.dumps(value)],
                                check=True, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         except (subprocess.SubprocessError, OSError) as error:

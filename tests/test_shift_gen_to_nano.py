@@ -188,6 +188,27 @@ class HandoffTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_stage_transition_chirps_progress_before_shorter_limits(self):
+        for tier, limit in (('NANO_AUDIT',900), ('RECO_CONFIG',600)):
+            with self.subTest(tier=tier), tempfile.TemporaryDirectory() as directory:
+                previous = Path.cwd()
+                try:
+                    os.chdir(directory)
+                    report = dict(source_stratum='qcd', progress_epoch=100,
+                                  stage_timeout_seconds=limit, stage_deadline_epoch=2900)
+                    with patch.dict(worker.os.environ, {'_CONDOR_SCRATCH_DIR':directory}), \
+                         patch.object(worker.shutil, 'which', return_value='/usr/bin/condor_chirp'), \
+                         patch.object(worker.time, 'time', return_value=2000), \
+                         patch.object(worker.subprocess, 'run') as chirp:
+                        worker.progress(report, tier, {'NANO':10})
+                    updates = [(call.args[0][2], json.loads(call.args[0][3])) for call in chirp.call_args_list]
+                    self.assertEqual(updates[0], ('ShiftNtupleProgressEpoch',2000))
+                    self.assertEqual(dict(updates)['ShiftNtupleStageTimeout'], limit)
+                    self.assertEqual(dict(updates)['ShiftNtupleStageDeadlineEpoch'],2900)
+                    self.assertEqual(dict(updates)['ShiftNtupleTier'],tier)
+                finally:
+                    os.chdir(previous)
+
     def test_partition_has_no_missing_or_repeated_events(self):
         for events in (1, 20, 51, 1000, 11342):
             pieces = module.slices(events, 50)

@@ -1460,6 +1460,12 @@ When the last requested framework record starts, its processing and output
 closure use the existing absolute stage deadline. The worker publishes a
 matching scheduler timeout so the controller does not apply an obsolete
 per-record timeout while the final record or file close is still running.
+The worker chirps the progress epoch before shortening a timeout at a stage
+transition. Since scheduler attributes arrive separately, both the controller
+and the submitted periodic guard use a positive current-attempt stage deadline
+when one is available. The worker enforces its own per-event stall guard.
+Missing or previous-attempt telemetry uses the current attempt's setup guard;
+an expired absolute deadline or total worker limit still isolates the job.
 
 Worker progress follows actual framework event records. The event-stall guard
 is separate from the measured absolute stage budget, and configuration
@@ -1468,6 +1474,57 @@ CMSSW loader paths. Uploaded evidence and receipts must keep the same hashes
 through worker exit. Do not infer supervisor state from `condor_q` batch
 columns: inspect numeric `JobStatus` with `-nobatch`/JSON, plus the timestamp,
 phase and health in `controller_state.json` and `watchdog_state.json`.
+
+For a new frozen launch, `prepare_shift_ntuple_restart.py` accepts
+`--config-timeout-seconds` (default 600) and
+`--event-stall-timeout-seconds` (default 1800). Both must be positive. They are
+stored in `policy.json` and the hashed `bootstrap.json`, then passed explicitly
+to the worker. Configuration and event-stall guards are not scaled with the
+selected event count. `--stage-timeouts` and the total worker limit remain
+independent; their defaults are unchanged. For selected jobs, the four stage
+budgets scale per 100 events, subject to the worker's existing stage floors.
+
+The October 7 tail recovery uses this explicit operational example for a new
+deployment, preserving the exact selected events and all detector settings:
+
+```bash
+python3 scripts/prepare_shift_ntuple_restart.py /path/to/new_frozen_campaign \
+  --email jeremi.niedziela@cern.ch --pilot-size 0 \
+  --config-timeout-seconds 1800 --event-stall-timeout-seconds 7200 \
+  --stage-timeouts 72000,18000,54000,144000 --worker-timeout-seconds 21600
+```
+
+For a ten-event selected slice this supplies a four-hour NANO stage budget,
+a two-hour event-stall guard, and a six-hour total worker bound. A stage budget
+does not extend the total bound. These measured tail limits are an explicit
+recovery choice, not new universal defaults. Never regenerate launch files
+inside an existing live campaign. See the dated findings and actual production
+state in [SHIFT_RECONSTRUCTION.md](../../SHIFT_RECONSTRUCTION.md); this example
+is not a current completion claim.
+
+The bootstrap writes `status.json` in Condor scratch before attempting failure
+uploads, using the host Python without CMSSW library or Python paths. Missing,
+unreadable or malformed reports still produce a failure status. Failure
+evidence uses `failures/job<id>/attempt_<cluster>.<proc>.<nanoseconds>/` below
+the frozen source output base, preserving earlier attempts. Uploads use
+explicit argument lists and bounded native XRootD commands. Upload errors are
+recorded in the local status; they cannot suppress status transfer or change
+the worker exit result.
+
+At supervisor startup, successful receipts resolve incidents together with
+one ledger read and at most one write per pass. This preserves all incident
+identities, records and earlier resolution timestamps instead of rereading
+the complete ledger for every finished job. Both receipt scanning and
+validation refresh the controller heartbeat every 30 seconds.
+
+Condor can reap the main factory after its last original worker exits while
+registered recovery workers are still running. The supervisor queries the
+factory itself with native `condor_q -factory`; a factory with no materialized
+workers is distinct from a verified retired factory. It skips allocation
+edits for a retired main factory while continuing recovery observation and
+capacity admission. A failed query remains unknown and cannot authorize
+allocation changes or campaign completion. Exact validated job receipts and
+per-bin tier event totals remain the completion gate.
 
 Production stdout/stderr use `logs/g<job-id // 500>/`, with the Condor cluster
 and process IDs included in filenames. Preparers create both ordinary and

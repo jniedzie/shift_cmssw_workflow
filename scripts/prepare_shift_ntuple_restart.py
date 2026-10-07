@@ -21,32 +21,89 @@ job=${5:?job identity}
 mode=${6:-production}
 scratch=${_CONDOR_SCRATCH_DIR:?Condor scratch required}
 cd "$scratch"
+attempt=$(env -u LD_LIBRARY_PATH -u LD_PRELOAD -u PYTHONPATH -u PYTHONHOME /usr/bin/python3 - <<'PY'
+import os,re,time
+from pathlib import Path
+ad=Path(os.environ.get('_CONDOR_JOB_AD', '.missing_job_ad'))
+try:
+    text=ad.read_text()
+except OSError:
+    text=''
+def number(key):
+    match=re.search(r'^'+re.escape(key)+r'\s*=\s*(\d+)\s*$',text,re.MULTILINE)
+    return match.group(1) if match else 'unknown'
+print(number('ClusterId')+'.'+number('ProcId')+'.'+str(time.time_ns()))
+PY
+)
 finish() {
     result=$?
-    python3 - "$result" "$job" <<'PY'
-import hashlib,json,sys
+    trap - EXIT
+    set +e
+    cd "$scratch"
+    env -u LD_LIBRARY_PATH -u LD_PRELOAD -u PYTHONPATH -u PYTHONHOME /usr/bin/python3 - "$result" "$job" "$source_index" "$attempt" <<'PY'
+import hashlib,json,os,subprocess,sys
 from pathlib import Path
+result,job,source_index,attempt=int(sys.argv[1]),int(sys.argv[2]),sys.argv[3],sys.argv[4]
 p=Path('report.json')
-d=json.loads(p.read_text()) if p.exists() else {}
+report_error=None
+report_bytes=None
+try:
+    report_bytes=p.read_bytes() if p.exists() else None
+    d=json.loads(report_bytes) if report_bytes is not None else {}
+    if not isinstance(d,dict):
+        raise ValueError('Report must be an object')
+except Exception as error:
+    d={}
+    report_error='Could not read report: '+repr(error)
 archive=Path('evidence.tar.gz')
-status={'job':int(sys.argv[2]),'exit_code':int(sys.argv[1]),'complete':d.get('complete',False),
-        'error':d.get('error') or ('Bootstrap failed; inspect worker logs' if int(sys.argv[1]) else None),
+stages=d.get('stages',{})
+nano=d.get('nano',{})
+status={'job':job,'exit_code':result,'complete':d.get('complete',False),
+        'error':d.get('error') or report_error or ('Bootstrap failed; inspect worker logs' if result else None),
         'source_stratum':d.get('source_stratum'), 'nano_path':d.get('nano_path'),
         'nano_bytes':d.get('nano_bytes'),'events':d.get('events'),
         'wall_seconds':d.get('wall_seconds'),
-        'stage_seconds':{k:v['seconds'] for k,v in d.get('stages',{}).items()},
+        'stage_seconds':{k:v['seconds'] for k,v in (stages.items() if isinstance(stages,dict) else [])
+                         if isinstance(v,dict) and 'seconds' in v},
         'validated_tier_events':d.get('validated_tier_events'),
-        'compressed_event_bytes':d.get('nano',{}).get('compressed_event_bytes'),
+        'compressed_event_bytes':nano.get('compressed_event_bytes') if isinstance(nano,dict) else None,
         'evidence_bytes':archive.stat().st_size if archive.exists() else 0,
-        'report_sha256':hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None}
-Path('status.json').write_text(json.dumps(status)+'\n')
+        'report_sha256':hashlib.sha256(report_bytes).hexdigest() if report_bytes is not None else None,
+        'attempt':attempt}
+status_path=Path('status.json')
+status_path.write_text(json.dumps(status)+'\n')
+if result and archive.exists():
+    errors=[]
+    try:
+        descriptor=json.loads(Path('source'+source_index+'.json').read_text())
+        base=descriptor['output_base']
+        if not isinstance(base,str) or not base.startswith('/eos/user/') or '..' in Path(base).parts:
+            raise ValueError('Unexpected failure evidence base')
+        destination=base+'/failures/job'+str(job)+'/attempt_'+attempt
+        status['failure_evidence_path']=destination
+        # Host tools must not inherit CMSSW library/Python settings. Each
+        # remote command receives explicit argv; descriptor content is not shell.
+        clean=dict(os.environ)
+        for key in ('LD_LIBRARY_PATH','LD_PRELOAD','PYTHONPATH','PYTHONHOME','ROOTSYS'):
+            clean.pop(key,None)
+        def run(argv,timeout):
+            try:
+                completed=subprocess.run(argv,env=clean,timeout=timeout,check=False)
+                if completed.returncode:
+                    errors.append({'argv':argv,'exit_code':completed.returncode})
+            except Exception as error:
+                errors.append({'argv':argv,'error':repr(error)})
+        run(['/usr/bin/xrdfs','root://eosuser.cern.ch','mkdir','-p',destination],30)
+        run(['/usr/bin/xrdcp','--silent','--cksum','adler32',str(archive),
+             'root://eosuser.cern.ch/'+destination+'/evidence.tar.gz'],60)
+        if p.exists():
+            run(['/usr/bin/xrdcp','--silent','--cksum','adler32',str(p),
+                 'root://eosuser.cern.ch/'+destination+'/failure.json'],30)
+    except Exception as error:
+        errors.append({'error':repr(error)})
+    status['failure_upload_errors']=errors
+    status_path.write_text(json.dumps(status)+'\n')
 PY
-    if [[ "$result" != 0 && -f evidence.tar.gz ]]; then
-        destination=$(python3 -c 'import json,sys; print(json.load(open("source"+sys.argv[1]+".json"))["output_base"]+"/failures/job"+sys.argv[2])' "$source_index" "$job")
-        env -u LD_LIBRARY_PATH -u LD_PRELOAD timeout 30 /usr/bin/xrdfs root://eosuser.cern.ch mkdir -p "$destination" || true
-        env -u LD_LIBRARY_PATH -u LD_PRELOAD timeout 60 /usr/bin/xrdcp --silent --cksum adler32 evidence.tar.gz "root://eosuser.cern.ch/$destination/evidence.tar.gz" || true
-        env -u LD_LIBRARY_PATH -u LD_PRELOAD timeout 30 /usr/bin/xrdcp --silent --cksum adler32 report.json "root://eosuser.cern.ch/$destination/failure.json" || true
-    fi
     exit "$result"
 }
 trap finish EXIT
@@ -73,16 +130,27 @@ tar -xzf runtime.tar.gz -C payload
 source /cvmfs/cms.cern.ch/cmsset_default.sh
 cd payload/CMSSW_17_0_0_pre4/src
 scram b ProjectRename
-eval "$(scram runtime -sh)"
+source <(scram runtime -sh)
 export LD_LIBRARY_PATH="$(python3 -c 'import os; print(":".join(p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if "/biglib/" not in p))')"
 export TMPDIR="$scratch"
 cd "$scratch"
 extra=()
 if [[ "$mode" == canary ]]; then extra+=(--canary); fi
-stage_limits=$(python3 -c 'import json; print(",".join(str(value) for value in json.load(open("bootstrap.json"))["stage_timeouts_seconds"]))')
+readarray -t limits < <(python3 - <<'PY'
+import json
+d=json.load(open('bootstrap.json'))
+print(','.join(str(value) for value in d['stage_timeouts_seconds']))
+print(d['config_timeout_seconds'])
+print(d['event_stall_timeout_seconds'])
+PY
+)
+stage_limits=${limits[0]}
+config_timeout=${limits[1]}
+event_stall_timeout=${limits[2]}
 python3 payload/workflow/scripts/run_shift_gen_to_nano.py "source${source_index}.json" \
     --skip "$skip" --count "$count" --job "$job" --templates templates \
-    --stage-timeouts "$stage_limits" --publish "${extra[@]}"
+    --stage-timeouts "$stage_limits" --config-timeout "$config_timeout" \
+    --event-stall-timeout "$event_stall_timeout" --publish "${extra[@]}"
 '''
 
 
@@ -102,11 +170,17 @@ def main():
                         help='Total worker limit; defaults to six hours for samples and thirty hours for full GEN slices')
     parser.add_argument('--stage-timeouts',
                         help='SIM,DIGIHLT,RECO,NANO limits in seconds; sampled jobs scale these per 100 events')
+    parser.add_argument('--config-timeout-seconds', type=int, default=600,
+                        help='Configuration-resolution deadline in seconds, independent of event processing')
+    parser.add_argument('--event-stall-timeout-seconds', type=int, default=1800,
+                        help='Maximum seconds without a new framework event, independent of the stage budget')
     args = parser.parse_args()
     if not (0 <= args.pilot_size <= args.worker_ceiling <= 1000) or not (1 <= args.initial_workers <= args.worker_ceiling):
         parser.error('Require 0 <= pilot size <= worker ceiling <= 1000 and 1 <= initial workers <= ceiling')
     if min(args.capacity_step,args.capacity_interval,args.capacity_completions) <= 0:
         parser.error('Capacity steps, intervals, completion gates and worker timeout must be positive')
+    if min(args.config_timeout_seconds,args.event_stall_timeout_seconds) <= 0:
+        parser.error('Configuration and event-stall timeouts must be positive')
     root = args.campaign.resolve()
     manifest = json.loads((root / 'manifest.json').read_text())
     sampled = bool(manifest.get('detector_sampling'))
@@ -130,7 +204,8 @@ def main():
                   canary_timeout_seconds=1800, completion_timeout_seconds=args.worker_timeout_seconds,
                   stage_timeouts_seconds=stage_limits, notification='one_attempt_per_campaign',
                   automatic_retry=False)
-    policy.update(config_timeout_seconds=600,event_stall_timeout_seconds=1800,
+    policy.update(config_timeout_seconds=args.config_timeout_seconds,
+                  event_stall_timeout_seconds=args.event_stall_timeout_seconds,
                   failure_policy='Isolate individual workers; keep healthy bins and persistent monitors active.',
                   absolute_limit_basis='Measured QCD20+ event tails up to1288s; absolute stage budgets are independent of the event-stall guard.')
     policy.update(worker_ceiling=args.worker_ceiling,initial_workers=args.initial_workers,
@@ -159,6 +234,8 @@ def main():
         shutil.copy2(scripts / name, root / name)
     bootstrap = dict(bundle_url='root://eosuser.cern.ch/' + manifest['eos_output'] + '/runtime.tar.gz',
                      bundle_sha256=runtime['sha256'], stage_timeouts_seconds=stage_limits,
+                     config_timeout_seconds=args.config_timeout_seconds,
+                     event_stall_timeout_seconds=args.event_stall_timeout_seconds,
                      sources={}, templates={})
     for source in manifest['sources']:
         bootstrap['sources'][str(source['index'])] = sha(root / 'sources' / f'source{source["index"]:05d}.json')
@@ -208,6 +285,18 @@ def main():
     manifest.update(pilot_jobs=sorted(ids),pilot_events=sum(pilot_strata.values()),
                     pilot_strata=pilot_strata,pilot_sources=list(pilot_sources.values()))
     (root / 'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
+    # Chirp attributes change separately. Prefer the current attempt's
+    # absolute stage deadline; the worker owns its per-event stall guard.
+    current_deadline = ('!isUndefined(ShiftNtupleStageDeadlineEpoch) && ShiftNtupleStageDeadlineEpoch > 0'
+        ' && ShiftNtupleStageDeadlineEpoch >= JobCurrentStartDate'
+        ' && !isUndefined(ShiftNtupleProgressEpoch) && ShiftNtupleProgressEpoch >= JobCurrentStartDate')
+    progress_epoch = ('ifThenElse(isUndefined(ShiftNtupleProgressEpoch) || ShiftNtupleProgressEpoch < JobCurrentStartDate,'
+                      ' JobCurrentStartDate, ShiftNtupleProgressEpoch)')
+    progress_limit = ('ifThenElse(isUndefined(ShiftNtupleProgressEpoch) || ShiftNtupleProgressEpoch < JobCurrentStartDate'
+        ' || isUndefined(ShiftNtupleStageTimeout) || ShiftNtupleStageTimeout <= 0,'
+        f' {policy["setup_timeout_seconds"]}, ShiftNtupleStageTimeout)')
+    stage_guard = (f'ifThenElse({current_deadline}, time() > ShiftNtupleStageDeadlineEpoch + 180,'
+                   f' time() - {progress_epoch} > {progress_limit} + 180)')
     common = f'''log_group = int($(job) / 500)
 universe = vanilla
 initialdir = {root}
@@ -230,7 +319,7 @@ request_disk = 6000000
 +ShiftNtupleJob = $(job)
 on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
 periodic_release = False
-periodic_hold = (JobStatus == 1 && time() - ifThenElse(isUndefined(JobMaterializeDate), EnteredCurrentStatus, ifThenElse(isUndefined(EnteredCurrentStatus) || JobMaterializeDate > EnteredCurrentStatus, JobMaterializeDate, EnteredCurrentStatus)) > 7200) || (JobStatus == 2 && (time() - JobCurrentStartDate > {args.worker_timeout_seconds} || (!isUndefined(ShiftNtupleProgressEpoch) && time() - ShiftNtupleProgressEpoch > ShiftNtupleStageTimeout + 180) || (!isUndefined(ShiftNtupleStageDeadlineEpoch) && ShiftNtupleStageDeadlineEpoch > 0 && time() > ShiftNtupleStageDeadlineEpoch + 180)))
+periodic_hold = (JobStatus == 1 && time() - ifThenElse(isUndefined(JobMaterializeDate), EnteredCurrentStatus, ifThenElse(isUndefined(EnteredCurrentStatus) || JobMaterializeDate > EnteredCurrentStatus, JobMaterializeDate, EnteredCurrentStatus)) > 7200) || (JobStatus == 2 && (time() - JobCurrentStartDate > {args.worker_timeout_seconds} || {stage_guard}))
 periodic_hold_reason = "SHIFT production exceeded its queue, stage, or total wall-time limit"
 log = events.log
 '''
