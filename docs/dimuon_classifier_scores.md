@@ -33,13 +33,21 @@ this addition and would require restoring the original sampling metadata.
 
 ## Preparing and testing production
 
-**Current storage gate:** the bulk attempt `12879017` is held because v10
-payloads were relocated during the independently authorized EOS migration.
-The classifier did not fail. Do not release/resubmit the old frozen deployment
-or publish to its former output tree. Preserve its successful outputs and
-failure evidence. A new deployment must freeze a completed migration map and
-the canonical storage resolver, retain the logical receipt identities, and
-use the dated process-bin layout. An incomplete migration map is a hard gate.
+**Current status:** the migration map is complete and its lossless audit
+passed. A fresh deployment was prepared as
+`validation/dimuon_score_production_20261009_v2/`; its three-file pilot is
+Condor `12879278.0` and passed independent readback. Full production is
+submitted as `12879319`: 199 batches covering 9,911 input files. At
+12:47:36 UTC on 2026-10-09, 12 jobs were running and five were idle, with no
+holds. This records a launched campaign, not 9,911 completed outputs.
+
+The historical bulk attempt `12879017` remains held after source relocation.
+Do not release/resubmit its frozen deployment or publish to its former output
+tree. Its 13 scored publications survived migration with exact hashes; see
+the historical deployment's `concurrent_additions.json`. New deployments
+freeze the completed map and canonical storage resolver, retain the logical
+receipt identities, and use the dated process-bin layout. An incomplete or
+changed migration map is a hard gate.
 
 Enter the read-only LCG environment for export/scoring. No CMSSW build or
 reconstruction configuration changes are needed. The reusable scorer is
@@ -106,8 +114,15 @@ old paths must now be resolved using the audited relocation map.
 The migration-aware preparer passed 19 tests. The actual incomplete workspace
 map was checked: preparation exits nonzero before creating a deployment or
 submitting anything. The check is preserved as `migration_gate_check.json`
-beside the historical plan. The revised preparation command above has not
-been launched against a completed map yet.
+beside the historical plan. After migration completed, the revised command
+above sealed all 9,911 inputs and 199 batches using the audited map. The fresh
+pilot completed three publications with 60 events and one pair. Independent
+native XRootD readback verified all 12 Nano/receipt/log/marker objects and the
+actual Double score arrays. It terminated normally with exit code zero in
+473 seconds. Reported peak RSS was approximately 1,465 MB against the site's
+3,000 MB allocation; the submit file requested 2,000 MB. PSS was unavailable.
+The proof is `pilot_readback.json` in the v2 deployment. Full submission is
+recorded in its `production_submission.json`; do not submit a duplicate.
 
 The local five-file pilot preserved 82 events and ten dimuon rows across
 J/psi, DY, QCD, a zero-pair QCD file and a 50 GeV signal file. All original
