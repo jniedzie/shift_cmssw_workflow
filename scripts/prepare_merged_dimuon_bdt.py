@@ -14,7 +14,7 @@ WORKSPACE = Path(__file__).resolve().parents[2]
 EOS = '/eos/user/j/jniedzie/shift_cmssw'
 
 
-def prepare(inventory, output, model, campaign, batch_size=5):
+def prepare(inventory, output, model, campaign, batch_size=5, reuse_completed_plan=None):
     inventory, output, model = map(lambda p: Path(p).resolve(), (inventory, output, model))
     if output.exists():
         raise FileExistsError('Refuse to overwrite a frozen merged scoring deployment')
@@ -115,6 +115,31 @@ def prepare(inventory, output, model, campaign, batch_size=5):
             canonical_resolver=source['storage_resolver'], runtime_archive_url=runtime_url),
         files=files, pilot=pilot, batches=[list(range(i, min(i + batch_size, len(files))))
             for i in range(0, len(files), batch_size)])
+    if reuse_completed_plan is not None:
+        previous_path = Path(reuse_completed_plan).resolve()
+        previous = json.loads(previous_path.read_text())
+        if (previous.get('schema') != plan['schema'] or previous.get('selection_applied') is not False
+                or previous.get('model_sha256') != plan['model_sha256']
+                or previous.get('files') != plan['files'] or previous.get('batches') != plan['batches']):
+            raise ValueError('Recovery changed the input/output/model/weight population contract')
+        # Only the file-writing implementation and its strict resume handling
+        # may change. Predictors, labels, weights, standard app and histograms
+        # must stay byte-identical before completed publications are accepted.
+        allowed_changes = {'classifier/add_bdt_score.py', 'workflow/scripts/run_merged_dimuon_bdt.py'}
+        if set(previous['dependencies']) != set(plan['dependencies']):
+            raise ValueError('Recovery dependency inventory changed')
+        for name, current in plan['dependencies'].items():
+            if name not in allowed_changes and previous['dependencies'][name]['sha256'] != current['sha256']:
+                raise ValueError('Recovery changed a physics/analysis dependency: ' + name)
+        previous_hash = io.digest(previous_path)
+        target = frozen / 'previous_plan.json'
+        shutil.copy2(previous_path, target)
+        if io.digest(target) != previous_hash:
+            raise ValueError('Previous plan changed while freezing compatibility proof')
+        plan['compatible_previous_plans'] = {previous_hash: dict(path=str(target),
+            sha256=previous_hash, source=str(previous_path),
+            contract='Identical sources/destinations/model/predictors/labels/weights/histograms; file-writer repair only')}
+        plan['dependencies']['previous_plan.json'] = dict(path=str(target), sha256=previous_hash)
     io.write_json(output / 'plan.json', plan)
     plan_hash = io.digest(output / 'plan.json')
     command = ['python3', str(frozen / 'workflow/scripts/run_merged_dimuon_bdt.py'),
@@ -163,8 +188,11 @@ def main():
     parser.add_argument('--model', required=True)
     parser.add_argument('--campaign', default='20261009-dimuon-bdt-merged-first-test-v1')
     parser.add_argument('--batch-size', type=int, default=5)
+    parser.add_argument('--reuse-completed-plan', type=Path,
+                        help='Freeze and validate a prior identical data/model contract; preserve completed outputs')
     args = parser.parse_args()
-    plan = prepare(args.inventory, args.output, args.model, args.campaign, args.batch_size)
+    plan = prepare(args.inventory, args.output, args.model, args.campaign, args.batch_size,
+                   args.reuse_completed_plan)
     print(json.dumps(dict(prepared=True, submitted=False, files=len(plan['files']), batches=len(plan['batches']))))
 
 

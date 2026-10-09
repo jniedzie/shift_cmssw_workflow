@@ -135,7 +135,8 @@ def run_file(plan, row, work, cache, analysis, plan_hash):
         planned = {'nano': row['output_nano'], 'histograms': row['output_histograms'],
                    **{k: row[k] for k in ('score_receipt', 'bdt_hist_receipt', 'score_log', 'histogram_log')}}
         if (marker.get('schema') != 'shift-merged-dimuon-bdt-complete-v1'
-                or marker.get('complete') is not True or marker.get('plan_sha256') != plan_hash
+                or marker.get('complete') is not True
+                or marker.get('plan_sha256') not in {plan_hash, *plan.get('compatible_previous_plans', {})}
                 or marker.get('source_sha256') != source_hash or marker.get('source') != row['source_logical_path']
                 or marker.get('events') != row['expected_events'] or type(marker.get('pairs')) is not int
                 or marker['pairs'] < 0 or marker.get('model_sha256') != plan['model_sha256']
@@ -160,7 +161,8 @@ def run_file(plan, row, work, cache, analysis, plan_hash):
                 or histogram.get('complete') is not True or histogram.get('pairs') != marker['pairs']
                 or histogram.get('output_sha256') != marker['published']['histograms']['sha256']):
             raise ValueError('Existing receipts lack matching content and score verification')
-        return dict(index=row['index'], complete=True, reused=True, marker=marker)
+        return dict(index=row['index'], complete=True, reused=True,
+                    publication_plan_sha256=marker['plan_sha256'], marker=marker)
     if any(io.remote_exists(row[k]) for k in ('output_nano', 'output_histograms', 'score_receipt',
                                              'bdt_hist_receipt', 'score_log', 'histogram_log')):
         raise FileExistsError('Incomplete publication exists; preserve it without overwrite')

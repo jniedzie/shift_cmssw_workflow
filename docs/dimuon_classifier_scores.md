@@ -1,5 +1,72 @@
 # Dimuon vertex BDT scores in v10 Nano files
 
+## Current merged-group first test and continuation (2026-10-09)
+
+The active first test uses 501 existing SM merged group files (up to 20 Nano
+files per group), plus two completed prompt signal files. Every group keeps
+its own scored ntuple and histogram output. No whole-bin event tree is made.
+Only histogram files are merged by process-bin at the final step.
+
+The user clarified that N_eff is the effective MC normalization fitted to
+data. AUC and fixed-cut BDT efficiency are the classifier metrics; neither is
+called N_eff. The new performance tool reports both empirical and correctly
+weighted MC-mixture ROC, proper-c-tau/mass maps, uncertainties and support.
+Seven signal points currently have no completed detector ntuple and remain
+unmeasured. Uniformity is a validation target, not an established result.
+
+The older individual-file campaign `12879319` was reversibly held at the
+user's request to use small merged groups; its 20 materialized jobs are held.
+Outputs, logs and frozen deployments are retained. Do not release it as part
+of this first test.
+
+Grouped campaign `12879497` uses `deployment_v2`. Its local four-group canary
+passed 1,209 events and 58 pairs, including standard and BDT histogramming.
+Two original merged-file layouts exposed a ROOT writer limitation before
+publication. The repaired metadata-only writer passed both actual failed-file
+probes and six streamer/four original scoring regression tests.
+
+`deployment_v3` freezes that repair and proves the same 503 source/destination
+rows, model, predictors, labels, weights and histogram definitions before
+reusing verified v2 publications. Existing published files are never rewritten.
+Its five-group recovery canary passed all groups 10--14 with no pending input;
+the proof is `recovery_canary_batch_status.json`.
+
+Control/state and source inventory are under workspace
+`validation/dimuon_merged_score_test_20261009/`. A finite continuation watcher
+waits for the original grouped jobs to drain, holds only the obsolete grouped
+cluster, then submits `deployment_v3/production.sub` once. Query failures are
+unknown state; ambiguous submissions stop without a duplicate. Its state and
+submission receipts are under `continuation/`. Reconcile those receipts and
+the queue before any manual recovery submission.
+
+When all 101 recovery batch statuses are complete, run the histogram-only
+merger with the sealed plan SHA printed in `deployment_v3/plan.json` receipts:
+
+```bash
+source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
+python3 scripts/merge_merged_dimuon_bdt_histograms.py \
+  --plan ../validation/dimuon_merged_score_test_20261009/deployment_v3/plan.json \
+  --plan-sha256 9fb387d477c10f5c3ba99205a866cd4fcb475b65deca0d741f33c86e22fad6b5 \
+  --results-directory ../validation/dimuon_merged_score_test_20261009/deployment_v3/results \
+  --work-directory ../validation/dimuon_merged_score_test_20261009/histogram_merges
+```
+
+The merger requires all 503 exact-plan publications, verifies inputs and
+creates 19 SM bin plus two signal-point histogram outputs. It never consumes
+event trees as histogram inputs. `bin_histogram_inputs.json` then feeds
+`tea_shift_cmssw/utils/prepare_shift_bdt_plots.py`; per-bin sigma/full GEN sumw
+is applied before process shapes are combined. The dedicated plot config is
+`shift_bdt_plotter_config.py`, selected through `SHIFT_BDT_PLOT_INPUTS`.
+
+Performance manifest preparation is preserved beside the source inventory.
+Once all outputs are validated, run the CMSSW classifier's
+`bdt_performance.py` with `performance_inputs.json`, the frozen portable
+model, `artifacts/phase2_seed71_72`, and a new output directory. Inspect both
+fixed-cut efficiencies and AUC. The two available prompt points have too few
+genuine vertices to establish closure; pending lifetimes must not be
+interpolated into a uniformity claim. See the task log for exact commands and
+the continuation checklist.
+
 The frozen `uniform_bdt_3p0_s71` benchmark is ready to produce a diagnostic
 score column. Its mass/vertex/lifetime acceptance has not passed the physics
 gates, so this production applies no BDT selection. The development record is
@@ -33,7 +100,7 @@ this addition and would require restoring the original sampling metadata.
 
 ## Preparing and testing production
 
-**Current status:** the migration map is complete and its lossless audit
+**Historical individual-file launch:** the migration map is complete and its lossless audit
 passed. A fresh deployment was prepared as
 `validation/dimuon_score_production_20261009_v2/`; its three-file pilot is
 Condor `12879278.0` and passed independent readback. Full production is
