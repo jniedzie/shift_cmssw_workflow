@@ -79,6 +79,36 @@ def genparticle_hash(event):
     return record_hash(rows)
 
 
+def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bound=1e-12):
+    """Finite-N exponential mean gate, including the small-pilot lower tail.
+
+    For N independent exponential draws and mean ratio r, the Chernoff bound
+    on the corresponding tail is exp[-N*(r-1-log(r))]. This is a conservative
+    finite-sample bound, not a Gaussian approximation or a physical acceptance.
+    Exact zero lengths cannot represent a continuous exponential realization.
+    """
+    lengths = list(lengths)
+    if not lengths or not math.isfinite(expected_mean_mm) or expected_mean_mm <= 0:
+        raise ValueError('Lifetime sample requires draws and a positive physical mean')
+    if not math.isfinite(rejection_probability_bound) or not 0 < rejection_probability_bound < 1:
+        raise ValueError('Lifetime rejection bound must lie strictly between zero and one')
+    if any(not math.isfinite(value) or value <= 0 for value in lengths):
+        raise ValueError('Proper lengths must be finite and strictly positive')
+    ratio = math.fsum(value/expected_mean_mm for value in lengths)/len(lengths)
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise ValueError('Invalid physical lifetime mean ratio')
+    distance = ratio-1.
+    rate = max(0., distance-math.log1p(distance)) if ratio > .5 else ratio-1.-math.log(ratio)
+    log_bound = -len(lengths)*rate
+    if log_bound < math.log(rejection_probability_bound):
+        raise ValueError('Generated lifetime disagrees with the physical target width')
+    return dict(passed=True, method='finite-N exponential Chernoff mean-tail bound',
+                terminal_decays=len(lengths), mean_ratio=ratio,
+                mean_lifetime_pull=distance*math.sqrt(len(lengths)),
+                log_tail_probability_upper_bound=log_bound,
+                rejection_probability_bound=rejection_probability_bound)
+
+
 def audit(directory):
     import ROOT
     from DataFormats.FWLite import Events, Runs
@@ -190,11 +220,8 @@ def audit(directory):
         raise ValueError('Missing native signal run information')
     generated_mean = sum(lengths) / len(lengths)
     requested_mean = contract['width_authority']['ctau_mm']
-    lifetime_pull=(generated_mean/requested_mean-1)*math.sqrt(len(lengths))
-    # A broad frozen sampling bound rejects wrong/zero/proposal lifetimes
-    # without turning ordinary pilot fluctuations into adaptive top-ups.
-    if abs(lifetime_pull)>8.:
-        raise ValueError('Generated lifetime does not match the physical target width')
+    lifetime_audit=validate_lifetime_sample(lengths,requested_mean)
+    lifetime_pull=lifetime_audit['mean_lifetime_pull']
     report = dict(schema='shift-dark-photon-gen-audit-v1', runtime_validated=True,
         physics_valid=False, normalization_ready=False, events=len(event_rows), counts=dict(counts),
         event_ids=[row['id'] for row in event_rows], event_rows=event_rows,
@@ -215,8 +242,7 @@ def audit(directory):
         maximum_decay_momentum_residual_gev=max_conservation,
         mean_proper_length_mm=generated_mean, expected_proper_length_mm=requested_mean,
         mean_lifetime_pull=lifetime_pull,
-        lifetime_audit=dict(passed=True,method='exponential mean; frozen eight-sigma sampling bound',
-                            terminal_decays=len(lengths)))
+        lifetime_audit=lifetime_audit)
     (out / 'validation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k!='event_rows'},indent=2))
     return report
