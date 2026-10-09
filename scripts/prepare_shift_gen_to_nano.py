@@ -8,13 +8,15 @@ from pathlib import Path
 import shutil
 import struct
 
+from shift_storage_paths import resolve_storage_path
+
 
 DEFAULT_TEMPLATE_DIRECTORY = Path(
     '/eos/user/j/jniedzie/shift_cmssw/jpsi/lssPaired_materialField_10k_2023_cms_v1/configs')
 
 
 def digest(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(Path(resolve_storage_path(path)).read_bytes()).hexdigest()
 
 
 def slices(events, size):
@@ -34,7 +36,7 @@ def event_key(identity):
 
 
 def descriptor(path, manifest_sha, output_base):
-    record = json.loads(path.read_text())
+    record = json.loads(Path(resolve_storage_path(path)).read_text())
     if not record.get('complete') or record['manifest_sha256'] != manifest_sha:
         raise ValueError('Incomplete or mismatched frozen receipt: ' + str(path))
     if record['schema'] == 'shift-dag-receipt-v1':
@@ -62,7 +64,8 @@ def descriptor(path, manifest_sha, output_base):
     if len(roots) != 1:
         raise ValueError('Exactly one frozen GEN file required')
     gen = roots[0]
-    if not Path(gen['path']).is_file() or Path(gen['path']).stat().st_size != gen['bytes']:
+    gen_payload = Path(resolve_storage_path(gen['path']))
+    if not gen_payload.is_file() or gen_payload.stat().st_size != gen['bytes']:
         raise ValueError('Missing or resized source GEN')
     result = {'receipt': str(path), 'receipt_sha256': digest(path), 'stratum': stratum,
               'gen': gen['path'], 'gen_sha256': gen['sha256'], 'gen_bytes': gen['bytes'],
@@ -87,15 +90,15 @@ def main():
     out.mkdir(exist_ok=False, parents=True)
     (out / 'sources').mkdir()
     (out / 'templates').mkdir()
-    ordinary = json.loads(args.ordinary.read_text())
-    weighted = json.loads(args.weighted.read_text())
+    ordinary = json.loads(Path(resolve_storage_path(args.ordinary)).read_text())
+    weighted = json.loads(Path(resolve_storage_path(args.weighted)).read_text())
     ordinary_sha, weighted_sha = digest(args.ordinary), digest(args.weighted)
     inputs = []
     for stratum in ordinary['plan']['strata']:
         for chunk in range(stratum['jobs']):
             inputs.append((Path(ordinary['receipt_base']) / 'receipts' / stratum['id'] / f'part{chunk:05d}.json', ordinary_sha))
     accounting_path = args.weighted.parent / 'production_complete.json'
-    accounting = json.loads(accounting_path.read_text())
+    accounting = json.loads(Path(resolve_storage_path(accounting_path)).read_text())
     if not accounting.get('complete') or accounting['manifest_sha256'] != weighted_sha:
         raise ValueError('Weighted production needs final frozen-manifest accounting')
     for node in weighted['jobs']:
@@ -133,12 +136,13 @@ def main():
             raise ValueError('Weighted inventory differs from complete campaign accounting')
     templates = {}
     for stage in range(1, 5):
-        files = sorted((reference / f'step{stage}').glob('*part*0000*cfg.py'))
+        logical_directory = reference / f'step{stage}'
+        files = sorted(Path(resolve_storage_path(logical_directory)).glob('*part*0000*cfg.py'))
         if len(files) != 1:
             raise ValueError('Ambiguous archived production config')
         target = out / 'templates' / f'step{stage}.py'
         shutil.copy2(files[0], target)
-        templates[str(stage)] = {'source': str(files[0]), 'sha256': digest(target)}
+        templates[str(stage)] = {'source': str(logical_directory / files[0].name), 'sha256': digest(target)}
     (out / 'jobs.txt').write_text(''.join(rows))
     (out / 'canaries.json').write_text(json.dumps(canaries, indent=2) + '\n')
     manifest = {'schema': 'shift-gen-to-nano-plan-v1', 'stage': 'SIM,DIGI,HLT,RECO,NANO',

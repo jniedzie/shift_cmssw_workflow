@@ -16,6 +16,8 @@ import sys
 import tarfile
 import time
 
+from shift_storage_paths import resolve_storage_path
+
 
 def sha(path):
     h = hashlib.sha256()
@@ -29,13 +31,13 @@ def copy_gen_input(descriptor, target):
     """Read frozen local pilots or existing XRootD inputs; verify both identically."""
     mode = descriptor.get('gen_transport', 'xrootd')
     if mode == 'local':
-        source = Path(descriptor['gen'])
+        source = Path(resolve_storage_path(descriptor['gen']))
         if not source.is_absolute() or not source.is_file() or source.resolve() == target.resolve():
             raise ValueError('Local GEN requires a distinct existing absolute input path')
         shutil.copyfile(source, target)
     elif mode == 'xrootd':
         command(['xrdcp', '--silent', '--cksum', 'adler32',
-                 'root://eosuser.cern.ch/' + descriptor['gen'], str(target)], timeout=900)
+                 'root://eosuser.cern.ch/' + resolve_storage_path(descriptor['gen']), str(target)], timeout=900)
     else:
         raise ValueError('Unsupported frozen GEN transport')
     if sha(target) != descriptor['gen_sha256']:

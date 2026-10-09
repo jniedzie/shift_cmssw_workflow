@@ -78,6 +78,42 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(manifest['templates'][str(stage)]['source'], str(original))
                 self.assertEqual((output / 'templates' / f'step{stage}.py').read_bytes(), original.read_bytes())
 
+    def test_migrated_gen_receipts_and_archived_templates_keep_logical_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output, templates, arguments = self.inventory_fixture(directory, [[1, 1, 1], [1, 1, 2]])
+            old_receipts = root / 'receipts'
+            moved_receipts = root / 'support/receipts'
+            moved_receipts.parent.mkdir()
+            old_receipts.rename(moved_receipts)
+            old_templates = templates
+            moved_templates = root / 'moved-configs'
+            templates.rename(moved_templates)
+            paths = {}
+            for index in range(2):
+                old = root / f'gen{index}.root'
+                new = root / f'moved-gen{index}.root'
+                old.rename(new)
+                paths[str(old)] = str(new)
+            migration = root / 'migration.json'
+            migration.write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=True,
+                paths=paths,
+                directories={str(old_templates / f'step{i}'): str(moved_templates / f'step{i}') for i in range(1, 5)},
+                support_prefixes={str(old_receipts): str(moved_receipts)})))
+            frozen = {str(path): path.read_bytes() for path in moved_receipts.rglob('*.json')}
+            with patch.dict(os.environ, {'SHIFT_STORAGE_MIGRATION_MANIFEST': str(migration)}), \
+                    patch.object(sys, 'argv', arguments), redirect_stdout(io.StringIO()):
+                module.main()
+                source = json.loads((output / 'sources/source00000.json').read_text())
+                self.assertEqual(source['gen'], str(root / 'gen0.root'))
+                self.assertEqual(source['receipt'], str(old_receipts / 'qcd_0to1/part00000.json'))
+                local_descriptor = dict(source, gen_transport='local')
+                worker.copy_gen_input(local_descriptor, root / 'readback.root')
+                self.assertEqual(worker.sha(root / 'readback.root'), source['gen_sha256'])
+            manifest = json.loads((output / 'manifest.json').read_text())
+            self.assertEqual(manifest['templates']['1']['source'], str(old_templates / 'step1/synthetic_part0000_cfg.py'))
+            self.assertEqual({str(path): path.read_bytes() for path in moved_receipts.rglob('*.json')}, frozen)
+
     def test_reject_duplicate_identities_across_distinct_gen_files(self):
         with tempfile.TemporaryDirectory() as directory:
             output, _, arguments = self.inventory_fixture(directory, [[1, 1, 1], [1, 1, 1]])

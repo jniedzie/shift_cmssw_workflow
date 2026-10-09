@@ -18,6 +18,7 @@ from generation_publication import sha256
 from fixed_target_generation import process_settings
 from submit_shift_production_dag import parse_queue
 import submit_shift_production_dag as submission
+import run_shift_production_node as production_worker
 
 
 class ProductionDagTest(unittest.TestCase):
@@ -103,6 +104,37 @@ class ProductionDagTest(unittest.TestCase):
             with self.assertRaises(ValueError): validate_receipt(receipt,'changed',1)
             root.write_bytes(b'changed payload')
             with self.assertRaises(ValueError): validate_receipt(receipt,'frozen',1)
+
+    def test_relocated_completion_receipt_and_payload_prevent_regeneration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            old_gen = root / 'gen.root'
+            new_gen = root / 'relocated_gen.root'
+            new_gen.write_bytes(b'audited payload')
+            logical_base = root / 'production_dags'
+            logical_receipt = logical_base / 'receipts/qcd_0to1/part00000.json'
+            moved_base = root / 'support/production_dags'
+            moved_receipt = moved_base / 'receipts/qcd_0to1/part00000.json'
+            moved_receipt.parent.mkdir(parents=True)
+            record = dict(complete=True, manifest_sha256='frozen', events=1, requested_events=1,
+                stratum='qcd_0to1', chunk=0, pilot=False, event_ids=[[1, 1, 1]],
+                artifacts=[dict(path=str(old_gen), bytes=new_gen.stat().st_size, sha256=sha256(new_gen))])
+            moved_receipt.write_text(json.dumps(record))
+            original = moved_receipt.read_bytes()
+            migration = root / 'migration.json'
+            migration.write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=True,
+                paths={str(old_gen): str(new_gen)}, support_prefixes={str(logical_base): str(moved_base)})))
+            manifest = dict(receipt_base=str(logical_base), plan=dict(strata=[dict(id='qcd_0to1',
+                jobs=1, events_per_job=1, target_events=1, pilot_events=1)]))
+            with mock.patch.dict(os.environ, {'SHIFT_STORAGE_MIGRATION_MANIFEST': str(migration),
+                                             'SHIFT_DAG_LOCAL_ROOT': str(root)}):
+                self.assertEqual(validate_receipt(logical_receipt, 'frozen', 1), record)
+                production_worker.worker(manifest, 'frozen', 0, 0, False)
+                self.assertFalse(logical_base.exists())
+                self.assertEqual(moved_receipt.read_bytes(), original)
+                new_gen.write_bytes(b'changed payload')
+                with self.assertRaisesRegex(ValueError, 'Artifact changed'):
+                    validate_receipt(logical_receipt, 'frozen', 1)
 
     def test_successful_empty_scheduler_query(self):
         self.assertEqual(parse_queue('', ''), [])

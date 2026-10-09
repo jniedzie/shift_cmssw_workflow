@@ -22,6 +22,7 @@ import uuid
 from shift_production_plan import validate_plan
 from generation_publication import sha256
 from collect_generation_metadata import combine
+from shift_storage_paths import resolve_storage_path
 
 
 def run(command, **kwargs):
@@ -101,7 +102,7 @@ def receipt_path(manifest, index, chunk=None):
 
 
 def validate_receipt(path, manifest_sha, expected_events=None):
-    record = json.loads(Path(path).read_text())
+    record = json.loads(Path(resolve_storage_path(path)).read_text())
     if record.get('manifest_sha256') != manifest_sha or record.get('complete') is not True:
         raise ValueError('Missing or mismatched completion receipt: '+str(path))
     if expected_events is not None and record['requested_events'] != expected_events:
@@ -113,7 +114,7 @@ def validate_receipt(path, manifest_sha, expected_events=None):
     if not record['artifacts'] or not any(x['path'].endswith('.root') for x in record['artifacts']):
         raise ValueError('No audited ROOT artifact')
     for artifact in record['artifacts']:
-        path = Path(artifact['path'])
+        path = Path(resolve_storage_path(artifact['path']))
         info = remote_info(path) if str(path).startswith('/eos/') else dict(bytes=path.stat().st_size,sha256=sha256(path))
         if path.is_symlink() or info['bytes'] != artifact['bytes'] or info['sha256'] != artifact['sha256']:
             raise ValueError('Artifact changed after semantic audit: '+str(path))
@@ -192,7 +193,7 @@ def worker(manifest, manifest_sha, index, chunk, pilot):
     events = (stratum['pilot_events'] if pilot else
               min(stratum['events_per_job'], stratum['target_events']-chunk*stratum['events_per_job']))
     receipt = receipt_path(manifest, index, None if pilot else chunk)
-    if receipt.exists():
+    if Path(resolve_storage_path(receipt)).exists():
         record = validate_receipt(receipt, manifest_sha, events)
         if (record['stratum'], record['chunk'], record['pilot']) != (stratum['id'], chunk, pilot):
             raise ValueError('Wrong receipt identity')

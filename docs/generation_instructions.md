@@ -1,5 +1,30 @@
 # Generation instructions
 
+## Process-bin storage layout (2026-10-09)
+
+The EOS data base now contains process-bin directories only. New standard
+workflow runs use `process_bin/YYYYMMDD-campaign/tier/file.root`, with the date
+allowed anywhere in the campaign name. Bin boundaries retain their exact value
+and encode decimal points as `p`; open upper limits are labelled `inf`.
+`workflow.env` derives the process-bin from the configured generator bounds or
+fragment name, requires a valid campaign date, and writes direct `GEN_SIM`,
+`DIGI_RAW_HLT`, `AODSIM` and `nanoAOD` tiers. Configs, logs and cross sections
+are under `metadata/`. Explicit site path overrides remain supported.
+
+Existing data were relocated with metadata-only EOS renames. Their original
+immutable manifests, completion receipts, normalization records and hashes
+are preserved. The complete migration inventory and path map are in workspace
+`validation/storage_reorganization_20261009/`; the storage resolver applies
+that map when reading a historical receipt, rather than rewriting its paths.
+Shared trigger/pileup inputs and runtime/control payloads are stored under the
+sibling `shift_cmssw_support` EOS directory.
+
+Do not resubmit an old frozen deployment to its former output namespace.
+New frozen detector-DAG/scoring deployments must version their storage contract,
+package the resolver dependencies and publish to the new dated process-bin
+tiers. The retained legacy manifest/publication contracts remain unchanged for
+auditing; relocating their payloads does not authorize regeneration or cleanup.
+
 ## Bounded dark-photon pilots (2026-10-09)
 
 The signal model, limitations, history and active plan are owned by
@@ -141,11 +166,48 @@ collisions or luminosity; authoritative cross sections come from GEN run data.
 
 Check storage headroom before starting. ROOT outputs, cards, frozen scripts,
 model files, plots and runtime receipts stay outside Git. Commit reusable
-source, tests and instructions. Remove only regenerable caches and disposable
-test fixtures after their validation; preserve source inventories, full-GEN
-ledgers, split/threshold locks and final evidence. The grid remains a bounded
+source, tests and instructions only when separately authorized. For the small
+grid authorized on 2026-10-09, retire exact per-point GEN/SIM/DIGI/AOD ROOT
+intermediates after validated full intended GEN coverage, healthy final ntuples,
+histograms and diagnostics, and terminal worker/reference checks. Preserve
+source inventories, full-GEN/trial ledgers, locks and final evidence. The grid remains a bounded
 software pilot: real recording acceptance, physical rate closure and classifier
 mass/lifetime transfer must still be established before using a common N_eff.
+
+### Running the submitted small kinematics grid
+
+The active preparation is
+`validation/bsm_grid_production_20261009/preparation_v2/plan.json`: nine points,
+20 GEN and 20 reconstructed events each. Condor DAG 12878246 has one batch
+canary followed by seven workers, capped at two. The local m15_prompt canary
+is complete and is not submitted again. Frozen worker code is in
+`analysis_tools/`; runtime and code hashes must remain unchanged while jobs run.
+Never rebuild this shared CMSSW release during those workers.
+
+`scripts/run_dark_photon_grid.py` binds every point to its exact physics/source
+contract and complete event identities before common histogramming and signal
+diagnostics. It does no submission or deletion. The renderer
+`scripts/plot_dark_photon_kinematics.py --plan PLAN --output-dir NEW_DIRECTORY`
+creates PNG/PDF figures, a multipage overview and ROOT histograms; use
+`--allow-incomplete` for a recorded completed-point checkpoint. Curves are
+counts per full generated event, not exposure-weighted predictions.
+
+`scripts/retire_dark_photon_intermediates.py` first freezes a dry-run plan and
+then accepts `--execute` with a fresh global queue proof and exact validated
+point. Retain its append-only journal and every protected record. The native
+controller additionally requires exact terminal Condor ownership/exit zero;
+workers never remove their own intermediates while running. Native host process
+coverage is required. Explicit pinned login-process exceptions remain recorded
+as visibility limitations; deletion must not run in the tool PID sandbox.
+
+Controller v3 is frozen under `controller_tools_v3/`; its resumable state is
+`monitor_state.json`, log `controller.log`, and plot coverage `latest_kinematics`.
+It never submits/retries/cancels jobs. It validates closed points, retires only
+their named intermediates and refreshes plots. Condor history is bounded with
+`-since 'ClusterId < 12878246'` to avoid scanning older unrelated campaigns.
+Check this state and the current process before resuming; never launch a second
+controller for the same campaign. Production, constraints and retirement
+history remain in [SHIFT_BSM.md](../../SHIFT_BSM.md).
 
 > **Fixed-constraint principle:** this project evaluates SHIFT reconstruction
 > under the real Run 3 CMS detector and trigger system. Never change electronics
