@@ -19,6 +19,17 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_local_pilot_input_requires_exact_frozen_checksum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);source=root/'source.root';target=root/'gen.root'
+            source.write_bytes(b'validated frozen GEN fixture')
+            descriptor=dict(gen_transport='local',gen=str(source),gen_sha256=worker.sha(source))
+            worker.copy_gen_input(descriptor,target)
+            self.assertEqual(target.read_bytes(),source.read_bytes())
+            source.write_bytes(b'changed input')
+            with self.assertRaisesRegex(ValueError,'Frozen GEN payload changed'):
+                worker.copy_gen_input(descriptor,target)
+
     def inventory_fixture(self, directory, identities):
         root = Path(directory)
         ordinary = root / 'ordinary.json'

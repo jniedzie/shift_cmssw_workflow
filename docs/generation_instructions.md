@@ -1,5 +1,152 @@
 # Generation instructions
 
+## Bounded dark-photon pilots (2026-10-09)
+
+The signal model, limitations, history and active plan are owned by
+[SHIFT_BSM.md](../../SHIFT_BSM.md). The first backend is pure on-shell DY
+with the full hypercharge-mixing fermion couplings translated into the native
+Pythia engine. It retains the CMS common/CP5 shower, stationary-proton target,
+6800 GeV Beam B, 148 m source and natural residual muon-producing hadron decays.
+It rejects masses below 12 GeV until the low-mass spectral and production
+mechanisms are implemented. This is a pilot, not final normalization approval.
+
+Enter the existing built `CMSSW_17_0_0_pre4` runtime without invoking the
+workflow's registration/build path. `IOMC/ShiftDarkPhoton` must be built and
+present in the plugin cache. Before any shared build, verify that current jobs
+do not use the release; do not rebuild or relink a release used by live jobs.
+
+Example bounded signal GEN preparation/run in a **new** output directory:
+
+```bash
+python3 scripts/run_dark_photon_gen.py \
+  --mass 15 --epsilon 3e-8 --sampling-epsilon 0.005 \
+  --events 100 --seed 24682357 \
+  --output ../validation/bsm_darkphoton_20261009/m15_displaced_gen100
+```
+
+The physical model epsilon is `3e-8`. The sampling value `0.005` specifies
+a common amplification of every physical-target fermion coupling; it is not
+a replacement physical model point. Pythia 8.317 collapses support for widths
+below 1e-6 GeV and can misnormalize very narrow resonances. The runner checks
+actual initialized width and both sides of the mass pole. It freezes the
+physical target lifetime with `tauCalc=off`, keeps the full natural total width
+for the branching fractions, and records the inverse squared amplitude factor
+as `production_rate_correction`. Native forced-dimuon cross sections already
+include BR_mumu. Apply the amplitude correction once, with no second BR factor.
+The independently checked native width is massive-fermion tree level plus
+first-order QCD. Final precision/model and exposure gates remain separate.
+
+The runner never builds, submits, overwrites or publishes. It preserves a
+contract, copied source, resolved config, logs, ROOT output and full-graph GEN
+audit. Its signal parent adapter preserves shower/history copies and physical
+decay vertices, marks completed parents as history, and leaves daughter
+transport to the unchanged simulation. Complete A' decay graphs outside the
+reference hadron cylinder are counted and retained in the full GEN denominator.
+
+After a successful GEN audit, replay a small slice through the exact frozen
+background templates:
+
+```bash
+python3 scripts/run_dark_photon_detector.py \
+  ../validation/bsm_darkphoton_20261009/m15_displaced_gen100 \
+  --count 2 --job 900002 \
+  --templates ../validation/ntuple_production_20261007_v10/templates \
+  --output ../validation/bsm_darkphoton_20261009/m15_displaced_detector2
+```
+
+This reuses `run_shift_gen_to_nano.py`, adding only local frozen-input support
+and explicit missing-filter metadata. It checks exact identities/weights,
+full timed HepMC graph/spacetime through the SIM/RAW tiers, exact retained
+GenParticle graph in AOD, and signal ancestry in Nano. Standard regeneration
+can permute the same multi-mother references; the audit compares adjacency
+multisets and exact physical values, keeping duplicate ancestry edges.
+The copied templates retain CMS IR5 material/fields, unchanged detector and
+SHIFT reconstruction settings, no pileup and placeholder `HLT_Fake2`. Keep the
+result labelled bounded background-chain replay; it is not final recorded-event
+acceptance. Detector/reconstruction validation is recorded only in
+[SHIFT_RECONSTRUCTION.md](../../SHIFT_RECONSTRUCTION.md).
+
+The second bounded checkpoint also provides reusable signal diagnostics and
+histogram replay. With ROOT available, audit one Nano into a **new** JSON file:
+
+```bash
+python3 scripts/audit_dark_photon_dimuons.py \
+  --input ../validation/bsm_darkphoton_20261009_v2/m50_eps3e-8_detector2/nano.root \
+  --output ../validation/bsm_darkphoton_20261009_v2/diagnostics/new_m50.json \
+  --max-events 2
+```
+
+The diagnostic counts unique retained direct A' pairs and hit-matched signal
+legs/vertices; accompanying hadron/cascade muons are distinct. It does not change
+reconstruction, data selection or the existing J/psi truth histograms. Retained
+Nano truth is a slice diagnostic, not the complete GEN exposure. Timed GEN/HepMC,
+not Float Nano vertices, owns proper lifetimes.
+
+For a newly completed detector pilot that has no histogram output yet:
+
+```bash
+python3 scripts/run_dark_photon_histograms.py /absolute/path/to/new_detector_pilot
+```
+
+This runner enters the existing frozen background TEA runtime itself, verifies
+its binary/library/configuration digests and completed detector receipts, and
+allows 1-20 events. It overrides only `nEvents` and `weightsBranchName='genWeight'`.
+It refuses to overwrite output/receipts and never builds, submits or publishes.
+The existing completed pilots must not be rerun into their original directories.
+
+`scripts/dark_photon_scan.py` provides the `LifetimeProposal`, `LifetimeEvent`,
+`estimate_lifetime_acceptance` and `recommend_scan_refinements` APIs. Freeze
+proper-length anchors and counts before GEN, retain every event and use an
+authoritative target total width. Production/BR corrections stay external.
+Do not retrospectively add held-out points to the proposal or mix physics
+contexts. The utilities recommend new evidence and numerical scan points;
+they do not compute CLs, run jobs or establish sensitivity. See
+[SHIFT_BSM.md](../../SHIFT_BSM.md) for the adaptive-grid and precision contract,
+and [SHIFT_ANALYSIS.md](../../SHIFT_ANALYSIS.md) for the expected-only statistical
+design, blinding and upstream normalization/recording gates.
+
+### Preparing a physical 3 by 3 signal grid
+
+`scripts/prepare_dark_photon_grid.py` freezes a reviewable pilot plan, without
+running it. Its default is 15, 30 and 50 GeV, with prompt (`epsilon=1e-3`),
+approximately 5 m and approximately 30 m **mean lab flight** at each mass.
+The physical epsilon is derived from the natural width table and a measured
+unfiltered mean boost. Every decay keeps the full exponential distribution.
+Proper decay lengths for the displaced columns are about 62-78 mm and
+373-469 mm. Lab estimates inherit the finite reference-sample uncertainty.
+Use `--epsilons E1 E2 E3` for a strict Cartesian mass/epsilon grid instead.
+
+```bash
+python3 scripts/prepare_dark_photon_grid.py \
+  --references ../validation/bsm_grid_20261009/reference_inputs.json \
+  --templates ../validation/ntuple_production_20261007_v10/templates \
+  --output ../validation/bsm_grid_20261009/new_grid_plan
+```
+
+The reference schema is `shift-dark-photon-grid-reference-v1`, with
+`sample_kind='simulation_only'`, the common/CP5 lists, and per-mass physical
+width tables, mean boosts and source provenance. Preparation requires the
+existing built CMSSW runtime, independent native partial-width closure and
+resolvable proposal support. It writes nine hashed contracts, copied scripts
+and V10 templates, plus `plan.json` with separate `gen_argv` and `detector_argv`
+for each point. Default budgets are 100 GEN events and a two-event detector
+canary per point. Use new directories; existing evidence is protected.
+
+Run and audit each GEN point before its detector command. The GEN receipt
+stores technical Pythia tried/selected/accepted counters and the log digest.
+Repeated identical statistics tables count once; missing or contradictory
+counters fail closed. Accepted events must equal the complete unfiltered GEN
+denominator, including out-of-envelope decays. Pythia trials are not proton
+collisions or luminosity; authoritative cross sections come from GEN run data.
+
+Check storage headroom before starting. ROOT outputs, cards, frozen scripts,
+model files, plots and runtime receipts stay outside Git. Commit reusable
+source, tests and instructions. Remove only regenerable caches and disposable
+test fixtures after their validation; preserve source inventories, full-GEN
+ledgers, split/threshold locks and final evidence. The grid remains a bounded
+software pilot: real recording acceptance, physical rate closure and classifier
+mass/lifetime transfer must still be established before using a common N_eff.
+
 > **Fixed-constraint principle:** this project evaluates SHIFT reconstruction
 > under the real Run 3 CMS detector and trigger system. Never change electronics
 > integration windows, BX assignment, buffering/readout behavior, trigger

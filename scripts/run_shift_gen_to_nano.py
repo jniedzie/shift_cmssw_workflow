@@ -25,6 +25,23 @@ def sha(path):
     return h.hexdigest()
 
 
+def copy_gen_input(descriptor, target):
+    """Read frozen local pilots or existing XRootD inputs; verify both identically."""
+    mode = descriptor.get('gen_transport', 'xrootd')
+    if mode == 'local':
+        source = Path(descriptor['gen'])
+        if not source.is_absolute() or not source.is_file() or source.resolve() == target.resolve():
+            raise ValueError('Local GEN requires a distinct existing absolute input path')
+        shutil.copyfile(source, target)
+    elif mode == 'xrootd':
+        command(['xrdcp', '--silent', '--cksum', 'adler32',
+                 'root://eosuser.cern.ch/' + descriptor['gen'], str(target)], timeout=900)
+    else:
+        raise ValueError('Unsupported frozen GEN transport')
+    if sha(target) != descriptor['gen_sha256']:
+        raise ValueError('Frozen GEN payload changed')
+
+
 def command(args, **kwargs):
     timeout = kwargs.pop('timeout', 900)
     on_poll = kwargs.pop('on_poll', None)
@@ -435,9 +452,7 @@ def main():
         report['stage_deadline_epoch'] = time.time() + 1800
         progress(report, 'SETUP', validated)
         gen = work / 'gen.root'
-        command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/' + descriptor['gen'], str(gen)], timeout=900)
-        if sha(gen) != descriptor['gen_sha256']:
-            raise ValueError('Frozen GEN payload changed')
+        copy_gen_input(descriptor, gen)
         before = signatures(gen, args.skip, args.count, indices=indices)
         timing_modes = {row['timing_persisted_in_input'] for row in before}
         if len(timing_modes) != 1:
@@ -472,7 +487,8 @@ def main():
                 config_arguments = [sys.executable, str(Path(__file__).resolve()), 'make-config',
                      str(args.templates / f'step{stage}.py'), str(stage), str(input_file), str(output),
                      str(args.skip if stage == 1 else 0), str(args.count), str(report['seed'] + stage * 10),
-                     str(int(report['timing_persisted_in_gen'])), str(int(descriptor['stratum'].startswith('dy_'))), str(cfg)]
+                     str(int(report['timing_persisted_in_gen'])), str(int(descriptor.get(
+                         'missing_filter_lumi', descriptor['stratum'].startswith('dy_')))), str(cfg)]
                 if stage == 1 and probabilities is not None:
                     config_arguments.append(str(selection))
                 if complete_muon_decays:
