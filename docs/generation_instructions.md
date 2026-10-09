@@ -1502,6 +1502,17 @@ inside an existing live campaign. See the dated findings and actual production
 state in [SHIFT_RECONSTRUCTION.md](../../SHIFT_RECONSTRUCTION.md); this example
 is not a current completion claim.
 
+For decay-replay DAGs, `watch_shift_decay_dag.py` publishes
+`production_complete.json` once every planned Nano receipt passes exact
+identity, event-count, tier, path, and provenance validation. This does not
+wait for histogram merging. `final_complete.json` records the later merged
+histogram audit. Once DAGMan has ended and its child queue has drained, the
+watchdog exits on either success or failure. Matching DAG metrics confirm
+termination; an empty queue alone is not completion. A failed DAG writes
+`production_failed.json` and a terminal failure in `live_status.json`. Missing
+terminal evidence and scheduler errors stop the monitor after five checks,
+recording `monitor_error` rather than falsely marking production complete.
+
 The bootstrap writes `status.json` in Condor scratch before attempting failure
 uploads, using the host Python without CMSSW library or Python paths. Missing,
 unreadable or malformed reports still produce a failure status. Failure

@@ -152,7 +152,7 @@ def signatures(path, skip, count, indices=None):
     return rows
 
 
-def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None):
+def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None, complete_muon_decays=False):
     import FWCore.ParameterSet.Config as cms
     process = runpy.run_path(str(template))['process']
     process.source = cms.Source('PoolSource', fileNames=cms.untracked.vstring('file:' + str(input_file)),
@@ -187,6 +187,9 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
         if timing_persisted:
             delattr(process, 'shiftEventTime')
             delattr(process, 'genParticles')
+        if complete_muon_decays:
+            from shift_muon_decay_replay import configure_decays
+            configure_decays(process, seed, timing_persisted)
         process.FEVTDEBUGoutput.SelectEvents = cms.untracked.PSet(SelectEvents=cms.vstring('simulation_step'))
         process.FEVTDEBUGoutput.outputCommands.extend(['drop *_g4SimHits_*_*', 'keep *_g4SimHits_*_SHIFTSIM'])
     outputs = process.outputModules_()
@@ -379,6 +382,7 @@ def main():
     if len(limits) != 4 or min(limits) <= 0 or min(args.config_timeout, args.event_stall_timeout) <= 0:
         raise ValueError('Four positive stage timeouts required')
     descriptor = json.loads(args.source.read_text())
+    complete_muon_decays = descriptor.get('complete_muon_decays', False)
     population_indices = descriptor.get('selected_indices')
     population_size = len(population_indices) if population_indices is not None else len(descriptor['event_ids'])
     if 'weights' in descriptor and len(descriptor['weights']) != len(descriptor['event_ids']):
@@ -471,6 +475,10 @@ def main():
                      str(int(report['timing_persisted_in_gen'])), str(int(descriptor['stratum'].startswith('dy_'))), str(cfg)]
                 if stage == 1 and probabilities is not None:
                     config_arguments.append(str(selection))
+                if complete_muon_decays:
+                    if len(config_arguments) == 13:
+                        config_arguments.append('-')
+                    config_arguments.append('1')
                 command(config_arguments,
                      timeout=args.config_timeout, stdout=config_log, stderr=subprocess.STDOUT)
             config_seconds = time.monotonic() - config_start
@@ -496,7 +504,16 @@ def main():
                 report['stages'][str(stage)]['audit'] = audit_nano(output, before)
             if stage == 1:
                 after = signatures(output, 0, args.count)
-                if [{k:v for k,v in row.items() if k != 'timing_persisted_in_input'} for row in after] != [
+                if complete_muon_decays:
+                    from shift_muon_decay_replay import audit_completed_decays
+                    report['original_source_events'] = before
+                    report['muon_decay_audit'] = audit_completed_decays(
+                        gen, output, indices, args.count, report['timing_persisted_in_gen'])
+                    if [row['id'] for row in after] != [row['id'] for row in before] or [
+                            row['weight'] for row in after] != [row['weight'] for row in before]:
+                        raise ValueError('Decay completion changed GEN identities or weights')
+                    before = after
+                elif [{k:v for k,v in row.items() if k != 'timing_persisted_in_input'} for row in after] != [
                         {k:v for k,v in row.items() if k != 'timing_persisted_in_input'} for row in before]:
                     raise ValueError('Simulation changed GEN kinematics, vertices, nominal physical timing or weights')
             validated[tiers[stage]] = args.count
@@ -517,17 +534,17 @@ def main():
             destination = descriptor['output_base'] + ('/canaries' if args.canary else '') + f'/job{args.job:07d}'
             command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', destination], timeout=120)
             report['nano_path'] = destination + '/nano.root'
-            command(['xrdcp', '--silent', '--cksum', 'adler32', str(input_file), 'root://eosuser.cern.ch/' + report['nano_path']], timeout=900)
+            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(input_file), 'root://eosuser.cern.ch/' + report['nano_path']], timeout=900)
             readback = work / 'nano_readback.root'
             command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/' + report['nano_path'], str(readback)], timeout=900)
             if sha(readback) != report['nano_sha256'] or audit_nano(readback, before, probabilities) != report['nano']:
                 raise ValueError('Published NanoAOD does not match validated local output')
             archive_evidence(work, args.source)
-            command(['xrdcp', '--silent', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
+            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
                      'root://eosuser.cern.ch/' + destination + '/evidence.tar.gz'], timeout=900)
             report['evidence_sha256'] = sha(work / 'evidence.tar.gz')
             progress(report, 'COMPLETE', validated)
-            command(['xrdcp', '--silent', '--cksum', 'adler32', str(work / 'report.json'),
+            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'report.json'),
                      'root://eosuser.cern.ch/' + destination + '/complete.json'], timeout=120)
             published_receipt = True
         else:
@@ -549,9 +566,10 @@ def main():
 if __name__ == '__main__':
     if len(sys.argv) > 1 and sys.argv[1] == 'make-config':
         template, stage, source, target, skip, count, seed, timed, missing_filter, cfg = sys.argv[2:12]
-        event_ids = json.loads(Path(sys.argv[12]).read_text()) if len(sys.argv) > 12 else None
+        event_ids = json.loads(Path(sys.argv[12]).read_text()) if len(sys.argv) > 12 and sys.argv[12] != '-' else None
+        complete_muon_decays = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
         process = build_config(Path(template), int(stage), Path(source), Path(target),
-                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids)
+                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids, complete_muon_decays)
         Path(cfg).write_text(process.dumpPython())
     else:
         main()
