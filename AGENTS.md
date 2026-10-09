@@ -27,6 +27,28 @@ or use Git worktrees unless the user explicitly overrides this policy.
   to be disposable; never use a blanket cleanup on campaign state, data, logs,
   or the repository. A directory named `tmp` is not proof it is unused.
 
+## Production retention and obsolete campaigns
+
+- Once the actual production is finalized, remove disposable
+  `nanoAOD_canaries` and `GEN_pilot` payloads after validating canonical outputs
+  and confirming no live job, controller, recovery or downstream consumer
+  needs them. Terminal failed or partial campaigns do not qualify.
+- Keep pilot ROOT files that are the sole scientific evidence or a required
+  reproducible reference. Retain unique references outside the analysis data
+  base under `shift_cmssw_support/legacy_references/`.
+- Preserve cross sections, weights, full attempted/accepted denominators,
+  provenance, configurations, seeds, receipts and validation gates. Do not
+  discard whole `metadata/` directories; archive retired campaign metadata
+  alongside its references under
+  `shift_cmssw_support/legacy_references/<process-bin>/<campaign>/` with
+  verified hashes.
+- The 2026-10-09 request authorizes the reviewed obsolete campaigns/bins across
+  all processes, not blanket deletion of future campaigns.
+  Require exact inventories, dependency and live-job checks, validated
+  canonical outputs and preserved references/metadata before deletion. Record
+  per-file receipts, verify deleted paths are absent and check retained outputs
+  and storage mappings. Names, age or overlapping bins alone are insufficient.
+
 ## Non-negotiable physics objective
 
 The goal is to measure how well SHIFT muons can be triggered, recorded, and

@@ -25,6 +25,37 @@ package the resolver dependencies and publish to the new dated process-bin
 tiers. The retained legacy manifest/publication contracts remain unchanged for
 auditing; relocating their payloads does not authorize regeneration or cleanup.
 
+## Standing production-retention policy
+
+After the actual production is finalized, remove disposable `nanoAOD_canaries`
+and `GEN_pilot` payloads once canonical outputs pass their intended coverage,
+identity, weight and ROOT-content checks and no live job, controller, recovery
+or downstream consumer needs them. A terminal failed or partial campaign is
+not finalized. Keep pilot ROOTs that are the sole scientific evidence or a
+required reproducible reference.
+
+The 2026-10-09 request authorizes the reviewed obsolete campaigns/bins across
+all processes. It does not authorize blanket deletion of future campaigns.
+Freeze an exact inventory, check dependencies and current jobs, and preserve
+canonical outputs and unique references before deleting listed payloads.
+Keep references outside the analysis base under
+`shift_cmssw_support/legacy_references/<process-bin>/<campaign>/`. Archive retired
+campaign metadata alongside those references, retaining its directory structure
+and verifying hashes. Preserve cross sections, weights, full attempted/accepted denominators,
+provenance, configurations, seeds, receipts and validation gates; entire
+`metadata/` directories are not disposable. Record per-file deletion receipts,
+verify absence and retained-output health, and keep historical paths resolvable
+through the audited storage map. Names, age or overlapping bins alone do not
+establish obsolescence. Follow the workspace and repository AGENTS.md safeguards.
+
+The 2026-10-09 retirement audit and exact receipts are in
+`../validation/pilot_campaign_cleanup_20261009/`. Its independent
+`retention_path_map.json` extends historical path resolution without rewriting
+the original migration map, which active scoring jobs pin by hash. New frozen
+deployments that consume archived references must resolve and freeze the
+retention map too; a custom migration map deliberately opts out of the default
+retention overlay unless it is supplied explicitly.
+
 ## Bounded dark-photon pilots (2026-10-09)
 
 The signal model, limitations, history and active plan are owned by
