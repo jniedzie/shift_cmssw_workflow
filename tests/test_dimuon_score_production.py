@@ -37,8 +37,28 @@ def fixture(base):
     receipt_path = model_path.with_suffix('.json.receipt.json'); receipt_path.write_text(json.dumps(receipt))
     runtime = base / 'LCG_108/x86_64-el9-gcc13-opt/setup.sh'
     runtime.parent.mkdir(parents=True); runtime.write_text('# synthetic pinned setup\n')
+    resolver = production.storage_helper(production.DEFAULT_STORAGE_HELPER)
+    paths = {}
+    for index, source in enumerate(inputs):
+        stratum = source[len(production.SOURCE_ROOT) + 1:].split('/')[0]
+        process, bounds = stratum.split('_', 1)
+        campaign = resolver.campaign_directory(production.EOS_BASE, process, bounds, 'synthetic_20261009_v10')
+        job = f'job{index:07d}'
+        paths[source] = str(campaign / 'nanoAOD' / ('nano_' + job + '.root'))
+        paths[source.rsplit('/', 1)[0] + '/complete.json'] = str(campaign / 'metadata/ntuple_production' / job / 'complete.json')
+    migration = base / 'migration.json'
+    migration.write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=True, paths=paths)))
     return dict(inventory=inventory, model_path=model_path, scorer_directory=sources,
-                export_receipt=receipt_path, runtime_setup=runtime, inputs=inputs)
+                export_receipt=receipt_path, runtime_setup=runtime, inputs=inputs,
+                migration_manifest=migration)
+
+
+class SyntheticWorkspace(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        patch = mock.patch.object(production, 'DEFAULT_MIGRATION_MANIFEST', Path(directory.name) / 'absent_map.json')
+        patch.start(); self.addCleanup(patch.stop)
 
 
 def prepared(base, **kwargs):
@@ -97,7 +117,7 @@ class InventoryContract(unittest.TestCase):
         self.assertEqual(production.validate_output_root(production.OUTPUT_ROOT), production.OUTPUT_ROOT)
 
 
-class FrozenPlanContract(unittest.TestCase):
+class FrozenPlanContract(SyntheticWorkspace):
     def test_immutable_model_sources_runtime_batches_and_no_external_actions(self):
         with tempfile.TemporaryDirectory() as name, mock.patch.object(production.subprocess, 'run') as external:
             data, output, plan = prepared(Path(name), files_per_batch=7, expected_files=168)
@@ -107,6 +127,14 @@ class FrozenPlanContract(unittest.TestCase):
             self.assertFalse(plan['launched']); self.assertFalse(plan['selection_applied'])
             self.assertTrue(plan['retain_zero_pair_files']); self.assertFalse(plan['source_population_filtered'])
             self.assertFalse(plan['physics_ready']); self.assertFalse(plan['normalization_transfer_validated'])
+            self.assertEqual(plan['storage_contract']['version'], 2)
+            self.assertIn('shift_storage_paths.py', plan['frozen_dependencies'])
+            self.assertIn('storage_path_map.json', plan['frozen_dependencies'])
+            for row in plan['files']:
+                self.assertTrue(row['source'].startswith(production.SOURCE_ROOT + '/'))
+                self.assertNotEqual(row['source'], row['transport_source'])
+                self.assertIn('/nanoAOD/nano_job', row['output'])
+                self.assertIn('/metadata/bdt_scores/job', row['receipt'])
             pilot_rows = [plan['files'][i] for i in plan['pilot_batches'][0]['file_indices']]
             self.assertEqual([r['stratum'].split('_')[0] for r in pilot_rows], ['qcd', 'jpsi', 'dy'])
             self.assertEqual(json.loads((output / 'plan.json').read_text()), plan)
@@ -167,11 +195,44 @@ class FrozenPlanContract(unittest.TestCase):
                 production.prepare_plan(output=base / 'plan', **kwargs)
             self.assertFalse((base / 'plan').exists())
 
+    def test_in_progress_default_guard_blocks_even_an_explicit_old_completed_map(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name); data = fixture(base); kwargs = {k:v for k,v in data.items() if k != 'inputs'}
+            guard = base / 'active_migration.json'
+            guard.write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=False, paths={})))
+            with mock.patch.object(production, 'DEFAULT_MIGRATION_MANIFEST', guard):
+                with self.assertRaisesRegex(RuntimeError, 'in progress'):
+                    production.prepare_plan(output=base / 'plan', **kwargs)
+            self.assertFalse((base / 'plan').exists())
 
-class WorkerPublicationContract(unittest.TestCase):
+    def test_incomplete_or_unmapped_manifest_is_rejected_before_output(self):
+        for complete, paths in ((False, {}), (True, {})):
+            with tempfile.TemporaryDirectory() as name:
+                base = Path(name); data = fixture(base)
+                data['migration_manifest'].write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=complete, paths=paths)))
+                with self.assertRaises(RuntimeError):
+                    production.prepare_plan(output=base / 'plan', **{k:v for k,v in data.items() if k != 'inputs'})
+                self.assertFalse((base / 'plan').exists())
+
+    def test_changed_completed_map_blocks_worker_start_and_next_file(self):
+        with tempfile.TemporaryDirectory() as name:
+            data, output, plan = prepared(Path(name))
+            data['migration_manifest'].write_text(json.dumps(dict(schema='shift-storage-path-map-v1', complete=False, paths={})))
+            with self.assertRaises(RuntimeError): production.verify_plan(output / 'plan.json', production.digest(output / 'plan.json'))
+            with self.assertRaises(RuntimeError): production.verify_storage_gate(plan)
+
+    def test_optional_legacy_mode_only_before_any_migration_guard(self):
+        with tempfile.TemporaryDirectory() as name:
+            base = Path(name); data = fixture(base); data.pop('migration_manifest')
+            plan = production.prepare_plan(output=base / 'plan', **{k:v for k,v in data.items() if k != 'inputs'})
+            self.assertEqual(plan['storage_contract']['version'], 1)
+            self.assertTrue(all(r['source'] == r['transport_source'] for r in plan['files']))
+
+
+class WorkerPublicationContract(SyntheticWorkspace):
     def fake_io(self, plan, row):
         source = b'Original simulated Nano fixture; zero retained pairs'
-        store = {row['source']: source, row['source_receipt']: json.dumps(dict(
+        store = {row['transport_source']: source, row['transport_source_receipt']: json.dumps(dict(
             complete=True, nano_path=row['source'], nano_sha256=hashlib.sha256(source).hexdigest(), events=2)).encode()}
         publication_order = []
         def get(remote, local): Path(local).write_bytes(store[remote])
@@ -197,7 +258,7 @@ class WorkerPublicationContract(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             _, output, plan = prepared(Path(name)); row = plan['files'][0]
             store, order, get, put, score = self.fake_io(plan, row)
-            original = store[row['source']]
+            original = store[row['transport_source']]
             with mock.patch.object(production, 'get_remote', side_effect=get), \
                  mock.patch.object(production, 'put_remote', side_effect=put), \
                  mock.patch.object(production, 'remote_exists', side_effect=lambda path:path in store), \
@@ -207,9 +268,10 @@ class WorkerPublicationContract(unittest.TestCase):
                 reused = production.run_file(plan, production.digest(output / 'plan.json'), row, Path(name) / 'reuse')
             self.assertTrue(result['complete']); self.assertFalse(result['reused']); self.assertTrue(reused['reused'])
             self.assertEqual(order, [row['output'], row['receipt'], row['log'], row['complete_marker']])
-            self.assertEqual(store[row['source']], original)
+            self.assertEqual(store[row['transport_source']], original)
             receipt = json.loads(store[row['receipt']])
             self.assertEqual(receipt['source'], row['source']); self.assertEqual(receipt['output'], row['output'])
+            self.assertEqual(receipt['source_transport'], row['transport_source'])
             self.assertEqual(receipt['retained_pairs'], 0); self.assertFalse(receipt['selection_applied'])
             self.assertEqual(receipt['score_log'], row['log'])
             self.assertEqual(receipt['score_log_sha256'], hashlib.sha256(store[row['log']]).hexdigest())
@@ -220,7 +282,7 @@ class WorkerPublicationContract(unittest.TestCase):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as name:
                 _, output, plan = prepared(Path(name)); row = plan['files'][0]
                 store, order, get, put, score = self.fake_io(plan, row)
-                if failure == 'source': store[row['source']] = b'changed source'
+                if failure == 'source': store[row['transport_source']] = b'changed source'
                 else: store[row['output']] = b'orphan payload'
                 with mock.patch.object(production, 'get_remote', side_effect=get), \
                      mock.patch.object(production, 'put_remote', side_effect=put), \

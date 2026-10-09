@@ -33,6 +33,14 @@ this addition and would require restoring the original sampling metadata.
 
 ## Preparing and testing production
 
+**Current storage gate:** the bulk attempt `12879017` is held because v10
+payloads were relocated during the independently authorized EOS migration.
+The classifier did not fail. Do not release/resubmit the old frozen deployment
+or publish to its former output tree. Preserve its successful outputs and
+failure evidence. A new deployment must freeze a completed migration map and
+the canonical storage resolver, retain the logical receipt identities, and
+use the dated process-bin layout. An incomplete migration map is a hard gate.
+
 Enter the read-only LCG environment for export/scoring. No CMSSW build or
 reconstruction configuration changes are needed. The reusable scorer is
 `PhysicsTools/ShiftDimuonClassifier/add_bdt_score.py`, beside the feature and
@@ -45,9 +53,20 @@ From the workflow repository, prepare a **new** frozen deployment:
 python3 scripts/prepare_dimuon_score_production.py \
   --inventory ../validation/histogram_rerun_20261009/histogram_inputs.txt \
   --model ../CMSSW_17_0_0_pre4/src/PhysicsTools/ShiftDimuonClassifier/artifacts/portable_bdt_v1/uniform_bdt_3p0_s71.json \
-  --output ../validation/new_dimuon_score_production \
+  --migration-manifest ../validation/storage_reorganization_20261009/path_map.json \
+  --campaign shift_detector_20261009_v10_bdt_v2 \
+  --output ../validation/dimuon_score_production_20261009_v2 \
   --expected-files 10060 --prepare-condor
 ```
+
+This command refuses preparation while the migration guard is incomplete.
+After validation, it snapshots the exact map and canonical storage helper.
+Original receipt paths remain logical identities; the frozen map supplies the
+transport paths. Outputs use
+`PROCESS_BIN/shift_detector_20261009_v10_bdt_v2/nanoAOD/nano_jobXXXXXXX.root`,
+with score receipts, logs and completion markers under the campaign's
+`metadata/bdt_scores/jobXXXXXXX/`. Startup verifies the map digest, and each
+file checks that the migration state has not changed.
 
 The 2026-10-09 frozen deployment is
 `validation/dimuon_score_production_20261009/`. Its inventory contains 9,911
@@ -69,17 +88,26 @@ file identities are retained for recovery.
 Submit only the pilot first:
 
 ```bash
-condor_submit ../validation/dimuon_score_production_20261009/pilot.sub
+condor_submit ../validation/dimuon_score_production_20261009_v2/pilot.sub
 ```
 
-The current pilot `12878715.0` passed with exit code zero, 60 events, one pair
+The historical pilot `12878715.0` passed with exit code zero, 60 events, one pair
 and verified source/output/receipt/log checksums. The full 199-batch campaign
-is submitted as `12879017`; do not submit a duplicate. Submission receipts are
+was submitted as `12879017` and subsequently held during source relocation;
+do not submit a duplicate. Submission receipts are
 `pilot_submission.json` and `production_submission.json` beside the frozen
-plan. Check returned batch statuses and EOS completion markers for progress;
-the initial status was five materialized idle jobs with no holds. The new EOS tree is
+plan. Check returned batch statuses and EOS completion markers for progress.
+At the interruption, 15 materialized jobs were held and 13 distinct scored
+files had been published. Its original intended EOS tree was
 `shift_detector_representative_20261007_v10_bdt_v1`, alongside the original
-v10 tree. Existing v10 files remain the source and normalization authority.
+v10 tree. The source files remain the normalization authority; their logical
+old paths must now be resolved using the audited relocation map.
+
+The migration-aware preparer passed 19 tests. The actual incomplete workspace
+map was checked: preparation exits nonzero before creating a deployment or
+submitting anything. The check is preserved as `migration_gate_check.json`
+beside the historical plan. The revised preparation command above has not
+been launched against a completed map yet.
 
 The local five-file pilot preserved 82 events and ten dimuon rows across
 J/psi, DY, QCD, a zero-pair QCD file and a 50 GeV signal file. All original

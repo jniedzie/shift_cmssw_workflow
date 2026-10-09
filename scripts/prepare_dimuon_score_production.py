@@ -9,6 +9,7 @@ import argparse
 import ast
 from collections import Counter
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -24,6 +25,10 @@ import tarfile
 WORKSPACE = Path(__file__).resolve().parents[2]
 SOURCE_ROOT = '/eos/user/j/jniedzie/shift_cmssw/ntuple_production/shift_detector_representative_20261007_v10'
 OUTPUT_ROOT = SOURCE_ROOT + '_bdt_v1'
+EOS_BASE = '/eos/user/j/jniedzie/shift_cmssw'
+DEFAULT_SCORE_CAMPAIGN = 'shift_detector_20261009_v10_bdt_v2'
+DEFAULT_MIGRATION_MANIFEST = WORKSPACE / 'validation/storage_reorganization_20261009/path_map.json'
+DEFAULT_STORAGE_HELPER = WORKSPACE / 'tea_shift_cmssw/configs/shift_storage_paths.py'
 LCG_SETUP = Path('/cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh')
 SOURCES = ('features.py', 'portable_inference.py', 'add_bdt_score.py')
 STRATA = frozenset(
@@ -48,7 +53,7 @@ def canonical_eos(value):
     if '..' in value.split('/') or '.' in value.split('/') or '//' in value or '\\' in value:
         raise ValueError('EOS paths must be normalized without traversal')
     value = value.replace('/eos/home-j/jniedzie/', '/eos/user/j/jniedzie/', 1)
-    if not value.startswith('/eos/user/j/jniedzie/shift_cmssw/'):
+    if value != EOS_BASE and not value.startswith(EOS_BASE + '/'):
         raise ValueError('Only the explicit private SHIFT EOS namespace is supported')
     return value.rstrip('/')
 
@@ -59,6 +64,33 @@ def validate_output_root(value):
     if source == output or source in output.parents or output in source.parents:
         raise ValueError('Scored output root must be distinct from the V10 input tree')
     return value
+
+
+def storage_helper(path):
+    spec = importlib.util.spec_from_file_location('_shift_score_storage_paths', Path(path))
+    if spec is None or spec.loader is None:
+        raise ValueError('Cannot load the canonical storage resolver')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def storage_contract(migration_manifest, helper_path):
+    """Reject an active migration even when a caller omitted the new option."""
+    configured = os.environ.get('SHIFT_STORAGE_MIGRATION_MANIFEST')
+    guard = Path(configured) if configured else DEFAULT_MIGRATION_MANIFEST
+    if guard.exists():
+        record = json.loads(guard.read_text())
+        if record.get('schema') != 'shift-storage-path-map-v1' or record.get('complete') is not True:
+            raise RuntimeError('Storage migration is in progress or unvalidated; preparation/run is blocked')
+        if migration_manifest is None:
+            raise RuntimeError('Migrated storage requires an explicit completed --migration-manifest')
+    if migration_manifest is None:
+        return None, None
+    manifest = Path(migration_manifest).resolve()
+    resolver = storage_helper(helper_path)
+    resolver.load_migration_map(manifest)
+    return resolver, manifest
 
 
 def read_inventory(path, *, require_all_strata=True):
@@ -140,9 +172,12 @@ def write_json(path, value):
         target.write(json.dumps(value, indent=2, allow_nan=False) + '\n')
 
 
-def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root=OUTPUT_ROOT,
+def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root=None,
                  export_receipt=None, runtime_setup=LCG_SETUP, files_per_batch=50,
-                 chunk_events=1000, expected_files=None, prepare_condor=False):
+                 chunk_events=1000, expected_files=None, prepare_condor=False,
+                 migration_manifest=None, storage_helper_path=DEFAULT_STORAGE_HELPER,
+                 campaign=DEFAULT_SCORE_CAMPAIGN):
+    resolver, migration_manifest = storage_contract(migration_manifest, storage_helper_path)
     if (type(files_per_batch) is not int or not 1 <= files_per_batch <= 100
             or type(chunk_events) is not int or not 1 <= chunk_events <= 10000):
         raise ValueError('Require 1..100 files/batch and 1..10000 events/read chunk')
@@ -154,8 +189,39 @@ def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root
         raise FileExistsError('Refuse to overwrite an existing production plan')
     if prepare_condor and not re.fullmatch(r'[A-Za-z0-9_./-]+', str(output)):
         raise ValueError('Condor preparation requires a path without whitespace or submit-language metacharacters')
-    output_root = validate_output_root(output_root)
+    if resolver:
+        output_root = canonical_eos(output_root or EOS_BASE)
+        if output_root != EOS_BASE:
+            raise ValueError('Migrated output must use the canonical process-bin EOS data base')
+    else:
+        output_root = validate_output_root(output_root or OUTPUT_ROOT)
     rows = read_inventory(inventory)
+    source_transports, receipt_transports = set(), set()
+    for row in rows:
+        row['transport_source'] = canonical_eos(resolver.resolve_storage_path(row['source'], migration_manifest)) if resolver else row['source']
+        row['transport_source_receipt'] = canonical_eos(resolver.resolve_storage_path(row['source_receipt'], migration_manifest)) if resolver else row['source_receipt']
+        if resolver and any(row[key].startswith(SOURCE_ROOT + '/') for key in ('transport_source', 'transport_source_receipt')):
+            raise RuntimeError('Completed migration map lacks an exact source/receipt relocation: ' + row['source'])
+        if row['transport_source'] in source_transports or row['transport_source_receipt'] in receipt_transports:
+            raise ValueError('Migration map aliases distinct jobs to the same source/receipt')
+        source_transports.add(row['transport_source']); receipt_transports.add(row['transport_source_receipt'])
+        row['transport_source_url'] = 'root://eosuser.cern.ch/' + row['transport_source']
+        if resolver:
+            process, bounds = row['stratum'].split('_', 1)
+            campaign_path = resolver.campaign_directory(output_root, process, bounds, campaign)
+            metadata = campaign_path / 'metadata/bdt_scores' / row['job']
+            row.update(output=str(campaign_path / 'nanoAOD' / ('nano_' + row['job'] + '.root')),
+                       receipt=str(metadata / 'bdt_score.json'), log=str(metadata / 'bdt_score.log'),
+                       complete_marker=str(metadata / 'complete.json'))
+        else:
+            destination = output_root + '/' + row['stratum'] + '/' + row['job']
+            row.update(output=destination + '/nano.root', receipt=destination + '/bdt_score.json',
+                       log=destination + '/bdt_score.log', complete_marker=destination + '/complete.json')
+        if row['output'] in source_transports or row['output'] == row['source']:
+            raise ValueError('Scored destination aliases an original source payload')
+    if any(row['output'] in source_transports or row['receipt'] in receipt_transports
+           or row['complete_marker'] in receipt_transports for row in rows):
+        raise ValueError('Scored destination aliases an original source payload/receipt')
     if expected_files is not None and (type(expected_files) is not int or expected_files < len(rows)):
         raise ValueError('Expected file count must be an integer at least as large as the inventory')
     model, receipt = validate_export(model_path, export_receipt, scorer_directory)
@@ -166,6 +232,9 @@ def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root
                     'export_receipt.json': export_receipt,
                     'prepare_dimuon_score_production.py': Path(__file__).resolve()}
     dependencies.update({name: scorer_directory / name for name in SOURCES})
+    if resolver:
+        dependencies.update({'shift_storage_paths.py': Path(storage_helper_path).resolve(),
+                             'storage_path_map.json': migration_manifest})
     hashes = {name: digest(path) for name, path in dependencies.items()}
     bundle_hash = hashlib.sha256(json.dumps(hashes, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     runtime_hash = digest(runtime_setup)
@@ -175,19 +244,25 @@ def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root
         shutil.copy2(path, frozen / name)
         if digest(frozen / name) != hashes[name] or digest(path) != hashes[name]:
             raise ValueError('Dependency changed during snapshot: ' + name)
-    if read_inventory(frozen / 'inventory.txt') != rows:
+    original_fields = ('index', 'source', 'source_url', 'source_receipt', 'stratum', 'job', 'original_inventory_path')
+    if read_inventory(frozen / 'inventory.txt') != [{k: row[k] for k in original_fields} for row in rows]:
         raise ValueError('Inventory changed between parsing and snapshot')
     frozen_model, frozen_receipt = validate_export(frozen / 'model.json', frozen / 'export_receipt.json', frozen)
     if frozen_model != model or frozen_receipt != receipt:
         raise ValueError('Model/export receipt changed between validation and snapshot')
+    if resolver:
+        frozen_resolver = storage_helper(frozen / 'shift_storage_paths.py')
+        frozen_resolver.load_migration_map(frozen / 'storage_path_map.json')
+        for row in rows:
+            for logical, physical in (('source', 'transport_source'), ('source_receipt', 'transport_source_receipt')):
+                if canonical_eos(frozen_resolver.resolve_storage_path(row[logical], frozen / 'storage_path_map.json')) != row[physical]:
+                    raise RuntimeError('Storage mapping changed between resolution and snapshot')
+        if digest(migration_manifest) != hashes['storage_path_map.json']:
+            raise RuntimeError('Storage mapping changed before sealing')
     if digest(runtime_setup) != runtime_hash:
         raise ValueError('Pinned runtime setup changed during preparation')
     for row in rows:
-        destination = output_root + '/' + row['stratum'] + '/' + row['job']
-        row.update(output=destination + '/nano.root', receipt=destination + '/bdt_score.json',
-                   log=destination + '/bdt_score.log',
-                   complete_marker=destination + '/complete.json')
-        row['score_argv'] = ['python3', str(frozen / 'add_bdt_score.py'), '--input', row['source'],
+        row['score_argv'] = ['python3', str(frozen / 'add_bdt_score.py'), '--input', row['transport_source'],
                              '--output', row['output'], '--model', str(frozen / 'model.json'),
                              '--sample-kind', 'simulation', '--receipt', row['receipt'],
                              '--chunk-events', str(chunk_events)]
@@ -199,6 +274,15 @@ def prepare_plan(inventory, model_path, output, *, scorer_directory, output_root
     result = dict(schema=PLAN_SCHEMA, prepared=True, launched=False, sample_kind='simulation',
                   selection_applied=False, physics_ready=False, normalization_transfer_validated=False,
                   source_root=SOURCE_ROOT, output_root=output_root,
+                  storage_contract=dict(version=2 if resolver else 1,
+                      layout='dated-process-bin-direct-tiers' if resolver else 'legacy-before-migration',
+                      campaign=campaign if resolver else None, migration_complete=True if resolver else None,
+                      migration_manifest_source=str(migration_manifest) if resolver else None,
+                      migration_manifest_mtime_ns=migration_manifest.stat().st_mtime_ns if resolver else None,
+                      migration_manifest_bytes=migration_manifest.stat().st_size if resolver else None,
+                      migration_manifest=str(frozen / 'storage_path_map.json') if resolver else None,
+                      resolver=str(frozen / 'shift_storage_paths.py') if resolver else None,
+                      historical_receipt_paths_unchanged=True),
                   inventory_files=len(rows), expected_files=expected_files,
                   missing_from_expected=None if expected_files is None else expected_files - len(rows),
                   missing_count_scope='Frozen inventory count only; missing source jobs are not produced or inferred complete',
@@ -299,7 +383,12 @@ def verify_plan(path, expected_sha):
             or plan.get('selection_applied') is not False or plan.get('physics_ready') is not False
             or plan.get('normalization_transfer_validated') is not False):
         raise ValueError('Invalid provisional simulation scoring plan')
-    validate_output_root(plan['output_root'])
+    storage = plan.get('storage_contract', {'version': 1})
+    if storage['version'] == 1:
+        storage_contract(None, DEFAULT_STORAGE_HELPER)
+        validate_output_root(plan['output_root'])
+    elif storage['version'] != 2 or plan['output_root'] != EOS_BASE:
+        raise ValueError('Unsupported dated storage contract')
     for name, row in plan['frozen_dependencies'].items():
         if digest(row['path']) != row['sha256']:
             raise ValueError('Frozen scoring dependency changed: ' + name)
@@ -308,7 +397,44 @@ def verify_plan(path, expected_sha):
         raise ValueError('Frozen scoring bundle digest differs')
     if digest(plan['runtime']['setup']) != plan['runtime']['setup_sha256']:
         raise ValueError('Pinned runtime setup changed')
+    verify_storage(plan)
     return plan
+
+
+def verify_storage(plan):
+    storage = plan.get('storage_contract', {'version': 1})
+    if storage['version'] == 1:
+        storage_contract(None, DEFAULT_STORAGE_HELPER)
+        return
+    manifest = Path(storage['migration_manifest_source'])
+    resolver, _ = storage_contract(manifest, storage['resolver'])
+    expected = plan['frozen_dependencies']['storage_path_map.json']['sha256']
+    if digest(manifest) != expected:
+        raise RuntimeError('Completed migration map changed; prepare a new deployment')
+    resolver.load_migration_map(storage['migration_manifest'])
+    for row in plan['files']:
+        for logical, physical in (('source', 'transport_source'), ('source_receipt', 'transport_source_receipt')):
+            if canonical_eos(resolver.resolve_storage_path(row[logical], storage['migration_manifest'])) != row[physical]:
+                raise ValueError('Frozen transport path differs from the completed migration map')
+
+
+def verify_storage_gate(plan):
+    """Cheap per-file gate; full map digests/resolution are verified at startup."""
+    storage = plan.get('storage_contract', {'version': 1})
+    if storage['version'] == 1:
+        storage_contract(None, DEFAULT_STORAGE_HELPER)
+        return
+    source = Path(storage['migration_manifest_source'])
+    info = source.stat()
+    if (info.st_mtime_ns != storage['migration_manifest_mtime_ns']
+            or info.st_size != storage['migration_manifest_bytes']):
+        raise RuntimeError('Storage migration map changed during this batch; no further file can run')
+    configured = os.environ.get('SHIFT_STORAGE_MIGRATION_MANIFEST')
+    guard = Path(configured) if configured else DEFAULT_MIGRATION_MANIFEST
+    if guard.exists() and guard.resolve() != source.resolve():
+        record = json.loads(guard.read_text())
+        if record.get('schema') != 'shift-storage-path-map-v1' or record.get('complete') is not True:
+            raise RuntimeError('Another storage migration is in progress; no further file can run')
 
 
 def clean_transfer_environment():
@@ -343,11 +469,11 @@ def put_remote(local, path):
 def run_file(plan, plan_sha, row, work):
     work.mkdir(exist_ok=False)
     source, original_receipt = work / 'source.root', work / 'source_complete.json'
-    get_remote(row['source_receipt'], original_receipt)
+    get_remote(row.get('transport_source_receipt', row['source_receipt']), original_receipt)
     original = json.loads(original_receipt.read_text())
     if original.get('complete') is not True or canonical_eos(original.get('nano_path')) != row['source']:
         raise ValueError('Source lacks its exact completed V10 publication receipt')
-    get_remote(row['source'], source)
+    get_remote(row.get('transport_source', row['source']), source)
     source_sha = digest(source)
     if source_sha != original.get('nano_sha256'):
         raise ValueError('Source Nano differs from its published V10 checksum')
@@ -399,12 +525,15 @@ def run_file(plan, plan_sha, row, work):
         raise ValueError('Scorer content/count/provenance verification failed')
     receipt['staged_paths'] = {k: receipt[k] for k in ('source', 'output')}
     receipt.update(source=row['source'], output=row['output'], source_url=row['source_url'],
+                   source_transport=row.get('transport_source', row['source']),
+                   source_transport_url=row.get('transport_source_url', row['source_url']),
                    output_url='root://eosuser.cern.ch/' + row['output'], plan_sha256=plan_sha,
                    original_publication_receipt=row['source_receipt'],
                    original_publication_receipt_sha256=digest(original_receipt),
                    score_log=row['log'], score_log_sha256=digest(work / 'score.log'))
     receipt_path.write_text(json.dumps(receipt, indent=2, allow_nan=False) + '\n')
-    transfer(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', row['output'].rsplit('/', 1)[0]])
+    for directory in sorted({row[key].rsplit('/', 1)[0] for key in ('output', 'receipt', 'log', 'complete_marker')}):
+        transfer(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', directory])
     for local, remote in ((output, row['output']), (receipt_path, row['receipt']), (work / 'score.log', row['log'])):
         put_remote(local, remote)
         readback = work / ('readback_' + local.name); get_remote(remote, readback)
@@ -412,6 +541,7 @@ def run_file(plan, plan_sha, row, work):
             raise ValueError('Scored publication checksum readback failed')
     marker = dict(schema=MARKER_SCHEMA, complete=True, plan_sha256=plan_sha,
                   source=row['source'], source_sha256=source_sha, output=row['output'], output_sha256=digest(output),
+                  source_transport=row.get('transport_source', row['source']),
                   score_receipt_sha256=digest(receipt_path), model_sha256=plan['model_sha256'],
                   score_log=row['log'], score_log_sha256=digest(work / 'score.log'),
                   events=receipt['events'], retained_pairs=receipt['retained_pairs'],
@@ -443,6 +573,8 @@ def run_batch(path, expected_sha, batch_index, scratch, *, pilot=False):
     active = None
     try:
         for index in status['expected_file_indices']:
+            # Refuse another file if a new migration starts during this batch.
+            verify_storage_gate(plan)
             active = work / f'file{index:05d}'
             status['files'].append(run_file(plan, expected_sha, plan['files'][index], active))
             status_path.write_text(json.dumps(status, indent=2) + '\n')
@@ -488,7 +620,10 @@ def main():
     parser.add_argument('--export-receipt', type=Path)
     parser.add_argument('--scorer-directory', type=Path, default=WORKSPACE / 'CMSSW_17_0_0_pre4/src/PhysicsTools/ShiftDimuonClassifier')
     parser.add_argument('--output', required=True, type=Path)
-    parser.add_argument('--eos-output-root', default=OUTPUT_ROOT)
+    parser.add_argument('--eos-output-root', help='EOS data base after migration, distinct legacy root before migration')
+    parser.add_argument('--migration-manifest', type=Path, help='Required explicit completed storage path map after relocation')
+    parser.add_argument('--storage-helper', type=Path, default=DEFAULT_STORAGE_HELPER)
+    parser.add_argument('--campaign', default=DEFAULT_SCORE_CAMPAIGN)
     parser.add_argument('--files-per-batch', type=int, default=50)
     parser.add_argument('--chunk-events', type=int, default=1000)
     parser.add_argument('--expected-files', type=int)
@@ -497,7 +632,9 @@ def main():
     plan = prepare_plan(args.inventory, args.model, args.output, scorer_directory=args.scorer_directory,
                         output_root=args.eos_output_root, export_receipt=args.export_receipt,
                         files_per_batch=args.files_per_batch, chunk_events=args.chunk_events,
-                        expected_files=args.expected_files, prepare_condor=args.prepare_condor)
+                        expected_files=args.expected_files, prepare_condor=args.prepare_condor,
+                        migration_manifest=args.migration_manifest, storage_helper_path=args.storage_helper,
+                        campaign=args.campaign)
     print(json.dumps(dict(prepared=True, launched=False, files=plan['inventory_files'],
                           batches=len(plan['batches']), output=str(args.output),
                           selection_applied=False, condor_prepared=plan['condor_prepared'])))
