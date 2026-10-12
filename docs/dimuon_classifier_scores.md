@@ -1,8 +1,75 @@
 # Dimuon vertex BDT scores in v10 Nano files
 
-## Current merged-group first test and continuation (2026-10-09)
+## October 12 recovery and all-sample first look
 
-The active first test uses 501 existing SM merged group files (up to 20 Nano
+The October 12 metadata audit found 494 of the 503 grouped publications
+complete. The old cluster `12879497` had returned 97 successful batches and
+four failures, then ended; its event log records the four failed jobs and
+factory being removed on October 10. The old continuation never submitted
+v3. Its expired state is retained unchanged.
+
+After verifying the queue, factories, immutable deployment and repaired-writer
+canary, recovery cluster `12901333` submitted all 101 sealed v3 batches once.
+The nine missing groups were 17--19, 128--129 and 196--199. Existing outputs
+are checksum-verified and reused. All 101 recovery jobs exited zero; the
+complete 503-file set contains 187,254 events and 20,184 retained pairs.
+New submission intent, receipt, scheduler
+snapshots and finish logs are under
+`validation/dimuon_merged_score_test_20261009/resume_20261012/`.
+
+All seven formerly unavailable signal points have now been scored separately
+in `validation/bdt_signal_extension_20261012/`: 140 events and 28 retained
+pairs, with 18 genuine and 10 unknown classifier labels. Every original branch,
+schema and recomputed score passed verification. Their native `genWeight` is
+used once. This extension preserves the original 503-file deployment.
+
+The completion runner validates all 101 successful statuses before preparing
+the exact 503-input performance manifest and 21 histogram merges. The combined
+first look adds the seven signal inputs: 510 files, 187,394 events, all 19 SM
+bins and all nine signal grid points. Its output directory is
+`validation/bdt_first_look_20261012/`. The SM population remains the frozen
+9,911-job subset, excluding 149 jobs from the original detector-production
+target. Signal statistics remain too small to establish mass/lifetime closure.
+
+The plot preparer accepts the merger's `rows` inventory as well as the original
+`samples` format, preserves logical EOS paths in provenance, and resolves the
+equivalent mounted path for reading. SM legends identify the process rather
+than the first contributing bin. Dedicated plot scopes are `sm` and `all`.
+Separate genuine/accidental/unknown overlays show all retained pairs; numerical
+ROC and fixed-cut efficiencies exclude the model's training/validation events.
+No score selection is applied to any ntuple or histogram.
+
+The completed `performance/performance.json` excludes 2,790 original
+training/validation pairs and evaluates 11,832 genuine and 2,383 accidental
+held-out SM pairs. Empirical AUC is 0.803 (95% event-bootstrap interval
+0.792--0.812) against all accidental pairs, or 0.876 (0.843--0.903) against
+the 107 accidental QCD pairs. At the unchanged threshold
+0.4403188643890805, genuine retention is 10,510/11,832 (88.8%); accidental
+QCD rejection is 70/107 (65.4%), and all-accidental rejection is 49.9%.
+
+The weighted QCD comparison has only 12.8 effective independent negative
+events and fails the required minimum of 20. Its AUC is a diagnostic, not
+validated physics performance. The all-retained genuine-SM weighted shape
+receives 96.5% of its weight from one genuine QCD pair; that pair is excluded
+from held-out evaluation, which has no genuine QCD support. Signal points
+have only 1--5 genuine direct-parent pairs each (25/26 survive in total).
+Neither mass nor lifetime independence is established.
+
+Within the first-look directory, start with
+`plots_all/dimuon_bdt/ShiftDimuonVertex_bdtScore_shape.png`,
+`label_separation_annotated/`, and the held-out ROC in `performance_annotated/`.
+The latter rerenders the frozen completed report with explicit statistical
+support annotations; the original evaluation and artifacts in `performance/`
+remain unchanged.
+The plot-validation receipts distinguish all-retained weighted shapes from
+held-out performance and preserve the original rendering evidence.
+
+## Historical merged-group first test and continuation (2026-10-09)
+
+The following records the October 9 state and planned commands. The completed
+October 12 recovery and evaluation above supersede its pending steps.
+
+The first test used 501 existing SM merged group files (up to 20 Nano
 files per group), plus two completed prompt signal files. Every group keeps
 its own scored ntuple and histogram output. No whole-bin event tree is made.
 Only histogram files are merged by process-bin at the final step.
@@ -11,15 +78,15 @@ The user clarified that N_eff is the effective MC normalization fitted to
 data. AUC and fixed-cut BDT efficiency are the classifier metrics; neither is
 called N_eff. The new performance tool reports both empirical and correctly
 weighted MC-mixture ROC, proper-c-tau/mass maps, uncertainties and support.
-Seven signal points currently have no completed detector ntuple and remain
-unmeasured. Uniformity is a validation target, not an established result.
+Seven signal points had no completed detector ntuple at that checkpoint and
+were unmeasured. Uniformity remains a validation target.
 
 The older individual-file campaign `12879319` was reversibly held at the
-user's request to use small merged groups; its 20 materialized jobs are held.
+user's request to use small merged groups; its 20 materialized jobs were held.
 Outputs, logs and frozen deployments are retained. Do not release it as part
 of this first test.
 
-Grouped campaign `12879497` uses `deployment_v2`. Its local four-group canary
+Grouped campaign `12879497` used `deployment_v2`. Its local four-group canary
 passed 1,209 events and 58 pairs, including standard and BDT histogramming.
 Two original merged-file layouts exposed a ROOT writer limitation before
 publication. The repaired metadata-only writer passed both actual failed-file
@@ -33,14 +100,15 @@ the proof is `recovery_canary_batch_status.json`.
 
 Control/state and source inventory are under workspace
 `validation/dimuon_merged_score_test_20261009/`. A finite continuation watcher
-waits for the original grouped jobs to drain, holds only the obsolete grouped
-cluster, then submits `deployment_v3/production.sub` once. Query failures are
+was prepared to wait for the original grouped jobs to drain, hold only the
+obsolete grouped cluster, then submit `deployment_v3/production.sub` once.
+It expired without submitting v3. Query failures are
 unknown state; ambiguous submissions stop without a duplicate. Its state and
 submission receipts are under `continuation/`. Reconcile those receipts and
 the queue before any manual recovery submission.
 
-When all 101 recovery batch statuses are complete, run the histogram-only
-merger with the sealed plan SHA printed in `deployment_v3/plan.json` receipts:
+The planned histogram-only merge, gated on all 101 complete recovery batch
+statuses and the sealed plan SHA, was:
 
 ```bash
 source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
@@ -59,13 +127,13 @@ is applied before process shapes are combined. The dedicated plot config is
 `shift_bdt_plotter_config.py`, selected through `SHIFT_BDT_PLOT_INPUTS`.
 
 Performance manifest preparation is preserved beside the source inventory.
-Once all outputs are validated, run the CMSSW classifier's
-`bdt_performance.py` with `performance_inputs.json`, the frozen portable
-model, `artifacts/phase2_seed71_72`, and a new output directory. Inspect both
-fixed-cut efficiencies and AUC. The two available prompt points have too few
-genuine vertices to establish closure; pending lifetimes must not be
-interpolated into a uniformity claim. See the task log for exact commands and
-the continuation checklist.
+The plan called for the CMSSW classifier's `bdt_performance.py` to consume
+`performance_inputs.json`, the frozen portable model and
+`artifacts/phase2_seed71_72`, writing fixed-cut efficiencies and AUC into a new
+output directory after complete validation. At that checkpoint, the two
+available prompt points had too few genuine vertices to establish closure.
+Pending lifetimes could not support a uniformity claim. The completed
+October 12 evaluation above still records the limited signal support.
 
 The frozen `uniform_bdt_3p0_s71` benchmark is ready to produce a diagnostic
 score column. Its mass/vertex/lifetime acceptance has not passed the physics
