@@ -62,6 +62,31 @@ class RestartTests(unittest.TestCase):
             subprocess.run(['/bin/bash', '-n', str(root / 'bootstrap.sh')], check=True)
             self.assertNotIn('eval ', (root / 'bootstrap.sh').read_text())
 
+    def test_explicit_canonical_runtime_url_is_preserved(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.campaign(root, sampled=True)
+            runtime = json.loads((root / 'runtime_freeze.json').read_text())
+            runtime['url'] = 'root://eosuser.cern.ch//eos/user/j/test/runtime.tar.gz'
+            (root / 'runtime_freeze.json').write_text(json.dumps(runtime))
+            self.launch(root)
+            self.assertEqual(json.loads((root / 'bootstrap.json').read_text())['bundle_url'], runtime['url'])
+
+    def test_invalid_runtime_url_preserves_campaign_before_launch(self):
+        for url in ('https://example.test/runtime.tar.gz', '/tmp/runtime.tar.gz', None):
+            with self.subTest(url=url), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                self.campaign(root, sampled=True)
+                runtime = json.loads((root / 'runtime_freeze.json').read_text())
+                runtime['url'] = url
+                (root / 'runtime_freeze.json').write_text(json.dumps(runtime))
+                original = {p: p.read_bytes() for p in root.rglob('*') if p.is_file()}
+                with self.assertRaisesRegex(ValueError, 'canonical user EOS endpoint'):
+                    self.launch(root)
+                self.assertEqual({p: p.read_bytes() for p in root.rglob('*') if p.is_file()}, original)
+                self.assertFalse((root / 'logs').exists())
+                self.assertFalse((root / 'results').exists())
+
     def test_explicit_guard_limits_are_frozen_and_forwarded_to_worker(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

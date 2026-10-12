@@ -34,3 +34,10 @@ def _canonical_helper(migration_manifest=None):
 def resolve_storage_path(path, migration_manifest=None):
     helper = _canonical_helper(migration_manifest)
     return str(path) if helper is None else helper.resolve_storage_path(path, migration_manifest)
+
+
+def campaign_directory(base_path, process, bin_name, campaign):
+    helper = _canonical_helper()
+    if helper is None:
+        raise RuntimeError('Storage campaign helper is unavailable')
+    return helper.campaign_directory(base_path, process, bin_name, campaign)

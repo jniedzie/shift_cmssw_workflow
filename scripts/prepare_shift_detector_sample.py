@@ -16,6 +16,8 @@ import math
 from pathlib import Path
 import shutil
 
+import shift_storage_paths
+
 
 HASH_SPACE = 1 << 256
 
@@ -113,7 +115,10 @@ def _normalization_authorities(manifest):
     return authorities
 
 
-def prepare(input_campaign, output, eos_output, target_events, events_per_job, seed):
+def prepare(input_campaign, output, eos_output, target_events, events_per_job, seed,
+            include_strata=None, target_events_by_stratum=None,
+            process_bin_campaign=None, eos_data_root=None,
+            complete_muon_decays=False, resolve_input_paths=False):
     input_campaign, output = Path(input_campaign).resolve(), Path(output).resolve()
     if output.exists():
         raise ValueError('Refusing an existing output campaign')
@@ -128,10 +133,36 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
     if manifest.get('detector_sampling'):
         raise ValueError('Input must be the full GEN inventory, not an earlier detector sample')
     authorities = _normalization_authorities(manifest)
+    available_strata = set(manifest['strata'])
+    included = available_strata if include_strata is None else set(include_strata)
+    if not included or not included <= available_strata:
+        raise ValueError('Requested detector strata are empty or absent from the parent inventory')
+    if target_events_by_stratum is not None and not isinstance(target_events_by_stratum, dict):
+        raise ValueError('Per-stratum targets must be a JSON object')
+    target_events_by_stratum = dict(target_events_by_stratum or {})
+    if not set(target_events_by_stratum) <= included:
+        raise ValueError('Per-stratum targets contain a stratum outside this detector sample')
+    if any(type(value) is not int or value < 1 for value in target_events_by_stratum.values()):
+        raise ValueError('Per-stratum targets must be positive integers')
+    storage = {}
+    if process_bin_campaign is not None:
+        if (not isinstance(eos_data_root, str) or not eos_data_root.startswith('/eos/user/')
+                or '..' in Path(eos_data_root).parts or '\n' in eos_data_root):
+            raise ValueError('Process-bin storage requires a canonical /eos/user/ data root')
+        for stratum in sorted(included):
+            process, bounds = stratum.split('_', 1)
+            campaign_root = shift_storage_paths.campaign_directory(
+                eos_data_root, process, bounds, process_bin_campaign)
+            storage[stratum] = dict(
+                campaign=str(campaign_root),
+                nano_base=str(campaign_root / 'nanoAOD'),
+                metadata_base=str(campaign_root / 'metadata' / 'detector_jobs'))
     cache, grouped, parent_records = [], defaultdict(list), []
     indices = set()
     # Read each large descriptor once: retain it for selection and publication.
     for summary in sorted(manifest['sources'], key=lambda row: row['index']):
+        if summary['stratum'] not in included:
+            continue
         index = summary['index']
         if type(index) is not int or index < 0 or index in indices:
             raise ValueError('Duplicate or invalid source index')
@@ -160,7 +191,7 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
             events=len(identities), receipt=descriptor['receipt'],
             receipt_sha256=descriptor['receipt_sha256'],
             normalization_record=descriptor.get('normalization_record')))
-    if set(grouped) != set(manifest['strata']):
+    if set(grouped) != included:
         raise ValueError('Full inventory does not cover every declared bin')
 
     statistics = {}
@@ -170,7 +201,8 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         weights = [weight for item in items for weight in item['weights']]
         if len(weights) != manifest['strata'][stratum]:
             raise ValueError('Full-inventory event count differs for ' + stratum)
-        scale, expected_target = fit_scale(weights, target_events)
+        requested_target = target_events_by_stratum.get(stratum, target_events)
+        scale, expected_target = fit_scale(weights, requested_target)
         sumw, sumw2 = math.fsum(weights), math.fsum(w * w for w in weights)
         expected_terms, expected_w2 = [], []
         selected_native, corrected, selected_variance = [], [], []
@@ -216,7 +248,7 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         realized_sumw2 = math.fsum(w * w for w in corrected)
         statistics[stratum] = dict(original_events=len(weights), original_sumw=sumw,
             original_sumw2=sumw2, original_ess=sumw * sumw / sumw2 if sumw2 else 0,
-            requested_expected_events=target_events, scale=scale, expected_events=expected_count,
+            requested_expected_events=requested_target, scale=scale, expected_events=expected_count,
             saturated_probability_one=saturated, minimum_positive_probability=minimum_probability,
             zero_weight_events_omitted=zero, realized_events=len(corrected),
             selected_native_sumw=math.fsum(selected_native), corrected_sumw=realized_sumw,
@@ -233,7 +265,7 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
     selected_sources.sort(key=lambda row: row['index'])
     jobs = partition_jobs(selected_sources, events_per_job)
     canaries = []
-    for stratum in manifest['strata']:
+    for stratum in statistics:
         candidates = [row for row in selected_sources if row['stratum'] == stratum and row['events'] >= 3]
         if not candidates:
             raise ValueError('No source supports a two-event check after its first selected event in ' + stratum)
@@ -255,6 +287,8 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         seed=seed, algorithm='independent-bernoulli-pps-absolute-native-weight-sha256-v1',
         probability='min(1,c*abs(native_GEN_weight)); c fixed before the single draw',
         hash_support_bits=256, no_topups=True, target_expected_events_per_bin=target_events,
+        target_expected_events_by_stratum={s: statistics[s]['requested_expected_events'] for s in statistics},
+        included_strata=sorted(included), complete_muon_decays=bool(complete_muon_decays),
         expected_events=math.fsum(s['expected_events'] for s in statistics.values()),
         selected_events=len(chosen_ids), planned_jobs=len(jobs), events_per_job=events_per_job,
         strata=statistics, normalization_authorities=authorities,
@@ -276,6 +310,16 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         detector_sampling=dict(schema=plan['schema'], plan='sampling_plan.json',
             seed=seed, parent_manifest_sha256=parent_sha, ledger='sampling_events.jsonl.gz'),
         preparation_basis='A single GEN-weight-only representative draw from the frozen parent inventory; canonical GEN, parent normalization and the archived detector recipe are preserved. Preparation does not establish child campaign authorization.')
+    if process_bin_campaign is not None:
+        new_manifest.update(
+            storage_contract='shift-process-bin-detector-v1',
+            storage_campaign=process_bin_campaign,
+            eos_data_root=eos_data_root,
+            stratum_outputs=storage)
+    if complete_muon_decays:
+        new_manifest.update(
+            complete_muon_decays=True,
+            correction='Complete every enabled positive-BR Pythia decay chain reaching muons; retain natural branching ratios.')
 
     output.mkdir(parents=True)
     (output / 'sources').mkdir()
@@ -305,13 +349,32 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         if not item['selected_indices']:
             continue
         descriptor = dict(item['descriptor'])
-        descriptor.update(output_base=eos_output + '/' + descriptor['stratum'],
-            selected_indices=item['selected_indices'],
+        stratum = descriptor['stratum']
+        if resolve_input_paths:
+            descriptor['logical_gen'] = descriptor['gen']
+            descriptor['logical_receipt'] = descriptor['receipt']
+            descriptor['gen'] = shift_storage_paths.resolve_storage_path(descriptor['gen'])
+            descriptor['receipt'] = shift_storage_paths.resolve_storage_path(descriptor['receipt'])
+            descriptor['gen_path_resolved'] = True
+            descriptor['receipt_path_resolved'] = True
+        output_fields = dict(output_base=eos_output + '/' + stratum)
+        if stratum in storage:
+            output_fields.update(storage_contract='shift-process-bin-detector-v1',
+                output_base=storage[stratum]['metadata_base'],
+                nano_base=storage[stratum]['nano_base'],
+                metadata_base=storage[stratum]['metadata_base'])
+        descriptor.update(**output_fields, selected_indices=item['selected_indices'],
             sampling_probabilities=item['sampling_probabilities'],
             sampling=dict(schema=plan['schema'], seed=seed, plan_sha256=plan_sha,
                 parent_manifest_sha256=parent_sha,
                 parent_descriptor_sha256=item['parent_descriptor_sha256']))
+        if complete_muon_decays:
+            descriptor['complete_muon_decays'] = True
         (output / 'sources' / f'source{item["index"]:05d}.json').write_text(json.dumps(descriptor, indent=2) + '\n')
+    if resolve_input_paths:
+        for row in selected_sources:
+            descriptor = json.loads((output / 'sources' / f'source{row["index"]:05d}.json').read_text())
+            row['gen'] = descriptor['gen']
     (output / 'manifest.json').write_text(json.dumps(new_manifest, indent=2, allow_nan=False) + '\n')
     (output / 'jobs.txt').write_text(''.join(f'{index:05d} {offset} {count} {job}\n' for index, offset, count, job in jobs))
     (output / 'canaries.json').write_text(json.dumps(canaries, indent=2) + '\n')
@@ -330,11 +393,28 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--eos-output', required=True)
     parser.add_argument('--target-events', type=int, default=10000)
+    parser.add_argument('--target-events-json', type=Path,
+                        help='Optional JSON object overriding the expected draw size by stratum')
+    parser.add_argument('--include-strata',
+                        help='Comma-separated exact strata to include; defaults to every parent stratum')
     parser.add_argument('--events-per-job', type=int, default=10)
     parser.add_argument('--seed', required=True)
+    parser.add_argument('--process-bin-campaign',
+                        help='Dated campaign name for the current process-bin storage contract')
+    parser.add_argument('--eos-data-root', default='/eos/user/j/jniedzie/shift_cmssw')
+    parser.add_argument('--complete-muon-decays', action='store_true')
+    parser.add_argument('--resolve-input-paths', action='store_true',
+                        help='Freeze current resolved GEN and receipt locations while preserving logical paths')
     args = parser.parse_args()
+    targets = json.loads(args.target_events_json.read_text()) if args.target_events_json else None
+    included = args.include_strata.split(',') if args.include_strata else None
     plan = prepare(args.input_campaign, args.output, args.eos_output,
-                   args.target_events, args.events_per_job, args.seed)
+                   args.target_events, args.events_per_job, args.seed,
+                   include_strata=included, target_events_by_stratum=targets,
+                   process_bin_campaign=args.process_bin_campaign,
+                   eos_data_root=args.eos_data_root,
+                   complete_muon_decays=args.complete_muon_decays,
+                   resolve_input_paths=args.resolve_input_paths)
     print(json.dumps({k: plan[k] for k in ('schema', 'expected_events', 'selected_events', 'planned_jobs', 'seed')}))
 
 

@@ -76,7 +76,7 @@ if result and archive.exists():
     errors=[]
     try:
         descriptor=json.loads(Path('source'+source_index+'.json').read_text())
-        base=descriptor['output_base']
+        base=descriptor.get('metadata_base', descriptor.get('output_base'))
         if not isinstance(base,str) or not base.startswith('/eos/user/') or '..' in Path(base).parts:
             raise ValueError('Unexpected failure evidence base')
         destination=base+'/failures/job'+str(job)+'/attempt_'+attempt
@@ -198,6 +198,10 @@ def main():
     runtime = json.loads((root / 'runtime_freeze.json').read_text())
     if (root / 'bootstrap.json').exists():
         raise ValueError('Campaign launch files already frozen')
+    bundle_url = runtime.get('url', 'root://eosuser.cern.ch/' + manifest['eos_output'] + '/runtime.tar.gz')
+    if (not isinstance(bundle_url, str) or
+            ('url' in runtime and not bundle_url.startswith('root://eosuser.cern.ch//eos/user/'))):
+        raise ValueError('Runtime bundle URL must use the canonical user EOS endpoint')
     tag = Path(manifest['eos_output']).name
     policy = dict(tag=tag, attention_email=args.email, queue_timeout_seconds=7200,
                   setup_timeout_seconds=1800, worker_timeout_seconds=args.worker_timeout_seconds,
@@ -232,7 +236,7 @@ def main():
     scripts = Path(__file__).resolve().parent
     for name in ('run_shift_ntuple_controller.py','shift_condor_native.py','run_shift_quota_audit.py'):
         shutil.copy2(scripts / name, root / name)
-    bootstrap = dict(bundle_url='root://eosuser.cern.ch/' + manifest['eos_output'] + '/runtime.tar.gz',
+    bootstrap = dict(bundle_url=bundle_url,
                      bundle_sha256=runtime['sha256'], stage_timeouts_seconds=stage_limits,
                      config_timeout_seconds=args.config_timeout_seconds,
                      event_stall_timeout_seconds=args.event_stall_timeout_seconds,

@@ -19,6 +19,24 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_publication_paths_keep_nano_and_metadata_in_current_layout(self):
+        descriptor = dict(storage_contract='shift-process-bin-detector-v1',
+            nano_base='/eos/user/j/test/qcd/nanoAOD',
+            metadata_base='/eos/user/j/test/qcd/metadata/detector_jobs')
+        self.assertEqual(worker.publication_paths(descriptor, 17), (
+            '/eos/user/j/test/qcd/nanoAOD/nano_job0000017.root',
+            '/eos/user/j/test/qcd/metadata/detector_jobs/job0000017'))
+        self.assertEqual(worker.publication_paths(descriptor, 17, True), (
+            '/eos/user/j/test/qcd/nanoAOD/canaries/nano_job0000017.root',
+            '/eos/user/j/test/qcd/metadata/detector_jobs/canaries/job0000017'))
+        self.assertEqual(worker.publication_paths({'output_base': '/eos/test/legacy'}, 17), (
+            '/eos/test/legacy/job0000017/nano.root', '/eos/test/legacy/job0000017'))
+        with self.assertRaises(ValueError):
+            worker.publication_paths({**descriptor, 'nano_base': '/tmp/not-eos'}, 17)
+        with self.assertRaisesRegex(ValueError, 'Unsupported detector storage contract'):
+            worker.publication_paths(dict(output_base='/eos/user/j/test/metadata',
+                                           storage_contract='unknown'), 17)
+
     def test_local_pilot_input_requires_exact_frozen_checksum(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source.root';target=root/'gen.root'
@@ -26,6 +44,9 @@ class HandoffTests(unittest.TestCase):
             descriptor=dict(gen_transport='local',gen=str(source),gen_sha256=worker.sha(source))
             worker.copy_gen_input(descriptor,target)
             self.assertEqual(target.read_bytes(),source.read_bytes())
+            with patch.object(worker, 'resolve_storage_path', side_effect=RuntimeError('No resolver')):
+                worker.copy_gen_input({**descriptor, 'gen_path_resolved': True}, root / 'resolved.root')
+            self.assertEqual((root / 'resolved.root').read_bytes(), source.read_bytes())
             source.write_bytes(b'changed input')
             with self.assertRaisesRegex(ValueError,'Frozen GEN payload changed'):
                 worker.copy_gen_input(descriptor,target)

@@ -31,17 +31,40 @@ def copy_gen_input(descriptor, target):
     """Read frozen local pilots or existing XRootD inputs; verify both identically."""
     mode = descriptor.get('gen_transport', 'xrootd')
     if mode == 'local':
-        source = Path(resolve_storage_path(descriptor['gen']))
+        source = Path(descriptor['gen'] if descriptor.get('gen_path_resolved') else
+                      resolve_storage_path(descriptor['gen']))
         if not source.is_absolute() or not source.is_file() or source.resolve() == target.resolve():
             raise ValueError('Local GEN requires a distinct existing absolute input path')
         shutil.copyfile(source, target)
     elif mode == 'xrootd':
+        source = descriptor['gen'] if descriptor.get('gen_path_resolved') else resolve_storage_path(descriptor['gen'])
         command(['xrdcp', '--silent', '--cksum', 'adler32',
-                 'root://eosuser.cern.ch/' + resolve_storage_path(descriptor['gen']), str(target)], timeout=900)
+                 'root://eosuser.cern.ch/' + source, str(target)], timeout=900)
     else:
         raise ValueError('Unsupported frozen GEN transport')
     if sha(target) != descriptor['gen_sha256']:
         raise ValueError('Frozen GEN payload changed')
+
+
+def publication_paths(descriptor, job, canary=False):
+    """Return the immutable NanoAOD path and its per-job evidence directory."""
+    suffix = '/canaries' if canary else ''
+    contract = descriptor.get('storage_contract')
+    if contract is not None and contract != 'shift-process-bin-detector-v1':
+        raise ValueError('Unsupported detector storage contract: ' + str(contract))
+    if contract == 'shift-process-bin-detector-v1':
+        for key in ('nano_base', 'metadata_base'):
+            value = descriptor.get(key)
+            if not isinstance(value, str) or not value.startswith('/eos/user/') or '..' in Path(value).parts:
+                raise ValueError('Invalid process-bin publication base: ' + key)
+        metadata = descriptor['metadata_base'] + suffix + f'/job{job:07d}'
+        nano = descriptor['nano_base'] + suffix + f'/nano_job{job:07d}.root'
+        return nano, metadata
+    base = descriptor.get('output_base')
+    if not isinstance(base, str) or not base.startswith('/eos/') or '..' in Path(base).parts:
+        raise ValueError('Invalid legacy publication base')
+    metadata = base + suffix + f'/job{job:07d}'
+    return metadata + '/nano.root', metadata
 
 
 def command(args, **kwargs):
@@ -549,9 +572,11 @@ def main():
         report['stage_deadline_epoch'] = time.time() + 3600
         progress(report, 'PUBLISHING' if args.publish else 'COMPLETE', validated)
         if args.publish:
-            destination = descriptor['output_base'] + ('/canaries' if args.canary else '') + f'/job{args.job:07d}'
-            command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', destination], timeout=120)
-            report['nano_path'] = destination + '/nano.root'
+            report['nano_path'], metadata_destination = publication_paths(
+                descriptor, args.job, args.canary)
+            command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', metadata_destination], timeout=120)
+            command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p',
+                     str(Path(report['nano_path']).parent)], timeout=120)
             command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(input_file), 'root://eosuser.cern.ch/' + report['nano_path']], timeout=900)
             readback = work / 'nano_readback.root'
             command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/' + report['nano_path'], str(readback)], timeout=900)
@@ -559,11 +584,11 @@ def main():
                 raise ValueError('Published NanoAOD does not match validated local output')
             archive_evidence(work, args.source)
             command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
-                     'root://eosuser.cern.ch/' + destination + '/evidence.tar.gz'], timeout=900)
+                     'root://eosuser.cern.ch/' + metadata_destination + '/evidence.tar.gz'], timeout=900)
             report['evidence_sha256'] = sha(work / 'evidence.tar.gz')
             progress(report, 'COMPLETE', validated)
             command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'report.json'),
-                     'root://eosuser.cern.ch/' + destination + '/complete.json'], timeout=120)
+                     'root://eosuser.cern.ch/' + metadata_destination + '/complete.json'], timeout=120)
             published_receipt = True
         else:
             progress(report, 'COMPLETE', validated)

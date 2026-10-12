@@ -5,11 +5,14 @@ import itertools
 import json
 import math
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'prepare_shift_detector_sample.py'
+sys.path.insert(0, str(SCRIPT.parent))
 SPEC = importlib.util.spec_from_file_location('detector_sample', SCRIPT)
 sample = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(sample)
@@ -120,6 +123,82 @@ class DetectorSampleTest(unittest.TestCase):
             repeat=root/'repeat'; sample.prepare(parent,repeat,'/eos/synthetic/sample',10,3,'fixed')
             self.assertEqual((out/'sampling_events.jsonl.gz').read_bytes(),(repeat/'sampling_events.jsonl.gz').read_bytes())
             with self.assertRaises(ValueError):sample.prepare(parent,out,'/eos/synthetic/sample',10,3,'fixed')
+
+    def test_qcd_subset_uses_process_bin_storage_and_complete_decays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); parent = root / 'full'; parent.mkdir()
+            (parent / 'sources').mkdir(); (parent / 'templates').mkdir()
+            templates = {}
+            for stage in range(1, 5):
+                path = parent / 'templates' / f'step{stage}.py'
+                path.write_text(f'# stage {stage}\n')
+                templates[str(stage)] = dict(sha256=sample.sha256(path), source='synthetic')
+            sources = []
+            for index, stratum in enumerate(('qcd_0to1', 'dy_2to5')):
+                descriptor = dict(receipt=f'/synthetic/receipt{index}', receipt_sha256='b' * 64,
+                    stratum=stratum, gen=f'/synthetic/gen{index}', gen_sha256=('a' if index == 0 else 'c') * 64,
+                    gen_bytes=100, event_ids=[[index + 1, 1, event + 1] for event in range(20)],
+                    output_base='/eos/synthetic/full/' + stratum, normalization_record=None)
+                (parent / 'sources' / f'source{index:05d}.json').write_text(json.dumps(descriptor))
+                sources.append(dict(index=index, gen=descriptor['gen'], stratum=stratum, events=20))
+            (parent / 'manifest.json').write_text(json.dumps(dict(
+                schema='shift-gen-to-nano-plan-v1', templates=templates, sources=sources,
+                strata={'qcd_0to1': 20, 'dy_2to5': 20}, physics_valid=False,
+                normalization_ready=False)))
+            output = root / 'qcd'
+            campaign = '/eos/user/j/test/shift_cmssw/qcd_pThat0to1GeV/20261012-qcd-tail-v1'
+            locations = {'/synthetic/gen0': '/eos/user/j/test/GEN/part0.root',
+                         '/synthetic/receipt0': '/eos/user/j/test/metadata/receipt0.json'}
+            originals = {p: p.read_bytes() for p in parent.rglob('*') if p.is_file()}
+            with patch.object(sample.shift_storage_paths, 'campaign_directory',
+                              return_value=Path(campaign)) as storage, \
+                 patch.object(sample.shift_storage_paths, 'resolve_storage_path',
+                              side_effect=locations.__getitem__):
+                plan = sample.prepare(parent, output, '/eos/user/j/test/control', 7, 3, 'qcd-subset',
+                    include_strata={'qcd_0to1'}, target_events_by_stratum={'qcd_0to1': 9},
+                    process_bin_campaign='20261012-qcd-tail-v1',
+                    eos_data_root='/eos/user/j/test/shift_cmssw', complete_muon_decays=True,
+                    resolve_input_paths=True)
+            storage.assert_called_once_with('/eos/user/j/test/shift_cmssw', 'qcd', '0to1',
+                                            '20261012-qcd-tail-v1')
+            manifest = json.loads((output / 'manifest.json').read_text())
+            descriptor = json.loads((output / 'sources/source00000.json').read_text())
+            self.assertEqual(plan['included_strata'], ['qcd_0to1'])
+            self.assertEqual(plan['target_expected_events_by_stratum'], {'qcd_0to1': 9})
+            self.assertAlmostEqual(plan['expected_events'], 9)
+            self.assertEqual(set(manifest['strata']), {'qcd_0to1'})
+            self.assertEqual(manifest['storage_contract'], 'shift-process-bin-detector-v1')
+            self.assertTrue(manifest['complete_muon_decays'])
+            self.assertEqual(descriptor['nano_base'], campaign + '/nanoAOD')
+            self.assertEqual(descriptor['metadata_base'], campaign + '/metadata/detector_jobs')
+            self.assertTrue(descriptor['complete_muon_decays'])
+            self.assertEqual(descriptor['logical_gen'], '/synthetic/gen0')
+            self.assertEqual(descriptor['logical_receipt'], '/synthetic/receipt0')
+            self.assertEqual(descriptor['gen'], locations[descriptor['logical_gen']])
+            self.assertEqual(descriptor['receipt'], locations[descriptor['logical_receipt']])
+            self.assertTrue(descriptor['gen_path_resolved'])
+            self.assertTrue(descriptor['receipt_path_resolved'])
+            self.assertEqual(manifest['sources'][0]['gen'], descriptor['gen'])
+            self.assertEqual({p: p.read_bytes() for p in parent.rglob('*') if p.is_file()}, originals)
+            self.assertNotIn('source00001.json', {path.name for path in (output / 'sources').iterdir()})
+
+    def test_invalid_sample_options_fail_before_writing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            parent = Path(directory) / 'full'
+            parent.mkdir()
+            (parent / 'manifest.json').write_text(json.dumps(
+                dict(strata={'qcd_0to1': 20}, sources=[])))
+            invalid = [{'target_events_by_stratum': value} for value in
+                       ([], [('qcd_0to1', 5)], {'dy_2to5': 5}, {'qcd_0to1': True})]
+            invalid.extend(dict(process_bin_campaign='20261012-test', eos_data_root=value)
+                           for value in ('/tmp/data', '/eos/home-j/test', '/eos/user/j/test/../data'))
+            for options in invalid:
+                with self.subTest(options=options):
+                    output = Path(directory) / 'output'
+                    with self.assertRaises(ValueError):
+                        sample.prepare(parent, output, '/eos/user/j/test/control', 7, 3,
+                                       'sample', **options)
+                    self.assertFalse(output.exists())
 
 
 if __name__=='__main__':

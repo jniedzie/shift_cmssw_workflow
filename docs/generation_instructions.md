@@ -1645,6 +1645,34 @@ top up or select events using reconstruction outcomes. The frozen plan and
 and parent normalization authorities. Job offsets address `selected_indices`
 rather than consecutive raw GEN entries.
 
+Use `--include-strata qcd_0to1,qcd_1to2` to retain exact named bins, and
+`--target-events-json TARGETS.json` for a JSON object of per-bin expected draw
+sizes. Unspecified included bins use `--target-events`. These options preserve
+the same single draw and full parent normalization; they do not authorize
+top-ups or selection using detector outcomes.
+
+For the current storage layout, set `--process-bin-campaign YYYYMMDD-NAME`
+and a canonical `--eos-data-root /eos/user/USER_PATH`. Final Nano files use
+`PROCESS_BIN/CAMPAIGN/nanoAOD/nano_jobXXXXXXX.root`; completion receipts and
+evidence use `metadata/detector_jobs/jobXXXXXXX/`. Canary outputs have a
+separate `canaries/` subdirectory. Invalid roots and unknown publication
+contracts are rejected. Omit the storage option only when preparing the
+historical publication contract.
+
+`--resolve-input-paths` freezes current GEN/receipt locations and retains
+`logical_gen`/`logical_receipt` for provenance. Runtime workers can then read
+the frozen GEN path without a second migration lookup. `--complete-muon-decays`
+enables the existing natural residual muon-producing hadron-decay completion
+in the common replay; it preserves branching fractions and the fixed detector
+recipe. These settings are recorded in the sampled manifest and descriptors.
+The canonical helper is supplied by `tea_shift_cmssw/configs/shift_storage_paths.py`
+through the workflow facade; missing helper support fails closed.
+
+The launch preparer honors an explicit canonical XRootD `url` in
+`runtime_freeze.json`, allowing the runtime bundle to live outside the data
+campaign. An invalid explicit URL is rejected before launch files are written.
+Without that field, the historical campaign-relative bundle path is retained.
+
 Sampled NanoAOD retains native `genWeight` and adds double-precision
 `shiftSamplingProbability`, `shiftSamplingWeight` (`1/p`),
 `shiftOriginalGenWeight` and `shiftSamplingGenWeight` (`original weight / p`).

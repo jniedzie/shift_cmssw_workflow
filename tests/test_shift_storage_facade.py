@@ -32,6 +32,8 @@ class StorageFacadeTest(unittest.TestCase):
             facade.CANONICAL_HELPER_PATH = root / 'missing_helper.py'
             facade.DEFAULT_MIGRATION_MANIFEST = root / 'map.json'
             self.assertEqual(facade.resolve_storage_path('/tmp/original.root'), '/tmp/original.root')
+            with self.assertRaisesRegex(RuntimeError, 'Storage campaign helper is unavailable'):
+                facade.campaign_directory('/eos/user/j/test', 'qcd', '0to1', '20261012-test')
             facade.DEFAULT_MIGRATION_MANIFEST.write_text('{}')
             with self.assertRaisesRegex(RuntimeError, 'resolver is unavailable'):
                 facade.resolve_storage_path('/tmp/original.root')
