@@ -205,14 +205,34 @@ source inventories, full-GEN/trial ledgers, locks and final evidence. The grid r
 software pilot: real recording acceptance, physical rate closure and classifier
 mass/lifetime transfer must still be established before using a common N_eff.
 
-### Running the submitted small kinematics grid
+### Completed small kinematics grid
 
-The active preparation is
+**Completion checked 2026-10-12:** all nine points completed with 180 intended
+GEN/Nano events and validated per-point histograms. DAG 12878246 succeeded;
+the fresh account-wide queue has no live grid jobs. Completion evidence is in
+`validation/bsm_status_20261012/`, and all-nine plots are in
+`validation/bsm_grid_production_20261009/kinematics/full_grid_20261012/`.
+The old controller state records only four plotted points and pending
+retirement bookkeeping; retain it as historical evidence. No existing worker
+needs histogram resubmission. One final Nano/histogram file exists per distinct
+physical point, so no same-point merge is needed for this pilot.
+
+For a new statistics campaign, the user's October 12 processing order is
+GEN -> disjoint detector chunks -> same-point Nano grouping to a few thousand
+events/file -> histogramming -> same-point histogram merging. The old worker
+histograms each twenty-event slice immediately and must not be reused for
+that order. Freeze a new BSM inventory/orchestration, validate exact complete
+event unions and native weights, count shared GEN source ledgers once, and
+keep distinct mass/epsilon/contracts separate. Existing helpers' twenty-event
+limits remain intact. See the current checkpoint and plan in
+[SHIFT_BSM.md](../../SHIFT_BSM.md).
+
+The frozen preparation is
 `validation/bsm_grid_production_20261009/preparation_v2/plan.json`: nine points,
-20 GEN and 20 reconstructed events each. Condor DAG 12878246 has one batch
-canary followed by seven workers, capped at two. The local m15_prompt canary
-is complete and is not submitted again. Frozen worker code is in
-`analysis_tools/`; runtime and code hashes must remain unchanged while jobs run.
+20 GEN and 20 Nano events each, including events without reconstructed muons.
+Condor DAG 12878246 ran one batch canary followed by seven workers, capped at
+two. The local m15_prompt canary was completed before submission. Frozen worker
+code is in `analysis_tools/`; runtime and code hashes must remain unchanged while jobs run.
 Never rebuild this shared CMSSW release during those workers.
 
 `scripts/run_dark_photon_grid.py` binds every point to its exact physics/source
