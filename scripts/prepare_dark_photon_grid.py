@@ -52,6 +52,86 @@ def content_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def repartition_detector_chunks(chunks, event_ids, retained_chunks, events_per_job,
+                                output_base, job_base):
+    """Split unstarted slices while retaining audited or live chunk descriptors.
+
+    This function only prepares descriptors. The caller must reconcile scheduler
+    and publication state before selecting retained chunks or launching a new
+    deployment. Chunk identifiers are stable identities, not list offsets.
+    Finalizers must merge this entire ordered partition before histogramming.
+    """
+    if type(events_per_job) is not int or not 1 <= events_per_job <= 20:
+        raise ValueError('Detector chunks require 1..20 events per job')
+    if type(job_base) is not int or job_base < 1:
+        raise ValueError('Replacement detector job namespace must be positive')
+    if not isinstance(output_base, str) or not output_base.startswith('/eos/'):
+        raise ValueError('Replacement detector outputs require an absolute EOS namespace')
+    if any(character.isspace() for character in output_base) or '..' in Path(output_base).parts:
+        raise ValueError('Invalid replacement detector output namespace')
+    output_base = output_base.rstrip('/')
+    if output_base == '/eos' or str(Path(output_base)) != output_base:
+        raise ValueError('Replacement detector output namespace must be a canonical EOS directory')
+    if not isinstance(event_ids, (list, tuple)) or not event_ids:
+        raise ValueError('Require the complete parent GEN event identities')
+    if any(not isinstance(value, (list, tuple)) or len(value) != 3 or
+           any(type(component) is not int for component in value) for value in event_ids):
+        raise ValueError('Invalid parent GEN event identity')
+    if len({tuple(value) for value in event_ids}) != len(event_ids):
+        raise ValueError('Duplicate parent GEN event identity')
+    if not isinstance(chunks, (list, tuple)) or not chunks:
+        raise ValueError('Require an existing complete detector partition')
+    identifiers, jobs, paths, offset = set(), set(), set(), 0
+    for row in chunks:
+        if not isinstance(row, dict) or any(type(row.get(key)) is not int
+                for key in ('chunk', 'skip', 'count', 'job')):
+            raise ValueError('Invalid original detector chunk descriptor')
+        if (row['chunk'] < 0 or row['job'] < 1 or not 1 <= row['count'] <= 20 or
+                row['skip'] != offset or row['chunk'] in identifiers or row['job'] in jobs):
+            raise ValueError('Original detector chunks do not form an ordered unique partition')
+        for key in ('nano', 'metadata'):
+            path = row.get(key)
+            if (not isinstance(path, str) or not path.startswith('/eos/') or path in paths or
+                    any(character.isspace() for character in path) or '..' in Path(path).parts or
+                    str(Path(path)) != path):
+                raise ValueError('Invalid or duplicate original detector output path')
+            paths.add(path)
+        if str(Path(row['nano']).parent.parent) == output_base:
+            raise ValueError('Replacement detector outputs must use a new namespace')
+        identifiers.add(row['chunk'])
+        jobs.add(row['job'])
+        offset += row['count']
+    if offset != len(event_ids):
+        raise ValueError('Original detector partition differs from the complete GEN population')
+    if (not isinstance(retained_chunks, (list, tuple, set, frozenset)) or
+            any(type(value) is not int for value in retained_chunks) or
+            len(set(retained_chunks)) != len(retained_chunks) or
+            not set(retained_chunks) <= identifiers):
+        raise ValueError('Retained chunk identities must be unique members of the original partition')
+    retained_chunks = set(retained_chunks)
+    next_identifier, next_job = max(identifiers) + 1, job_base
+    result = []
+    for row in chunks:
+        if row['chunk'] in retained_chunks:
+            result.append(copy.deepcopy(row))
+            continue
+        for skip in range(row['skip'], row['skip'] + row['count'], events_per_job):
+            if next_job in jobs:
+                raise ValueError('Replacement detector job namespace overlaps original jobs')
+            name = f'chunk_{next_identifier:03d}'
+            result.append(dict(chunk=next_identifier, skip=skip,
+                count=min(events_per_job, row['skip'] + row['count'] - skip),
+                job=next_job, nano=output_base + '/nanoAOD/' + name + '.root',
+                metadata=output_base + '/metadata/' + name, source_chunk=row['chunk']))
+            next_identifier += 1
+            next_job += 1
+    ordered_ids = [identity for row in result
+                   for identity in event_ids[row['skip']:row['skip'] + row['count']]]
+    if ordered_ids != list(event_ids):
+        raise ValueError('Replacement detector chunks changed complete GEN event coverage')
+    return result
+
+
 def normalized_width(native, mass, epsilon):
     table = copy.deepcopy(native)
     if not math.isclose(float(table['mass_gev']), mass, rel_tol=1e-12):

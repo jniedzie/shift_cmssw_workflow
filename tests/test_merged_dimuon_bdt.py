@@ -16,6 +16,7 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import run_merged_dimuon_bdt as worker
+import prepare_merged_dimuon_bdt as preparer
 
 
 def expected_legacy_cutflow(weights, accumulator=0.0):
@@ -40,6 +41,59 @@ def expected_legacy_cutflow(weights, accumulator=0.0):
     for weight in weights:
         accumulator = float32(accumulator + float32(weight))
     return accumulator
+
+
+class HistoricalAnalysisDependencyTest(unittest.TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.previous_path = self.root / 'previous/plan.json'
+        self.previous_path.parent.mkdir()
+        self.dependencies = {}
+        for name in preparer.HISTORICAL_ANALYSIS_SOURCES:
+            key = 'tea/' + name
+            path = self.previous_path.parent / 'frozen' / key
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('original frozen analysis: ' + name)
+            self.dependencies[key] = dict(path=str(path), sha256=preparer.io.digest(path))
+        self.previous_path.write_text(json.dumps(dict(
+            schema='shift-merged-dimuon-bdt-plan-v1', dependencies=self.dependencies)))
+        patch = mock.patch.object(preparer, 'WORKSPACE', self.root / 'workspace')
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def test_recovery_uses_exact_frozen_files_when_live_sources_are_missing(self):
+        resolved = preparer.historical_analysis_dependencies(self.previous_path)
+        self.assertEqual(resolved, {key: Path(row['path']) for key, row in self.dependencies.items()})
+        self.assertFalse((preparer.WORKSPACE / 'tea_shift_cmssw').exists())
+
+    def test_recovery_does_not_replace_frozen_analysis_with_changed_live_sources(self):
+        for name in preparer.HISTORICAL_ANALYSIS_SOURCES:
+            live = preparer.WORKSPACE / 'tea_shift_cmssw' / name
+            live.parent.mkdir(parents=True, exist_ok=True)
+            live.write_text('changed live analysis')
+        resolved = preparer.historical_analysis_dependencies(self.previous_path)
+        self.assertTrue(all('original frozen analysis' in path.read_text() for path in resolved.values()))
+
+    def test_changed_frozen_hash_rejects_recovery_without_live_fallback(self):
+        key = next(iter(self.dependencies))
+        Path(self.dependencies[key]['path']).write_text('changed frozen analysis')
+        name = key.removeprefix('tea/')
+        live = preparer.WORKSPACE / 'tea_shift_cmssw' / name
+        live.parent.mkdir(parents=True, exist_ok=True)
+        live.write_text('original frozen analysis: ' + name)
+        with self.assertRaisesRegex(ValueError, 'checksum differs'):
+            preparer.historical_analysis_dependencies(self.previous_path)
+
+    def test_new_deployment_fails_before_any_mutation_when_live_analysis_is_removed(self):
+        output = self.root / 'new_deployment'
+        with mock.patch.object(preparer.io, 'validate_export') as validate:
+            with self.assertRaisesRegex(ValueError, 'requires a prior frozen analysis plan'):
+                preparer.prepare(self.root / 'inventory.json', output,
+                                 self.root / 'model.json', 'test_20261009')
+        validate.assert_not_called()
+        self.assertFalse(output.exists())
 
 
 class MergedDimuonBdtWorkerTest(unittest.TestCase):

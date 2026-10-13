@@ -12,6 +12,40 @@ import prepare_dimuon_score_production as io
 
 WORKSPACE = Path(__file__).resolve().parents[2]
 EOS = '/eos/user/j/jniedzie/shift_cmssw'
+HISTORICAL_ANALYSIS_SOURCES = (
+    'utils/shift_bdt_histogrammer.py', 'configs/shift_bdt_histograms.py',
+)
+
+
+def historical_analysis_dependencies(reuse_completed_plan=None):
+    """Resolve this dated worker's analysis from its exact frozen predecessor."""
+    if reuse_completed_plan is None:
+        dependencies = {'tea/' + name: WORKSPACE / 'tea_shift_cmssw' / name
+                        for name in HISTORICAL_ANALYSIS_SOURCES}
+        if any(not path.is_file() for path in dependencies.values()):
+            raise ValueError(
+                'This dated v1 preparer requires a prior frozen analysis plan '
+                '(--reuse-completed-plan). New studies use the main SHIFT '
+                'histogrammer and plotter configurations.')
+        return dependencies
+
+    previous_path = Path(reuse_completed_plan).resolve()
+    previous = json.loads(previous_path.read_text())
+    if previous.get('schema') != 'shift-merged-dimuon-bdt-plan-v1':
+        raise ValueError('Historical analysis requires a frozen merged BDT v1 plan')
+    dependencies = {}
+    for name in HISTORICAL_ANALYSIS_SOURCES:
+        key = 'tea/' + name
+        record = previous.get('dependencies', {}).get(key)
+        if not isinstance(record, dict) or not record.get('path') or not record.get('sha256'):
+            raise ValueError('Previous plan lacks a frozen analysis dependency: ' + key)
+        path = Path(record['path'])
+        if path.resolve() != (previous_path.parent / 'frozen' / key).resolve():
+            raise ValueError('Previous analysis dependency is not its exact frozen path: ' + key)
+        if not path.is_file() or io.digest(path) != record['sha256']:
+            raise ValueError('Frozen historical analysis checksum differs: ' + key)
+        dependencies[key] = path
+    return dependencies
 
 
 def prepare(inventory, output, model, campaign, batch_size=5, reuse_completed_plan=None):
@@ -20,6 +54,7 @@ def prepare(inventory, output, model, campaign, batch_size=5, reuse_completed_pl
         raise FileExistsError('Refuse to overwrite a frozen merged scoring deployment')
     if not re.fullmatch(r'[A-Za-z0-9_./-]+', str(output)) or not re.fullmatch(r'[A-Za-z0-9_-]*20261009[A-Za-z0-9_-]*', campaign):
         raise ValueError('Safe deployment path and dated campaign required')
+    historical_analysis = historical_analysis_dependencies(reuse_completed_plan)
     source = json.loads(inventory.read_text())
     if source.get('schema') != 'shift-merged-dimuon-score-source-inventory-v1' or source.get('complete') is not True:
         raise ValueError('Require the completed existing-merged-source inventory')
@@ -52,8 +87,7 @@ def prepare(inventory, output, model, campaign, batch_size=5, reuse_completed_pl
     }
     for name in (*io.SOURCES, 'labels.py'):
         dependencies['classifier/' + name] = classifier / name
-    for name in ('utils/shift_bdt_histogrammer.py', 'configs/shift_bdt_histograms.py'):
-        dependencies['tea/' + name] = WORKSPACE / 'tea_shift_cmssw' / name
+    dependencies.update(historical_analysis)
     hashes = {name: io.digest(path) for name, path in dependencies.items()}
     frozen = output / 'frozen'
     frozen.mkdir(parents=True, exist_ok=False)

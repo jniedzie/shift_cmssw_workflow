@@ -8,7 +8,7 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
-from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, validate_references, write_plan
+from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, repartition_detector_chunks, validate_references, write_plan
 
 
 def fake_native(mass, epsilon, scale=1.):
@@ -144,6 +144,75 @@ class FrozenGridReceipts(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'preflight source changed'):
                 write_plan(out,path,templates,plan,{'source_preflight_sha256':{'dark_photon_model.py':'0'*64}},scripts)
             self.assertFalse(out.exists())
+
+
+class DetectorChunkReplacement(unittest.TestCase):
+    @staticmethod
+    def original():
+        base = '/eos/user/synthetic/old'
+        return [dict(chunk=i, skip=20*i, count=20, job=960000+i,
+                     nano=f'{base}/nanoAOD/chunk_{i:03d}.root',
+                     metadata=f'{base}/metadata/chunk_{i:03d}') for i in range(10)]
+
+    def test_five_event_replacement_preserves_live_chunks_and_full_event_union(self):
+        original = self.original()
+        before = copy.deepcopy(original)
+        identities = [[123, 1, event] for event in range(1, 201)]
+        result = repartition_detector_chunks(original, identities, [0, 7], 5,
+                                             '/eos/user/synthetic/replacement', 970000)
+        self.assertEqual(len(result), 34)
+        self.assertEqual(original, before)
+        self.assertEqual([row for row in result if row['chunk'] in (0, 7)],
+                         [original[0], original[7]])
+        new = [row for row in result if row['chunk'] not in (0, 7)]
+        self.assertTrue(all(row['count'] == 5 and row['chunk'] >= 10 for row in new))
+        self.assertEqual(len({row['job'] for row in result}), len(result))
+        self.assertEqual(len({row['nano'] for row in result}), len(result))
+        self.assertTrue(all('/replacement/' in row['nano'] for row in new))
+        union = [identity for row in result
+                 for identity in identities[row['skip']:row['skip'] + row['count']]]
+        self.assertEqual(union, identities)
+        self.assertEqual(len(set(map(tuple, union))), 200)
+
+    def test_short_final_slice_and_all_retained_partition(self):
+        original = self.original()[:2]
+        original[-1]['count'] = 17
+        identities = [[123, 1, event] for event in range(1, 38)]
+        result = repartition_detector_chunks(original, identities, [0], 5,
+                                             '/eos/user/synthetic/replacement', 970000)
+        self.assertEqual([row['count'] for row in result], [20, 5, 5, 5, 2])
+        self.assertEqual(repartition_detector_chunks(original, identities, [0, 1], 5,
+                         '/eos/user/synthetic/replacement', 970000), original)
+
+    def test_corrupt_partition_duplicates_and_output_collisions_fail_closed(self):
+        identities = [[123, 1, event] for event in range(1, 201)]
+        for change in (lambda rows: rows[1].update(skip=19),
+                       lambda rows: rows[1].update(chunk=0),
+                       lambda rows: rows[1].update(job=rows[0]['job']),
+                       lambda rows: rows[1].update(nano=rows[0]['nano']),
+                       lambda rows: rows[-1].update(count=19)):
+            rows = self.original()
+            change(rows)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                repartition_detector_chunks(rows, identities, [], 5,
+                    '/eos/user/synthetic/replacement', 970000)
+        for retained, count, base, job in (([10], 5, '/eos/user/synthetic/new', 970000),
+                ([0, 0], 5, '/eos/user/synthetic/new', 970000),
+                ([True], 5, '/eos/user/synthetic/new', 970000),
+                ([], 0, '/eos/user/synthetic/new', 970000),
+                ([], 21, '/eos/user/synthetic/new', 970000),
+                ([], 5, '/eos/user/synthetic/old', 970000),
+                ([], 5, '/eos/user/synthetic/new', 960005),
+                ([], 5, '/eos/', 970000),
+                ([], 5, '/eos/user/synthetic//new', 970000),
+                ([], 5, '/eos/user/synthetic/../old', 970000)):
+            with self.subTest(retained=retained, count=count, base=base, job=job), self.assertRaises(ValueError):
+                repartition_detector_chunks(self.original(), identities, retained, count, base, job)
+        duplicate = copy.deepcopy(identities)
+        duplicate[-1] = duplicate[0]
+        with self.assertRaisesRegex(ValueError, 'Duplicate parent'):
+            repartition_detector_chunks(self.original(), duplicate, [], 5,
+                                        '/eos/user/synthetic/replacement', 970000)
 
 
 if __name__=='__main__': unittest.main()
