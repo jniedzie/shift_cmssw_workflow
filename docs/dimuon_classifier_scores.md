@@ -64,6 +64,26 @@ remain unchanged.
 The plot-validation receipts distinguish all-retained weighted shapes from
 held-out performance and preserve the original rendering evidence.
 
+The subsequent fixed-threshold study is under
+`validation/bdt_acceptance_study_20261012/`. It reproduces all 510 first-look
+inputs and compares the quality-only baseline with the frozen uniformity BDT
+on identical held-out events. Quality-only does not cure DY mass dependence
+and has stronger radius dependence. Keep the uniformity score diagnostic;
+neither physics cut is validated. The independent QCD/label audit confirms
+the dominant pair's common omega origin and sampling arithmetic while keeping
+provisional source normalization, unknown matches and fit precision separate.
+
+Signal stage DAG `12902110` adds 200 fresh GEN events at each of the nine
+physical points. Ninety detector chunks feed nine exact complete-point unions,
+then unchanged scoring and standard plus BDT histogramming. All events and
+native weights remain; source exposure is recorded once. The full GEN audits,
+resolved-config/two-event detector canary, empty/nonempty preservation probes,
+publication tests, storage forecast and live submission receipt are in
+`production/`. Its `HANDOFF.md` owns monitoring and reviewed recovery. Preserve
+all sealed files, running jobs and output evidence. The original QCD v11 pilot
+and bulk hold are unchanged. Additional signals remain validation-only; reserve
+fresh independent SM parents before any classifier optimization.
+
 ## Historical merged-group first test and continuation (2026-10-09)
 
 The following records the October 9 state and planned commands. The completed

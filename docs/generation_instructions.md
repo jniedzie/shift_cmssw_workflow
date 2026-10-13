@@ -227,6 +227,22 @@ keep distinct mass/epsilon/contracts separate. Existing helpers' twenty-event
 limits remain intact. See the current checkpoint and plan in
 [SHIFT_BSM.md](../../SHIFT_BSM.md).
 
+`prepare_dark_photon_grid.repartition_detector_chunks(...)` prepares smaller
+detector slices while preserving every selected original descriptor. Supply
+the full ordered GEN identity inventory, the IDs of all materialized or
+validated chunks, a new EOS namespace and a disjoint detector job/seed base.
+It returns a complete ordered partition; it never submits or changes jobs.
+Before choosing the retained set, stop further submissions from the original
+manager and reconcile its exact queue, event log and publication receipts.
+Freeze replacement workers that look up stable chunk IDs rather than list
+offsets, accept the smaller counts, and validate original/new receipt
+authorities. Use external completion barriers for retained live workers.
+Merge the entire same-point GEN union before scoring/histogramming. A pilot
+with only 200 events per point uses one complete file; larger stages should
+group a few thousand events per file. The October 12 five-event handover and
+its exact scheduling/validation receipts are in
+`validation/bsm_repartition_20261012/HANDOFF.md` in the workspace.
+
 The frozen preparation is
 `validation/bsm_grid_production_20261009/preparation_v2/plan.json`: nine points,
 20 GEN and 20 Nano events each, including events without reconstructed muons.
