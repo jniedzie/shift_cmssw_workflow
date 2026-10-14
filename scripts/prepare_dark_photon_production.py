@@ -11,6 +11,9 @@ import shutil
 
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
+from dark_photon_production_support import (
+    PROFILES, validate_complete_groups, validate_publication_canary,
+)
 
 
 def read(path):
@@ -115,6 +118,85 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
     return '\n'.join(lines) + '\n'
 
 
+def extend_worker(text, publication_profile):
+    """Version the qualified worker's publication contract in its new copy."""
+    old = "    paths = {tier: str(base / tier / name)\n             for tier in ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD')}\n"
+    replacement = ("    from dark_photon_production_support import publication_paths as profile_paths\n"
+                   "    return profile_paths(chunk, read(B/'plan.json')['publication_profile'])\n")
+    start, stop = text.index('def publication_paths(chunk):'), text.index('def valid_digest(value):')
+    if old not in text[start:stop]:
+        raise ValueError('Qualified publication namespace changed; review the new worker contract')
+    text = text[:start] + 'def publication_paths(chunk):\n' + replacement + '\n' + text[stop:]
+    validation = "    destinations = publication_paths(chunk)\n    published = status.get('published', {})\n"
+    if text.count(validation) != 1:
+        raise ValueError('Qualified chunk receipt validation changed')
+    text = text.replace(validation,
+        "    profile = plan.get('publication_profile', 'all-tiers-v1')\n"
+        "    if status.get('publication_profile') != profile:\n"
+        "        raise ValueError('Detector receipt publication profile changed')\n"
+        "    if profile == 'nano-metadata-v1':\n"
+        "        scratch = status.get('audited_scratch_tiers', {})\n"
+        "        if set(scratch) != {'GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM'}:\n"
+        "            raise ValueError('Nano-only receipt lacks full-chain scratch evidence')\n"
+        "        for item in scratch.values():\n"
+        "            if (not valid_digest(item.get('sha256')) or type(item.get('bytes')) is not int or item['bytes'] <= 0):\n"
+        "                raise ValueError('Audited scratch-tier evidence is incomplete')\n"
+        + validation)
+    files = "        files['metadata'] = bundle\n"
+    if text.count(files) != 1:
+        raise ValueError('Qualified full-chain publication inventory changed')
+    text = text.replace(files,
+        "        tiers = plan['publication_tiers']\n"
+        "        receipt.update(publication_profile=plan['publication_profile'],\n"
+        "            audited_scratch_tiers={tier:dict(sha256=sha(local),bytes=local.stat().st_size)\n"
+        "                                  for tier,local in files.items() if tier not in tiers})\n"
+        "        files = {tier:local for tier,local in files.items() if tier in tiers}\n"
+        + files)
+    quota = '    minimum_bytes, minimum_files = quota_requirements(budget, count)\n'
+    if text.count(quota) != 1:
+        raise ValueError('Qualified worker quota hook changed; review before extending')
+    # Extension/recovery templates can already have this hook. Freeze it once.
+    if 'from dark_photon_publication_quota import external_chunk_reservations' not in text:
+        text = text.replace(quota, quota +
+            '    from dark_photon_publication_quota import external_chunk_reservations\n'
+            '    extra_bytes, extra_files, external = external_chunk_reservations(budget)\n'
+            '    minimum_bytes += extra_bytes\n'
+            '    minimum_files += extra_files\n')
+        text = text.replace('result.update(credited_complete_chunks=count,',
+                            'result.update(external_reservations=external, credited_complete_chunks=count,')
+    return text
+
+
+def deployment_wrapper(kind):
+    """Keep deployed entry points small; freeze their reusable implementation."""
+    if kind == 'finalizer':
+        return '''#!/usr/bin/env python3
+# Code style: AI-code. AI-generated immutable grouped signal finalizer.
+import argparse
+import json
+from pathlib import Path
+from dark_photon_production_support import finalize as run
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('point')
+    parser.add_argument('seal')
+    parser.add_argument('--runtime-cache', type=Path, required=True)
+    args = parser.parse_args()
+    print(json.dumps(run(args.point, args.seal, args.runtime_cache)))
+'''
+    return '''#!/usr/bin/env python3
+# Code style: AI-code. AI-generated immutable grouped signal collector.
+import argparse
+from dark_photon_production_support import collect
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('seal')
+    collect(parser.parse_args().seal)
+'''
+
+
 def prepare(args):
     template, output = args.template.resolve(), args.output.resolve()
     if output.exists():
@@ -132,9 +214,6 @@ def prepare(args):
     if (len(names) != len(set(names)) or not args.canary_points or
             len(set(args.canary_points)) != len(args.canary_points) or not set(args.canary_points) <= set(names)):
         raise ValueError('Require distinct physical points and existing distinct detector gates')
-    for row in plan['points']:
-        if len(row.get('groups', [])) != 1 or row['groups'][0]['count'] != row['events']:
-            raise ValueError('Qualified finalizer supports one complete same-point Nano group')
     template_jobs = {chunk['job'] for row in read(template / 'plan.json')['points'] for chunk in row['chunks']}
     jobs = [chunk['job'] for row in plan['points'] for chunk in row['chunks']]
     if len(jobs) != len(set(jobs)) or template_jobs.intersection(jobs):
@@ -142,11 +221,25 @@ def prepare(args):
     inventory, publication = read(args.gen_inventory), read(args.gen_publication)
     independence = check_gen(plan, inventory, publication, args.prior_inventories)
     for row in plan['points']:
+        validate_complete_groups(dict(row, group_events=plan['group_events']),
+                                 inventory['points'][row['point']]['event_ids'])
         row['gen_remote_path'] = inventory['points'][row['point']]['gen_path']
     budget = copy.deepcopy(read(args.storage_budget))
     if budget['detector_chunks'] != plan['detector_chunks'] or budget['events'] != plan['events']:
         raise ValueError('Reviewed storage budget differs from the new complete partition')
     external_chunk_reservations(budget)  # Verify external authorities before freezing.
+    profile = getattr(args, 'publication_profile', 'all-tiers-v1')
+    canary_path = getattr(args, 'publication_canary', None)
+    if profile not in PROFILES:
+        raise ValueError('Unknown signal publication profile')
+    qualification = None
+    if profile == 'nano-metadata-v1':
+        if canary_path is None:
+            raise ValueError('Nano-only publication requires a pinned measured canary')
+        qualification = validate_publication_canary(canary_path, budget,
+            max(chunk['count'] for row in plan['points'] for chunk in row['chunks']))
+    elif budget.get('publication_profile', profile) != profile:
+        raise ValueError('Reviewed budget publication profile differs from the requested worker')
     if not 1 <= args.detector_workers <= 100 or not 1 <= args.finalizers <= 3:
         raise ValueError('Require bounded concurrency up to100detectorworkers and3finalizers')
     output.mkdir(parents=True, exist_ok=False)
@@ -178,21 +271,23 @@ def prepare(args):
             text = re.sub(r'^REMOTE_BASE = .*$', 'REMOTE_BASE = ' + repr(args.failure_base), text,
                           flags=re.MULTILINE)
         if name == 'chunk_worker.py':
-            needle = '    minimum_bytes, minimum_files = quota_requirements(budget, count)\n'
-            if text.count(needle) != 1:
-                raise ValueError('Qualified worker quota hook changed; review before extending')
-            text = text.replace(needle, needle +
-                '    from dark_photon_publication_quota import external_chunk_reservations\n'
-                '    extra_bytes, extra_files, external = external_chunk_reservations(budget)\n'
-                '    minimum_bytes += extra_bytes\n'
-                '    minimum_files += extra_files\n')
-            text = text.replace('result.update(credited_complete_chunks=count,',
-                                'result.update(external_reservations=external, credited_complete_chunks=count,')
+            text = extend_worker(text, profile)
+        elif name == 'finalize_point.py':
+            # Retain the exact qualified stage/weight/scoring validators in the
+            # new namespace; the new entry point supports all bounded groups.
+            (output / 'qualified_finalizer.py').write_text(text)
+            text = deployment_wrapper('finalizer')
+        elif name == 'collect_inputs.py':
+            text = deployment_wrapper('collector')
         (output / name).write_text(text)
         if name.endswith('.sh'):
             (output / name).chmod(0o750)
     shutil.copy2(Path(__file__).with_name('dark_photon_publication_quota.py'),
                  output / 'dark_photon_publication_quota.py')
+    shutil.copy2(Path(__file__).with_name('dark_photon_production_support.py'),
+                 output / 'dark_photon_production_support.py')
+    if qualification is not None:
+        write(output / 'publication_qualification.json', qualification)
     for name in ('postprocess_canary.json', 'shared_dependency_gate.json'):
         shutil.copy2(template / name, output / name)
     score = (template / 'scoring_components.json').read_text().replace(str(template), str(output))
@@ -204,7 +299,11 @@ def prepare(args):
         frozen_dependencies=dependencies, selection_applied=False, model_training_on_signals=False,
         reference_preparation=str(args.preparation.resolve()), reference_preparation_sha256=sha256(args.preparation),
         runtime_fingerprint=str(frozen / 'runtime_fingerprint.json'),
-        runtime_fingerprint_sha256=sha256(frozen / 'runtime_fingerprint.json'))
+        runtime_fingerprint_sha256=sha256(frozen / 'runtime_fingerprint.json'),
+        publication_profile=profile, publication_tiers=list(PROFILES[profile]),
+        detector_intermediates_policy=('Audited in worker scratch; retain all non-ROOT audit metadata and tier SHA-256/bytes'
+                                      if profile == 'nano-metadata-v1' else 'Retain all audited detector ROOT tiers'),
+        finalizer_contract='Complete ordered GEN union; all bounded Nano groups precede histogramming; validated histogram sum')
     write(output / 'plan.json', plan)
     write(output / 'gen_inventory.json', inventory)
     write(output / 'gen_publication.json', publication)
@@ -225,6 +324,8 @@ def prepare(args):
     common.extend(path for category in ('sources', 'templates')
                   for path in (frozen / category).rglob('*') if path.is_file())
     common.extend([frozen / 'runtime_fingerprint.json', args.preparation.resolve()])
+    if qualification is not None:
+        common.extend(Path(item['path']) for item in qualification['dependencies'])
     scoring = [output / 'scoring_components.json']
     scoring.extend(path for path in (frozen / 'scoring').rglob('*') if path.is_file())
     gen = {row['point']: sorted(str(path) for path in Path(row['gen_directory']).rglob('*')
@@ -255,6 +356,9 @@ def main():
     parser.add_argument('--failure-base', required=True)
     parser.add_argument('--detector-workers', type=int, default=100)
     parser.add_argument('--finalizers', type=int, default=3)
+    parser.add_argument('--publication-profile', choices=tuple(PROFILES), default='all-tiers-v1')
+    parser.add_argument('--publication-canary', type=Path,
+                        help='Pinned measured full-chain Nano/metadata canary required for nano-metadata-v1')
     print(json.dumps(prepare(parser.parse_args())))
 
 

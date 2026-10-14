@@ -15,7 +15,6 @@ import json
 import math
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 
@@ -209,7 +208,7 @@ def combined_rate(populations, *, point, campaign):
 def load_source(source, expected_model, conditions_digest):
     plan_path = checked(source['plan_path'], source['plan_sha256'])
     plan, directory = read(plan_path), plan_path.parent
-    checked(directory / 'seal.json', source['seal_sha256'])
+    source_seal = read(checked(directory / 'seal.json', source['seal_sha256']))
     if source.get('conditions_sha256') != conditions_digest:
         raise ValueError('Source conditions do not match the reviewed aggregate conditions')
     rows = [row for row in plan['points'] if row['point'] == source['point']]
@@ -218,7 +217,11 @@ def load_source(source, expected_model, conditions_digest):
     row = rows[0]
     if any(row[key] != expected_model[key] for key in MODEL_FIELDS):
         raise ValueError('Source plan changes the selected physical point or proposal')
-    inventory = read(directory / 'gen_inventory.json')
+    inventory_path = directory / 'gen_inventory.json'
+    checked(inventory_path, source_seal['files'].get(str(inventory_path)))
+    if source_seal['files'].get(str(plan_path)) != source['plan_sha256']:
+        raise ValueError('Source plan is outside its immutable production seal')
+    inventory = read(inventory_path)
     if inventory.get('complete') is not True:
         raise ValueError('Incomplete source GEN inventory')
     parent = inventory['points'][source['point']]
@@ -279,7 +282,7 @@ def load_plan(path, digest):
     seal = read(deployment / 'seal.json')
     dependencies = set(seal['verification_groups']['scoring']) | set(seal['verification_groups']['common'])
     for path in dependencies:
-        checked(path, seal['dependencies'][path])
+        checked(path, seal['files'][path])
     return plan
 
 
@@ -297,6 +300,13 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     populations = unique_populations([load_source(source, row, plan['conditions']['sha256']) for source in row['sources']])
     if len(populations) < 2:
         raise ValueError('Additive production requires at least two independent GEN populations')
+    settings = ('common', 'cp5', 'beam_settings', 'process_settings', 'source_z_mm',
+                'source_sigma_z_mm', 'source_model', 'timing', 'hadron_decay_policy',
+                'signal_decay_policy', 'lifetime_owner', 'signal_parent_transport')
+    first_contract = populations[0]['contract']
+    if any(any(population['contract'].get(key) != first_contract.get(key) for key in settings)
+           for population in populations[1:]):
+        raise ValueError('Source generator, lifetime, beam or source settings differ')
     rate = combined_rate(populations, point=point, campaign=plan['campaign'])
     identities = [identity for population in populations for identity in population['parent']['event_ids']]
     if len(identities) != row['events']:
@@ -308,6 +318,25 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     import run_merged_dimuon_bdt as scorer
     from dark_photon_production_support import validate_histogram_merge
     io = scorer.io
+    guard_spec = plan['publication_guard']
+    guard_directory = Path(guard_spec['deployment_path'])
+    checked(guard_directory / 'seal.json', guard_spec['seal_sha256'])
+    sys.path.insert(0, str(guard_directory))
+    import chunk_worker as guard
+    import finalize_point as qualified
+    guard.verify_seal(guard_spec['seal_sha256'], guard_spec['point'], scoring=True)
+    guard.prepare_publication_guard(guard_spec['seal_sha256'])
+    guard.check_headroom()
+    original_put = io.put_remote
+    axes_checked = set()
+    def guarded_put(local, remote):
+        histogram = Path(local).parent / 'histograms.root'
+        if histogram.is_file() and str(histogram) not in axes_checked:
+            qualified.validate_histogram_axes(histogram, deployment / 'frozen/scoring/sm_axis_authority.root')
+            axes_checked.add(str(histogram))
+        guard.check_headroom()
+        return original_put(local, remote)
+    io.put_remote = guarded_put
     work = Path(scratch) / 'aggregate'
     work.mkdir(exist_ok=False)
     def stage(item, destination):
@@ -396,6 +425,8 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
         score_histograms=dict(complete=True, marker=dict(complete=True, events=len(identities), pairs=total_pairs,
             selection_applied=False, model_sha256=scoreplan['model_sha256'], published=dict(histograms=final_histogram))),
         histogram_merge=histogram_audit, cross_sections=rate_items, final_output_base=prefix,
+        canonical_sm_histogram_axes_verified=1081,
+        canonical_sm_histogram_authority_sha256=sha(deployment / 'frozen/scoring/sm_axis_authority.root'),
         plan_sha256=plan_digest, seal_sha256=seal_digest, created_utc=datetime.now(timezone.utc).isoformat())
     write(work / 'union.json', union)
     put(work / 'union.json', prefix + '/metadata/grouping/union.json')

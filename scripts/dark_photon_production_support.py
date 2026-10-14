@@ -34,6 +34,16 @@ def read(path):
     return json.loads(Path(path).read_text())
 
 
+def valid_digest(value):
+    return (isinstance(value, str) and len(value) == 64 and
+            all(character in '0123456789abcdef' for character in value))
+
+
+def valid_artifact(item, path):
+    return (isinstance(item, dict) and item.get('path') == path and
+            type(item.get('bytes')) is int and item['bytes'] > 0 and valid_digest(item.get('sha256')))
+
+
 def validate_complete_groups(row, expected):
     """Require an exact ordered partition, with no point or group overlap."""
     count = row['events']
@@ -238,11 +248,13 @@ def validate_group_reports(row, parent, report, seal_hash, plan_hash, model_hash
         raise ValueError('Point report differs from the complete frozen production')
     union = report.get('union', {})
     published_groups, scored_groups = union.get('groups', []), report.get('groups', [])
-    if (union.get('parent_gen') != parent or union.get('parent_gen_ledger_count') != 1 or
+    if (union.get('complete') is not True or union.get('point') != row['point'] or
+            union.get('parent_gen') != parent or union.get('parent_gen_ledger_count') != 1 or
             union.get('event_ids') != expected or union.get('events') != row['events'] or
             union.get('native_sumw') != row['events'] or union.get('native_sumw2') != row['events'] or
             union.get('seal_sha256') != seal_hash or union.get('plan_sha256') != plan_hash or
             union.get('histogramming_started_after_complete_grouping') is not True or
+            [item.get('path') for item in union.get('inputs', [])] != [chunk['nano'] for chunk in row['chunks']] or
             len(published_groups) != len(groups) or len(scored_groups) != len(groups)):
         raise ValueError('Point grouping changed its unique full GEN denominator')
     prefix = row['final_output_base']
@@ -253,11 +265,12 @@ def validate_group_reports(row, parent, report, seal_hash, plan_hash, model_hash
         marker = scored.get('score_histograms', {}).get('marker', {})
         if (publication.get('group') != number or publication.get('events') != count or
                 publication.get('event_ids') != identities or publication.get('native_sumw') != count or
-                publication.get('native_sumw2') != count or source.get('path') != group['nano'] or
+                publication.get('native_sumw2') != count or not valid_artifact(source, group['nano']) or
                 scored.get('group') != number or marker.get('complete') is not True or
                 marker.get('events') != count or marker.get('source') != group['nano'] or
                 marker.get('source_sha256') != source.get('sha256') or
                 marker.get('model_sha256') != model_hash or marker.get('plan_sha256') != seal_hash or
+                type(marker.get('pairs')) is not int or marker['pairs'] < 0 or
                 marker.get('selection_applied') is not False):
             raise ValueError('Group scoring differs from its exact grouped GEN slice')
         destinations = {
@@ -271,15 +284,16 @@ def validate_group_reports(row, parent, report, seal_hash, plan_hash, model_hash
             raise ValueError('Grouped scoring publication inventory is incomplete')
         for key, destination in destinations.items():
             item = marker['published'][key]
-            if (item.get('path') != destination or type(item.get('bytes')) is not int or item['bytes'] <= 0 or
-                    not isinstance(item.get('sha256'), str) or len(item['sha256']) != 64):
+            if not valid_artifact(item, destination):
                 raise ValueError('Grouped scoring publication changed its frozen namespace')
     final = report.get('score_histograms', {}).get('marker', {})
     if (final.get('complete') is not True or final.get('events') != row['events'] or
             final.get('plan_sha256') != seal_hash or final.get('model_sha256') != model_hash or
-            final.get('selection_applied') is not False or
-            final.get('published', {}).get('histograms', {}).get('path') != prefix +
-            '/histograms_merged/ntuple_0.root' or report.get('histogram_merge', {}).get('complete') is not True):
+            final.get('selection_applied') is not False or final.get('groups') != len(groups) or
+            final.get('pairs') != sum(item['score_histograms']['marker']['pairs'] for item in scored_groups) or
+            not valid_artifact(final.get('published', {}).get('histograms'), prefix + '/histograms_merged/ntuple_0.root') or
+            report.get('histogram_merge', {}).get('complete') is not True or
+            report.get('histogram_merge', {}).get('inputs') != len(groups)):
         raise ValueError('Final merged histogram lacks complete-group validation')
     return published_groups, scored_groups
 

@@ -119,7 +119,7 @@ def capacity_decision(previous, policy, *, now, completed_jobs, own_ads,
         changed, baseline, reason = now, completed_jobs, 'healthy_completed_outputs_allow_growth'
     elif current == policy['worker_ceiling']:
         reason = 'at_approved_worker_ceiling'
-    available = max(0, current - external_workers - len(live)) if observations_verified and healthy else 0
+    available = max(0, min(current, policy['worker_ceiling'] - external_workers) - len(live)) if observations_verified and healthy else 0
     return {'current_capacity': current, 'last_capacity_change_epoch': changed,
             'completed_at_change': baseline, 'completed_jobs': completed_jobs,
             'external_workers': external_workers if observations_verified else None,

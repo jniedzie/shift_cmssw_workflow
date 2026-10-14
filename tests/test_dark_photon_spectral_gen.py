@@ -87,6 +87,9 @@ class SpectralGenerationTest(unittest.TestCase):
             self.assertAlmostEqual(proper*200/1000,row['target_mean_lab_flight_m'])
         with self.assertRaises(ValueError):
             plan_points(reference,[.22],[5.],50,251013701,2700001)
+        self.assertEqual(plan_points(reference,[2.],[5.],10000,251013701,2700001)['points'][0]['events'],10000)
+        with self.assertRaises(ValueError):
+            plan_points(reference,[2.],[5.],10001,251013701,2700001)
 
     def test_explicit_epsilon_grid_keeps_physical_couplings_and_unique_identities(self):
         reference = dict(schema='shift-dark-photon-grid-reference-v1', sample_kind='simulation_only',

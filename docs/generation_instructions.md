@@ -272,6 +272,25 @@ frozen generator/width sources into `metadata/GEN/`, with SHA-256 readback
 receipts. The exporter leaves sealed deployments and existing different files
 unchanged. It can also run without `--publish` to prepare the records first.
 
+For a statistics extension, pass `--reuse-physical-plan OLD_PLAN` to the native
+or spectral grid preparer. This keeps the exact old physical epsilon, proper
+lifetime and reference boost, then checks the lifetime again during fresh width
+preflight. New accepted-event counts, run numbers and random seeds are separate.
+The planners support up to 10,000 accepted events per point; use bounded detector
+chunks and groups of a few thousand events before histogramming. `--gen-timeout`
+sets a CPU deadline without changing any physical or detector setting.
+
+`scripts/prepare_dark_photon_gen_stage.py` prepares a sealed Condor GEN DAG for
+work that must continue after logout. Its `--combine-only --plans ...` mode
+combines compatible native/spectral preparations while preserving each point's
+event budget and all source authorities. The GEN worker checks complete accepted
+identities and weights, publishes with independent SHA-256 readback, and collects
+one full-GEN inventory. Only then does the DAG execute the explicit frozen
+downstream commands from `--handoff-config`. These commands must prepare and
+submit the qualified detector-to-merged-histogram stage and retain cross sections.
+Preparation itself never submits. Failed or interrupted commands retain their
+evidence and require review; the DAG does not blindly retry or overwrite them.
+
 Use `physical_selected_cross_sections_pb` for dimuon yield estimates: the
 native selected rate already contains its dimuon branching fraction, and the
 recorded amplitude and physical/native branching corrections were applied once.

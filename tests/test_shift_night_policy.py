@@ -74,10 +74,17 @@ class NightPolicyTests(unittest.TestCase):
         self.assertFalse(admission_valid({**ad, 'ShiftNightAdmissionLeaseEpoch': None}, 150))
 
     def test_other_campaigns_consume_the_same_capacity(self):
-        result = capacity_decision({}, policy(), now=100, completed_jobs=0,
+        settings = {**policy(), 'worker_ceiling': 50, 'maximum_wave_jobs': 50}
+        result = capacity_decision({}, settings, now=100, completed_jobs=0,
                                    own_ads=[{'JobStatus': 2}] * 20, external_workers=25,
                                    observations_verified=True, healthy=True)
         self.assertEqual(result['available_new_slots'], 5)
+
+    def test_initial_night_ramp_can_start_beside_larger_existing_campaign(self):
+        result = capacity_decision({}, policy(), now=100, completed_jobs=0,
+                                   own_ads=[], external_workers=193,
+                                   observations_verified=True, healthy=True)
+        self.assertEqual(result['available_new_slots'], 50)
 
     def test_new_reservations_never_exceed_wave_bound(self):
         result = capacity_decision({'current_capacity': 1000}, policy(), now=100,

@@ -9,10 +9,11 @@ from pathlib import Path
 import re
 import signal
 import socket
+import subprocess
 import time
 import uuid
 
-from shift_condor_native import NativeCondorError, query, run_condor
+from shift_condor_native import NativeCondorError, native_env, query, run_condor
 from shift_night_plan import load_epoch, load_plan, pinned_path, sha, valid_sha
 from shift_night_policy import (LIVE_STATUSES, NIGHT_HOLD_REASON, capacity_decision,
                                 night_window, observations_safe, validate_policy)
@@ -109,6 +110,16 @@ class NativeBackend:
         # audit, whose frozen copy counts all vanilla jobs for this account.
         from run_shift_ntuple_controller import refresh_quota
         return refresh_quota(self.root)
+
+    def afs_headroom(self):
+        output = subprocess.run(['/usr/bin/fs', 'listquota', '-path', str(self.root)],
+                                capture_output=True, text=True, timeout=20,
+                                check=True, env=native_env(local_schedd=True)).stdout
+        for line in output.splitlines():
+            match = re.match(r'\s*\S+\s+(\d+)\s+(\d+)\s+', line)
+            if match and int(match[1]) > 0:
+                return max(0, int(match[1]) - int(match[2])) * 1024
+        raise ValueError('Cannot verify AFS volume quota headroom')
 
 
 class NightController:
@@ -230,7 +241,7 @@ class NightController:
                     failed[job_id] = 'Worker removed or held outside the night admission policy'
         return completed, failed, deferred, pending_exit, assigned
 
-    def renew_admissions(self, ads, deferred, window, now):
+    def renew_admissions(self, ads, deferred, window, now, eligible_budget):
         """Update only idle or proved unprocessed calendar deferrals; never touch running jobs."""
         eligible = []
         for ad in ads:
@@ -238,6 +249,15 @@ class NightController:
             if ad.get('JobStatus') == 1 or (ad.get('JobStatus') == 5 and (
                     ad.get('HoldReason') == NIGHT_HOLD_REASON or identity in deferred)):
                 eligible.append(ad)
+        eligible.sort(key=lambda ad: ad.get('ShiftNightJob', -1))
+        denied = eligible[max(0, eligible_budget):]
+        eligible = eligible[:max(0, eligible_budget)]
+        for start in range(0, len(denied), 100):
+            identities = ' || '.join('(ClusterId == %d && ProcId == %d)' % (ad['ClusterId'], ad['ProcId'])
+                                     for ad in denied[start:start + 100])
+            self.backend.command(['/usr/bin/condor_qedit', '-constraint',
+                                  self.constraint() + ' && (' + identities + ') && JobStatus == 1',
+                                  'ShiftNightAdmissionLeaseEpoch', '0'])
         for start in range(0, len(eligible), 100):
             batch = eligible[start:start + 100]
             identities = ' || '.join('(ClusterId == %d && ProcId == %d)' % (ad['ClusterId'], ad['ProcId']) for ad in batch)
@@ -347,6 +367,14 @@ class NightController:
             else:
                 external = sum(ad.get('JobStatus') in LIVE_STATUSES and ad.get('ShiftNightCampaign') != self.tag
                                for ad in observation['account_workers'])
+        if verified and self.policy.get('minimum_AFS_free_bytes', 0):
+            cache_path = self.root / 'last_AFS_quota.json'
+            cache = read(cache_path) if cache_path.exists() else {}
+            if not 0 <= now - cache.get('checked_at_epoch', 0) <= 300:
+                cache = {'checked_at_epoch': now, 'free_bytes': self.backend.afs_headroom()}
+                save(cache_path, cache)
+            if cache['free_bytes'] < self.policy['minimum_AFS_free_bytes']:
+                verified, observation_reason = False, 'AFS quota cannot safely retain compact statuses and controller state'
         # Reserve all assigned originals that lack terminal proof, even when
         # absent from a queue snapshot. Unknown disappearance cannot free slots.
         unresolved = assigned - set(completed) - set(failed)
@@ -369,7 +397,12 @@ class NightController:
                      pending_terminal_evidence=sorted(pending_exit), submitted_jobs=len(assigned),
                      queued_or_running_workers=len(live_by_job), active_admission_deferrals=len(deferred), dry_run=dry_run)
         if allow and not dry_run:
-            self.renew_admissions(ads, deferred, window, now)
+            own_running = sum(ad.get('JobStatus') in (2, 6, 7) for ad in ads)
+            missing_reservations = len(unresolved - set(live_by_job) - {
+                ad.get('ShiftNightJob') for ad in ads if ad.get('JobStatus') == 5})
+            eligible_budget = max(0, min(capacity['current_capacity'], self.policy['worker_ceiling'] - external)
+                                  - own_running - missing_reservations)
+            self.renew_admissions(ads, deferred, window, now, eligible_budget)
             count = capacity['available_new_slots']
             pending = [job for job in epoch['jobs'] if job['job'] not in assigned]
             if count and pending:
