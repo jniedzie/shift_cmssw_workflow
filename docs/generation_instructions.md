@@ -99,6 +99,12 @@ decay vertices, marks completed parents as history, and leaves daughter
 transport to the unchanged simulation. Complete A' decay graphs outside the
 reference hadron cylinder are counted and retained in the full GEN denominator.
 
+For new grids, `--accepted-events` makes `--events N` count written accepted
+GEN events. CMSSW stops at N outputs or at a bounded 10*N input slots. The
+audit still requires exactly N accepted events, preserves gaps in original
+event IDs from rejected generator slots, and retains all Pythia trial counters.
+The default remains the original input-slot budget for reproducibility.
+
 After a successful GEN audit, replay a small slice through the exact frozen
 background templates:
 
@@ -242,6 +248,39 @@ with only 200 events per point uses one complete file; larger stages should
 group a few thousand events per file. The October 12 five-event handover and
 its exact scheduling/validation receipts are in
 `validation/bsm_repartition_20261012/HANDOFF.md` in the workspace.
+
+`scripts/prepare_dark_photon_production.py` prepares a new immutable full-chain
+DAG from a qualified deployment and a new native-preflight grid. Supply the
+completed GEN identity inventory, checksum/readback publication receipt,
+reviewed storage budget and prior GEN inventories. It rejects reused event,
+run, generator-seed and detector-job namespaces. The detector gates run first;
+each point then groups its complete Nano union before histogramming, and the
+collector waits for every point's merged histogram. Preparation never submits.
+This qualified finalizer supports one complete group per point; choose a GEN
+budget at or below the grouping target. For simultaneous deployments, list
+their pinned authorities in the budget's `external_reservations`. The new
+workers reserve every unfinished external detector chunk and count shared
+safety floors once. Inspect fresh total quota and concurrency before submitting
+the prepared DAG with the native Condor tools.
+
+Preserve every completed signal GEN run's rates before retiring its source
+directory. `scripts/export_dark_photon_cross_sections.py --plan PLAN --output
+NEW_RETENTION_DIRECTORY --publish` exports `cross_sections.json` and
+`cross_sections.txt` to each canonical sample/campaign directory. It also copies
+the exact GEN contract, run audit, manifest, log, resolved configuration and
+frozen generator/width sources into `metadata/GEN/`, with SHA-256 readback
+receipts. The exporter leaves sealed deployments and existing different files
+unchanged. It can also run without `--publish` to prepare the records first.
+
+Use `physical_selected_cross_sections_pb` for dimuon yield estimates: the
+native selected rate already contains its dimuon branching fraction, and the
+recorded amplitude and physical/native branching corrections were applied once.
+Keep the inferred inclusive rate separate. Normalize an accepted signal count
+with the full GEN sum of weights, including decays outside the detector and
+events without reconstructed candidates. Pythia trial counters are retained
+for generator accounting; they are not luminosity. These rates remain an
+explicitly provisional pure-DY prediction until physical rate closure passes.
+Ordinary partial plotting still requires only available histogram files.
 
 The frozen preparation is
 `validation/bsm_grid_production_20261009/preparation_v2/plan.json`: nine points,
