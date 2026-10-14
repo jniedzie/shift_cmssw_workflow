@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code.
 """Audit signal graph, spacetime, weights and native cross-section bookkeeping."""
 from collections import Counter
 import hashlib
@@ -79,6 +80,45 @@ def genparticle_hash(event):
     return record_hash(rows)
 
 
+def validate_event_identity(identity, index, contract, previous=None):
+    """Keep original accepted identities; input rejections may leave gaps."""
+    mode = contract.get('event_budget_mode')
+    if mode not in (None, 'outputAccepted'):
+        raise ValueError('Unknown signal GEN event budget mode')
+    if (len(identity) != 3 or any(type(value) is not int for value in identity) or
+            identity[0] != contract['run_number'] or identity[1] != 1 or identity[2] < 1):
+        raise ValueError('Invalid signal run/lumi/event identity')
+    if mode == 'outputAccepted':
+        cap = contract.get('maximum_framework_events')
+        if type(cap) is not int or cap != 10 * contract['requested_events'] or identity[2] > cap:
+            raise ValueError('Accepted signal identity exceeds the frozen framework attempt budget')
+        if previous is not None and identity <= previous:
+            raise ValueError('Duplicated/out-of-order accepted signal identity')
+    elif identity != (contract['run_number'], 1, index + 1):
+        raise ValueError('Missing/duplicated/out-of-order signal identity')
+
+
+def validate_event_ids(event_ids, contract):
+    if len(event_ids) != contract['requested_events']:
+        raise ValueError('Accepted signal GEN count differs from the frozen request')
+    previous = None
+    for index, identity in enumerate(event_ids):
+        identity = tuple(identity)
+        validate_event_identity(identity, index, contract, previous)
+        previous = identity
+
+
+def proper_length_from_native_time(delta_ct_mm, mass_gev, energy_gev):
+    """Use the unshifted GEN time before source translation loses precision."""
+    if (not all(math.isfinite(value) for value in (delta_ct_mm, mass_gev, energy_gev)) or
+            delta_ct_mm <= 0 or mass_gev <= 0 or energy_gev <= 0):
+        raise ValueError('Invalid native proper decay length inputs')
+    length = delta_ct_mm * mass_gev / energy_gev
+    if not math.isfinite(length) or length <= 0:
+        raise ValueError('Invalid native proper decay length')
+    return length
+
+
 def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bound=1e-12):
     """Finite-N exponential mean gate, including the small-pilot lower tail.
 
@@ -130,7 +170,9 @@ def audit(directory):
     for index, event in enumerate(Events(str(out / 'gen.root'))):
         aux = event.eventAuxiliary()
         identity = (int(aux.run()), int(aux.luminosityBlock()), int(aux.event()))
-        if identity in identities or identity != (contract['run_number'], 1, index + 1):
+        validate_event_identity(identity, index, contract,
+                                tuple(event_rows[-1]['id']) if event_rows else None)
+        if identity in identities:
             raise ValueError('Missing/duplicated/out-of-order signal identity')
         identities.add(identity)
         info = read_product(event, 'generator', 'GenEventInfoProduct')
@@ -178,9 +220,19 @@ def audit(directory):
             delta = [float(decay.x()-prod.x()), float(decay.y()-prod.y()),
                      float(decay.z()-prod.z()), float(decay.t()-prod.t())]
             components = [float(mom.px()), float(mom.py()), float(mom.pz()), float(mom.e())]
-            length = delta[3] * mass / components[3]
-            if not math.isfinite(length) or length < 0:
-                raise ValueError('Invalid proper decay length')
+            native_parent = original.barcode_to_particle(parent.barcode())
+            if (not native_parent or abs(native_parent.pdg_id()) != 32 or
+                    not native_parent.production_vertex() or not native_parent.end_vertex() or
+                    native_parent.generated_mass() != mass):
+                raise ValueError('Missing or changed original signal parent')
+            native_mom = native_parent.momentum()
+            native_components = [float(native_mom.px()), float(native_mom.py()),
+                                 float(native_mom.pz()), float(native_mom.e())]
+            if native_components != components:
+                raise ValueError('Source placement changed the signal parent momentum')
+            native_start = native_parent.production_vertex().position()
+            native_end = native_parent.end_vertex().position()
+            length = proper_length_from_native_time(float(native_end.t()-native_start.t()), mass, components[3])
             for displacement, momentum in zip(delta, components):
                 error = abs(displacement - momentum / mass * length)
                 max_flight_error = max(max_flight_error, error)
@@ -207,6 +259,7 @@ def audit(directory):
         counts['residual_added_muons'] += muons
         event_rows.append(dict(id=list(identity), weight=weight, full_graph_sha256=signature,
                                signal_decays=signal_decays))
+    validate_event_ids([row['id'] for row in event_rows], contract)
     if max_source_error > 1e-7:
         raise ValueError('Common physical source timing changed')
     native_xsecs = []
@@ -229,6 +282,8 @@ def audit(directory):
         sum_weights_squared=sum(row['weight']**2 for row in event_rows),
         proposal_ledger=proposal_ledger,
         full_gen_denominator=dict(accepted_events=len(event_rows),
+            event_budget_mode=contract.get('event_budget_mode', 'frameworkInput'),
+            framework_attempt_cap=contract.get('maximum_framework_events', contract['requested_events']),
             selection='none; outside-envelope decays retained',
             interpretation='Technical Pythia trial counts are not proton collisions or luminosity'),
         beams=beam_summary, native_cross_sections=native_xsecs,
@@ -243,6 +298,7 @@ def audit(directory):
         mean_proper_length_mm=generated_mean, expected_proper_length_mm=requested_mean,
         mean_lifetime_pull=lifetime_pull,
         lifetime_audit=lifetime_audit)
+    report['lifetime_measurement_source'] = 'Original unshifted generator HepMC; translated spacetime checked separately'
     (out / 'validation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k!='event_rows'},indent=2))
     return report

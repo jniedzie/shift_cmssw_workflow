@@ -1,3 +1,4 @@
+# Code style: human-code.
 """Pure configuration contract for bounded native-Pythia dark-photon pilots.
 
 Only the pure on-shell DY contribution is implemented. Low-mass hadronic
@@ -75,7 +76,7 @@ def signal_settings(mass_gev, epsilon, width_table, decay_mode='mumu', coupling_
 
 
 def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_number,
-             common, cp5, sampling_width_table=None, coupling_scale=1.):
+             common, cp5, sampling_width_table=None, coupling_scale=1., accepted_events=False):
     if not 1 <= events <= 10000 or not 1 <= seed <= 899999900:
         raise ValueError('Require 1..10000 events and valid reserved RNG seed range')
     if not 1 <= run_number <= 4294967295:
@@ -92,7 +93,7 @@ def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_numbe
     if sampling_width_table['total_width_gev'] < max(1e-6,1e6*math.ulp(mass_gev)):
         raise ValueError('Native pole width is numerically unresolved; use explicit narrow-width sampling')
     commands = signal_settings(mass_gev, epsilon, width_table, decay_mode, coupling_scale)
-    return dict(schema='shift-dark-photon-gen-v1', model='PBC-BC1-visible-hypercharge',
+    result = dict(schema='shift-dark-photon-gen-v1', model='PBC-BC1-visible-hypercharge',
         mechanism='pure-on-shell-drell-yan', mass_gev=mass_gev, epsilon=epsilon,
         generated_mass_support_gev=[.99*mass_gev,1.01*mass_gev],
         pdg_id=SIGNAL_PDG_ID, decay_mode=decay_mode, requested_events=events,
@@ -115,3 +116,7 @@ def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_numbe
         filtering='none', physics_valid=False, normalization_ready=False,
         low_mass_mechanisms_included=False, prompt_interference_included=False,
         detector_simulated=False)
+    if accepted_events:
+        result.update(event_budget_mode='outputAccepted', maximum_framework_events=10 * events,
+                      event_identity_policy='Original accepted run/lumi/event IDs; gaps retained')
+    return result

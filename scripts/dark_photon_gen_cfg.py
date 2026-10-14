@@ -1,3 +1,4 @@
+# Code style: human-code.
 """Frozen GEN-only dark-photon configuration, used by run_dark_photon_gen.py."""
 import json
 from pathlib import Path
@@ -19,6 +20,12 @@ process = cms.Process('SHIFTBSMGEN', Run3_2023)
 process.load('Configuration.StandardSequences.Services_cff')
 process.load('SimGeneral.HepPDTESSource.pythiapdt_cfi')
 process.maxEvents = cms.untracked.PSet(input=cms.untracked.int32(data['requested_events']))
+if data.get('event_budget_mode') == 'outputAccepted':
+    # Pythia may reject an input slot. Keep its original event number and stop
+    # when the output has the requested accepted count, with a bounded input cap.
+    process.maxEvents = cms.untracked.PSet(
+        input=cms.untracked.int32(data['maximum_framework_events']),
+        output=cms.untracked.int32(data['requested_events']))
 process.source = cms.Source('EmptySource', firstRun=cms.untracked.uint32(data['run_number']))
 process.options = cms.untracked.PSet(numberOfThreads=cms.untracked.uint32(1),
     numberOfStreams=cms.untracked.uint32(1), wantSummary=cms.untracked.bool(True))

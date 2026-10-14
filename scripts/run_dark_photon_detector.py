@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code.
 """Replay at most 20 audited signal GEN events with the frozen background chain.
 
 No build, scheduler submission, publication or signal-dependent reco tuning.
@@ -24,9 +25,15 @@ def main():
     parser.add_argument('--templates',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--timeout',type=int,default=10800)
+    parser.add_argument('--event-stall-timeout',type=int,default=1800)
+    parser.add_argument('--first-event-stall-timeout',type=int,
+                        help='Extra bounded startup/first-event time for lazy material-table initialization')
     args=parser.parse_args()
     if not 1 <= args.count <= 20 or args.skip < 0 or args.timeout <= 0:
         parser.error('Require 1..20 events, nonnegative skip and positive timeout')
+    if args.event_stall_timeout <= 0 or (args.first_event_stall_timeout is not None and
+                                        args.first_event_stall_timeout < args.event_stall_timeout):
+        parser.error('Require positive event stall limits; first-event allowance cannot be shorter')
     if not shutil.which('cmsRun') or not os.environ.get('CMSSW_BASE'):
         parser.error('Enter the prepared CMSSW runtime; no build is performed')
     gen_dir=args.gen_directory.resolve()
@@ -39,7 +46,7 @@ def main():
         raise ValueError('Invalid slice or changed GEN payload')
     out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     scripts=Path(__file__).resolve().parent
-    for name in ('run_shift_gen_to_nano.py','shift_muon_decay_replay.py','audit_dark_photon_gen.py',
+    for name in ('run_shift_gen_to_nano.py','shift_storage_paths.py','shift_muon_decay_replay.py','audit_dark_photon_gen.py',
                  'pythia_generation_ledger.py'):
         shutil.copy2(scripts/name,out/name)
     templates=out/'templates';templates.mkdir()
@@ -48,7 +55,7 @@ def main():
         source=args.templates.resolve()/f'step{stage}.py'
         shutil.copy2(source,templates/source.name)
         frozen_templates[str(stage)]=dict(source=str(source),sha256=sha(source))
-    descriptor=dict(schema='shift-bsm-pilot-source-v1',gen_transport='local',
+    descriptor=dict(schema='shift-bsm-pilot-source-v1',gen_transport='local',gen_path_resolved=True,
         gen=str(gen_dir/'gen.root'),gen_sha256=manifest['output_sha256'],
         receipt=str(gen_dir/'manifest.json'),receipt_sha256=sha(gen_dir/'manifest.json'),
         stratum='darkphoton_dy_m'+str(contract['mass_gev']),event_ids=audit['event_ids'],
@@ -65,7 +72,9 @@ def main():
     path=out/'signal_report.json';path.write_text(json.dumps(wrapper,indent=2)+'\n')
     command=[sys.executable,str(out/'run_shift_gen_to_nano.py'),str(out/'source.json'),
         '--skip',str(args.skip),'--count',str(args.count),'--job',str(args.job),
-        '--templates',str(templates)]
+        '--templates',str(templates),'--event-stall-timeout',str(args.event_stall_timeout)]
+    if args.first_event_stall_timeout is not None:
+        command += ['--first-event-stall-timeout',str(args.first_event_stall_timeout)]
     try:
         with (out/'worker.log').open('w') as log:
             subprocess.run(command,cwd=out,stdout=log,stderr=subprocess.STDOUT,

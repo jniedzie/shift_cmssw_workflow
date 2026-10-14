@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code.
 """Generate a new bounded, audited native-Pythia dark-photon GEN pilot.
 
 Requires an already built CMSSW runtime; never builds, submits or overwrites.
@@ -32,6 +33,8 @@ def main():
     parser.add_argument('--sampling-epsilon', type=float,
                         help='Resolvable common amplitude scale; physical epsilon and lifetime stay unchanged')
     parser.add_argument('--events', type=int, default=100)
+    parser.add_argument('--accepted-events', action='store_true',
+                        help='Write --events accepted GEN events, with input capped at10times that count')
     parser.add_argument('--seed', type=int, default=24681357)
     parser.add_argument('--run-number', type=int)
     parser.add_argument('--timeout', type=int, default=600)
@@ -90,7 +93,8 @@ def main():
         sampling_width['pole_support_audit'] = validate_native_proposal_support(
             sampling_width, .99*args.mass, 1.01*args.mass)
         data = contract(args.mass, args.epsilon, width, args.decay_mode, args.events, args.seed,
-                        args.run_number or args.seed, common, cp5, sampling_width, scale)
+                        args.run_number or args.seed, common, cp5, sampling_width, scale,
+                        accepted_events=args.accepted_events)
         (out / 'contract.json').write_text(json.dumps(data, indent=2) + '\n')
         command = ['cmsRun', str(out / 'dark_photon_gen_cfg.py'), 'pilotDirectory=' + str(out)]
         manifest.update(command=command, status='generating')
