@@ -1,3 +1,4 @@
+# Code style: AI-code. AI-generated signal generation contract tests.
 """Guard physical-point and normalization contracts before runtime pilots."""
 import math
 from pathlib import Path
@@ -27,6 +28,15 @@ class SignalGenerationContractTest(unittest.TestCase):
                        {'br_mumu':0.},{'total_width_gev':float('nan')}):
             with self.assertRaises(ValueError):
                 signal_settings(15.,1e-3,dict(self.width,**change))
+
+    def test_accepted_output_budget_is_explicit_and_bounded(self):
+        legacy=contract(15.,1e-3,self.width,'mumu',100,1234,1234,[],[])
+        accepted=contract(15.,1e-3,self.width,'mumu',100,1234,1234,[],[],accepted_events=True)
+        self.assertNotIn('event_budget_mode',legacy)
+        self.assertEqual(accepted['event_budget_mode'],'outputAccepted')
+        self.assertEqual(accepted['maximum_framework_events'],1000)
+        self.assertEqual(accepted['requested_events'],100)
+        self.assertEqual(accepted['process_settings'],legacy['process_settings'])
 
     def test_unsupported_hadronic_and_degenerate_points_fail(self):
         for mass,eps in ((.22,1e-7),(5.,1e-7),(91.1876,1e-7),(15.,0.),(15.,.1)):

@@ -1,3 +1,4 @@
+# Code style: AI-code. AI-generated detector workflow regression tests.
 import importlib.util
 import json
 from pathlib import Path
@@ -12,6 +13,7 @@ from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import run_shift_gen_to_nano as worker
+import run_dark_photon_detector as signal_runner
 
 spec = importlib.util.spec_from_file_location('handoff', Path(__file__).resolve().parents[1] / 'scripts/prepare_shift_gen_to_nano.py')
 module = importlib.util.module_from_spec(spec)
@@ -19,6 +21,43 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); gen = root/'gen'; gen.mkdir()
+            (gen/'gen.root').write_bytes(b'synthetic GEN payload')
+            (gen/'manifest.json').write_text(json.dumps(dict(
+                status='GEN runtime audit passed fixture', output_sha256=worker.sha(gen/'gen.root'))))
+            (gen/'contract.json').write_text(json.dumps(dict(mass_gev=15.)))
+            identities = [[123, 1, event] for event in range(1, 6)]
+            (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
+                event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))
+            templates = root/'templates'; templates.mkdir()
+            for stage in range(1, 5):
+                (templates/f'step{stage}.py').write_text('# synthetic template\n')
+            output = root/'detector'
+            launched = []
+            def run(command, **kwargs):
+                launched.append(command)
+                if Path(command[1]).name == 'run_shift_gen_to_nano.py':
+                    (output/'report.json').write_text(json.dumps(dict(complete=True)))
+                elif command[2] == 'audit-replay':
+                    (output/'signal_audit.json').write_text('{}\n')
+                else:
+                    self.fail('Unexpected external command')
+                return subprocess.CompletedProcess(command, 0)
+            arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
+                         '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600']
+            with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
+                    patch.object(signal_runner.shutil, 'which', return_value='cmsRun'), \
+                    patch.object(signal_runner.subprocess, 'run', side_effect=run), redirect_stdout(io.StringIO()):
+                signal_runner.main()
+            descriptor = json.loads((output/'source.json').read_text())
+            self.assertTrue(descriptor['gen_path_resolved'])
+            self.assertEqual(descriptor['event_ids'], identities)
+            self.assertTrue((output/'shift_storage_paths.py').is_file())
+            self.assertEqual(launched[0][launched[0].index('--event-stall-timeout') + 1], '1800')
+            self.assertEqual(launched[0][launched[0].index('--first-event-stall-timeout') + 1], '3600')
+
     def test_publication_paths_keep_nano_and_metadata_in_current_layout(self):
         descriptor = dict(storage_contract='shift-process-bin-detector-v1',
             nano_base='/eos/user/j/test/qcd/nanoAOD',
@@ -222,6 +261,44 @@ class HandoffTests(unittest.TestCase):
                 poll = worker.event_progress(log, {}, 'NANO', {}, 1800, expected_records=1)
                 poll()
                 poll()  # closing the requested output is governed by the absolute limit
+
+    def test_first_event_material_initialization_has_its_own_bounded_allowance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'cmsRun.log'; log.write_text('')
+            report = {}
+            with patch.object(worker.time, 'monotonic', return_value=0), patch.object(worker, 'progress'):
+                poll = worker.event_progress(log, report, 'NANO', {}, 1800,
+                    expected_records=5, first_event_stall_seconds=3600)
+                with patch.object(worker.time, 'monotonic', return_value=1801):
+                    poll()  # no first record yet; startup has the same bounded allowance
+                log.write_text('Begin processing the 1st record. Run 1, Event 106\n')
+                with patch.object(worker.time, 'monotonic', return_value=1900):
+                    poll()
+                self.assertEqual(report['stage_timeout_seconds'], 3600)
+                with patch.object(worker.time, 'monotonic', return_value=3701):
+                    poll()  # lazy first-event material tables can exceed the later-event limit
+                with patch.object(worker.time, 'monotonic', return_value=5501):
+                    with self.assertRaisesRegex(TimeoutError, '3600 seconds; records started=1'):
+                        poll()
+
+    def test_second_record_restores_normal_stall_limit_and_scheduler_telemetry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory) / 'cmsRun.log'
+            log.write_text('Begin processing the 1st record. Run 1, Event 106\n')
+            report = {}
+            with patch.object(worker.time, 'monotonic', return_value=0), patch.object(worker, 'progress') as update:
+                poll = worker.event_progress(log, report, 'NANO', {}, 1800,
+                    expected_records=5, first_event_stall_seconds=3600)
+                poll()
+                with log.open('a') as stream:
+                    stream.write('Begin processing the 2nd record. Run 1, Event 107\n')
+                with patch.object(worker.time, 'monotonic', return_value=2000):
+                    poll()
+                self.assertEqual(report['stage_timeout_seconds'], 1800)
+                self.assertEqual(update.call_count, 2)
+                with patch.object(worker.time, 'monotonic', return_value=3801):
+                    with self.assertRaisesRegex(TimeoutError, '1800 seconds; records started=2'):
+                        poll()
 
     def test_final_record_telemetry_keeps_scheduler_and_worker_deadlines_consistent(self):
         import run_shift_ntuple_controller as controller

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated immutable signal planning utilities.
 """Freeze a bounded physical mass/epsilon pilot grid; never launch jobs.
 
 Default columns are prompt, approximately 5 m and 30 m mean LAB flight.
@@ -13,6 +14,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+from datetime import datetime
 import shlex
 import shutil
 import subprocess
@@ -26,7 +29,7 @@ REFERENCE_SCHEMA = 'shift-dark-photon-grid-reference-v1'
 SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'dark_photon_gen_cfg.py',
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
-           'run_shift_gen_to_nano.py', 'shift_muon_decay_replay.py', 'pythia_generation_ledger.py')
+           'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py', 'pythia_generation_ledger.py')
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
     'Compare measured <beta gamma> and lab-flight distributions with the reference estimate; do not condition on detector acceptance.',
@@ -132,6 +135,92 @@ def repartition_detector_chunks(chunks, event_ids, retained_chunks, events_per_j
     return result
 
 
+def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
+                        group_events=2000, detector_job_base=1000000):
+    """Prepare complete detector slices and same-point Nano groups, without I/O.
+
+    The full native-width-preflighted GEN budget remains authoritative. Runtime
+    workers must bind these ordered slices to the audited GEN identities and
+    weights, and group all slices before starting any histogramming. A group
+    boundary may shorten a slice; different physical points never share a file.
+    """
+    if not isinstance(physical_plan, dict) or physical_plan.get('native_width_preflight_passed') is not True:
+        raise ValueError('Detector stages require completed native-width preflight')
+    if not isinstance(campaign, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', campaign):
+        raise ValueError('Require a valid detector stage campaign name')
+    dates = re.findall(r'(?<![0-9])(20[0-9]{6})(?![0-9])', campaign)
+    if not dates:
+        raise ValueError('Detector stage campaign must contain its YYYYMMDD date')
+    for date in dates:
+        datetime.strptime(date, '%Y%m%d')
+    if (not isinstance(eos_base, str) or not eos_base.startswith('/eos/user/') or
+            str(Path(eos_base)) != eos_base or '..' in Path(eos_base).parts or
+            any(character.isspace() for character in eos_base)):
+        raise ValueError('Detector stages require a canonical absolute EOS user base')
+    if type(events_per_job) is not int or not 1 <= events_per_job <= 20:
+        raise ValueError('Detector stage chunks require 1..20 events per job')
+    if type(group_events) is not int or group_events < events_per_job:
+        raise ValueError('Nano group size must be at least the detector chunk size')
+    if type(detector_job_base) is not int or detector_job_base < 1:
+        raise ValueError('Detector stage job namespace must be positive')
+    rows = physical_plan.get('points')
+    if not isinstance(rows, list) or not rows:
+        raise ValueError('Require a nonempty physical point plan')
+    names, runs = set(), set()
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError('Invalid physical point descriptor')
+        point = row.get('point')
+        if (not isinstance(point, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', point) or
+                point in names or type(row.get('events')) is not int or row['events'] < 1 or
+                type(row.get('run_number')) is not int or row['run_number'] < 1 or
+                row['run_number'] in runs):
+            raise ValueError('Require unique physical points/runs and complete positive GEN budgets')
+        if isinstance(row.get('signal_contract'), dict):
+            if row['signal_contract'].get('requested_events') != row['events']:
+                raise ValueError('Detector stage GEN budget differs from its physical contract')
+        names.add(point)
+        runs.add(row['run_number'])
+    result = copy.deepcopy(physical_plan)
+    next_job = detector_job_base
+    for row in result['points']:
+        prefix = f"{eos_base}/darkphoton_{row['point']}/{campaign}"
+        chunks, groups = [], []
+        for group_skip in range(0, row['events'], group_events):
+            count = min(group_events, row['events'] - group_skip)
+            identifiers = []
+            for skip in range(group_skip, group_skip + count, events_per_job):
+                chunk_id = len(chunks)
+                name = f'chunk_{chunk_id:03d}'
+                chunks.append(dict(chunk=chunk_id, skip=skip,
+                    count=min(events_per_job, group_skip + count - skip), job=next_job,
+                    nano=prefix + '/nanoAOD/' + name + '.root',
+                    metadata=prefix + '/metadata/' + name))
+                identifiers.append(chunk_id)
+                next_job += 1
+            group_id = len(groups)
+            groups.append(dict(group=group_id, skip=group_skip, count=count, chunks=identifiers,
+                nano=prefix + f'/nanoAOD_merged_unscored/ntuple_{group_id}.root',
+                histograms=prefix + f'/histograms/ntuple_{group_id}.root'))
+        row.update(chunks=chunks, groups=groups, final_output_base=prefix,
+                   merged_histograms=prefix + '/histograms_merged/ntuple_0.root')
+    # Canary simulation uses a distinct job/seed from every production slice.
+    for row in result['points']:
+        row['detector_job'] = next_job
+        next_job += 1
+    if 230000000 + (next_job - 1) * 100 + 40 > 899999900:
+        raise ValueError('Detector stage job namespace exceeds the CMSSW random seed range')
+    result.update(campaign=campaign, chunk_size=events_per_job, group_events=group_events,
+        detector_stage_prepared=True, detector_chunks=next_job - detector_job_base - len(rows),
+        events=sum(row['events'] for row in rows),
+        processing_order=['GEN and complete identity/weight ledger audit', 'disjoint detector chunks',
+            'complete same-point Nano grouping', 'histogramming grouped Nano files',
+            'same-point histogram merging'],
+        grouping_requires_complete_point=True, source_gen_ledger_count_per_point=1,
+        electronics_or_trigger_changes=False, submitted=False)
+    return result
+
+
 def normalized_width(native, mass, epsilon):
     table = copy.deepcopy(native)
     if not math.isclose(float(table['mass_gev']), mass, rel_tol=1e-12):
@@ -170,7 +259,8 @@ def validate_references(reference):
 
 def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
                 epsilons=None, prompt_epsilon=.001, sampling_epsilon=.005,
-                events=100, detector_count=2, seed_base=24693357, detector_job_base=910001):
+                events=100, detector_count=2, seed_base=24693357, detector_job_base=910001,
+                accepted_events=False):
     """Select physical epsilon; scaling is only an initial native-width estimate."""
     refs = validate_references(reference)
     masses = tuple(map(float, masses))
@@ -219,10 +309,13 @@ def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
                                run_number=seed_base + i, detector_job=detector_job_base + i))
     if len({row['point'] for row in points}) != len(points):
         raise ValueError('Grid points collide in their eight-digit display names; choose distinct pilot columns')
-    return dict(grid_mode=mode, points=points, lab_flight_is_fixed=False,
+    result = dict(grid_mode=mode, points=points, lab_flight_is_fixed=False,
                 reference_content_sha256=content_digest(reference),
                 prompt_definition='physical epsilon ' + format(prompt_epsilon, '.8g') + '; lifetime derived from native width',
                 assumption='Default displaced columns mean approximately 5 m and 30 m LAB flight; configurable before GEN')
+    if accepted_events:
+        result['event_budget_mode'] = 'outputAccepted'
+    return result
 
 
 def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e-4):
@@ -237,8 +330,12 @@ def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e
         sampling = copy.deepcopy(native_probe(mass, epsilon, scale)) if scale != 1 else copy.deepcopy(width)
         sampling['total_width_gev'] = float(sampling['m_width_gev'])
         sampling['pole_support_audit'] = validate_native_proposal_support(sampling, .99 * mass, 1.01 * mass)
+        if scale == 1:
+            # The runtime uses the physical width as the proposal in this case.
+            width['pole_support_audit'] = copy.deepcopy(sampling['pole_support_audit'])
         data = contract(mass, epsilon, width, 'mumu', row['events'], row['seed'], row['run_number'],
-                        reference['common'], reference['cp5'], sampling, scale)
+                        reference['common'], reference['cp5'], sampling, scale,
+                        accepted_events=plan.get('event_budget_mode') == 'outputAccepted')
         lab = row['mean_beta_gamma_reference'] * width['ctau_mm'] / 1000
         target = row['target_mean_lab_flight_m']
         if target is not None and not math.isclose(lab, target, rel_tol=relative_flight_tolerance):
@@ -312,6 +409,8 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
                            '--epsilon', repr(row['epsilon']), '--sampling-epsilon', repr(row['sampling_epsilon']),
                            '--events', str(row['events']), '--seed', str(row['seed']),
                            '--run-number', str(row['run_number']), '--output', str(gen)]
+        if result.get('event_budget_mode') == 'outputAccepted':
+            row['gen_argv'].append('--accepted-events')
         row['detector_argv'] = [python, str(frozen / 'run_dark_photon_detector.py'), str(gen),
                                 '--count', str(row['detector_count']), '--job', str(row['detector_job']),
                                 '--templates', str(frozen_templates), '--output', str(detector)]
@@ -334,10 +433,21 @@ def main():
     parser.add_argument('--prompt-epsilon', type=float, default=.001)
     parser.add_argument('--sampling-epsilon', type=float, default=.005)
     parser.add_argument('--events', type=int, default=100)
+    parser.add_argument('--accepted-events', action='store_true',
+                        help='Budget accepted GEN outputs, retaining original IDs and all Pythia trial counters')
     parser.add_argument('--detector-count', type=int, default=2)
     parser.add_argument('--seed-base', type=int, default=24693357)
     parser.add_argument('--detector-job-base', type=int, default=910001)
+    stage = parser.add_argument_group('Complete detector stage (preparation only)')
+    stage.add_argument('--campaign', help='New dated EOS campaign for the complete detector stage')
+    stage.add_argument('--eos-base', help='Canonical /eos/user/... data base')
+    stage.add_argument('--events-per-job', type=int, help='Stage detector slice size (default 5)')
+    stage.add_argument('--group-events', type=int, help='Maximum events per same-point Nano group (default 2000)')
     args = parser.parse_args()
+    stage_requested = any(value is not None for value in
+                          (args.campaign, args.eos_base, args.events_per_job, args.group_events))
+    if stage_requested and (args.campaign is None or args.eos_base is None):
+        parser.error('Complete detector stages require both --campaign and --eos-base')
     if args.output.exists():
         parser.error('Refuse to overwrite an existing grid preparation')
     if not os.environ.get('CMSSW_BASE') or not shutil.which('cmsRun'):
@@ -345,7 +455,7 @@ def main():
     reference = json.loads(args.references.read_text())
     plan = plan_points(reference, args.masses, args.mean_lab_flights_m or (5., 30.), args.epsilons,
                        args.prompt_epsilon, args.sampling_epsilon, args.events, args.detector_count,
-                       args.seed_base, args.detector_job_base)
+                       args.seed_base, args.detector_job_base, accepted_events=args.accepted_events)
     from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
     from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
     from fixed_target_generation import canonical_settings
@@ -362,6 +472,10 @@ def main():
         return measure_widths(current_common + current_cp5 + production_settings(mass, epsilon, scale)
                               + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
     plan = preflight_points(plan, reference, native_probe)
+    if stage_requested:
+        plan = plan_detector_stage(plan, args.campaign, args.eos_base,
+            5 if args.events_per_job is None else args.events_per_job,
+            2000 if args.group_events is None else args.group_events, args.detector_job_base)
     base = Path(os.environ['CMSSW_BASE'])
     runtime = dict(cmssw_base=str(base), cmssw_version=os.environ.get('CMSSW_VERSION'),
                    scram_arch=os.environ.get('SCRAM_ARCH'), python=sys.version, python_executable=sys.executable,
@@ -372,6 +486,7 @@ def main():
     result = write_plan(args.output, args.references, args.templates, plan, runtime)
     print(json.dumps(dict(output=str(args.output.resolve()), points=len(result['points']),
                           grid_mode=result['grid_mode'], native_width_preflight_passed=True,
+                          detector_stage_prepared=result.get('detector_stage_prepared', False),
                           launched=False, physics_valid=False, normalization_ready=False)), flush=True)
 
 

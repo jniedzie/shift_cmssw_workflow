@@ -1,3 +1,4 @@
+# Code style: AI-code. AI-generated signal planning regression tests.
 """Synthetic regression fixtures for immutable, unlaunched signal grid plans."""
 import copy
 import json
@@ -8,7 +9,7 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
-from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, repartition_detector_chunks, validate_references, write_plan
+from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, validate_references, write_plan
 
 
 def fake_native(mass, epsilon, scale=1.):
@@ -48,6 +49,21 @@ def frozen_inputs(base, ref):
 
 
 class PhysicalGridPlanning(unittest.TestCase):
+    def test_accepted_output_flag_survives_native_preflight_and_freezing(self):
+        reference=references()
+        plan=preflight_points(plan_points(reference,accepted_events=True),reference,fake_native)
+        self.assertEqual(plan['event_budget_mode'],'outputAccepted')
+        self.assertTrue(all(row['signal_contract']['maximum_framework_events']==1000
+                            for row in plan['points']))
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary)
+            scripts,templates,refpath=frozen_inputs(base,reference)
+            result=write_plan(base/'frozen',refpath,templates,plan,{},scripts=scripts)
+            for row in result['points']:
+                self.assertIn('--accepted-events',row['gen_argv'])
+                data=json.loads(Path(row['signal_contract']).read_text())
+                self.assertEqual(data['event_budget_mode'],'outputAccepted')
+
     def test_nine_points_use_lab_estimate_unique_seeds_and_full_exponential(self):
         plan = plan_points(references())
         self.assertEqual(len(plan['points']), 9)
@@ -109,7 +125,104 @@ class PhysicalGridPlanning(unittest.TestCase):
             with self.assertRaises(ValueError): preflight_points(plan_points(ref),ref,probe)
 
 
+class CompleteDetectorStagePlanning(unittest.TestCase):
+    def test_scientific_epsilon_names_survive_detector_partitioning(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1e-6, 1e-4, 1e-2),
+                                   sampling_epsilon=.01, events=50, accepted_events=True), ref, fake_native)
+        stage = plan_detector_stage(physical, '20261013-epsilon-grid', '/eos/user/t/test/data')
+        self.assertEqual(stage['points'][0]['point'], 'm15_epsilon_1e-06')
+        self.assertEqual(stage['detector_chunks'], 30)
+        self.assertEqual(stage['events'], 150)
+        self.assertTrue(all(len(row['chunks']) == 10 for row in stage['points']))
+        self.assertTrue(all(row['groups'][0]['count'] == 50 for row in stage['points']))
+        direct = physical['points'][2]['signal_contract']
+        self.assertEqual(direct['width_authority']['pole_support_audit'],
+                         direct['sampling_width_authority']['pole_support_audit'])
+
+    def test_fifteen_thousand_events_are_partitioned_and_grouped_by_physical_point(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, mean_lab_flights_m=(5., 30., 100., 1000.),
+                                   events=1000, detector_count=5), ref, fake_native)
+        before = copy.deepcopy(physical)
+        stage = plan_detector_stage(physical, '20261013-independent-stage2',
+                                    '/eos/user/t/test/shift_cmssw', detector_job_base=1000000)
+        self.assertEqual(physical, before)
+        self.assertEqual(stage['events'], 15000)
+        self.assertEqual(stage['detector_chunks'], 3000)
+        jobs, paths = set(), set()
+        for row, original in zip(stage['points'], before['points']):
+            self.assertEqual(len(row['chunks']), 200)
+            self.assertEqual([event for chunk in row['chunks']
+                for event in range(chunk['skip'], chunk['skip'] + chunk['count'])], list(range(1000)))
+            self.assertTrue(all(chunk['count'] == 5 for chunk in row['chunks']))
+            self.assertEqual(row['groups'][0]['chunks'], list(range(200)))
+            self.assertEqual(row['groups'][0]['count'], 1000)
+            self.assertIn('/darkphoton_' + row['point'] + '/', row['groups'][0]['nano'])
+            self.assertEqual(row['signal_contract'], original['signal_contract'])
+            for chunk in row['chunks']:
+                self.assertNotIn(chunk['job'], jobs)
+                self.assertNotIn(chunk['nano'], paths)
+                jobs.add(chunk['job']); paths.add(chunk['nano'])
+        self.assertEqual(len(jobs), 3000)
+        self.assertFalse(jobs.intersection(row['detector_job'] for row in stage['points']))
+        self.assertTrue(stage['grouping_requires_complete_point'])
+        self.assertFalse(stage['submitted'])
+
+    def test_group_boundary_and_final_remainder_cover_every_event_once(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(.001,),
+                                   events=23, detector_count=5), ref, fake_native)
+        stage = plan_detector_stage(physical, 'stage2_20261013', '/eos/user/t/test/data',
+                                    events_per_job=5, group_events=12)
+        row = stage['points'][0]
+        self.assertEqual([chunk['count'] for chunk in row['chunks']], [5, 5, 2, 5, 5, 1])
+        self.assertEqual([group['chunks'] for group in row['groups']], [[0, 1, 2], [3, 4, 5]])
+        self.assertEqual([group['count'] for group in row['groups']], [12, 11])
+        for group in row['groups']:
+            chunks = [row['chunks'][index] for index in group['chunks']]
+            self.assertEqual([event for chunk in chunks
+                for event in range(chunk['skip'], chunk['skip'] + chunk['count'])],
+                list(range(group['skip'], group['skip'] + group['count'])))
+
+    def test_invalid_stage_names_budgets_jobs_and_duplicate_runs_fail(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref), ref, fake_native)
+        for kwargs in ({'campaign': 'undated'}, {'campaign': '20260230-bad'},
+                       {'campaign': '20261013/unsafe'}, {'eos_base': '/eos/home-j/test/data'},
+                       {'eos_base': '/eos/user/t/test/../data'}, {'events_per_job': 21},
+                       {'events_per_job': True}, {'group_events': 4}, {'detector_job_base': 6699998}):
+            arguments = dict(campaign='20261013-stage2', eos_base='/eos/user/t/test/data')
+            arguments.update(kwargs)
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValueError):
+                plan_detector_stage(physical, **arguments)
+        for mutate in (lambda plan: plan.update(native_width_preflight_passed=False),
+                       lambda plan: plan['points'][1].update(run_number=plan['points'][0]['run_number']),
+                       lambda plan: plan['points'][0].update(events=99)):
+            bad = copy.deepcopy(physical); mutate(bad)
+            with self.assertRaises(ValueError):
+                plan_detector_stage(bad, '20261013-stage2', '/eos/user/t/test/data')
+
+
 class FrozenGridReceipts(unittest.TestCase):
+    def test_complete_stage_freezes_grouping_contract_and_distinct_canary_command(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(.001,),
+                                   events=1000, detector_count=5), ref, fake_native)
+        stage = plan_detector_stage(physical, '20261013-stage2', '/eos/user/t/test/data')
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory); scripts, templates, path = frozen_inputs(base, ref)
+            result = write_plan(base/'stage', path, templates, stage, {}, scripts, 'python3')
+            self.assertTrue(result['detector_stage_prepared'])
+            self.assertEqual(result['points'][0]['chunks'], stage['points'][0]['chunks'])
+            self.assertEqual(result['points'][0]['groups'], stage['points'][0]['groups'])
+            command = result['points'][0]['detector_argv']
+            self.assertEqual(command[command.index('--job') + 1], '1000200')
+            self.assertEqual(command[command.index('--count') + 1], '5')
+            facade = result['frozen_dependencies']['sources']['shift_storage_paths.py']
+            self.assertEqual(digest(facade['frozen_copy']), facade['sha256'])
+            self.assertFalse((base/'stage/runs').exists())
+
     def test_freeze_commands_without_creating_runtime_directories(self):
         ref = references(); plan = preflight_points(plan_points(ref),ref,fake_native)
         with tempfile.TemporaryDirectory() as d:

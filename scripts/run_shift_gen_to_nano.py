@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated audited detector-chain worker.
 """Replay an exact, contiguous GEN slice through the established CMS IR5 chain."""
 import argparse
 import hashlib
@@ -106,8 +107,12 @@ def command(args, **kwargs):
         raise subprocess.CalledProcessError(code, args)
 
 
-def event_progress(log_path, report, tier, validated, stall_seconds, expected_records=None):
+def event_progress(log_path, report, tier, validated, stall_seconds, expected_records=None,
+                   first_event_stall_seconds=None):
     """Observe actual framework records, rather than refreshing a timer blindly."""
+    first_limit = stall_seconds if first_event_stall_seconds is None else first_event_stall_seconds
+    if type(first_limit) is not int or first_limit < stall_seconds:
+        raise ValueError('First-event stall allowance must be at least the later-event limit')
     offset, records, remainder = 0, 0, ''
     last_record = time.monotonic()
     pattern = re.compile(r'Begin processing the ([\d,]+)(?:st|nd|rd|th) record')
@@ -128,6 +133,7 @@ def event_progress(log_path, report, tier, validated, stall_seconds, expected_re
             records = max(observed)
             last_record = time.monotonic()
             report['stage_records_started'] = records
+            report['stage_timeout_seconds'] = first_limit if records <= 1 else stall_seconds
             # The final record has started, but it and output closure may
             # still take time. Keep scheduler telemetry consistent with the
             # worker's absolute stage guard instead of a per-record timer.
@@ -140,8 +146,9 @@ def event_progress(log_path, report, tier, validated, stall_seconds, expected_re
         # file finalisation, even though no further record is expected.
         if expected_records is not None and records >= expected_records:
             return
-        if time.monotonic() - last_record > stall_seconds:
-            raise TimeoutError(f'{tier} made no event progress for {stall_seconds} seconds; records started={records}')
+        active_limit = first_limit if records <= 1 else stall_seconds
+        if time.monotonic() - last_record > active_limit:
+            raise TimeoutError(f'{tier} made no event progress for {active_limit} seconds; records started={records}')
     return poll
 
 
@@ -416,6 +423,8 @@ def main():
                         help='SIM,DIGIHLT,RECO,NANO wall limits in seconds')
     parser.add_argument('--config-timeout', type=int, default=600)
     parser.add_argument('--event-stall-timeout', type=int, default=1800)
+    parser.add_argument('--first-event-stall-timeout', type=int,
+                        help='Startup/first-record allowance; defaults to the normal event-stall timeout')
     args = parser.parse_args()
     def terminate(signum, frame):
         raise TimeoutError('Worker stopped by signal ' + str(signum))
@@ -423,6 +432,10 @@ def main():
     limits = [int(value) for value in args.stage_timeouts.split(',')]
     if len(limits) != 4 or min(limits) <= 0 or min(args.config_timeout, args.event_stall_timeout) <= 0:
         raise ValueError('Four positive stage timeouts required')
+    first_event_limit = (args.event_stall_timeout if args.first_event_stall_timeout is None
+                         else args.first_event_stall_timeout)
+    if first_event_limit < args.event_stall_timeout:
+        raise ValueError('First-event stall timeout must be at least the normal event-stall timeout')
     descriptor = json.loads(args.source.read_text())
     complete_muon_decays = descriptor.get('complete_muon_decays', False)
     population_indices = descriptor.get('selected_indices')
@@ -461,6 +474,8 @@ def main():
               'source_gen': descriptor['gen'], 'source_gen_sha256': descriptor['gen_sha256'],
               'source_stratum': descriptor['stratum'], 'source_skip': args.skip, 'events': args.count,
               'seed': 230000000 + args.job * 100, 'stages': {},
+              'event_stall_timeout_seconds': args.event_stall_timeout,
+              'first_event_stall_timeout_seconds': first_event_limit,
               'normalization_ready': False, 'physics_valid': False,
               'canary': args.canary,
               'normalization_record': descriptor.get('normalization_record'),
@@ -525,14 +540,15 @@ def main():
             config_seconds = time.monotonic() - config_start
             stage_start = time.monotonic()
             report['stage_started_epoch'] = time.time()
-            report['stage_timeout_seconds'] = args.event_stall_timeout
+            report['stage_timeout_seconds'] = first_event_limit
             report['stage_deadline_epoch'] = time.time() + limits[stage - 1]
             progress(report, tiers[stage], validated)
             log_path = work / f'step{stage}.log'
             with log_path.open('w') as log:
                 command(['cmsRun', str(cfg)], timeout=limits[stage - 1], stdout=log, stderr=subprocess.STDOUT,
                         on_poll=event_progress(log_path, report, tiers[stage], validated,
-                                               args.event_stall_timeout, expected_records=args.count))
+                                               args.event_stall_timeout, expected_records=args.count,
+                                               first_event_stall_seconds=first_event_limit))
             report['stages'][str(stage)] = {'seconds': time.monotonic() - stage_start,
                                            'config_seconds': config_seconds,
                                            'config_sha256': sha(cfg), 'bytes': output.stat().st_size}
