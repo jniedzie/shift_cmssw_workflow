@@ -49,7 +49,7 @@ def plan_points(reference, masses, flights, events, seed_base, detector_job_base
             for flight in flights]
         mode = 'mass-by-approximate-mean-lab-flight'
     count = len(masses) * len(columns)
-    if not 1 <= events <= 1000 or count > 30 or not 1 <= seed_base <= 899999823-count+1:
+    if type(events) is not int or not 1 <= events <= 10000 or count > 30 or not 1 <= seed_base <= 899999823-count+1:
         raise ValueError('Require bounded point budgets and valid unique seeds')
     rows = []
     for mass in masses:
@@ -88,6 +88,8 @@ def main():
     columns.add_argument('--epsilons',nargs='+',type=float)
     parser.add_argument('--sampling-epsilon',type=float,default=.01)
     parser.add_argument('--events',type=int,default=50)
+    parser.add_argument('--gen-timeout',type=int,default=600)
+    parser.add_argument('--reuse-physical-plan',type=Path)
     parser.add_argument('--seed-base',type=int,required=True)
     parser.add_argument('--detector-job-base',type=int,required=True)
     parser.add_argument('--campaign',required=True)
@@ -97,9 +99,14 @@ def main():
     args=parser.parse_args()
     if args.output.exists():
         raise FileExistsError('Refuse to overwrite an existing spectral preparation')
+    if not 1 <= args.gen_timeout <= 21600:
+        parser.error('GEN timeout must be 1..21600 seconds')
     reference=json.loads(args.references.read_text())
     plan=plan_points(reference,args.masses,args.mean_lab_flights_m or [5.,30.,100.,1000.],
         args.events,args.seed_base,args.detector_job_base,args.sampling_epsilon,epsilons=args.epsilons)
+    if args.reuse_physical_plan is not None:
+        plan=grid.reuse_physical_points(plan,json.loads(args.reuse_physical_plan.read_text()),args.reuse_physical_plan)
+    plan['gen_timeout_seconds']=args.gen_timeout
     from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
     from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
     common=list(pythia8CommonSettingsBlock.pythia8CommonSettings)
@@ -116,6 +123,7 @@ def main():
         options=SimpleNamespace(mass=row['mass_gev'],epsilon=row['epsilon'],sampling_epsilon=row['sampling_epsilon'],
                                 events=row['events'],seed=row['seed'],run_number=row['run_number'])
         width=physical_width_table(model,options.mass,options.epsilon,authority)
+        grid.check_reused_lifetime(row,width['ctau_mm'])
         native=_native_inspect(common+tune+native_proposal_settings(options.mass,options.epsilon,options.sampling_epsilon)+beam_settings(6800.))
         contract=build_contract(options,width,native,common,tune)
         lab=row['mean_beta_gamma_reference']*width['ctau_mm']/1000

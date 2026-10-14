@@ -9,7 +9,7 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
-from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, validate_references, write_plan
+from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, reuse_physical_points, validate_references, write_plan
 
 
 def fake_native(mass, epsilon, scale=1.):
@@ -94,11 +94,30 @@ class PhysicalGridPlanning(unittest.TestCase):
         for mutate in mutations:
             value = copy.deepcopy(references()); mutate(value)
             with self.assertRaises(ValueError): validate_references(value)
-        for kwargs in ({'masses':(15.,15.)}, {'masses':(12.,)}, {'events':1001}, {'detector_count':21},
+        for kwargs in ({'masses':(15.,15.)}, {'masses':(12.,)}, {'events':10001}, {'detector_count':21},
                        {'events':1,'detector_count':2}, {'seed_base':899999900}, {'mean_lab_flights_m':(0,30)},
                        {'epsilons':(1e-7,1e-7)}, {'epsilons':(1e-7,1.0000000001e-7)},
                        {'epsilons':(.006,)}, {'prompt_epsilon':0}):
             with self.subTest(kwargs=kwargs), self.assertRaises(ValueError): plan_points(references(), **kwargs)
+
+    def test_statistics_extension_reuses_old_physics_and_keeps_new_population(self):
+        reference = references()
+        old = preflight_points(plan_points(reference), reference, fake_native)
+        changed_reference = copy.deepcopy(reference)
+        changed_reference['references'][0]['mean_beta_gamma'] *= 1.1
+        new = plan_points(changed_reference, events=9000, seed_base=251014001,
+                          accepted_events=True)
+        reused = reuse_physical_points(new, old)
+        final = preflight_points(reused, changed_reference, fake_native)
+        for previous, current in zip(old['points'], final['points']):
+            self.assertEqual(current['epsilon'], previous['epsilon'])
+            self.assertEqual(current['proper_ctau_mm'], previous['proper_ctau_mm'])
+            self.assertEqual(current['mean_beta_gamma_reference'], previous['mean_beta_gamma_reference'])
+            self.assertEqual(current['events'], 9000)
+            self.assertNotEqual(current['seed'], previous['seed'])
+        old['points'][0]['proper_ctau_mm'] *= 2
+        with self.assertRaisesRegex(ValueError, 'reused physical lifetime'):
+            preflight_points(reuse_physical_points(new, old), changed_reference, fake_native)
 
     def test_native_preflight_keeps_physical_width_and_lifetime(self):
         ref = references(); plan = preflight_points(plan_points(ref), ref, fake_native)

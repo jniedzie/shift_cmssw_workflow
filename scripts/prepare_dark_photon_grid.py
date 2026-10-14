@@ -266,8 +266,8 @@ def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
     masses = tuple(map(float, masses))
     if not masses or len(set(masses)) != len(masses) or any(m not in refs for m in masses):
         raise ValueError('Require unique masses covered by the frozen references')
-    if type(events) is not int or not 1 <= events <= 1000:
-        raise ValueError('Bounded grid accepts 1..1000 GEN events per point')
+    if type(events) is not int or not 1 <= events <= 10000:
+        raise ValueError('Bounded grid accepts 1..10000 GEN events per point')
     if type(detector_count) is not int or not 1 <= detector_count <= min(20, events):
         raise ValueError('Detector canary accepts 1..20 events and cannot exceed GEN count')
     if epsilons is not None:
@@ -318,6 +318,45 @@ def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
     return result
 
 
+def reuse_physical_points(plan, previous, previous_path=None):
+    """Keep the exact old physics point while adding a new independent population.
+
+    Reference boosts must not silently turn a statistics extension into a new
+    lifetime point. New event counts, run numbers and random seeds stay separate.
+    A fresh width preflight still checks every copied physical lifetime.
+    """
+    if previous.get('native_width_preflight_passed') is not True:
+        raise ValueError('Reused physics requires a previously width-qualified plan')
+    old_rows = {row['point']: row for row in previous['points']}
+    if len(old_rows) != len(previous['points']):
+        raise ValueError('Previous physical point names are ambiguous')
+    result = copy.deepcopy(plan)
+    for row in result['points']:
+        old = old_rows.get(row['point'])
+        if old is None or any(old[key] != row[key] for key in
+                              ('mass_gev', 'target_mean_lab_flight_m', 'sampling_epsilon')):
+            raise ValueError('Statistics extension does not match the old point: ' + row['point'])
+        for key in ('epsilon', 'mean_beta_gamma_reference', 'boost_reference_source'):
+            row[key] = copy.deepcopy(old[key])
+        proper = float(old['proper_ctau_mm'])
+        if not math.isfinite(proper) or proper <= 0:
+            raise ValueError('Old point has no valid physical proper lifetime')
+        row['proper_ctau_reference_estimate_mm'] = proper
+        row['statistics_extension_expected_ctau_mm'] = proper
+        row['statistics_extension_source_point'] = old['point']
+    result['statistics_extension_physics_content_sha256'] = content_digest(previous)
+    if previous_path is not None:
+        result['statistics_extension_physics_authority'] = dict(
+            path=str(Path(previous_path).resolve()), sha256=digest(previous_path))
+    return result
+
+
+def check_reused_lifetime(row, proper_ctau_mm):
+    expected = row.get('statistics_extension_expected_ctau_mm')
+    if expected is not None and not math.isclose(proper_ctau_mm, expected, rel_tol=1e-10):
+        raise ValueError('Fresh width changed the reused physical lifetime: ' + row['point'])
+
+
 def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e-4):
     """Probe natural physical widths and common-amplitude sampling before launch."""
     if not math.isfinite(relative_flight_tolerance) or not 0 < relative_flight_tolerance < 1:
@@ -326,6 +365,7 @@ def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e
     for row in result['points']:
         mass, epsilon = row['mass_gev'], row['epsilon']
         width = normalized_width(native_probe(mass, epsilon, 1.), mass, epsilon)
+        check_reused_lifetime(row, width['ctau_mm'])
         scale = row['sampling_epsilon'] / epsilon
         sampling = copy.deepcopy(native_probe(mass, epsilon, scale)) if scale != 1 else copy.deepcopy(width)
         sampling['total_width_gev'] = float(sampling['m_width_gev'])
@@ -411,6 +451,8 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
                            '--run-number', str(row['run_number']), '--output', str(gen)]
         if result.get('event_budget_mode') == 'outputAccepted':
             row['gen_argv'].append('--accepted-events')
+        if 'gen_timeout_seconds' in result:
+            row['gen_argv'].extend(['--timeout', str(result['gen_timeout_seconds'])])
         row['detector_argv'] = [python, str(frozen / 'run_dark_photon_detector.py'), str(gen),
                                 '--count', str(row['detector_count']), '--job', str(row['detector_job']),
                                 '--templates', str(frozen_templates), '--output', str(detector)]
@@ -433,11 +475,14 @@ def main():
     parser.add_argument('--prompt-epsilon', type=float, default=.001)
     parser.add_argument('--sampling-epsilon', type=float, default=.005)
     parser.add_argument('--events', type=int, default=100)
+    parser.add_argument('--gen-timeout', type=int, default=600)
     parser.add_argument('--accepted-events', action='store_true',
                         help='Budget accepted GEN outputs, retaining original IDs and all Pythia trial counters')
     parser.add_argument('--detector-count', type=int, default=2)
     parser.add_argument('--seed-base', type=int, default=24693357)
     parser.add_argument('--detector-job-base', type=int, default=910001)
+    parser.add_argument('--reuse-physical-plan', type=Path,
+                        help='Add independent statistics at exactly the physical points in this old plan')
     stage = parser.add_argument_group('Complete detector stage (preparation only)')
     stage.add_argument('--campaign', help='New dated EOS campaign for the complete detector stage')
     stage.add_argument('--eos-base', help='Canonical /eos/user/... data base')
@@ -450,12 +495,18 @@ def main():
         parser.error('Complete detector stages require both --campaign and --eos-base')
     if args.output.exists():
         parser.error('Refuse to overwrite an existing grid preparation')
+    if not 1 <= args.gen_timeout <= 21600:
+        parser.error('GEN timeout must be 1..21600 seconds')
     if not os.environ.get('CMSSW_BASE') or not shutil.which('cmsRun'):
         parser.error('Enter the existing built CMSSW runtime; no build or generation is performed')
     reference = json.loads(args.references.read_text())
     plan = plan_points(reference, args.masses, args.mean_lab_flights_m or (5., 30.), args.epsilons,
                        args.prompt_epsilon, args.sampling_epsilon, args.events, args.detector_count,
                        args.seed_base, args.detector_job_base, accepted_events=args.accepted_events)
+    if args.reuse_physical_plan is not None:
+        plan = reuse_physical_points(plan, json.loads(args.reuse_physical_plan.read_text()),
+                                    args.reuse_physical_plan)
+    plan['gen_timeout_seconds'] = args.gen_timeout
     from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
     from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
     from fixed_target_generation import canonical_settings
