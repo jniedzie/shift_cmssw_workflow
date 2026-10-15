@@ -1,5 +1,6 @@
 # Code style: AI-code. AI-generated admission safety regression tests.
 import importlib.util
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -22,6 +23,7 @@ class AdmissionTests(unittest.TestCase):
             observation_max_age_seconds=600, pre_reservation_seconds=900,
             account_owner='jniedzie', account_pool='pool', schedd_name='local', suite_tag='mu_qcd')
         self.observation = dict(complete=True, quota_checked_at_epoch=1000,
+            quota_observation_started_at_epoch=999,
             remote_account_checked_at_epoch=1000, remote_account_coverage_verified=True,
             excluded_local_schedd='local', account_schedds=['local', 'remote'],
             remote_account_workers=[], free_bytes=10000, free_files=10000)
@@ -80,10 +82,45 @@ class AdmissionTests(unittest.TestCase):
         self.assertFalse(result['admitted'])
         self.assertEqual(result['reserved_workers'], 2)
 
-    def test_expired_pre_reservation_does_not_block_forever(self):
+    def test_expired_pre_reservation_waits_for_a_new_quota_measurement(self):
         result = self.decide(reservations={'expired': {'at_epoch': 99}})
         self.assertTrue(result['admitted'])
+        self.assertIn('expired', result['reservations'])
+        self.assertEqual(result['storage_reserved_workers'], 2)
+        self.observation.update(quota_observation_started_at_epoch=1001,
+                                quota_checked_at_epoch=1002,
+                                remote_account_checked_at_epoch=1002)
+        result = self.decide(reservations=result['reservations'], now=1003)
         self.assertNotIn('expired', result['reservations'])
+
+    def test_completed_publication_keeps_bytes_and_files_until_quota_remeasured(self):
+        previous = {'finished': {'at_epoch': 900, 'seen_queued': True, 'last_seen_at_epoch': 998}}
+        self.observation['free_bytes'] = 69
+        result = self.decide(reservations=previous)
+        self.assertFalse(result['admitted'])
+        self.assertEqual(result['storage_reserved_workers'], 2)
+        self.assertEqual(result['reservations']['finished']['missing_since_epoch'], 1000)
+        self.observation['free_bytes'] = 10000
+        self.observation['free_files'] = 23
+        result = self.decide(reservations=previous)
+        self.assertFalse(result['admitted'])
+        self.assertIn('file reservation', result['reason'])
+
+    def test_quota_reply_after_completion_does_not_release_inflight_measurement(self):
+        previous = {'finished': {'at_epoch': 900, 'seen_queued': True,
+                                'missing_since_epoch': 998}}
+        self.observation.update(quota_observation_started_at_epoch=997,
+                                quota_checked_at_epoch=1000)
+        result = self.decide(reservations=previous)
+        self.assertIn('finished', result['reservations'])
+        self.assertEqual(result['storage_reserved_workers'], 2)
+
+    def test_observation_started_after_missing_job_releases_its_storage_claim(self):
+        previous = {'finished': {'at_epoch': 900, 'seen_queued': True,
+                                'missing_since_epoch': 998}}
+        result = self.decide(reservations=previous)
+        self.assertNotIn('finished', result['reservations'])
+        self.assertEqual(result['storage_reserved_workers'], 1)
 
     def test_eos_file_and_afs_reserves_are_enforced(self):
         self.observation['free_files'] = 21
@@ -103,6 +140,43 @@ class AdmissionTests(unittest.TestCase):
         self.policy['account_ceiling'] = 1001
         with self.assertRaises(ValueError):
             module.validate_policy(self.policy)
+
+    def external_commitments(self, required_bytes=100, required_files=30):
+        self.policy['external_storage_reservations'] = [{'production_directory': '/sealed/other'}]
+        self.observation['external_storage_commitments'] = dict(complete=True,
+            checked_at_epoch=998, required_free_bytes=required_bytes, required_free_files=required_files,
+            authority_contracts_sha256=hashlib.sha256(json.dumps(
+                self.policy['external_storage_reservations'], sort_keys=True).encode()).hexdigest())
+
+    def test_external_commitments_keep_bytes_and_files_reserved(self):
+        self.external_commitments()
+        self.observation['free_bytes'] = 109
+        self.assertFalse(self.decide()['admitted'])
+        self.observation['free_bytes'] = 1000
+        self.observation['free_files'] = 31
+        self.assertFalse(self.decide()['admitted'])
+
+    def test_shared_safety_floors_are_not_added_twice(self):
+        self.external_commitments()
+        self.observation.update(free_bytes=110, free_files=32)
+        result = self.decide()
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['required_free_bytes'], 100)
+        self.assertEqual(result['required_free_files'], 30)
+
+    def test_unknown_external_commitment_defers(self):
+        self.policy['external_storage_reservations'] = [{'production_directory': '/sealed/other'}]
+        self.assertFalse(self.decide()['admitted'])
+
+    def test_external_credit_measured_after_old_eos_snapshot_is_refused(self):
+        self.external_commitments()
+        self.observation['external_storage_commitments']['checked_at_epoch'] = 1000
+        self.assertFalse(self.decide()['admitted'])
+
+    def test_different_external_authority_cannot_authorize_admission(self):
+        self.external_commitments()
+        self.observation['external_storage_commitments']['authority_contracts_sha256'] = '0' * 64
+        self.assertFalse(self.decide()['admitted'])
 
     def admission_directory(self, directory):
         root = Path(directory)
@@ -155,6 +229,17 @@ class AdmissionTests(unittest.TestCase):
                 self.assertEqual(module.admit(root, 'one'), 0)
             state = json.loads((root / 'admission' / 'pre_reservations.json').read_text())
             self.assertEqual(len(state), 1)
+
+    def test_busy_pre_lock_has_a_bounded_wait_without_submitting_an_audit(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = self.admission_directory(directory)
+            with mock.patch.object(module.fcntl, 'flock', side_effect=BlockingIOError), \
+                    mock.patch.object(module.time, 'monotonic', side_effect=[0, 0, 6]), \
+                    mock.patch.object(module.time, 'sleep') as sleep, \
+                    mock.patch.object(module, 'refresh_quota') as auditor:
+                self.assertEqual(module.admit(root, 'one'), 75)
+                auditor.assert_not_called()
+                sleep.assert_called_once_with(0.05)
 
 
 if __name__ == '__main__':

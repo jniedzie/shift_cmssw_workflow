@@ -9,6 +9,7 @@ Return 75 means temporary deferral; return 99 preserves the weighted budget skip
 """
 import argparse
 import fcntl
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -45,11 +46,33 @@ def validate_policy(policy):
 def decision(policy, observation, local_ads, reservations, node, now, afs_free):
     """Compute an admission from verified observations without mutating state."""
     result = {'node': node, 'checked_at_epoch': now, 'admitted': False}
-    for key in ('quota_checked_at_epoch', 'remote_account_checked_at_epoch'):
+    for key in ('quota_observation_started_at_epoch', 'quota_checked_at_epoch',
+                'remote_account_checked_at_epoch'):
         stamp = observation.get(key)
         if (type(stamp) not in (int, float) or not math.isfinite(stamp)
                 or not 0 <= now - stamp <= policy['observation_max_age_seconds']):
             return result | {'reason': 'Storage/account observation is missing or stale'}
+    if observation['quota_observation_started_at_epoch'] > observation['quota_checked_at_epoch']:
+        return result | {'reason': 'EOS observation times are inconsistent'}
+    minimum_bytes, minimum_files = policy['minimum_free_bytes'], policy['minimum_free_files']
+    if policy.get('external_storage_reservations'):
+        external = observation.get('external_storage_commitments', {})
+        stamp = external.get('checked_at_epoch')
+        if (external.get('complete') is not True
+                or external.get('authority_contracts_sha256') != hashlib.sha256(
+                    json.dumps(policy['external_storage_reservations'], sort_keys=True).encode()).hexdigest()
+                or type(stamp) not in (int, float) or not math.isfinite(stamp)
+                or not 0 <= now - stamp <= policy['observation_max_age_seconds']
+                or stamp > observation['quota_observation_started_at_epoch']
+                or type(external.get('required_free_bytes')) is not int
+                or type(external.get('required_free_files')) is not int
+                or external['required_free_bytes'] < 0 or external['required_free_files'] < 0):
+            return result | {'reason': 'External storage commitments are missing, stale or inconsistent'}
+        # The external sealed guard already includes its own safety floors.
+        # Keep both floors by taking their maximum, rather than adding twice.
+        minimum_bytes = max(minimum_bytes, external['required_free_bytes'])
+        minimum_files = max(minimum_files, external['required_free_files'])
+    result.update(required_free_bytes=minimum_bytes, required_free_files=minimum_files)
     if (observation.get('complete') is not True
             or observation.get('remote_account_coverage_verified') is not True
             or observation.get('excluded_local_schedd') != policy['schedd_name']
@@ -68,28 +91,53 @@ def decision(policy, observation, local_ads, reservations, node, now, afs_free):
     if external + policy['worker_ceiling'] > policy['account_ceiling']:
         return result | {'reason': 'Other account jobs leave insufficient worker capacity',
                          'external_workers': external}
-    queued_nodes = {ad.get('ShiftMuEnrichedNodeId') for ad in own}
-    pending = {key: value for key, value in reservations.items()
-               if isinstance(value, dict) and type(value.get('at_epoch')) in (int, float)
-               and 0 <= now - value['at_epoch'] < policy['pre_reservation_seconds']
-               and key not in queued_nodes}
+    queued_nodes = {ad.get('ShiftMuEnrichedNodeId') for ad in own
+                    if isinstance(ad.get('ShiftMuEnrichedNodeId'), str)}
+    retained, pending, completed_since_quota = {}, set(), set()
+    for key, value in reservations.items():
+        if not isinstance(value, dict) or type(value.get('at_epoch')) not in (int, float):
+            raise ValueError('Invalid persistent PRE reservation')
+        record = dict(value)
+        if key in queued_nodes:
+            record.update(seen_queued=True, last_seen_at_epoch=now)
+            record.pop('missing_since_epoch', None)
+        elif (not record.get('seen_queued')
+              and 0 <= now - record['at_epoch'] < policy['pre_reservation_seconds']):
+            pending.add(key)
+        else:
+            # A disappearing worker may just have published ROOT files. Its
+            # bytes cannot be reused against an older cached EOS observation.
+            # Even a very short worker that escaped our queue observations is
+            # retained until a quota read after its PRE reservation expires.
+            record.setdefault('missing_since_epoch', now)
+            if observation['quota_observation_started_at_epoch'] > record['missing_since_epoch']:
+                continue
+            completed_since_quota.add(key)
+        retained[key] = record
+    for key in queued_nodes:
+        retained.setdefault(key, {'at_epoch': now})
+        retained[key].update(seen_queued=True, last_seen_at_epoch=now)
     reserved = len(own) + len(pending) + int(node not in pending and node not in queued_nodes)
+    storage_reserved = reserved + len(completed_since_quota - {node})
     result.update(external_workers=external, own_workers=len(own),
-                  pending_PRE_reservations=len(pending), reserved_workers=reserved)
+                  pending_PRE_reservations=len(pending), reserved_workers=reserved,
+                  completed_since_quota_reservations=len(completed_since_quota),
+                  storage_reserved_workers=storage_reserved, reservations=retained)
     if reserved > policy['worker_ceiling']:
         return result | {'reason': 'This production has reached its worker ceiling'}
     for key in ('free_bytes', 'free_files'):
         if type(observation.get(key)) is not int or observation[key] < 0:
             return result | {'reason': 'Storage headroom is unknown'}
-    if observation['free_bytes'] < policy['minimum_free_bytes'] + reserved * policy['reserved_bytes_per_worker']:
+    if observation['free_bytes'] < minimum_bytes + storage_reserved * policy['reserved_bytes_per_worker']:
         return result | {'reason': 'EOS byte reservation would consume the retained reserve'}
-    if observation['free_files'] < policy['minimum_free_files'] + reserved * policy['reserved_files_per_worker']:
+    if observation['free_files'] < minimum_files + storage_reserved * policy['reserved_files_per_worker']:
         return result | {'reason': 'EOS file reservation would consume the retained reserve'}
     if type(afs_free) is not int or afs_free < policy['minimum_AFS_free_bytes']:
         return result | {'reason': 'AFS free space is missing or below its retained reserve'}
-    pending[node] = {'at_epoch': now}
+    if node not in queued_nodes:
+        retained[node] = {'at_epoch': now}
     return result | {'admitted': True, 'reason': 'Fresh account and storage checks pass',
-                     'reservations': pending, 'AFS_free_bytes': afs_free,
+                     'reservations': retained, 'AFS_free_bytes': afs_free,
                      'EOS_free_bytes': observation['free_bytes'],
                      'EOS_free_files': observation['free_files']}
 
@@ -110,10 +158,15 @@ def admit(directory, node):
     (root / 'decisions').mkdir(parents=True, exist_ok=True)
     policy = validate_policy(json.loads((root / 'policy.json').read_text()))
     with (root / 'admission.lock').open('a+') as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return 75
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    return 75
+                time.sleep(0.05)
         now = time.time()
         try:
             if (directory / 'stop_requested.json').exists() or (root / 'stop_requested.json').exists():
@@ -128,7 +181,7 @@ def admit(directory, node):
             reservations = json.loads(reservation_path.read_text()) if reservation_path.exists() else {}
             result = decision(policy, observation, local_ads, reservations, node,
                               now, afs_headroom(directory))
-            if result['admitted']:
+            if 'reservations' in result:
                 save(reservation_path, result.pop('reservations'))
         except Exception as error:
             result = {'node': node, 'checked_at_epoch': now, 'admitted': False,

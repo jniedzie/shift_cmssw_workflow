@@ -22,6 +22,49 @@ def receipt(name, source, tried, saved):
 
 
 class ProductionTest(unittest.TestCase):
+    def test_cold_control_handoff_reuses_exact_completed_originals_without_rerun(self):
+        with tempfile.TemporaryDirectory() as name:
+            root=Path(name)
+            assets=root/'assets'
+            assets.mkdir()
+            for asset in ('runtime.tar.gz','pluginShiftMpiWeightedProposalHook.so','libShiftMpiTailProposal.so'):
+                (assets/asset).write_bytes(b'fixture')
+            reference=root/'reference.json'
+            reference.write_text(json.dumps(dict(generator_profile=PROFILE,samples=[{'stratum':'qcd_5to10'}])))
+            old=root/'old'
+            prepare(old,assets,reference,'/eos/user/j/jniedzie/shift_cmssw',200)
+            old_weighted=old/'weighted/manifest.json'
+            weighted_manifest=json.loads(old_weighted.read_text())
+            weighted_manifest['budget_safety_factor']=2.
+            old_weighted.write_text(json.dumps(weighted_manifest,indent=2)+'\n')
+            manifest=json.loads((old/'ordinary/manifest.json').read_text())
+            request=manifest['jobs'][0]
+            import hashlib
+            digest=hashlib.sha256((old/'ordinary/manifest.json').read_bytes()).hexdigest()
+            record=dict(schema='shift-mu-enriched-ordinary-gen-receipt-v1',
+                complete=True,publication_complete=True,exit_status=0,request=request,
+                manifest_sha256=digest,source_inputs=manifest['inputs'],generator_profile=PROFILE,
+                event_count=1,publication_directory=request['output_base']+'/'+request['id'],
+                semantic_audit=dict(generator_profile=PROFILE,
+                    source_model_settings_sha256=manifest['source_model_settings_sha256'],
+                    complete=True,healthy=True,source_accepted=request['trials'],events=1,
+                    no_second_filter_efficiency=True,event_ids=[[request['run'],1,9]],weights=[1.]))
+            path=old/'ordinary/results'/(request['id']+'.json')
+            path.write_text(json.dumps(record))
+            new=root/'new'
+            summary=prepare(new,assets,reference,'/eos/user/j/jniedzie/shift_cmssw',200,resume_from=old)
+            self.assertEqual(summary['reused_completed_nodes'],1)
+            self.assertEqual(old_weighted.read_bytes(),(new/'weighted/manifest.json').read_bytes())
+            self.assertEqual(path.read_bytes(),(new/'ordinary/results'/path.name).read_bytes())
+            dag=(new/'production.dag').read_text()
+            self.assertNotIn('L0000',dag)
+            self.assertNotIn('DONE ',dag)
+            self.assertIn('PARENT L0101 L0202 L0303 L0404 CHILD LOW_GATE',dag)
+            manifest['jobs'][0]['seed']+=1
+            (old/'ordinary/manifest.json').write_text(json.dumps(manifest))
+            with self.assertRaisesRegex(ValueError,'cannot change scientific'):
+                prepare(root/'changed',assets,reference,'/eos/user/j/jniedzie/shift_cmssw',200,resume_from=old)
+
     def test_failed_or_unknown_worker_exit_cannot_pass_the_completion_gate(self):
         with tempfile.TemporaryDirectory() as directory:
             base=Path(directory)
