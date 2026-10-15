@@ -8,6 +8,11 @@ inactive payloads can leave AFS after verified archival and dependency updates.
 The initial audit was read-only. The user later authorized the exact reviewed
 removals recorded below; current production deployments were preserved.
 
+The companion `validation_retention_audit_20261015/` evidence directory is
+retained locally and ignored by Git. Its generated inventories, archives and
+receipts are not repository source; this Markdown report remains versioned.
+The evidence links below resolve in the local workspace.
+
 ## Completed cleanup
 
 Executed at 13:25–13:26 CEST on 15 October after the user's explicit request.
@@ -26,6 +31,12 @@ at 13:26 CEST: no job references a removed scope and all previously required
 inputs remain. Current BSM/QCD/limits inputs, the ordinary-QCD fallback,
 selected-model snapshots, project plots and the four protected old roots
 listed below remain in place.
+
+Independent post-deletion verification reconciled every inventory entry with
+its deletion receipt, reread and hash-checked all 1,079 retained archive
+members, and checked 1,395 required existing paths. The 985 retained
+fallback/private files match their reviewed size, allocation and modification
+time; all 28 selected-model/source hashes and four shared-helper hashes pass.
 
 The [execution result](validation_retention_audit_20261015/execution_20261015/deletion_result.json),
 [frozen inventory](validation_retention_audit_20261015/execution_20261015/manifest.jsonl.gz)
@@ -195,7 +206,8 @@ the enrichment workspace. Its old detailed study, like the other closed
 experiments in this proposal, would no longer be replayable from its original
 payloads. Persistent conclusions and current required accounting survive.
 
-At that proposal stage, no payload deletion or EOS migration had been performed. The new evidence
+At that proposal stage, no payload deletion or EOS migration had been
+performed. The new evidence
 files use the `active_task_` prefix. Other remaining inactive directories are
 not automatically approved: historical private geometry variants still follow
 the mandatory private-copy rule, and old production metadata can remain an
@@ -244,7 +256,7 @@ lists every inventoried top-level entry, size, file count, disposition and
 reference counts. Additional rows record directories created during the audit.
 Size units in the CSV are bytes.
 
-## Live files that must stay in place
+## Initial live-file snapshot
 
 At 11:43:34 CEST, the verified assigned scheduler `bigbird26.cern.ch` contained
 103 jobs: 102 running and one held. The snapshot established these dependencies:
@@ -317,9 +329,11 @@ in 1,773 files; seven JSON files over 8 MiB were skipped. Some targets are
 redundant rendered figures, but others are essential numerical/provenance
 inputs. Historical document links alone do not establish a runtime dependency.
 
-## What can be reduced
+## Initial reduction candidates (historical)
 
-There is confirmed redundant content, plus larger archival opportunities:
+At the first inventory, the following redundant content and archival
+opportunities were found. These figures are historical and must not be counted
+as additional savings after the completed cleanup above:
 
 1. **Specific redundant-copy candidates: 100.6 MiB.** Three large files under QCD
    `job_review/preserved` are SHA-256-identical to their retained original
