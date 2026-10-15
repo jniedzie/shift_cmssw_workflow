@@ -37,7 +37,7 @@ def worker_submit(base, manifest_sha, ordinary):
         f'transfer_input_files = {shared}', 'transfer_output_files = result.json,artifacts.zip',
         'transfer_output_remaps = "result.json=results/$(node_id).json; artifacts.zip=results/$(node_id).zip"',
         'getenv = False', 'request_cpus = 1', 'request_memory = 4000', 'request_disk = 3000000',
-        '+MaxRuntime = 4200', '+ShiftProductionSuite = true',
+        '+MaxRuntime = 7200', '+ShiftProductionSuite = true',
         '+ShiftSuiteTag = "qcd_mu_enriched_20261015_v1"', '+ShiftMuEnrichedQCD = true',
         '+ShiftMuEnrichedNodeId = "$(node_id)"',
         '+ShiftMuEnrichedStage = "$(stage)"', '+ShiftPeakBytesPerWorker = 1000000000',
