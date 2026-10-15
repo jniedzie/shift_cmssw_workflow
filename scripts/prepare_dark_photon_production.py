@@ -121,12 +121,18 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
 def extend_worker(text, publication_profile):
     """Version the qualified worker's publication contract in its new copy."""
     old = "    paths = {tier: str(base / tier / name)\n             for tier in ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD')}\n"
-    replacement = ("    from dark_photon_production_support import publication_paths as profile_paths\n"
-                   "    return profile_paths(chunk, read(B/'plan.json')['publication_profile'])\n")
+    replacement = ("    profile = read(B/'plan.json')['publication_profile']\n"
+                   "    if profile == 'nano-metadata-v1':\n"
+                   "        tiers = ('nanoAOD',)\n"
+                   "    elif profile == 'all-tiers-v1':\n"
+                   "        tiers = ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD')\n"
+                   "    else:\n"
+                   "        raise ValueError('Unknown signal publication profile')\n"
+                   "    paths = {tier:str(base/tier/name) for tier in tiers}\n")
     start, stop = text.index('def publication_paths(chunk):'), text.index('def valid_digest(value):')
     if old not in text[start:stop]:
         raise ValueError('Qualified publication namespace changed; review the new worker contract')
-    text = text[:start] + 'def publication_paths(chunk):\n' + replacement + '\n' + text[stop:]
+    text = text[:start] + text[start:stop].replace(old, replacement) + text[stop:]
     validation = "    destinations = publication_paths(chunk)\n    published = status.get('published', {})\n"
     if text.count(validation) != 1:
         raise ValueError('Qualified chunk receipt validation changed')

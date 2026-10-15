@@ -367,6 +367,7 @@ class LocalFinalizer(unittest.TestCase):
         checks orchestration without depending on private trained model data.
         """
         ROOT = root_module()
+        import uproot  # Load its runtime before the temporary module overrides.
         qualified_base = Path(__file__).resolve().parents[2] / 'validation/bsm_stage2_20261013/production'
         if not qualified_base.is_dir():
             self.skipTest('Qualified deployment is unavailable')
@@ -377,6 +378,10 @@ class LocalFinalizer(unittest.TestCase):
             scratch.mkdir()
             (deployment / 'statuses').mkdir()
             (deployment / 'completed_points').mkdir()
+            authority = deployment / 'frozen/scoring/sm_axis_authority.root'
+            authority.parent.mkdir(parents=True)
+            fixture = ROOT.TFile(str(authority), 'RECREATE')
+            fixture.Close()
             worker_path = deployment / 'chunk_worker.py'
             worker_path.write_text(extend_worker((qualified_base / 'chunk_worker.py').read_text(), 'nano-metadata-v1'))
             specification = importlib.util.spec_from_file_location('_local_grouped_worker', worker_path)

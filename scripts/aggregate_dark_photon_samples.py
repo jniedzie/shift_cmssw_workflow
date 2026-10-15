@@ -11,6 +11,7 @@ not summed; their technical trial counts are never interpreted as luminosity.
 import argparse
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import math
 from pathlib import Path
@@ -286,9 +287,33 @@ def load_plan(path, digest):
     return plan
 
 
+def verify_aggregate_seal(plan_path, plan_digest, seal_digest):
+    plan_path = Path(plan_path).resolve()
+    seal_path = plan_path.parent / 'seal.json'
+    seal = read(checked(seal_path, seal_digest))
+    files = seal.get('files', {})
+    if files.get(str(plan_path)) != plan_digest:
+        raise ValueError('Aggregate plan is outside its immutable deployment seal')
+    for path, digest in files.items():
+        checked(path, digest)
+    return seal
+
+
+def qualified_finalizer(deployment):
+    """Load the pinned original validators rather than a multi-group wrapper."""
+    path = Path(deployment) / 'qualified_finalizer.py'
+    specification = importlib.util.spec_from_file_location(
+        '_shift_aggregate_qualified_' + sha(path)[:16], path)
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    if not callable(getattr(module, 'validate_histogram_axes', None)):
+        raise ValueError('Qualified finalizer has no canonical histogram axis validator')
+    return module
+
+
 def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_directory):
+    verify_aggregate_seal(plan_path, plan_digest, seal_digest)
     plan = load_plan(plan_path, plan_digest)
-    checked(Path(plan_path).parent / 'seal.json', seal_digest)
     rows = [row for row in plan['points'] if row['point'] == point]
     if len(rows) != 1:
         raise ValueError('Unknown or duplicate aggregate physical point')
@@ -323,7 +348,7 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     checked(guard_directory / 'seal.json', guard_spec['seal_sha256'])
     sys.path.insert(0, str(guard_directory))
     import chunk_worker as guard
-    import finalize_point as qualified
+    qualified = qualified_finalizer(deployment)
     guard.verify_seal(guard_spec['seal_sha256'], guard_spec['point'], scoring=True)
     guard.prepare_publication_guard(guard_spec['seal_sha256'])
     guard.check_headroom()

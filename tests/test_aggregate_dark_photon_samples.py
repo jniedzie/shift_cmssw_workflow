@@ -15,7 +15,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from aggregate_dark_photon_samples import (combined_rate, event_rows, execute, group_inputs,
-                                         sha, unique_populations, validate_event_rows)
+                                         qualified_finalizer, sha, unique_populations,
+                                         validate_event_rows, verify_aggregate_seal)
 
 
 def population(run=10, events=2, trials=100, rate=2., error=.1):
@@ -133,6 +134,32 @@ class Grouping(unittest.TestCase):
                 validate_event_rows(identities, weights, expected)
 
 
+class DeploymentIntegrity(unittest.TestCase):
+    def test_seal_verifies_code_as_well_as_the_plan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            plan, worker = directory / 'plan.json', directory / 'worker.py'
+            plan.write_text('{}')
+            worker.write_text('# synthetic sealed worker\n')
+            seal = directory / 'seal.json'
+            seal.write_text(json.dumps(dict(files={str(plan): sha(plan), str(worker): sha(worker)})))
+            verify_aggregate_seal(plan, sha(plan), sha(seal))
+            worker.write_text('# changed worker\n')
+            with self.assertRaisesRegex(ValueError, 'Frozen aggregate input changed'):
+                verify_aggregate_seal(plan, sha(plan), sha(seal))
+
+    def test_exact_qualified_module_is_used_when_wrapper_has_no_validator(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            (directory / 'finalize_point.py').write_text('from dark_photon_production_support import finalize\n')
+            (directory / 'qualified_finalizer.py').write_text('def validate_histogram_axes(*arguments):\n    return 1081\n')
+            with patch.dict(sys.modules, finalize_point=SimpleNamespace(), qualified_finalizer=SimpleNamespace(
+                    validate_histogram_axes=lambda *arguments: 0)):
+                qualified = qualified_finalizer(directory)
+            self.assertEqual(qualified.validate_histogram_axes(None, None), 1081)
+            self.assertEqual(Path(qualified.__file__), directory / 'qualified_finalizer.py')
+
+
 class SemanticRoot(unittest.TestCase):
     def test_real_root_identity_and_weight_content(self):
         try:
@@ -169,6 +196,7 @@ class SemanticRoot(unittest.TestCase):
             (deployment / 'frozen/scoring').mkdir(parents=True)
             authority = deployment / 'frozen/scoring/sm_axis_authority.root'
             authority.write_bytes(b'synthetic axis authority')
+            (deployment / 'qualified_finalizer.py').write_text('def validate_histogram_axes(*arguments):\n    return 1081\n')
             (deployment / 'scoring_components.json').write_text(json.dumps(dict(model_sha256='b' * 64)))
             populations = [population(), population(20, 8, 300, 4., .2)]
             stages, remote = [], {}
@@ -238,15 +266,16 @@ class SemanticRoot(unittest.TestCase):
                 run_file=score_file, check_standard_histograms=check_histograms)
             guard = SimpleNamespace(verify_seal=lambda *a, **k: None, prepare_publication_guard=lambda *a: None,
                                     check_headroom=lambda: stages.append(('quota', None)))
-            qualified = SimpleNamespace(validate_histogram_axes=lambda *arguments: stages.append(('axes', None)))
             plan = dict(campaign='additive', group_events=5, conditions=dict(sha256='c' * 64),
                 scoring_deployment=dict(path=str(deployment)), publication_guard=dict(deployment_path=str(deployment),
                     seal_sha256='d' * 64, point='point'), points=[dict(point='point', events=10,
                     final_output_base='/eos/user/t/test/darkphoton_point/additive', sources=[dict(index=0), dict(index=1)])])
+            (base / 'plan.json').write_text(json.dumps(plan))
+            (base / 'seal.json').write_text(json.dumps(dict(files={str(base / 'plan.json'): 'e' * 64})))
             with patch('aggregate_dark_photon_samples.load_plan', return_value=plan), patch(
                     'aggregate_dark_photon_samples.checked', side_effect=lambda path, digest: Path(path)), patch(
                     'aggregate_dark_photon_samples.load_source', side_effect=lambda source, *args: populations[source['index']]), patch.dict(
-                    sys.modules, run_merged_dimuon_bdt=scorer, chunk_worker=guard, finalize_point=qualified,
+                    sys.modules, run_merged_dimuon_bdt=scorer, chunk_worker=guard, finalize_point=SimpleNamespace(),
                     dark_photon_production_support=SimpleNamespace(validate_histogram_merge=check_merge)):
                 report = execute(base / 'plan.json', 'e' * 64, 'f' * 64, 'point', base / 'cache', scratch, base / 'results')
             self.assertTrue(report['complete'])
