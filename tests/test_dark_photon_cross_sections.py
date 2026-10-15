@@ -6,11 +6,12 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from export_dark_photon_cross_sections import canonical_bytes, publish_file, rate_record, retain_bytes
+from export_dark_photon_cross_sections import canonical_bytes, publish_file, publish_file_rpc, rate_record, retain_bytes
 
 
 class CrossSectionAccounting(unittest.TestCase):
@@ -100,6 +101,56 @@ class CrossSectionAccounting(unittest.TestCase):
 
 
 class DurablePublication(unittest.TestCase):
+    def native_publication(self, previous, *, unknown_state=False):
+        with tempfile.TemporaryDirectory() as temporary:
+            source=Path(temporary)/"rate.json";source.write_bytes(b"exact rate\n")
+            remote={"bytes":previous};uploads=[]
+            def command(argv, **options):
+                self.assertEqual(options["env"]["PATH"],"/usr/bin:/bin")
+                self.assertNotIn("LD_LIBRARY_PATH",options["env"])
+                if argv[0].endswith("xrdfs"):
+                    if argv[2]=="stat":
+                        if unknown_state:
+                            return SimpleNamespace(returncode=1,stderr="Connection failed")
+                        return SimpleNamespace(returncode=int(remote["bytes"] is None),
+                            stderr="[3011] No such file" if remote["bytes"] is None else "")
+                    self.assertEqual(argv[2:4],["mkdir","-p"])
+                elif argv[0].endswith("xrdcp"):
+                    if argv[-2].startswith("root://"):
+                        Path(argv[-1]).write_bytes(remote["bytes"])
+                    else:
+                        self.assertIn("--posc",argv);self.assertNotIn("--force",argv)
+                        uploads.append(argv);remote["bytes"]=Path(argv[-2]).read_bytes()
+                else:
+                    self.fail("Unexpected native command")
+                return SimpleNamespace(returncode=0,stderr="")
+            with patch("export_dark_photon_cross_sections.subprocess.run",side_effect=command):
+                try:
+                    result=publish_file_rpc(source,"/eos/user/t/test/cross_sections.json")
+                except Exception:
+                    self.assertFalse(uploads)
+                    raise
+            return result,uploads
+
+    def test_native_publication_writes_absent_sidecar_and_hashes_readback(self):
+        result,uploads=self.native_publication(None)
+        self.assertEqual(len(uploads),1)
+        self.assertEqual(result["sha256"],hashlib.sha256(b"exact rate\n").hexdigest())
+        self.assertEqual(result["sha256"],result["readback_sha256"])
+
+    def test_native_publication_accepts_equal_existing_bytes_without_upload(self):
+        result,uploads=self.native_publication(b"exact rate\n")
+        self.assertFalse(uploads)
+        self.assertEqual(result["bytes"],len(b"exact rate\n"))
+
+    def test_native_publication_never_overwrites_different_existing_bytes(self):
+        with self.assertRaisesRegex(ValueError,"different EOS sidecar"):
+            self.native_publication(b"different rate\n")
+
+    def test_native_publication_unknown_state_stops_before_upload(self):
+        with self.assertRaisesRegex(RuntimeError,"Unknown EOS sidecar state"):
+            self.native_publication(None,unknown_state=True)
+
     def test_local_retention_is_idempotent_and_never_overwrites_different_bytes(self):
         with tempfile.TemporaryDirectory() as directory:
             path=Path(directory)/"record.json"

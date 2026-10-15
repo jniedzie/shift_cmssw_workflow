@@ -69,7 +69,34 @@ def verify_seal(directory, expected):
     return read(directory / 'plan.json'), read(directory / 'config.json')
 
 
-def validate_population(row):
+def root_publication(row, manifest):
+    """Bind the retained audit evidence to the canonical EOS GEN payload."""
+    gen = Path(row['gen_directory'])
+    proof = read(gen / 'root_publication.json')
+    expected = dict(schema='shift-dark-photon-local-GEN-retention-v1', point=row['point'],
+        local_path=str(gen / 'gen.root'), path=row['final_output_base'] + '/GEN/gen.root',
+        sha256=manifest['output_sha256'], readback_sha256=manifest['output_sha256'],
+        metadata_sha256={name: sha256(gen / name) for name in
+                         ('manifest.json', 'contract.json', 'validation.json')})
+    if (type(proof.get('bytes')) is not int or proof['bytes'] <= 0 or
+            proof != dict(expected, bytes=proof['bytes'])):
+        raise ValueError('Remote-only GEN publication proof differs from the retained audit evidence')
+    return proof
+
+
+def verify_remote_root(remote, expected, size, config=None):
+    configuration = config or {}
+    with tempfile.TemporaryDirectory(prefix='dp-gen-readback-',
+                                     dir=configuration.get('scratch_base', '/tmp')) as temporary:
+        check = Path(temporary) / 'gen.root'
+        command(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
+                 HOST + '/' + remote, str(check)],
+                timeout=configuration.get('publication_timeout_seconds', 600))
+        if check.stat().st_size != size or sha256(check) != expected:
+            raise ValueError('Published GEN readback differs from the complete audited source')
+
+
+def validate_population(row, config=None):
     """Require the complete accepted population and its original event identities."""
     gen = Path(row['gen_directory'])
     audit, manifest, contract = [read(gen / name) for name in
@@ -92,9 +119,15 @@ def validate_population(row):
     if any(left[2] >= right[2] for left, right in zip(identities, identities[1:])):
         raise ValueError('GEN accepted identity order changed')
     if (contract != read(row['signal_contract']) or contract['requested_events'] != count or
-            any(contract[key] != row[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number')) or
-            sha256(gen / 'gen.root') != manifest['output_sha256']):
+            any(contract[key] != row[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number'))):
         raise ValueError('GEN differs from the exact frozen physical contract: ' + row['point'])
+    if (gen / 'gen.root').exists():
+        if sha256(gen / 'gen.root') != manifest['output_sha256']:
+            raise ValueError('GEN differs from the exact frozen physical contract: ' + row['point'])
+    else:
+        proof = root_publication(row, manifest)
+        # A receipt never substitutes for checking the actual canonical ROOT.
+        verify_remote_root(proof['path'], proof['sha256'], proof['bytes'], config)
     frozen = Path(row['gen_argv'][1]).parent
     for name, expected in manifest['source_sha256'].items():
         if sha256(gen / name) != expected or sha256(frozen / name) != expected:
@@ -106,7 +139,12 @@ def check_afs_margin(config):
     lines = command(['/usr/bin/fs', 'listquota', '-path', config['workspace']], timeout=30).stdout.splitlines()
     row = lines[1].split()
     free_mb = (int(row[1]) - int(row[2])) / 1024
-    if free_mb < config['minimum_afs_free_mb']:
+    metadata_mb = config.get('afs_metadata_reservation_mb', 0)
+    retain_root = config.get('retain_local_gen_root', True)
+    if (type(retain_root) is not bool or type(metadata_mb) is not int or metadata_mb < 0 or
+            (not retain_root and metadata_mb == 0)):
+        raise ValueError('Remote-only GEN requires a reviewed positive AFS metadata reservation')
+    if free_mb < config['minimum_afs_free_mb'] + metadata_mb:
         raise ValueError('AFS free-space margin is too small for the remaining GEN outputs')
     return free_mb
 
@@ -128,27 +166,28 @@ def check_eos_margin(config, required_payload_bytes):
 
 
 def publish_gen(row, config):
-    audit, manifest, unused_contract = validate_population(row)
+    if type(config.get('retain_local_gen_root', True)) is not bool:
+        raise ValueError('GEN local ROOT retention must be an explicit boolean')
+    audit, manifest, unused_contract = validate_population(row, config)
     source = Path(row['gen_directory']) / 'gen.root'
     expected = manifest['output_sha256']
     remote = row['final_output_base'] + '/GEN/gen.root'
+    proof = root_publication(row, manifest) if not source.exists() else None
+    size = source.stat().st_size if source.exists() else proof['bytes']
     status = command(['/usr/bin/xrdfs', HOST, 'stat', remote], check=False)
     if status.returncode:
         if '[3011]' not in status.stderr and 'No such file' not in status.stderr:
             raise RuntimeError('EOS state is unknown: ' + status.stderr)
-        check_eos_margin(config, source.stat().st_size)
+        if not source.exists():
+            raise ValueError('Canonical remote-only GEN ROOT is missing; refuse to regenerate or overwrite')
+        check_eos_margin(config, size)
         command(['/usr/bin/xrdfs', HOST, 'mkdir', '-p', str(Path(remote).parent)])
         command(['/usr/bin/xrdcp', '--silent', '--posc', '--cksum', 'adler32',
                  str(source), HOST + '/' + remote], timeout=config['publication_timeout_seconds'])
     # This also makes an interrupted publication recoverable without overwriting.
-    with tempfile.TemporaryDirectory(prefix='dp-gen-readback-', dir=config['scratch_base']) as temporary:
-        check = Path(temporary) / 'gen.root'
-        command(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
-                 HOST + '/' + remote, str(check)], timeout=config['publication_timeout_seconds'])
-        if check.stat().st_size != source.stat().st_size or sha256(check) != expected:
-            raise ValueError('Published GEN readback differs from the complete audited source')
+    verify_remote_root(remote, expected, size, config)
     publication = dict(point=row['point'], path=remote, sha256=expected,
-                       readback_sha256=expected, bytes=source.stat().st_size)
+                       readback_sha256=expected, bytes=size)
     parent = dict(event_ids=audit['event_ids'], events=row['events'], native_sumw=audit['sum_weights'],
         native_sumw2=audit['sum_weights_squared'], gen_path=remote, gen_sha256=expected,
         manifest_sha256=sha256(source.parent / 'manifest.json'),
@@ -157,6 +196,23 @@ def publish_gen(row, config):
         proposal_ledger=audit['proposal_ledger'], full_gen_denominator=audit['full_gen_denominator'],
         proper_ctau_mm=row['proper_ctau_mm'], epsilon=row['epsilon'], mass_gev=row['mass_gev'],
         seed=row['seed'], run_number=row['run_number'], sample_role='validation_only', gen_transport='xrootd')
+    if not config.get('retain_local_gen_root', True):
+        retention = dict(schema='shift-dark-photon-local-GEN-retention-v1', point=row['point'],
+            local_path=str(source), path=remote, sha256=expected, readback_sha256=expected,
+            bytes=size, metadata_sha256={name: sha256(source.parent / name) for name in
+                                       ('manifest.json', 'contract.json', 'validation.json')})
+        receipt = source.parent / 'root_publication.json'
+        if receipt.exists():
+            if read(receipt) != retention:
+                raise ValueError('Previous GEN local-retention receipt differs')
+        else:
+            write_new(receipt, retention)
+        root_publication(row, manifest)
+        if source.exists():
+            # Only this new local duplicate is removed; EOS and all audit files stay.
+            if source.stat().st_size != size or sha256(source) != expected:
+                raise ValueError('Local GEN ROOT changed after the successful EOS readback')
+            source.unlink()
     return publication, parent
 
 
@@ -171,7 +227,7 @@ def run_point(directory, expected, point):
         previous = read(path)
         if previous['seal_sha256'] != expected:
             raise ValueError('Completed GEN receipt belongs to a different stage')
-        validate_population(row)
+        validate_population(row, config)
         print(json.dumps(dict(complete=True, reused=True, point=point)))
         return
     report = dict(schema='shift-dark-photon-GEN-stage-point-v1', point=point, complete=False,
@@ -208,7 +264,7 @@ def collect(directory, expected):
         status = read(path)
         if not status.get('complete') or status['seal_sha256'] != expected:
             raise ValueError('Full-grid GEN collection requires every complete sealed point')
-        validate_population(row)
+        validate_population(row, config)
         parent = status['parent']
         identities = set(map(tuple, parent['event_ids']))
         if seen.intersection(identities):

@@ -12,9 +12,12 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tempfile
 
 from pythia_generation_ledger import read_pythia_generation_ledger
 
@@ -204,7 +207,39 @@ def publish_file(source, destination):
                 sha256=expected, readback_sha256=actual)
 
 
-def export_plan(plan_path, output, *, publish=False):
+def publish_file_rpc(source, destination):
+    """Publish without an EOS mount, refusing different bytes at an existing path."""
+    source, destination = Path(source), Path(destination)
+    if not str(destination).startswith("/eos/user/") or ".." in destination.parts:
+        raise ValueError("Publication requires a canonical /eos/user destination")
+    host = "root://eosuser.cern.ch"
+    environment = {key: value for key, value in os.environ.items() if key not in
+                   ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD", "ROOTSYS")}
+    environment["PATH"] = "/usr/bin:/bin"
+
+    def command(argv, *, check=True):
+        return subprocess.run(list(map(str, argv)), env=environment, check=check,
+                              capture_output=True, text=True, timeout=300)
+
+    expected, size = sha256(source), source.stat().st_size
+    state = command(["/usr/bin/xrdfs", host, "stat", destination], check=False)
+    if state.returncode != 0:
+        if "[3011]" not in state.stderr and "No such file" not in state.stderr:
+            raise RuntimeError("Unknown EOS sidecar state: " + state.stderr)
+        command(["/usr/bin/xrdfs", host, "mkdir", "-p", destination.parent])
+        command(["/usr/bin/xrdcp", "--silent", "--posc", "--cksum", "adler32",
+                 source, host + "/" + str(destination)])
+    with tempfile.TemporaryDirectory(prefix="dp-rate-readback-") as temporary:
+        readback = Path(temporary) / "sidecar"
+        command(["/usr/bin/xrdcp", "--silent", "--cksum", "adler32",
+                 host + "/" + str(destination), readback])
+        actual = sha256(readback)
+        if actual != expected or readback.stat().st_size != size:
+            raise ValueError("Refuse different EOS sidecar bytes: " + str(destination))
+    return dict(path=str(destination), bytes=size, sha256=expected, readback_sha256=actual)
+
+
+def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
     plan_path, output = Path(plan_path).resolve(), Path(output).resolve()
     plan = read(plan_path)
     campaign = plan["campaign"]
@@ -218,6 +253,7 @@ def export_plan(plan_path, output, *, publish=False):
     publication = read(publication_path) if publication_path.exists() else None
     published = {row["point"]: row for row in publication["inputs"]} if publication else {}
     records = []
+    publisher = publish_file_rpc if eos_rpc else publish_file
     for row in plan["points"]:
         name = row["point"]
         if not SAFE_NAME.fullmatch(name):
@@ -269,10 +305,10 @@ def export_plan(plan_path, output, *, publish=False):
         point_receipt = dict(point=name, campaign=campaign, rate_path=str(base / "cross_sections.json"),
                              record=record, artifacts=artifacts, published=False)
         if publish:
-            point_receipt["publication_readbacks"] = [publish_file(item["local_path"], item["path"]) for item in artifacts]
+            point_receipt["publication_readbacks"] = [publisher(item["local_path"], item["path"]) for item in artifacts]
             point_receipt["published"] = True
             retain_bytes(stage / "publication_receipt.json", canonical_bytes(point_receipt))
-            point_receipt["receipt_publication"] = publish_file(stage / "publication_receipt.json", base / "metadata" / "GEN" / "cross_sections_publication.json")
+            point_receipt["receipt_publication"] = publisher(stage / "publication_receipt.json", base / "metadata" / "GEN" / "cross_sections_publication.json")
         records.append(point_receipt)
         print(json.dumps(dict(point=name, campaign=campaign, sigma_mumu_pb=record["physical_selected_cross_sections_pb"][0]["value_pb"], published=publish)), flush=True)
     receipt = dict(schema="shift-dark-photon-rate-retention-v1", complete=True, published=publish,
@@ -287,10 +323,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--publish", action="store_true", help="Publish new rate/GEN sidecars on mounted EOS with SHA-256 readback")
+    parser.add_argument("--publish", action="store_true", help="Publish new rate/GEN sidecars with SHA-256 readback")
+    parser.add_argument("--eos-rpc", action="store_true", help="Publish with native XRootD rather than the EOS mount")
     args = parser.parse_args()
+    if args.eos_rpc and not args.publish:
+        parser.error("--eos-rpc requires --publish")
     for path in args.plan:
-        export_plan(path, args.output, publish=args.publish)
+        export_plan(path, args.output, publish=args.publish, eos_rpc=args.eos_rpc)
 
 
 if __name__ == "__main__":
