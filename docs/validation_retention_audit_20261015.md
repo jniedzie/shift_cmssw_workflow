@@ -5,7 +5,34 @@ Audit date: 15 October 2026. **Do not remove the whole directory.** It contains
 running production deployments, inputs used by current tools and published
 results, and scientific data without verified replacement copies. Large
 inactive payloads can leave AFS after verified archival and dependency updates.
-No production files were deleted, relocated or rewritten in this audit.
+The initial audit was read-only. The user later authorized the exact reviewed
+removals recorded below; current production deployments were preserved.
+
+## Completed cleanup
+
+Executed at 13:25–13:26 CEST on 15 October after the user's explicit request.
+All **44 whole directories and 21 subdirectories** in the reviewed combined
+list are absent. The per-entry receipt records **32,526 files, eight symlinks
+and 827 directories removed**, totalling **1,459,014,656 allocated bytes
+(1.36 GiB)**. No additional removal scope was added.
+
+`validation/` now occupies **2.90 GiB** (3,042,439 KiB), down from 4.26 GiB
+immediately before execution. AFS quota usage fell from **69% to 67%**.
+Concurrent production writes can affect the volume-wide change.
+
+The retained 4.44 MiB archive contains all 1,079 required records. Its SHA-256
+is unchanged after deletion. Fresh checks of both account schedulers passed
+at 13:26 CEST: no job references a removed scope and all previously required
+inputs remain. Current BSM/QCD/limits inputs, the ordinary-QCD fallback,
+selected-model snapshots, project plots and the four protected old roots
+listed below remain in place.
+
+The [execution result](validation_retention_audit_20261015/execution_20261015/deletion_result.json),
+[frozen inventory](validation_retention_audit_20261015/execution_20261015/manifest.jsonl.gz)
+and [per-entry deletion receipt](validation_retention_audit_20261015/execution_20261015/deleted.jsonl.gz)
+record the completed operation. The execution evidence directory also holds
+the preflight and post-deletion checks. This completed status supersedes the
+proposal and preparation status in the historical sections below.
 
 ## Further removals after the first cleanup
 
@@ -15,16 +42,17 @@ occupy about **4.25 GiB**, compared with 11.50 GiB in the first inventory.
 The workspace AFS volume reports **69% used**. There are still 103 top-level
 entries, including ordinary files as well as directories.
 
-**A further 44 whole directories and 21 subdirectories are ready for retirement
-within the checked task graph, with an estimated net saving of 1.35 GiB.**
+**The reviewed second proposal covered 44 whole directories and 21
+subdirectories, with an estimated net saving of 1.35 GiB. It has now been
+executed as recorded above.**
 The [whole-directory list](validation_retention_audit_20261015/remaining_whole_directory_removals.txt)
 contains absolute paths to the 44 parents. The
 [subdirectory list](validation_retention_audit_20261015/remaining_subdirectory_removals.txt)
 contains only the 21 disposable descendants; their parents must remain. The
 [combined list](validation_retention_audit_20261015/remaining_directory_removals.txt)
 and [sizes and reasons](validation_retention_audit_20261015/remaining_directory_removals.csv)
-cover all 65 nonoverlapping scopes. No validation payload was deleted by this
-audit.
+cover all 65 nonoverlapping scopes. This section records the review before
+execution.
 
 Preparation is complete for this list: **1,079 required records have been
 retained in a verified 4.44 MiB archive**, including old accounting and deletion
@@ -167,7 +195,7 @@ the enrichment workspace. Its old detailed study, like the other closed
 experiments in this proposal, would no longer be replayable from its original
 payloads. Persistent conclusions and current required accounting survive.
 
-No payload deletion or EOS migration has been performed. The new evidence
+At that proposal stage, no payload deletion or EOS migration had been performed. The new evidence
 files use the `active_task_` prefix. Other remaining inactive directories are
 not automatically approved: historical private geometry variants still follow
 the mandatory private-copy rule, and old production metadata can remain an
