@@ -1,0 +1,11 @@
+{
+  "timestamp_utc": "2026-10-15T09:46:45.144697+00:00",
+  "host": "lxplus923.cern.ch",
+  "matches": [
+    {
+      "pid": 4012629,
+      "cwd": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/qcd_mu_enriched_production_20261015_v1/independent_reference/qcd_5to10_reference",
+      "cmdline": "cmsRun gen_cfg.py "
+    }
+  ]
+}

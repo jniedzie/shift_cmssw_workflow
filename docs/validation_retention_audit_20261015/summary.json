@@ -1,0 +1,44 @@
+{
+  "snapshot_started_utc": "2026-10-15T09:42:51.823298+00:00",
+  "snapshot_finished_utc": "2026-10-15T09:43:05.504393+00:00",
+  "packaged_utc": "2026-10-15T09:52:11.732163+00:00",
+  "totals": {
+    "files": 82648,
+    "directories": 6730,
+    "symlinks": 28,
+    "top_level_entries": 113,
+    "allocated_bytes": 12345271296,
+    "logical_bytes": 12287687477
+  },
+  "inventory_errors": [],
+  "new_entries_after_snapshot": [
+    {
+      "path": "validation/ai_code_review_20261015",
+      "allocated_bytes": 10240,
+      "logical_bytes": 6409,
+      "files": 2,
+      "symlinks": 0,
+      "disposition": "KEEP CURRENT STUDY",
+      "reason": "Concurrent task created this directory during the audit; leave to its owner for completion and cleanup.",
+      "published_absolute_targets": 0,
+      "canonical_document_references": 0
+    },
+    {
+      "path": "validation/qcd_mu_enriched_production_20261015_v1",
+      "allocated_bytes": 63105024,
+      "logical_bytes": 63025167,
+      "files": 81,
+      "symlinks": 0,
+      "disposition": "KEEP LIVE",
+      "reason": "Active or held job/local process uses this deployment; do not move or rewrite.",
+      "published_absolute_targets": 0,
+      "canonical_document_references": 0
+    }
+  ],
+  "production_deletions": 0,
+  "relocation_performed": false,
+  "classification_is_deletion_allowlist": false,
+  "large_file_duplicate_groups": 91,
+  "large_file_redundant_content_bytes": 529999906,
+  "duplicate_scan_errors": []
+}

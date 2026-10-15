@@ -1,0 +1,130 @@
+{
+  "evidence_time_utc": "2026-10-15T09:46:33.210306+00:00",
+  "queue_evidence": "queue_summary.json",
+  "queue_coverage": "Successfully queried assigned schedd bigbird26.cern.ch only. Other schedds were not queried. Scheduler assignment was verified live; query return code 0 and empty stderr. No scheduler or data mutation.",
+  "local_process_evidence": "local_scientific_processes_final.json",
+  "local_process_coverage": "lxplus923.cern.ch only; other login nodes not inspected. Some /proc reads raced process exit or were inaccessible. Read-only audit processes appear in the snapshot and are not scientific workloads.",
+  "protect_entire_live_deployments": [
+    "bsm_scale10_20261014",
+    "bsm_limits_resource_diagnosis_20261015",
+    "qcd_mu_enriched_production_20261015_v1",
+    "qcd_mu_enrichment_20261015_v1"
+  ],
+  "external_live_metadata_top_dirs": {
+    "bdt_acceptance_study_20261012": {
+      "file_count": 3,
+      "reasons": [
+        "live production sealed dependency"
+      ]
+    },
+    "bsm_epsilon_native_20261013": {
+      "file_count": 11,
+      "reasons": [
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_epsilon_recovery_20261014": {
+      "file_count": 3,
+      "reasons": [
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_epsilon_spectral_20261013": {
+      "file_count": 11,
+      "reasons": [
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_mass_extension_20261013": {
+      "file_count": 68,
+      "reasons": [
+        "live aggregate completion receipt",
+        "live aggregate full generation provenance",
+        "live aggregate source provenance",
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_plot_refresh_20261014": {
+      "file_count": 1,
+      "reasons": [
+        "live publisher conditions"
+      ]
+    },
+    "bsm_remaining_recovery_20261014": {
+      "file_count": 13,
+      "reasons": [
+        "live aggregate completion receipt",
+        "live aggregate source provenance",
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_repartition_20261012": {
+      "file_count": 11,
+      "reasons": [
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_spectral_extension_20261013": {
+      "file_count": 78,
+      "reasons": [
+        "live aggregate completion receipt",
+        "live aggregate full generation provenance",
+        "live aggregate source provenance",
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_stage2_20261013": {
+      "file_count": 38,
+      "reasons": [
+        "live aggregate completion receipt",
+        "live aggregate full generation provenance",
+        "live aggregate source provenance",
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    },
+    "bsm_stage2_recovery_20261013": {
+      "file_count": 4,
+      "reasons": [
+        "live aggregate completion receipt",
+        "live aggregate source provenance",
+        "live publisher source completion receipt",
+        "live publisher source plan",
+        "live publisher source seal"
+      ]
+    }
+  },
+  "external_live_metadata_manifest": "live_metadata_dependencies.json",
+  "important": "A completed baseline campaign remains a live aggregate/publication dependency. Do not delete its metadata or generation ledgers based on an empty queue for that old campaign. This manifest is a source-derived minimum, not an exhaustive cleanup allowlist.",
+  "new_directory_coverage": {
+    "timestamp_utc": "2026-10-15T09:46:56.319260+00:00",
+    "baseline_started": 1792057371.8232982,
+    "baseline_finished": 1792057385.5043926,
+    "new_top_level_names": [
+      "qcd_mu_enriched_production_20261015_v1"
+    ],
+    "removed_top_level_names": []
+  },
+  "failed_checks": [
+    "Initial sandbox scheduler config queries failed DNS; retried successfully outside sandbox.",
+    "SSH to assigned scheduler closed connection over IPv4 and IPv6, so scheduler-local spool path could not be read.",
+    "Installed condor_q direct -addr probe failed; it does not invalidate successful default assigned-schedd query."
+  ],
+  "final_local_process_evidence": "local_scientific_processes_final.json",
+  "limits_process": "No corrected_fit process found in current local process working directory or command scan at 09:46:45 UTC. Historical/other-node work remains outside that scan."
+}
