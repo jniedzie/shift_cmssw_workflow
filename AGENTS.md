@@ -1,3 +1,4 @@
+<!-- Code style: human-code. -->
 # SHIFT project instructions
 
 These instructions apply to every task in this repository and must be read
@@ -11,6 +12,12 @@ or use Git worktrees unless the user explicitly overrides this policy.
 
 ## Temporary scripts and cleanup
 
+- Generated validation reports, inventories, scheduler snapshots, archives,
+  figures and deletion receipts are local artifacts. Keep them in ignored
+  `validation/`, `docs/results/` or `docs/validation_retention_audit_<date>/`
+  directories. Keep concise Markdown conclusions in the versioned docs.
+  Do not force-add ignored artifacts. JSON belongs in Git when it is maintained
+  configuration, a schema or a small synthetic test fixture.
 - Put one-off probes, debugging scripts, generated test configurations, and
   disposable outputs in `tmp/<YYYYMMDD-task>/` within this repository. Do not
   put temporary scripts in the repository root, `scripts/`, or `tests/`.
