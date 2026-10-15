@@ -1,0 +1,26 @@
+{
+  "checked_at_utc": "2026-10-15T10:53:12.869785+00:00",
+  "proposed_paths": 56,
+  "gross_allocated_bytes": 8974717952,
+  "gross_gib": 8.358357429504395,
+  "candidate_files": 47542,
+  "target_net_gib": 8.0,
+  "missing_targets": 0,
+  "protected_existing_files": 1302,
+  "protected_expected_future_paths": 30,
+  "previously_existing_protected_paths_now_absent": 0,
+  "live_protected_intersections": 0,
+  "checks": [
+    "nonoverlapping target scopes",
+    "source count/allocated totals",
+    "target existence",
+    "all observed existing protected files still exist",
+    "planned future completion files remain protected",
+    "current sealed input/deployment intersection empty",
+    "all new JSON/gzip evidence parses",
+    "report links and whitespace"
+  ],
+  "no_payloads_deleted": true,
+  "no_job_mutations": true,
+  "execution_requires_fresh_state": true
+}

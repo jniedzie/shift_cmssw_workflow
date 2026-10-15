@@ -1,0 +1,66 @@
+path,allocated_bytes,files,directories,reason
+validation/bdt_acceptance_study_20261012/comparison,18243584,96,6,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_acceptance_study_20261012/label_audit,971776,25,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_acceptance_study_20261012/production/canary,21567488,33,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_acceptance_study_20261012/production/failures,966656,27,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_acceptance_study_20261012/production/frozen,1671168,41,14,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_discrimination_improvement_20261012,68136960,316,29,Closed analysis; enumerated required summaries preserved and verified.
+validation/bdt_histograms_20261009,805888,41,4,Remaining closed probe/build/review target from the preceding proposal.
+validation/bdt_signal_extension_20261012,10891264,65,14,Closed analysis; enumerated required summaries preserved and verified.
+validation/bsm_extended_20261013,11258880,35,5,Closed analysis; enumerated required summaries preserved and verified.
+validation/bsm_plot_inputs_20261013,141394944,85,20,Closed analysis; enumerated required summaries preserved and verified.
+validation/bsm_plotfixes_20261013,10135552,19,3,Closed analysis; enumerated required summaries preserved and verified.
+validation/bsm_sm_plots_20261012,72590336,158,53,Closed analysis; enumerated required summaries preserved and verified.
+validation/cms_lss_event14_20260924,43008,2,12,Closed historical test; conclusions remain in canonical study documents.
+validation/dimuon_histograms_20261009,1998848,19,3,Remaining closed probe/build/review target from the preceding proposal.
+validation/generation_20260915,2732032,53,7,Closed historical test; conclusions remain in canonical study documents.
+validation/high_bins_20261001,20649984,101,5,Closed analysis; enumerated required summaries preserved and verified.
+validation/jpsi_1k_merges_20260921,83968,8,1,All regular records archived byte-for-byte before directory retirement.
+validation/jpsi_xsec_recovery_20260921,58368,2,1,All regular records archived byte-for-byte before directory retirement.
+validation/lss_combined_20260917,1292288,49,2,Closed historical test; conclusions remain in canonical study documents.
+validation/lss_combined_20260918,1093632,29,1,Closed historical test; conclusions remain in canonical study documents.
+validation/lss_reco_20260908,13064192,111,29,Closed historical test; conclusions remain in canonical study documents.
+validation/lss_reco_20260911,389120,53,1,Closed historical test; conclusions remain in canonical study documents.
+validation/lss_reco_20260915,1374208,101,1,Closed historical test; conclusions remain in canonical study documents.
+validation/lss_reco_20260916,40084480,159,8,Closed historical test; conclusions remain in canonical study documents.
+validation/merge_files_contract_20261009,7168,3,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/mixing_hard_scale_shape_20261015_v1,7121920,8,2,Closed analysis; enumerated required summaries preserved and verified.
+validation/mixing_shape_20261015_complete_v1,12131328,16,3,Closed analysis; enumerated required summaries preserved and verified.
+validation/mixing_shape_20261015_v1,11270144,1,1,Closed analysis; enumerated required summaries preserved and verified.
+validation/mixing_shape_20261015_v2,11498496,3,1,Closed analysis; enumerated required summaries preserved and verified.
+validation/mixing_shape_20261015_v3,12485632,10,3,Closed analysis; enumerated required summaries preserved and verified.
+validation/ntuple_group_merge_20261009,3275776,511,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/plot_auto_y_range_20261014,714752,27,10,Remaining closed probe/build/review target from the preceding proposal.
+validation/plot_category_labels_20261014,46080,1,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/plot_rebin_20261014,71680,1,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/plot_review_20261009,1393664,30,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/plot_signal_stat_uncertainty_20261014,104448,10,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/plotter_startup_20261014,290816,35,4,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/full_gen_scan/inputs,1546240,9,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/full_gen_scan/probes,7838720,10,3,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/inventory_cost,23985152,69,16,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/mixing_closure,1360896,19,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/physics_next_pilot_v1,5092352,8,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/recovery_pilot/resolved_config_preflight,9973760,4,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/recovery_pilot/results,20849664,4,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/complement_pilot200_v1,67018752,163,2,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/friend_runtime,26349568,8,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/private_cmake,12414976,346,73,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/private_cmake_double,16811008,361,73,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/private_histogrammer,5098496,19,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/sampling_weights/tested_consumer_v1,3042304,67,26,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/tail_reco_launch_v1/logs,1859584,442,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/tail_reco_launch_v1/resolved_config_preflight,19944448,8,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_gen_recovery_20261014/unused_two_muon_both2_cues,458752,4,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/qcd_night_reco_20261014_v1,261275648,27489,215,Retired campaign; no active reader or job. Post-retirement pointer and compact final receipts preserved.
+validation/qcd_production_20260918,10240,4,1,Closed historical test; conclusions remain in canonical study documents.
+validation/qcd_selection_study_20261012,422690816,222,40,Closed analysis; enumerated required summaries preserved and verified.
+validation/qcd_unfiltered_20260921,4788224,748,10,All regular records archived byte-for-byte before directory retirement.
+validation/qcd_weighted_merges_20260921,4092928,13,1,All regular records archived byte-for-byte before directory retirement.
+validation/retention_20260922,26583040,9,1,All regular records archived byte-for-byte before directory retirement.
+validation/tea_consolidation_20261012,4114432,185,36,Remaining closed probe/build/review target from the preceding proposal.
+validation/tea_histogram_preparation_20261007,94208,0,46,Remaining closed probe/build/review target from the preceding proposal.
+validation/tea_rebase_20261007,104448,7,12,Remaining closed probe/build/review target from the preceding proposal.
+validation/unfiltered_merges_20260923,839680,16,1,All regular records archived byte-for-byte before directory retirement.
+validation/workflow_review_20261007,8813568,4,1,Remaining closed probe/build/review target from the preceding proposal.
+validation/workflow_review_20261012,52224,4,1,Remaining closed probe/build/review target from the preceding proposal.

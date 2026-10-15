@@ -1,5 +1,101 @@
 # Generation instructions
 
+## Night reconstruction of saved QCD GEN (2026-10-14)
+
+`prepare_shift_night_draws.py` freezes independent draws over all saved QCD
+originals. `prepare_shift_night_reconstruction.py` then prepares a separate
+immutable worker and scheduler supervisor. It does not submit jobs. The
+October 14 worklist is in `../validation/qcd_night_reco_20261014_v1/draws/`:
+fourteen fixed 1% draws over 2,866,485 originals in 709 sources require 23,836
+new jobs for 368,014 previously unprocessed originals. Reused originals stay
+in each draw's membership ledger and are omitted only from reconstruction work.
+
+The controller and watchdog run in the scheduler universe. The default local
+night is 22:00--06:00, with new starts stopped at 04:00. Running workers drain;
+slow jobs can finish later than 06:00. An expiring three-minute start permission
+stops new reconstruction if the controller disappears. A positively verified
+worker still staging inputs can receive renewed permission; it checks the
+current scheduler permission again before reconstruction. Workers already
+reconstructing keep their fixed settings and drain. The campaign starts at
+50 workers and can grow to 1000, subtracting other account workers and checking
+fresh account and quota observations. Later frozen draws can run while a slow
+earlier job finishes. Isolated computation failures remain recorded for explicit
+recovery; common input, identity, weight, configuration or publication failures
+stop admissions. Reconstruction that already started is never retried automatically.
+
+A supervisor may be submitted before its operational tests finish. Its frozen
+`required_operational_gates.json` then keeps it in
+`waiting_for_operational_validation`, with no worker submissions or renewed start
+permissions. The two named receipts must explicitly pass the native admission
+guard and the detector/publication canary. They pin the expected science runtime,
+response, base and draw authorities; the guard also pins the exact worker helper,
+launcher and manifest. Each required native check must be true, and the recorded
+evidence files must still match their SHA-256 values. Merely creating a receipt,
+setting a campaign flag, or completing a test with another worker does not arm it.
+Only the separate gate receipts may be added after submission; do not edit the
+frozen policy, worker files or deployment manifest used by a live supervisor.
+
+Normal Nano, evidence and completion receipts go to versioned support EOS, with
+whole-file SHA-256 readback. The initial reservation is 32 MiB and eight EOS
+files per admitted worker, above reserves of 50 GiB and 2000 files. Capacity
+uses current storage headroom rather than reserving all future workers at once.
+An output larger than its reservation stops new admissions for a sizing review.
+The full worklist needs more files than the present free file quota allows;
+preparing fourteen draws does not promise that all fourteen can finish before
+storage is expanded or a separately reviewed complete merge is retained.
+
+Workers are submitted with `condor_submit -spool`. Completed sandboxes remain
+on the scheduler for up to thirty days. Rescue archives preserve unique detector
+tiers when EOS publication fails. The controller retrieves exact completed
+jobs individually only after native output-size and AFS-room checks. Unknown
+sizes or insufficient room leave outputs in the scheduler spool and stop new
+admissions. Only a successful completed queue record with verified EOS outputs,
+retained native exit evidence and hashed retrieved status may be removed
+automatically. Failed, held and running jobs are preserved.
+
+The October 15 scheduler repair freezes a separate worker and supervisor; it
+does not edit the October 14 deployments. Collector/account discovery runs on
+the authenticated audit worker. That worker queries other account schedds but
+excludes the local schedd; the scheduler manager combines that evidence with a
+fresh query through its verified local address. Named collector queries on the
+scheduler host failed in the real detached probe and must not be reintroduced.
+Every manager and audit submission uses a persistent absolute `initialdir` and
+the same `cwd`. Supervisor submit files explicitly request thirty days, and
+the queued `Iwd` and `MaxRuntime` must be checked after submission.
+
+Only idempotent Chirp reads/writes receive bounded transport retries. A failure
+to report final progress does not change successful, fully published science
+into a failed detector job. The controller may import a frozen
+`retained_completions.json` containing exact old status/retrieval hashes. It
+accepts old native exit 73 only when the receipt proves an otherwise successful
+publication, a final Chirp reporting error and an empty rescue archive. No
+science is repeated. Explicitly reviewed zero-science failures and deferrals
+may be retired and recovered with their unchanged selected originals, seeds,
+probabilities and response. A transient native `Spooling input data files` hold
+with zero starts remains reserved rather than becoming a science failure.
+
+Execution order may use `job_order=source_round_robin_descending`. This visits
+the harder end of the frozen source catalogue first and spreads work among
+GEN files. It changes neither membership nor sampling probabilities; a partial
+epoch still cannot be used as an unbiased analysis sample. The October 15
+replacement starts at 200 workers after the previous 291 successful jobs,
+allows growth to 1000, and uses a five-minute lease. It keeps the 22:00--06:00
+night and 04:00 stop for new starts. The watchdog records stale controllers,
+observer faults and night-running managers that fail to produce child workers.
+
+Before arming the replacement, exercise the actual detached manager, account
+audit, downstream detector worker, native expired-admission guard, all detector
+tiers and whole-file EOS publication/readback. Unit tests and submission
+receipts alone do not pass those gates. Repair evidence and exact retirement
+manifests are in `../validation/qcd_night_reco_20261014_v1/scheduler_repair_20261015/`.
+
+Every analysis release stays closed. Native weights must be divided once by
+the union probability for the fixed, fully included draw prefix; original GEN
+exposure is counted once. Partial draws and omitted failures cannot become a
+normalized physics sample. The unchanged V10 parent-hadron transport still
+needs physical validation. Campaign state and numerical results belong in
+`../SHIFT_ANALYSIS.md` and `../SHIFT_RECONSTRUCTION.md`.
+
 ## Process-bin storage layout (2026-10-09)
 
 The EOS data base now contains process-bin directories only. New standard

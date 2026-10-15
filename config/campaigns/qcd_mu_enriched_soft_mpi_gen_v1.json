@@ -1,0 +1,24 @@
+{
+  "code_style": "human-code",
+  "schema": "shift-qcd-generator-profile-v1",
+  "generator_profile": "shift-qcd-mu-enriched-cylinder-v1",
+  "sample": "qcd",
+  "source_partition": "SoftQCD non-diffractive with MPI processLevel=3; exclude direct hard Jpsi",
+  "default_bounds": [20.0, -1.0],
+  "default_trials": 2000,
+  "decay_settings": [
+    "ParticleDecays:limitTau0 = off",
+    "ParticleDecays:limitCylinder = on",
+    "ParticleDecays:xyMax = 8000.",
+    "ParticleDecays:zMax = 151000.",
+    "130:mayDecay = on",
+    "211:mayDecay = on",
+    "321:mayDecay = on"
+  ],
+  "muon_filter": "Stable muon, -10 < eta < 0, rho <= 8000 mm, 0 <= z <= 151000 mm, no momentum threshold",
+  "normalization": "sigma_ND * sum(saved native weights) / full fixed source trials; no second filter efficiency",
+  "ordinary_and_enriched_are_alternative_estimates": true,
+  "material_competition_validated": false,
+  "requires_scientific_gate": true,
+  "physics_valid": false
+}

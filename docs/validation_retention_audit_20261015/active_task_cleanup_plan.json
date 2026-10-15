@@ -1,0 +1,27 @@
+{
+  "status": "PROPOSAL ONLY; no deletions performed",
+  "policy": "Keep active tasks and required current inputs/results; retire closed experiment bulk.",
+  "generated_utc": "2026-10-15T10:50:38.821391+00:00",
+  "targets_count": 56,
+  "candidate_files": 47542,
+  "gross_allocated_bytes": 8974717952,
+  "gross_gib": 8.358357429504395,
+  "net_target_gib": 8.0,
+  "net_qualification": "Target after retaining compact required records and small protected exceptions. Recompute exact deletion manifest and net bytes before execution.",
+  "live_protected_intersections": 0,
+  "active_tasks": [
+    "SM/QCD mu-enriched production and detector checks",
+    "BSM detector/aggregate/publication",
+    "unfinished BSM limits including held jobs",
+    "current AI-code review/commits",
+    "this cleanup audit"
+  ],
+  "preserve_required_records_before_delete": true,
+  "fresh_queue_and_consumer_check_before_delete": true,
+  "fresh_canonical_EOS_readback_before_old_histogram_scratch_delete": true,
+  "optional_additional_eos_archival_gib": 0.8287420272827148,
+  "optional_archival_excluded_from_gross": true,
+  "destructive_consequence": "Closed experiment GEN/graph/replay/training/sandbox payloads would be permanently retired; their original detailed replay would no longer be available. Current canonical physics products and required accounting remain.",
+  "targets_file": "active_task_cleanup_targets.csv",
+  "keep_paths_file": "active_task_live_keep_paths.txt"
+}

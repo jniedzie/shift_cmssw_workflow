@@ -113,3 +113,7 @@ the change.
   while jobs using it are running. Documentation-only edits are safe.
 - Keep timing, occupancy, trigger-candidate, electronics-response, and offline
   reconstruction conclusions clearly separated in code, metadata, and reports.
+- Follow the workspace section "Detached production must be checked after
+  handoff". In particular, set a persistent `initialdir`, submit with that
+  directory as `cwd`, inspect the queued `Iwd`, and verify actual downstream
+  execution. See the October 14–15 DP incident in `../SHIFT_BSM.md`.
