@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated production supervision and quota accounting.
 """Gate and supervise one frozen GEN-to-Nano campaign, with one failure email."""
 import argparse
 from email.message import EmailMessage
@@ -190,23 +191,34 @@ def launch_quota_audit(root, *, local_schedd=True, persistent=False):
     native = Path(__file__).resolve().with_name('shift_condor_native.py')
     shutil.copy2(native,folder/'shift_condor_native.py')
     policy=read(root/'policy.json') if (root/'policy.json').exists() else {}
-    save(folder/'quota_request.json',{'nonce':nonce,
+    audit_priority = policy.get('quota_audit_priority', 100)
+    if type(audit_priority) is not int or not -2147483648 <= audit_priority <= 2147483647:
+        raise ValueError('Quota audit priority must be a native signed integer')
+    request = {'nonce':nonce,
          'account_owner':policy.get('account_owner',pwd.getpwuid(os.getuid()).pw_name),
-         'account_pool':policy.get('account_pool','tweetybird04.cern.ch')})
+         'account_pool':policy.get('account_pool','tweetybird04.cern.ch'),
+         'local_schedd_name':policy.get('schedd_name')}
+    extra_inputs = ''
+    if policy.get('external_storage_reservations'):
+        request['external_storage_reservations'] = policy['external_storage_reservations']
+        reader = Path(__file__).resolve().with_name('read_shift_external_storage_commitments.py')
+        shutil.copy2(reader, folder / reader.name)
+        extra_inputs = ',' + str(folder / reader.name)
+    save(folder/'quota_request.json', request)
     (folder/'quota.sub').write_text(f'''universe = vanilla
 initialdir = {folder}
 executable = /usr/bin/python3
 arguments = audit.py quota_request.json
 should_transfer_files = YES
 when_to_transfer_output = ON_EXIT
-transfer_input_files = {folder}/audit.py,{folder}/shift_condor_native.py,{folder}/quota_request.json
+transfer_input_files = {folder}/audit.py,{folder}/shift_condor_native.py,{folder}/quota_request.json{extra_inputs}
 transfer_output_files = quota_result.json
 getenv = False
 notification = Never
 request_cpus = 1
 request_memory = 512
 request_disk = 1000
-priority = 100
+priority = {audit_priority}
 +MaxRuntime = 300
 +ShiftNtupleQuotaAudit = True
 +ShiftNtupleAuditNonce = "{nonce}"

@@ -14,6 +14,19 @@ def audit(request):
     result = {'nonce': request['nonce'], 'complete': False, 'account_coverage_verified': False,
               'account_owner': request['account_owner'], 'account_pool': request['account_pool']}
     try:
+        if request.get('external_storage_reservations'):
+            # Count completions before measuring free space. A later count
+            # could credit publications absent from an older quota snapshot.
+            Path('external_commitment_request.json').write_text(json.dumps(request))
+            subprocess.run(['/usr/bin/python3', 'read_shift_external_storage_commitments.py',
+                '--request', 'external_commitment_request.json',
+                '--output', 'external_commitment_result.json'], check=True, timeout=90,
+                capture_output=True, text=True)
+            external = json.loads(Path('external_commitment_result.json').read_text())
+            if external.get('complete') is not True:
+                raise ValueError('External storage commitment observation did not complete')
+            result['external_storage_commitments'] = external
+        result['quota_observation_started_at_epoch'] = time.time()
         text = subprocess.run(['/usr/bin/eos', '-b', 'root://eoshome-j.cern.ch', 'quota', 'ls', '-m',
                                '/eos/user/j/jniedzie'], check=True, timeout=60,
                               capture_output=True, text=True).stdout

@@ -1,3 +1,4 @@
+# Code style: AI-code. AI-generated production supervision regression tests.
 import json
 from pathlib import Path
 import sys
@@ -919,6 +920,38 @@ class ControllerTests(unittest.TestCase):
                 return '123.0 - 123.0\n'
             with patch.object(controller,'run_condor',side_effect=submit):
                 self.assertEqual(controller.quota(root,heartbeat=False),(123456,456))
+
+    def test_quota_auditor_receives_the_pinned_external_storage_reader(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            authorities = [{'production_directory': '/sealed/external'}]
+            (root/'policy.json').write_text(json.dumps(dict(external_storage_reservations=authorities)))
+            with patch.object(controller, 'run_condor', return_value='123.0 - 123.0\n') as submit:
+                pending = controller.launch_quota_audit(root, persistent=True)
+            folder = Path(pending['folder'])
+            self.assertEqual(json.loads((folder/'quota_request.json').read_text())['external_storage_reservations'], authorities)
+            self.assertTrue((folder/'read_shift_external_storage_commitments.py').is_file())
+            self.assertIn(str(folder/'read_shift_external_storage_commitments.py'), (folder/'quota.sub').read_text())
+            self.assertEqual(submit.call_args.kwargs['cwd'], folder)
+
+    def test_quota_audit_priority_is_configurable_without_changing_other_campaigns(self):
+        for priority in [None, 1000000]:
+            with self.subTest(priority=priority), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                if priority is not None:
+                    (root/'policy.json').write_text(json.dumps(dict(quota_audit_priority=priority)))
+                with patch.object(controller, 'run_condor', return_value='123.0 - 123.0\n'):
+                    pending = controller.launch_quota_audit(root, persistent=True)
+                text = (Path(pending['folder'])/'quota.sub').read_text()
+                self.assertIn('priority = ' + str(100 if priority is None else priority) + '\n', text)
+
+    def test_quota_audit_priority_cannot_inject_a_submit_expression(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root/'policy.json').write_text(json.dumps(dict(quota_audit_priority='100\nqueue 10')))
+            with patch.object(controller, 'run_condor') as submit, self.assertRaises(ValueError):
+                controller.launch_quota_audit(root, persistent=True)
+            submit.assert_not_called()
 
     def test_quota_refreshes_completed_result_after_long_scheduler_outage(self):
         with tempfile.TemporaryDirectory() as directory:
