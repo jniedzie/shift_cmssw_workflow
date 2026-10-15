@@ -99,6 +99,22 @@ class NightPolicyTests(unittest.TestCase):
         self.assertEqual(result['current_capacity'], 50)
         self.assertEqual(result['available_new_slots'], 0)
 
+    def test_current_quota_budget_limits_admissions_without_reserving_future_thousand_workers(self):
+        result = capacity_decision({'current_capacity': 1000}, policy(), now=100,
+                                   completed_jobs=0, own_ads=[{'JobStatus': 2}] * 35,
+                                   external_workers=193, quota_worker_limit=60,
+                                   observations_verified=True, healthy=True)
+        self.assertEqual(result['available_new_slots'], 25)
+        self.assertEqual(result['quota_worker_limit'], 60)
+
+    def test_exhausted_current_quota_never_admits_or_kills_live_workers(self):
+        result = capacity_decision({'current_capacity': 1000}, policy(), now=100,
+                                   completed_jobs=0, own_ads=[{'JobStatus': 2}] * 50,
+                                   external_workers=0, quota_worker_limit=0,
+                                   observations_verified=True, healthy=True)
+        self.assertEqual(result['available_new_slots'], 0)
+        self.assertEqual(result['own_live_workers'], 50)
+
     def test_actual_completions_and_elapsed_time_allow_one_step(self):
         result = capacity_decision({'last_capacity_change_epoch': 0, 'completed_at_change': 0},
                                    policy(), now=2000, completed_jobs=10,

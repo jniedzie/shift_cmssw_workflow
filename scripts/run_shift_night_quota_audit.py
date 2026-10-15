@@ -8,8 +8,7 @@ import subprocess
 import sys
 import time
 
-from shift_condor_native import query_account
-
+from shift_condor_native import _account_schedds, query
 
 def audit(request):
     result = {'nonce': request['nonce'], 'complete': False, 'account_coverage_verified': False,
@@ -23,12 +22,24 @@ def audit(request):
         result.update(complete=True, quota_checked_at_epoch=time.time(),
                       free_bytes=int(entry['maxlogicalbytes']) - int(entry['usedlogicalbytes']),
                       free_files=int(entry['maxfiles']) - int(entry['usedfiles']))
-        workers = query_account(request['account_owner'],
-                                'JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 6 || JobStatus == 7)',
-                                ['ClusterId', 'ProcId', 'JobUniverse', 'JobStatus', 'ShiftSuiteTag',
-                                 'ShiftNightCampaign', 'ShiftNightWaveNonce', 'ShiftNightJob', 'ShiftNtupleQuotaAudit'],
-                                pool=request['account_pool'], local_schedd=False, timeout=60)
-        result.update(account_coverage_verified=True, account_checked_at_epoch=time.time(), account_workers=workers)
+        local_name = request['local_schedd_name']
+        if not isinstance(local_name, str) or not local_name:
+            raise ValueError('Local scheduler identity must be explicit')
+        before = _account_schedds(request['account_owner'], timeout=20,
+                                  local_schedd=False, pool=request['account_pool'])
+        workers = []
+        for schedd in sorted(before - {local_name}):
+            workers.extend(query('Owner == ' + json.dumps(request['account_owner']) + ' && '
+                'JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 6 || JobStatus == 7)',
+                ['ClusterId', 'ProcId', 'JobUniverse', 'JobStatus', 'ShiftNightCampaign'],
+                pool=request['account_pool'], schedd=schedd, local_schedd=False, timeout=20))
+        after = _account_schedds(request['account_owner'], timeout=20,
+                                 local_schedd=False, pool=request['account_pool'])
+        if before != after or local_name not in before:
+            raise ValueError('Account scheduler coverage changed or omitted the local scheduler')
+        result.update(remote_account_coverage_verified=True, remote_account_checked_at_epoch=time.time(),
+                      account_schedds=sorted(before), excluded_local_schedd=local_name,
+                      remote_account_workers=workers)
     except Exception as error:
         result['error'] = repr(error)
     result['checked_at_epoch'] = time.time()

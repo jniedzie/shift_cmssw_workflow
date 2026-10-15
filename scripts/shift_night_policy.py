@@ -47,6 +47,8 @@ def validate_policy(policy):
         raise ValueError('Invalid idle fraction')
     if policy['maximum_wave_jobs'] > policy['worker_ceiling']:
         raise ValueError('A submission wave cannot exceed the worker ceiling')
+    if policy.get('job_order', 'catalogue') not in ('catalogue', 'source_round_robin_descending'):
+        raise ValueError('Unknown operational execution order')
     return dict(policy)
 
 
@@ -95,7 +97,7 @@ def night_window(now, policy):
 
 
 def capacity_decision(previous, policy, *, now, completed_jobs, own_ads,
-                      external_workers, observations_verified, healthy):
+                      external_workers, observations_verified, healthy, quota_worker_limit=None):
     """Count reservations and increase capacity only after healthy measured progress."""
     current = int(previous.get('current_capacity', policy['initial_workers']))
     current = min(policy['worker_ceiling'], max(policy['initial_workers'], current))
@@ -119,11 +121,14 @@ def capacity_decision(previous, policy, *, now, completed_jobs, own_ads,
         changed, baseline, reason = now, completed_jobs, 'healthy_completed_outputs_allow_growth'
     elif current == policy['worker_ceiling']:
         reason = 'at_approved_worker_ceiling'
-    available = max(0, min(current, policy['worker_ceiling'] - external_workers) - len(live)) if observations_verified and healthy else 0
+    quota_limit = policy['worker_ceiling'] if quota_worker_limit is None else quota_worker_limit
+    if type(quota_limit) is not int or quota_limit < 0:
+        raise ValueError('Quota worker budget must be a nonnegative integer')
+    available = max(0, min(current, policy['worker_ceiling'] - external_workers, quota_limit) - len(live)) if observations_verified and healthy else 0
     return {'current_capacity': current, 'last_capacity_change_epoch': changed,
             'completed_at_change': baseline, 'completed_jobs': completed_jobs,
             'external_workers': external_workers if observations_verified else None,
-            'own_live_workers': len(live), 'idle_fraction': idle_fraction,
+            'own_live_workers': len(live), 'idle_fraction': idle_fraction, 'quota_worker_limit': quota_limit,
             'available_new_slots': min(available, policy['maximum_wave_jobs']), 'reason': reason}
 
 
