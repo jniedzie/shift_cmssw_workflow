@@ -1,3 +1,4 @@
+# Code style: human-code.
 *.pyc
 logs
 condor/runtime_snapshots/
@@ -6,6 +7,11 @@ condor
 *.root
 jniedzie.cc
 docs/results
+
+# Generated validation reports, inventories, archives and deletion receipts.
+# Keep maintained JSON configuration and synthetic test fixtures versioned.
+/validation/
+/docs/validation_retention_audit_*/
 
 # One-off scripts and disposable test outputs; keep the directory guide.
 /tmp/*
