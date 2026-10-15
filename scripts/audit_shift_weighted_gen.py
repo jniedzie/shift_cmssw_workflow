@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated fixed-trial GEN audit.
 """Audit fixed-trial weighted GEN, using the named ledger rather than native counters.
 
 This checks generator bookkeeping and complementary event ownership. It does
@@ -258,7 +259,7 @@ def validate_snapshot(ledger, embedded_ledger, records, weighted_run_info):
                 effective_events=sumw*sumw/sumw2 if sumw2 else 0.)
 
 
-def read_edm(path, expected_events):
+def read_edm(path, expected_events, require_muon=False, weighted=True):
     import ROOT
     from DataFormats.FWLite import Events, Handle, Runs
 
@@ -303,12 +304,20 @@ def read_edm(path, expected_events):
         beams = dict(target_energy_GeV=float(a.e()), projectile_energy_GeV=float(b.e()),
                      projectile_pz_GeV=float(b.pz()))
         direct = []
+        eligible_muons = 0
         particle, end = hepmc.particles_begin(), hepmc.particles_end()
         while particle != end:
             item = particle.__deref__()
             particle.__preinc__()
             if abs(item.pdg_id()) in DIRECT_JPSI_IDS and abs(item.status()) in (23, 33):
                 direct.append(float(item.momentum().perp()))
+            if require_muon and abs(item.pdg_id()) == 13 and item.status() == 1 and item.production_vertex():
+                momentum, vertex = item.momentum(), item.production_vertex().position()
+                if (-10. < momentum.eta() < 0. and 0. <= vertex.z() <= 151000.
+                        and math.hypot(vertex.x(), vertex.y()) <= 8000.):
+                    eligible_muons += 1
+        if require_muon and not eligible_muons:
+            raise ValueError('Saved mu-enriched event does not satisfy its stable-muon filter')
         charged = 0
         for particle in get(event, 'genParticles', 'std::vector<reco::GenParticle>'):
             if not math.isfinite(float(particle.charge())):
@@ -320,6 +329,11 @@ def read_edm(path, expected_events):
                             charged=charged))
     runs = []
     for run in Runs(str(path)):
+        if not weighted:
+            native = get(run, 'generator', 'GenRunInfoProduct').internalXSec()
+            runs.append((None, None, dict(internal_xsec_pb=float(native.value()),
+                                         error_pb=float(native.error()))))
+            continue
         ledger = json.loads(str(get(run, ('shiftWeightedNormalization', 'fixedTrialLedger'), 'std::string')))
         if int(run.runAuxiliary().run()) != ledger['run']:
             raise ValueError('EDM run namespace differs from named fixed-trial ledger')
@@ -334,17 +348,41 @@ def read_edm(path, expected_events):
     return records, runs[0][0], runs[0][1], runs[0][2], beams
 
 
-def audit(input_path, ledger_path, config_path):
+def audit(input_path, ledger_path, config_path, generator_profile='ordinary'):
     inputs = [Path(input_path), Path(ledger_path), Path(config_path)]
     before = [(path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in inputs]
     ledger_bytes, config_bytes = inputs[1].read_bytes(), inputs[2].read_bytes()
     ledger = json.loads(ledger_bytes)
     validate_ledger(ledger)
-    model_digest = validate_config(config_bytes.decode(), ledger)
-    records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], ledger['accepted'])
-    report = validate_snapshot(ledger, embedded, records, weighted_run)
+    if generator_profile == 'ordinary':
+        model_digest = validate_config(config_bytes.decode(), ledger)
+        records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], ledger['accepted'])
+        report = validate_snapshot(ledger, embedded, records, weighted_run)
+    else:
+        from qcd_mu_enrichment import PROFILE, filtered_snapshot, ordinary_source_config
+        if generator_profile != PROFILE:
+            raise ValueError('Unsupported generator profile')
+        from DataFormats.FWLite import Handle, Lumis
+        filters = []
+        for lumi in Lumis(str(inputs[0])):
+            handle = Handle('GenFilterInfo')
+            lumi.getByLabel('genFilterEfficiencyProducer', handle)
+            if not handle.isValid():
+                raise ValueError('Missing weighted muon-filter bookkeeping')
+            info = handle.product()
+            filters.append(dict(total_positive=int(info.numTotalPositiveEvents()),
+                total_negative=int(info.numTotalNegativeEvents()),
+                pass_positive=int(info.numPassPositiveEvents()), pass_negative=int(info.numPassNegativeEvents()),
+                sum_weights=float(info.sumWeights()), sum_weights2=float(info.sumWeights2()),
+                sum_pass_weights=float(info.sumPassWeights()), sum_pass_weights2=float(info.sumPassWeights2())))
+        ordinary = ordinary_source_config(config_bytes.decode(), ledger)
+        model_digest = validate_config(ordinary, ledger)
+        saved_count = sum(row['pass_positive'] + row['pass_negative'] for row in filters)
+        records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], saved_count, require_muon=True)
+        report = filtered_snapshot(ledger, embedded, records, weighted_run, filters)
+        report['filter_records'] = filters
     report.update(schema='shift-weighted-gen-semantic-audit-v1', complete=True, healthy=True,
-                  requested=ledger['requested_trials'], accepted=ledger['accepted'], tried=ledger['tried'],
+                  requested=ledger['requested_trials'], accepted=report['events'], tried=ledger['tried'],
                   proposal_calls=ledger['proposal_calls'], sample=ledger['sample'],
                   bounds=[ledger['lower'], ledger['upper']], algorithm=ALGORITHM, ledger=ledger,
                   weighted_run_info=weighted_run, native_generator_run_info=native_run,
@@ -358,6 +396,7 @@ def audit(input_path, ledger_path, config_path):
                   physics_valid=False, normalization_ready=False,
                   forced_decay=('443 -> 13 -13; branching convention remains an independent gate'
                                 if ledger['sample'] == 'direct_jpsi' else 'none'))
+    report['generator_profile'] = generator_profile
     after = [(path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in inputs]
     if before != after:
         raise ValueError('GEN audit inputs changed while being inspected')
@@ -370,10 +409,11 @@ def main():
     parser.add_argument('--ledger', required=True)
     parser.add_argument('--config', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--generator-profile', default='ordinary')
     args = parser.parse_args()
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    report = audit(args.input, args.ledger, args.config)
+    report = audit(args.input, args.ledger, args.config, args.generator_profile)
     temporary = output.with_name(output.name+'.partial.'+uuid.uuid4().hex)
     temporary.write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
     temporary.replace(output)

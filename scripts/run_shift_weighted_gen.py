@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated frozen GEN worker.
 """Frozen fixed-trial GEN worker; always returns receipts and diagnostic archive."""
 import argparse
 import hashlib
@@ -46,7 +47,7 @@ def publish(files,destination):
 
 
 def existing_publication(manifest,row,expected,env):
-    destination=manifest['eos_base']+'/'+row['id']
+    destination=row.get('output_base',manifest['eos_base'])+'/'+row['id']
     receipt=destination+'/publication_receipt.json'
     stat=subprocess.run(['xrdfs','root://eosuser.cern.ch','stat',receipt],capture_output=True,text=True,timeout=120)
     if stat.returncode:
@@ -62,7 +63,8 @@ def existing_publication(manifest,row,expected,env):
         if item['path']!=destination+'/'+name or not item.get('independent_sha256_readback'):raise ValueError('Existing artifact publication contract differs')
         subprocess.run(['xrdcp','--cksum','adler32','root://eosuser.cern.ch/'+item['path'],name],check=True,timeout=900)
         if Path(name).stat().st_size!=item['bytes'] or sha(name)!=item['sha256']:raise ValueError('Existing weighted artifact changed: '+name)
-    command(['python3','audit_shift_weighted_gen.py','--input','gen.root','--ledger','proposal_ledger.json','--config','resolved_gen_cfg.py','--output','resumption_audit.json'],'resumption_audit.log',env,900)
+    audit_command=['python3','audit_shift_weighted_gen.py','--input','gen.root','--ledger','proposal_ledger.json','--config','resolved_gen_cfg.py','--output','resumption_audit.json','--generator-profile',manifest.get('generator_profile','ordinary')]
+    command(audit_command,'resumption_audit.log',env,900)
     fresh=json.loads(Path('resumption_audit.json').read_text())
     if fresh['ledger']!=saved['ledger'] or fresh['event_ids']!=saved['semantic_audit']['event_ids'] or fresh['weights']!=saved['semantic_audit']['weights']:raise ValueError('Existing EDM differs from saved semantic receipt')
     saved['resumed_existing_publication']=True;saved['resumption_audit_sha256']=sha('resumption_audit.json')
@@ -78,9 +80,17 @@ def main():
     try:
         if sha(args.manifest)!=args.expected_sha256:raise ValueError('Frozen weighted manifest changed')
         manifest=json.loads(Path(args.manifest).read_text());row=next(j for j in manifest['jobs'] if j['id']==args.node);record['request']=row
+        profile=manifest.get('generator_profile','ordinary')
+        if profile not in ('ordinary','shift-qcd-mu-enriched-cylinder-v1'):
+            raise ValueError('Unsupported frozen generator profile')
+        if profile!='ordinary' and (row['sample']!='qcd' or 'qcd_mu_enrichment.py' not in manifest['inputs']):
+            raise ValueError('Muon-enriched profile requires QCD and its frozen profile helper')
+        record['generator_profile']=profile
         if row.get('stage')=='production':
             gate=json.loads(Path('scientific_gate.json').read_text())
             if gate.get('schema')!='shift-weighted-high-bin-scientific-gate-v2' or not gate.get('pass') or gate.get('manifest_sha256')!=args.expected_sha256:raise ValueError('Missing frozen-manifest scientific gate')
+            if gate.get('generator_profile','ordinary')!=profile:
+                raise ValueError('Scientific gate and frozen source use different generator profiles')
             allocation=gate['production_plan'][row['stratum']]
             if row['chunk_index']>=allocation['chunks']:raise ValueError('Inactive production node should have been PRE_SKIPPED')
             record['scientific_gate_sha256']=sha('scientific_gate.json')
@@ -137,16 +147,18 @@ process.weightedNormalization_step = cms.EndPath(process.shiftWeightedNormalizat
 process.schedule.insert(0, process.weightedNormalization_step)
 process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization_*_*')
 ''')
+            if profile!='ordinary':
+                config.write("\nfrom qcd_mu_enrichment import configure\nprocess = configure(process)\n")
         command(['edmConfigDump','gen_cfg.py'],'resolved_gen_cfg.py',env,600)
         weighted_env=dict(env,LD_PRELOAD=overlay)
         runstart=time.monotonic();command(['cmsRun','gen_cfg.py'],'cmsRun.log',weighted_env,row.get('timeout_seconds',3600));record['generation_seconds']=time.monotonic()-runstart
-        command(['python3','audit_shift_weighted_gen.py','--input','gen.root','--ledger','proposal_ledger.json','--config','resolved_gen_cfg.py','--output','semantic_audit.json'],'audit.log',env,900)
+        command(['python3','audit_shift_weighted_gen.py','--input','gen.root','--ledger','proposal_ledger.json','--config','resolved_gen_cfg.py','--output','semantic_audit.json','--generator-profile',profile],'audit.log',env,900)
         audit=json.loads(Path('semantic_audit.json').read_text());ledger=json.loads(Path('proposal_ledger.json').read_text())
         if ledger['algorithm']!=manifest['algorithm'] or ledger['requested_trials']!=n or ledger['run']!=run or ledger['lower']!=low or ledger['upper']!=up:raise ValueError('Returned ledger differs from frozen request')
-        record.update(complete=True,generated_edm=True,event_count=ledger['accepted'],ledger=ledger,semantic_audit=audit,artifacts={name:dict(sha256=sha(name),bytes=Path(name).stat().st_size) for name in ['gen.root','gen_cfg.py','resolved_gen_cfg.py','proposal_ledger.json','semantic_audit.json','cmsRun.log']})
+        record.update(complete=True,generated_edm=True,event_count=audit['events'],ledger=ledger,semantic_audit=audit,artifacts={name:dict(sha256=sha(name),bytes=Path(name).stat().st_size) for name in ['gen.root','gen_cfg.py','resolved_gen_cfg.py','proposal_ledger.json','semantic_audit.json','cmsRun.log']})
         if Path('gen.root').stat().st_size*2+32000000>manifest.get('peak_bytes_per_worker',1000000000):raise ValueError('Measured generation/readback peak exceeds reserved worker storage')
         if row.get('publish',False):
-            destination=manifest['eos_base']+'/'+args.node
+            destination=row.get('output_base',manifest['eos_base'])+'/'+args.node
             record['publication']=publish([(Path(name),name) for name in ['gen.root','resolved_gen_cfg.py','proposal_ledger.json','semantic_audit.json']],destination)
             record['publication_complete']=True;record['publication_directory']=destination
             atomic_json('publication_receipt.json',record)

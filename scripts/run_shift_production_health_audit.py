@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated production receipt and payload audit.
 """Read-only worker audit; scheduler hosts deliberately never access EOS.
 
 Only immutable completion receipts are counted. Inspect fresh representative
@@ -47,6 +48,13 @@ def weighted_receipt(record, manager, manifest, row, gate_sha=None):
     if row['stage'] == 'production' and record.get('scientific_gate_sha256') != gate_sha:
         raise ValueError('Production receipt has a different scientific gate: '+row['id'])
     ledger, semantic = record['ledger'], record['semantic_audit']
+    profile=manifest.get('generator_profile','ordinary')
+    if profile not in ('ordinary','shift-qcd-mu-enriched-cylinder-v1'):
+        raise ValueError('Unsupported weighted receipt generator profile')
+    if (record.get('generator_profile','ordinary')!=profile or
+            semantic.get('generator_profile','ordinary')!=profile):
+        raise ValueError('Weighted receipt generator profile differs from manifest')
+    count=ledger['accepted'] if profile=='ordinary' else semantic['events']
     trials = validate_ledger(ledger)
     event_class = 'direct_jpsi' if row['sample'] == 'jpsi' else row['sample']
     if (ledger['requested_trials'] != row['trials'] or ledger['run'] != row['run'] or
@@ -58,11 +66,10 @@ def weighted_receipt(record, manager, manifest, row, gate_sha=None):
             semantic.get('source_model_settings_sha256') != SOURCE_MODEL_SHA256 or
             manifest['source_model_settings_sha256'] != SOURCE_MODEL_SHA256 or
             semantic.get('auditor_sha256') != manifest['inputs']['audit_shift_weighted_gen.py'] or
-            semantic.get('events') != ledger['accepted'] or
+            semantic.get('events') != count or
             semantic.get('requested') != trials or semantic.get('tried') != trials or
-            record.get('event_count') != ledger['accepted']):
+            record.get('event_count') != count):
         raise ValueError('Weighted semantic audit is not bound to fixed trials: '+row['id'])
-    count = ledger['accepted']
     ids, weights = semantic['event_ids'], semantic['weights']
     if (type(record['event_count']) is not int or
             any(not isinstance(semantic[key], list) or len(semantic[key]) != count
@@ -81,19 +88,23 @@ def weighted_receipt(record, manager, manifest, row, gate_sha=None):
                 type(charged) is not int or charged < 0):
             raise ValueError('Invalid weighted likelihood/scale/shape metadata: '+row['id'])
     sumw, sumw2 = math.fsum(weights), math.fsum(w*w for w in weights)
-    close(ledger['sumw'], sumw, 'Receipt sum of weights')
-    close(ledger['sumw2'], sumw2, 'Receipt sum of squared weights')
+    if profile=='ordinary':
+        close(ledger['sumw'], sumw, 'Receipt sum of weights')
+        close(ledger['sumw2'], sumw2, 'Receipt sum of squared weights')
+    else:
+        from qcd_mu_enrichment import receipt_estimator
+        receipt_estimator(record,profile)
     sigma = ledger['sigma_nd_mb']*sumw/trials
     error = ledger['sigma_nd_mb']*math.sqrt(max(0., sumw2-sumw*sumw/trials)/(trials*(trials-1)))
-    for actual in (ledger['sigma_mb'], semantic['sigma_weighted_mb']):
+    for actual in ((ledger['sigma_mb'], semantic['sigma_weighted_mb']) if profile=='ordinary' else (semantic['sigma_weighted_mb'],)):
         close(actual, sigma, 'Receipt fixed-trial cross section')
-    for actual in (ledger['sigma_error_mb'], semantic['error_weighted_mb']):
+    for actual in ((ledger['sigma_error_mb'], semantic['error_weighted_mb']) if profile=='ordinary' else (semantic['error_weighted_mb'],)):
         close(actual, error, 'Receipt fixed-trial cross-section error')
     run_info = semantic['weighted_run_info']
-    close(run_info['internal_xsec_pb'], sigma*1e9, 'Receipt named run cross section')
-    close(run_info['error_pb'], error*1e9, 'Receipt named run cross-section error')
+    close(run_info['internal_xsec_pb'], (sigma if profile=='ordinary' else ledger['sigma_mb'])*1e9, 'Receipt named run cross section')
+    close(run_info['error_pb'], (error if profile=='ordinary' else ledger['sigma_error_mb'])*1e9, 'Receipt named run cross-section error')
     close(run_info['filter_efficiency'], 1., 'Receipt named run filter efficiency')
-    directory = manifest['eos_base'].rstrip('/')+'/'+row['id']
+    directory = row.get('output_base', manifest['eos_base']).rstrip('/')+'/'+row['id']
     if record.get('publication_directory') != directory:
         raise ValueError('Weighted publication directory differs: '+row['id'])
     publications = record['publication']
@@ -131,7 +142,8 @@ def readback_weighted(record, manager, manifest, row, gate_sha, temporary):
     published_audit = json.loads((directory/'semantic_audit.json').read_text())
     if published_audit != record['semantic_audit']:
         raise ValueError('Published semantic report differs from weighted receipt: '+row['id'])
-    fresh = semantic_audit(directory/'gen.root', directory/'proposal_ledger.json', directory/'resolved_gen_cfg.py')
+    fresh = semantic_audit(directory/'gen.root', directory/'proposal_ledger.json', directory/'resolved_gen_cfg.py',
+                           manifest.get('generator_profile','ordinary'))
     if fresh != published_audit:
         raise ValueError('Fresh weighted EDM audit differs from publication: '+row['id'])
     return dict(manager=manager['name'], stratum=row['stratum'], node_id=row['id'],
@@ -162,6 +174,8 @@ def audit_weighted_manager(manager, temporary, all_ids):
         if (gate.get('schema') != 'shift-weighted-high-bin-scientific-gate-v2' or
                 gate.get('manifest_sha256') != manager['manifest_sha256'] or gate.get('pass') is not True):
             raise ValueError('Weighted scientific gate failed or differs from manifest')
+        if gate.get('generator_profile','ordinary')!=manifest.get('generator_profile','ordinary'):
+            raise ValueError('Weighted scientific gate uses a different generator profile')
         gate_sha = digest(gate_path)
     counts, events, trials = 0, 0, 0
     identities, per_stratum, newest = set(), {}, {}

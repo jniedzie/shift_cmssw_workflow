@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated fixed-budget final accounting.
 """Close fixed-budget high production; never schedule adaptive statistics top-ups."""
 import hashlib,json,math,sys
 from pathlib import Path
@@ -7,12 +8,13 @@ base=Path(sys.argv[1]);m=json.loads((base/'manifest.json').read_text());expected
 result=dict(schema='shift-weighted-high-bin-final-accounting-v1',manifest_sha256=expected,complete=False,physics_valid=False,normalization_ready=False,strata={},failures=[])
 try:
  if not g.get('pass') or g.get('manifest_sha256')!=expected:raise ValueError('Scientific gate is not valid')
+ if g.get('generator_profile','ordinary')!=m.get('generator_profile','ordinary'):raise ValueError('Scientific gate uses a different generator profile')
  ids=set()
  for stratum,allocation in g['production_plan'].items():
   rows=[r for r in m['jobs'] if r['stage']=='production' and r['stratum']==stratum and r['chunk_index']<allocation['chunks']];receipts=[]
   for row in rows:
    r=json.loads((base/'results'/f"{row['id']}.json").read_text())
-   if not r.get('complete') or not r.get('generated_edm') or not r.get('publication_complete') or r.get('manifest_sha256')!=expected or r.get('request')!=row or r.get('algorithm')!=m['algorithm']:raise ValueError('Invalid completed production receipt: '+row['id'])
+   if not r.get('complete') or not r.get('generated_edm') or not r.get('publication_complete') or r.get('manifest_sha256')!=expected or r.get('request')!=row or r.get('algorithm')!=m['algorithm'] or r.get('generator_profile','ordinary')!=m.get('generator_profile','ordinary'):raise ValueError('Invalid completed production receipt: '+row['id'])
    for eventid in r['semantic_audit']['event_ids']:
     key=tuple(eventid)
     if key in ids:raise ValueError('Duplicate accepted event identity across strata/chunks')

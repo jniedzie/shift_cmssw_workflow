@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated fixed-trial statistical gate.
 """AFS-only scientific gate and fixed production budget from independent pilots."""
 import argparse,hashlib,json,math,sys
 from pathlib import Path
@@ -6,9 +7,19 @@ from pathlib import Path
 
 def sha(path):return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 def aggregate(records):
-    ledgers=[r['ledger'] for r in records];n=sum(x['tried'] for x in ledgers);w=math.fsum(x['sumw'] for x in ledgers);w2=math.fsum(x['sumw2'] for x in ledgers);nd=ledgers[0]['sigma_nd_mb']
+    if not records:raise ValueError('Cannot aggregate an empty fixed-trial cohort')
+    profiles={r.get('generator_profile','ordinary') for r in records}
+    if len(profiles)!=1:raise ValueError('Cannot combine different generator profiles as independent backgrounds')
+    profile=next(iter(profiles));ledgers=[r['ledger'] for r in records]
+    if any(r.get('semantic_audit',{}).get('generator_profile','ordinary')!=profile for r in records):raise ValueError('Semantic audit and aggregate use different generator profiles')
+    if profile=='ordinary':
+        estimates=ledgers
+    else:
+        from qcd_mu_enrichment import receipt_estimator
+        estimates=[dict(receipt_estimator(r,profile),accepted=r['event_count']) for r in records]
+    n=sum(x['tried'] for x in ledgers);w=math.fsum(x['sumw'] for x in estimates);w2=math.fsum(x['sumw2'] for x in estimates);nd=ledgers[0]['sigma_nd_mb']
     if any(not math.isclose(x['sigma_nd_mb'],nd,rel_tol=1e-9) for x in ledgers):raise ValueError('Source sigmaND changed across seeds')
-    return dict(trials=n,accepted=sum(x['accepted'] for x in ledgers),sumw=w,sumw2=w2,sigma_mb=nd*w/n,error_mb=nd*math.sqrt(max(0.,w2-w*w/n)/(n*(n-1))),ess=w*w/w2 if w2 else 0.,seconds=sum(r['generation_seconds'] for r in records),bytes=sum(r['artifacts']['gen.root']['bytes'] for r in records))
+    return dict(trials=n,accepted=sum(x['accepted'] for x in estimates),source_accepted=sum(x['accepted'] for x in ledgers),generator_profile=profile,sumw=w,sumw2=w2,sigma_mb=nd*w/n,error_mb=nd*math.sqrt(max(0.,w2-w*w/n)/(n*(n-1))),ess=w*w/w2 if w2 else 0.,seconds=sum(r['generation_seconds'] for r in records),bytes=sum(r['artifacts']['gen.root']['bytes'] for r in records))
 def cdf_distance(a,aw,b,bw):
     combined=[(v,w,0) for v,w in zip(a,aw)]+[(v,w,1) for v,w in zip(b,bw)];combined.sort();totals=[math.fsum(aw),math.fsum(bw)];cdf=[0.,0.];maximum=0.;i=0
     while i<len(combined):
@@ -21,7 +32,8 @@ def cdf_distance(a,aw,b,bw):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('directory');args=parser.parse_args();base=Path(args.directory);manifest=json.loads((base/'manifest.json').read_text());expected=sha(base/'manifest.json')
-    result=dict(schema='shift-weighted-high-bin-scientific-gate-v2',manifest_sha256=expected,pass_=False,algorithm=manifest['algorithm'],physics_valid=False,normalization_ready=False,closure={},pilot_summary={},production_plan={},failures=[])
+    profile=manifest.get('generator_profile','ordinary')
+    result=dict(schema='shift-weighted-high-bin-scientific-gate-v2',manifest_sha256=expected,generator_profile=profile,pass_=False,algorithm=manifest['algorithm'],physics_valid=False,normalization_ready=False,closure={},pilot_summary={},production_plan={},failures=[])
     try:
         grouped={}
         if sha(base/'ordinary_reference.json')!=manifest['ordinary_reference_sha256']:raise ValueError('Frozen ordinary reference changed')
@@ -29,9 +41,12 @@ def main():
             if row['stage']=='production':continue
             path=base/'results'/f"{row['id']}.json";r=json.loads(path.read_text())
             if r.get('schema')!='shift-weighted-gen-receipt-v3' or not r.get('complete') or not r.get('generated_edm') or not r.get('publication_complete') or r.get('manifest_sha256')!=expected or r.get('request')!=row or r.get('algorithm')!=manifest['algorithm'] or r.get('source_inputs')!=manifest['inputs']:raise ValueError('Invalid frozen validation receipt '+row['id'])
-            if not r['semantic_audit'].get('complete') or not r['semantic_audit'].get('healthy') or r['semantic_audit'].get('algorithm')!=manifest['algorithm'] or r['semantic_audit'].get('ledger')!=r['ledger'] or r['semantic_audit'].get('source_model_settings_sha256')!=manifest['source_model_settings_sha256'] or r['semantic_audit'].get('events')!=r['ledger']['accepted']:raise ValueError('Semantic output not bound to trial ledger')
+            count=r['ledger']['accepted'] if profile=='ordinary' else r.get('event_count')
+            if not r['semantic_audit'].get('complete') or not r['semantic_audit'].get('healthy') or r['semantic_audit'].get('algorithm')!=manifest['algorithm'] or r['semantic_audit'].get('ledger')!=r['ledger'] or r['semantic_audit'].get('source_model_settings_sha256')!=manifest['source_model_settings_sha256'] or r['semantic_audit'].get('events')!=count or r.get('generator_profile','ordinary')!=profile:raise ValueError('Semantic output not bound to trial ledger and generator profile')
             grouped.setdefault(row['stratum'],[]).append(r)
-        reference=json.loads((base/'ordinary_reference.json').read_text());reference_samples={x['stratum']:x for x in reference['samples']}
+        reference=json.loads((base/'ordinary_reference.json').read_text())
+        if reference.get('generator_profile','ordinary')!=profile:raise ValueError('Ordinary reference uses a different generator profile')
+        reference_samples={x['stratum']:x for x in reference['samples']}
         for stratum in manifest['closure_strata']:
             cohort=grouped[stratum];sample=aggregate(cohort);old=reference_samples[stratum];pull=abs(sample['sigma_mb']-old['sigma_mb'])/math.hypot(sample['error_mb'],old['error_poisson_mb'])
             old_shapes=[x['result'] for x in reference['shape_records'] if x['request']['sample']==cohort[0]['request']['sample'] and x['request']['bounds']==cohort[0]['request']['bounds']]
