@@ -44,8 +44,9 @@ Use `scripts/prepare_dark_photon_spectral_grid.py` to freeze a mass and lab
 flight grid, or pass `--epsilons 1e-6 1e-4 1e-2` for a Cartesian mass/epsilon
 grid. The two column options are mutually exclusive. The default sampling
 epsilon is 0.01; set `--sampling-epsilon` explicitly when a new validated
-proposal needs another value. Point names retain the physical epsilon, for
-example `m2_epsilon_1e-06`. It uses the standard detector partitioning and plan writer,
+proposal needs another value. New point names use mass and reference mean lab
+flight, for example `m2_lab_100m`; the physical epsilon and original selector
+remain in metadata. It uses the standard detector partitioning and plan writer,
 copies the external width provider into the preparation, and records its
 hashes. The standard production preparation and controller then handle
 detector jobs, same-point ntuple grouping, histogramming and histogram merging.
@@ -58,6 +59,16 @@ mass support for proposal widths below `1e-6 GeV`. Do not lower the shared
 native mass guard to bypass these limitations. Threshold-to-1-GeV samples
 need a separate meson/bremsstrahlung or validated narrow-width production
 backend.
+
+The explicit `--experimental-low-mass-dy` option admits 1.4--2 GeV GEN-only
+diagnostics while retaining those native support checks. The default remains
+2--12 GeV, and the resulting contract records the experimental scope. The
+reserved 1.8/1.5 GeV pilot configuration is in
+`config/campaigns/dark_photon_low_mass_20261016.json`. This option does not
+establish a complete production model or authorize extrapolating reconstructed
+efficiencies below the simulated mass range. The separate meson decay kernel
+and its tests cover kinematics and branching weights; parent-source rates,
+form factors and detector integration remain required.
 
 DarkCast uses photon-like spectral widths in this mass range; the native
 proposal uses the full hypercharge-mixing couplings. The small neutral-current

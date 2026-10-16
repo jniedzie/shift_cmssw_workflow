@@ -45,7 +45,7 @@ class NightQuotaTests(unittest.TestCase):
         def command(arguments, **options):
             calls.append(arguments[0:2])
             if arguments[0] == '/usr/bin/python3':
-                self.assertEqual(options['timeout'], 90)
+                self.assertEqual(options['timeout'], 600)
                 return subprocess.CompletedProcess(arguments, 0, '', '')
             return self.quota()
         with patch.object(audit.subprocess, 'run', side_effect=command), \
@@ -61,7 +61,7 @@ class NightQuotaTests(unittest.TestCase):
     def test_external_reader_timeout_does_not_authorize_storage(self):
         request = self.request() | {'external_storage_reservations': [{'production_directory': '/sealed'}]}
         with patch.object(audit.Path, 'write_text'), \
-                patch.object(audit.subprocess, 'run', side_effect=subprocess.TimeoutExpired('reader', 90)), \
+                patch.object(audit.subprocess, 'run', side_effect=subprocess.TimeoutExpired('reader', 600)), \
                 patch.object(audit, '_account_schedds') as discovery:
             result = audit.audit(request)
         self.assertFalse(result['complete'])

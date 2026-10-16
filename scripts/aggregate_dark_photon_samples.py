@@ -7,6 +7,8 @@ jobs, filters events or changes detector settings. Complete unscored Nano files
 are grouped before the existing frozen scoring/histogram pipeline is called.
 Recovery views of the same GEN ledger count once. Rate estimates are averaged,
 not summed; their technical trial counts are never interpreted as luminosity.
+Plans with histogram_only=true sum already-validated batch histograms while
+retaining their complete Nano groups at the original published locations.
 """
 import argparse
 from datetime import datetime, timezone
@@ -267,13 +269,34 @@ def load_source(source, expected_model, conditions_digest):
         all_ids.extend(ids)
     validate_event_rows(all_ids, [1.] * len(all_ids), parent['event_ids'])
     return dict(source=dict(source, completed_point_path=str(report_path), completed_point_sha256=sha(report_path)),
-                parent=parent, rate=rate, inputs=inputs, contract=contract)
+                parent=parent, rate=rate, inputs=inputs, contract=contract, report=report)
+
+
+def completed_histogram_input(population, model_hash):
+    """Bind one source histogram to its already-validated complete Nano union."""
+    report = population['report']
+    marker = report.get('score_histograms', {}).get('marker', {})
+    item = marker.get('published', {}).get('histograms', {})
+    expected = report['final_output_base'] + '/histograms_merged/ntuple_0.root'
+    count = len(population['parent']['event_ids'])
+    if (marker.get('complete') is not True or marker.get('events') != count
+            or marker.get('selection_applied') is not False
+            or marker.get('model_sha256') != model_hash
+            or type(marker.get('pairs')) is not int or marker['pairs'] < 0
+            or item.get('path') != expected
+            or type(item.get('bytes')) is not int or item['bytes'] <= 0
+            or not re.fullmatch('[0-9a-f]{64}', item.get('sha256', ''))):
+        raise ValueError('Source histogram does not match its complete population and classifier')
+    return dict(item, events=count, pairs=marker['pairs'], source=population['source'],
+                gen_sha256=population['parent']['gen_sha256'])
 
 
 def load_plan(path, digest):
     plan = read(checked(path, digest))
     if plan.get('schema') != SCHEMA or not SAFE_NAME.fullmatch(plan.get('campaign', '')):
         raise ValueError('Invalid additive production plan')
+    if 'histogram_only' in plan and type(plan['histogram_only']) is not bool:
+        raise ValueError('histogram_only must be an explicit boolean')
     condition = plan['conditions']
     checked(condition['path'], condition['sha256'])
     for path, checksum in plan.get('dependencies', {}).items():
@@ -311,6 +334,101 @@ def qualified_finalizer(deployment):
     return module
 
 
+def execute_histogram_only(plan, row, populations, rate, identities,
+                           plan_digest, seal_digest, scratch, results_directory):
+    """Sum complete batch histograms while retaining their Nano groups in place."""
+    deployment = Path(plan['scoring_deployment']['path'])
+    sys.path.insert(0, str(deployment / 'frozen/scoring/workflow/scripts'))
+    import run_merged_dimuon_bdt as scorer
+    from dark_photon_production_support import validate_histogram_merge
+    scoreplan = read(deployment / 'scoring_components.json')
+    sources = [completed_histogram_input(population, scoreplan['model_sha256'])
+               for population in populations]
+    guard_spec = plan['publication_guard']
+    guard_directory = Path(guard_spec['deployment_path'])
+    checked(guard_directory / 'seal.json', guard_spec['seal_sha256'])
+    sys.path.insert(0, str(guard_directory))
+    import chunk_worker as guard
+    qualified = qualified_finalizer(deployment)
+    guard.verify_seal(guard_spec['seal_sha256'], guard_spec['point'], scoring=True)
+    guard.prepare_publication_guard(guard_spec['seal_sha256'])
+    guard.check_headroom()
+    io = scorer.io
+    work = Path(scratch) / 'histogram_aggregate'
+    work.mkdir(exist_ok=False)
+
+    def stage(item, destination):
+        io.get_remote(item['path'], destination)
+        if sha(destination) != item['sha256'] or destination.stat().st_size != item['bytes']:
+            raise ValueError('Source histogram or publication checksum/size changed')
+
+    def put(path, destination):
+        guard.check_headroom()
+        if io.remote_exists(destination):
+            raise FileExistsError('Aggregate output exists; preserve it for reviewed recovery: ' + destination)
+        io.transfer(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', str(Path(destination).parent)])
+        io.put_remote(path, destination)
+        item = dict(path=destination, sha256=sha(path), bytes=path.stat().st_size)
+        readback = work / ('readback_' + hashlib.sha256(destination.encode()).hexdigest()[:12])
+        stage(item, readback)
+        readback.unlink()
+        return item
+
+    histograms = []
+    for index, source in enumerate(sources):
+        path = work / ('source_' + str(index) + '.root')
+        stage(source, path)
+        qualified.validate_histogram_axes(path, deployment / 'frozen/scoring/sm_axis_authority.root')
+        scorer.check_standard_histograms(path, source['events'], float(source['events']))
+        histograms.append(path)
+    merged = work / 'histograms.root'
+    with (work / 'merge.log').open('x') as log:
+        subprocess.run(['hadd', str(merged), *map(str, histograms)], check=True,
+                       stdout=log, stderr=subprocess.STDOUT, timeout=900)
+    audit = validate_histogram_merge(histograms, merged)
+    qualified.validate_histogram_axes(merged, deployment / 'frozen/scoring/sm_axis_authority.root')
+    scorer.check_standard_histograms(merged, len(identities), float(len(identities)))
+    prefix = row['final_output_base']
+    histogram = put(merged, prefix + '/histograms_merged/ntuple_0.root')
+    write(work / 'cross_sections.json', rate)
+    estimate = rate['physical_selected_cross_sections_pb'][0]
+    with (work / 'cross_sections.txt').open('x') as target:
+        target.write('# physical selected dimuon rate [pb], independent-run statistical error [pb]\n')
+        target.write(f"{estimate['value_pb']:.17g} {estimate['error_pb']:.17g}\n")
+    rate_items = {name: put(work / name, prefix + '/' + name)
+                  for name in ('cross_sections.json', 'cross_sections.txt')}
+    groups = []
+    for population in populations:
+        for item in population['inputs']:
+            groups.append(dict(group=len(groups), events=item['events'], event_ids=item['event_ids'],
+                native_sumw=float(item['events']), native_sumw2=float(item['events']),
+                grouped={key: item[key] for key in ('path', 'sha256', 'bytes')},
+                population_gen_sha256=population['parent']['gen_sha256']))
+    union = dict(schema='shift-additive-signal-histogram-union-v1', complete=True,
+        point=row['point'], events=len(identities), event_ids=identities,
+        native_sumw=float(len(identities)), native_sumw2=float(len(identities)), groups=groups,
+        parent_gen_populations=[population['parent'] for population in populations],
+        parent_gen_ledger_count=len(populations), sources=[population['source'] for population in populations],
+        histogramming_started_after_complete_grouping=True, source_groups_retained_in_place=True,
+        new_nano_files_created=False, plan_sha256=plan_digest, seal_sha256=seal_digest)
+    report = dict(schema='shift-independent-signal-point-complete-v1', complete=True,
+        point=row['point'], events=len(identities), union=union, groups=[],
+        source_histograms=sources, histogram_only=True, sample_role='validation_only',
+        score_histograms=dict(complete=True, marker=dict(complete=True, events=len(identities),
+            pairs=sum(source['pairs'] for source in sources), selection_applied=False,
+            model_sha256=scoreplan['model_sha256'], published=dict(histograms=histogram))),
+        histogram_merge=audit, cross_sections=rate_items, final_output_base=prefix,
+        canonical_sm_histogram_axes_verified=1081,
+        canonical_sm_histogram_authority_sha256=sha(deployment / 'frozen/scoring/sm_axis_authority.root'),
+        plan_sha256=plan_digest, seal_sha256=seal_digest, created_utc=datetime.now(timezone.utc).isoformat())
+    write(work / 'union.json', union)
+    put(work / 'union.json', prefix + '/metadata/grouping/union.json')
+    write(work / 'point_receipt.json', report)
+    put(work / 'point_receipt.json', prefix + '/metadata/point_receipt.json')
+    write(Path(results_directory) / 'completed_points' / (row['point'] + '.json'), report)
+    return report
+
+
 def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_directory):
     verify_aggregate_seal(plan_path, plan_digest, seal_digest)
     plan = load_plan(plan_path, plan_digest)
@@ -336,6 +454,9 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     identities = [identity for population in populations for identity in population['parent']['event_ids']]
     if len(identities) != row['events']:
         raise ValueError('Aggregate does not cover its full requested base-plus-new population')
+    if plan.get('histogram_only') is True:
+        return execute_histogram_only(plan, row, populations, rate, identities,
+            plan_digest, seal_digest, scratch, results_directory)
     inputs = [item for population in populations for item in population['inputs']]
     groups = group_inputs(inputs, plan.get('group_events', 2000))
     deployment = Path(plan['scoring_deployment']['path'])

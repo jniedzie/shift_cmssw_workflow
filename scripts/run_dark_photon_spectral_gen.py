@@ -41,17 +41,18 @@ def digest(path):
     return checksum.hexdigest()
 
 
-def validate_point(mass, epsilon, sampling_epsilon):
-    if not math.isfinite(mass) or not 2. <= mass < 12.:
-        raise ValueError("Spectral DY pilot requires 2 <= mass < 12 GeV; lower masses need another production backend")
+def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False):
+    minimum = 1.4 if experimental_low_mass_dy else 2.
+    if not math.isfinite(mass) or not minimum <= mass < 12.:
+        raise ValueError("Spectral DY pilot requires mass >=2 GeV, or >=1.4 GeV with the explicit experimental low-mass DY option, and mass <12 GeV")
     if not math.isfinite(epsilon) or not 0 < epsilon <= .01:
         raise ValueError("Physical epsilon must be finite and in (0, 0.01]")
     if not math.isfinite(sampling_epsilon) or not epsilon <= sampling_epsilon <= .01:
         raise ValueError("Require physical epsilon <= sampling epsilon <= 0.01")
 
 
-def native_proposal_settings(mass, epsilon, sampling_epsilon):
-    validate_point(mass, epsilon, sampling_epsilon)
+def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False):
+    validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy)
     couplings = pythia_couplings(mass, epsilon, NATIVE_EW)
     scale = sampling_epsilon / epsilon
     settings = [
@@ -132,7 +133,8 @@ def build_contract(args, width, native, common, tune):
     native_br = sum(c["branching_fraction"] for c in native["channels"] if sorted(c["products"]) == [-13, 13])
     correction = cross_section_correction(args.epsilon, args.sampling_epsilon, width["br_mumu"], native_br)
     support = validate_native_proposal_support(native, .99*args.mass, 1.01*args.mass)
-    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon)
+    experimental = getattr(args, 'experimental_low_mass_dy', False)
+    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental)
     commands.extend(["32:tauCalc = off", f"32:tau0 = {width['ctau_mm']:.17g}",
                      "32:onMode = off", "32:onIfMatch = 13 -13"])
     return dict(schema="shift-dark-photon-gen-v1", model="PBC-BC1-visible-hypercharge",
@@ -157,6 +159,8 @@ def build_contract(args, width, native, common, tune):
         cross_section_convention="native selected sigma already includes native BR_mumu; apply amplitude times physical/native BR ratio once",
         timing="proper decay after source placement; nominal Beam-B time shift once on complete graph; canonical shiftEventTime metadata",
         filtering="none", physics_valid=False, normalization_ready=False, low_mass_mechanisms_included=False,
+        experimental_low_mass_dy=experimental,
+        production_scope="DY-only experimental extension; meson/bremsstrahlung absent" if args.mass<2 else "DY-only spectral pilot",
         prompt_interference_included=False, detector_simulated=False)
 
 
@@ -165,6 +169,8 @@ def main():
     parser.add_argument("--mass", type=float, required=True)
     parser.add_argument("--epsilon", type=float, required=True)
     parser.add_argument("--sampling-epsilon", type=float, default=.01)
+    parser.add_argument("--experimental-low-mass-dy", action="store_true",
+                        help="Allow 1.4-2 GeV DY-only diagnostics; retain native pole-support checks and provisional physics flags")
     parser.add_argument("--darkcast-path", type=Path, required=True)
     parser.add_argument("--darkcast-source-receipt", type=Path, required=True)
     parser.add_argument("--events", type=int, default=100)
@@ -173,7 +179,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    validate_point(args.mass, args.epsilon, args.sampling_epsilon)
+    validate_point(args.mass, args.epsilon, args.sampling_epsilon, args.experimental_low_mass_dy)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999823 or args.timeout <= 0:
         parser.error("Require bounded events, valid seed namespace and positive timeout")
     if args.run_number is not None and not 1 <= args.run_number <= 4294967295:
@@ -207,7 +213,7 @@ def main():
         from dark_photon_pythia import _native_inspect
         common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
         tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
-        native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon)+beam_settings(6800.))
+        native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,args.experimental_low_mass_dy)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
         (output / "contract.json").write_text(json.dumps(contract, indent=2, allow_nan=False)+"\n")
         command = ["cmsRun", str(output / "dark_photon_gen_cfg.py"), "pilotDirectory="+str(output)]

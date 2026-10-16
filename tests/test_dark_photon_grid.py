@@ -9,6 +9,7 @@ import tempfile
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
+from dark_photon_sample_names import physical_point_name, point_mean_lab_flight_m
 from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, reuse_physical_points, validate_references, write_plan
 
 
@@ -145,12 +146,23 @@ class PhysicalGridPlanning(unittest.TestCase):
 
 
 class CompleteDetectorStagePlanning(unittest.TestCase):
-    def test_scientific_epsilon_names_survive_detector_partitioning(self):
+    def test_epsilon_selectors_publish_lab_names_without_changing_physics(self):
         ref = references()
         physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1e-6, 1e-4, 1e-2),
                                    sampling_epsilon=.01, events=50, accepted_events=True), ref, fake_native)
         stage = plan_detector_stage(physical, '20261013-epsilon-grid', '/eos/user/t/test/data')
-        self.assertEqual(stage['points'][0]['point'], 'm15_epsilon_1e-06')
+        for current, original in zip(stage['points'], physical['points']):
+            flight = original['mean_lab_flight_reference_estimate_m']
+            self.assertEqual(current['point'], physical_point_name(15., flight))
+            self.assertEqual(current['original_point'], original['point'])
+            self.assertEqual(current['selector_kind'], 'epsilon')
+            self.assertEqual(current['mean_lab_flight_m'], flight)
+            self.assertEqual(current['reference_mean_lab_flight_m'], flight)
+            for key in ('epsilon', 'proper_ctau_mm', 'signal_contract', 'seed', 'run_number'):
+                self.assertEqual(current[key], original[key])
+            self.assertIsNone(current['target_mean_lab_flight_m'])
+            self.assertIn('/darkphoton_' + current['point'] + '/', current['final_output_base'])
+        self.assertEqual(physical['points'][0]['point'], 'm15_epsilon_1e-06')
         self.assertEqual(stage['detector_chunks'], 30)
         self.assertEqual(stage['events'], 150)
         self.assertTrue(all(len(row['chunks']) == 10 for row in stage['points']))
@@ -158,6 +170,35 @@ class CompleteDetectorStagePlanning(unittest.TestCase):
         direct = physical['points'][2]['signal_contract']
         self.assertEqual(direct['width_authority']['pole_support_audit'],
                          direct['sampling_width_authority']['pole_support_audit'])
+
+    def test_lab_names_are_concise_and_anchor_names_stay_familiar(self):
+        self.assertEqual(physical_point_name(40., None, prompt=True), 'm40_prompt')
+        for flight in (5., 30., 100., 1000.):
+            self.assertEqual(physical_point_name(40., flight), f'm40_lab_{int(flight)}m')
+        self.assertEqual(physical_point_name(2., 2.5787102372956836), 'm2_lab_2p58m')
+        self.assertEqual(physical_point_name(2., 2.5787102372956833e-8), 'm2_lab_2p58em08m')
+        self.assertEqual(physical_point_name(50., .01146646928466834), 'm50_lab_0p0115m')
+        for value in (0., -1., float('nan'), float('inf')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                physical_point_name(40., value)
+        with self.assertRaisesRegex(ValueError, 'reference mean lab flight'):
+            point_mean_lab_flight_m(dict(point='m2_epsilon_1e-06', proper_ctau_mm=9.7))
+
+    def test_rounded_lab_name_collision_is_rejected_before_publication(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1.e-6, 1.00001e-6)),
+                                    ref, fake_native)
+        with self.assertRaisesRegex(ValueError, 'unique physical points'):
+            plan_detector_stage(physical, '20261016-lab', '/eos/user/t/test/data')
+
+    def test_statistics_extension_accepts_previous_lab_named_epsilon_point(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1.e-6,)), ref, fake_native)
+        previous = plan_detector_stage(physical, '20261016-lab', '/eos/user/t/test/data')
+        new = plan_points(ref, masses=(15.,), epsilons=(1.e-6,), seed_base=251016001)
+        reused = reuse_physical_points(new, previous)
+        self.assertEqual(reused['points'][0]['epsilon'], previous['points'][0]['epsilon'])
+        self.assertEqual(reused['points'][0]['statistics_extension_source_point'], previous['points'][0]['point'])
 
     def test_fifteen_thousand_events_are_partitioned_and_grouped_by_physical_point(self):
         ref = references()
@@ -224,6 +265,32 @@ class CompleteDetectorStagePlanning(unittest.TestCase):
 
 
 class FrozenGridReceipts(unittest.TestCase):
+    def test_new_gen_only_plan_uses_lab_names_and_keeps_the_original_epsilon(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1.e-6,)), ref, fake_native)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            scripts, templates, path = frozen_inputs(base, ref)
+            result = write_plan(base/'grid', path, templates, physical, {}, scripts, 'python3')
+            row = result['points'][0]
+            self.assertIn('/m15_lab_', row['gen_directory'])
+            self.assertEqual(row['original_point'], 'm15_epsilon_1e-06')
+            self.assertEqual(row['epsilon'], physical['points'][0]['epsilon'])
+            self.assertEqual(json.loads(Path(row['signal_contract']).read_text()),
+                             physical['points'][0]['signal_contract'])
+            self.assertEqual(physical['points'][0]['point'], 'm15_epsilon_1e-06')
+
+    def test_ambiguous_lab_names_fail_before_writing_any_frozen_files(self):
+        ref = references()
+        physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(1.e-6, 1.00001e-6)),
+                                    ref, fake_native)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            scripts, templates, path = frozen_inputs(base, ref)
+            with self.assertRaisesRegex(ValueError, 'rounded LAB names'):
+                write_plan(base/'grid', path, templates, physical, {}, scripts, 'python3')
+            self.assertFalse((base/'grid').exists())
+
     def test_complete_stage_freezes_grouping_contract_and_distinct_canary_command(self):
         ref = references()
         physical = preflight_points(plan_points(ref, masses=(15.,), epsilons=(.001,),
@@ -240,6 +307,8 @@ class FrozenGridReceipts(unittest.TestCase):
             self.assertEqual(command[command.index('--count') + 1], '5')
             facade = result['frozen_dependencies']['sources']['shift_storage_paths.py']
             self.assertEqual(digest(facade['frozen_copy']), facade['sha256'])
+            names = result['frozen_dependencies']['sources']['dark_photon_sample_names.py']
+            self.assertEqual(digest(names['frozen_copy']), names['sha256'])
             self.assertFalse((base/'stage/runs').exists())
 
     def test_freeze_commands_without_creating_runtime_directories(self):

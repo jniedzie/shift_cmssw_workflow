@@ -170,6 +170,12 @@ def extend_worker(text, publication_profile):
             '    minimum_files += extra_files\n')
         text = text.replace('result.update(credited_complete_chunks=count,',
                             'result.update(external_reservations=external, credited_complete_chunks=count,')
+    detector_limit = "'--timeout','21600'"
+    process_limit = 'timeout=22000,check=True'
+    if text.count(detector_limit) != 1 or text.count(process_limit) != 1:
+        raise ValueError('Qualified detector timeout invocation changed; review before extending')
+    text = text.replace(detector_limit, "'--timeout',str(plan['detector_timeout_seconds'])")
+    text = text.replace(process_limit, "timeout=plan['detector_timeout_seconds']+600,check=True")
     return text
 
 
@@ -203,7 +209,22 @@ if __name__ == '__main__':
 '''
 
 
+def detector_timeout_settings(args):
+    """Keep longer operational deadlines separate from unchanged physics."""
+    limits = dict(event_stall_timeout_seconds=getattr(args, 'event_stall_timeout', 1800),
+                  first_event_stall_timeout_seconds=getattr(args, 'first_event_stall_timeout', 3600),
+                  detector_timeout_seconds=getattr(args, 'detector_timeout', 21600))
+    if any(type(value) is not int or not 0 < value <= 72000 for value in limits.values()):
+        raise ValueError('Detector deadlines must be positive integer seconds up to72000')
+    if limits['first_event_stall_timeout_seconds'] < limits['event_stall_timeout_seconds']:
+        raise ValueError('First-event deadline cannot be shorter than the event-stall deadline')
+    if limits['detector_timeout_seconds'] <= limits['first_event_stall_timeout_seconds']:
+        raise ValueError('Detector deadline must exceed the first-event deadline')
+    return limits
+
+
 def prepare(args):
+    timeouts = detector_timeout_settings(args)
     template, output = args.template.resolve(), args.output.resolve()
     if output.exists():
         raise FileExistsError('Refuse to overwrite an existing BSM deployment')
@@ -285,6 +306,11 @@ def prepare(args):
             text = deployment_wrapper('finalizer')
         elif name == 'collect_inputs.py':
             text = deployment_wrapper('collector')
+        if name == 'detector.sub' and timeouts['detector_timeout_seconds'] > 21600:
+            # Set the matching request before submission; a running job cannot
+            # safely acquire a longer enforced lifetime through a later qedit.
+            text = re.sub(r'^\+JobFlavour = .*$', '+JobFlavour = "tomorrow"', text, flags=re.MULTILINE)
+            text = text.replace('\nqueue', '\n+MaxRuntime = 86400\nqueue')
         (output / name).write_text(text)
         if name.endswith('.sh'):
             (output / name).chmod(0o750)
@@ -301,7 +327,7 @@ def prepare(args):
     plan.update(schema='shift-bdt-independent-signal-stage-v1', prepared=True, submitted=False,
         sample_role='validation_only', new_worker_cap=args.detector_workers,
         finalizer_concurrency=args.finalizers, detector_gate_points=args.canary_points,
-        detector_gate_chunk=0, event_stall_timeout_seconds=1800, first_event_stall_timeout_seconds=3600,
+        detector_gate_chunk=0, **timeouts,
         frozen_dependencies=dependencies, selection_applied=False, model_training_on_signals=False,
         reference_preparation=str(args.preparation.resolve()), reference_preparation_sha256=sha256(args.preparation),
         runtime_fingerprint=str(frozen / 'runtime_fingerprint.json'),
@@ -362,6 +388,10 @@ def main():
     parser.add_argument('--failure-base', required=True)
     parser.add_argument('--detector-workers', type=int, default=100)
     parser.add_argument('--finalizers', type=int, default=3)
+    parser.add_argument('--event-stall-timeout', type=int, default=1800)
+    parser.add_argument('--first-event-stall-timeout', type=int, default=3600)
+    parser.add_argument('--detector-timeout', type=int, default=21600,
+                        help='Total detector worker deadline in seconds, at most72000; physics is unchanged')
     parser.add_argument('--publication-profile', choices=tuple(PROFILES), default='all-tiers-v1')
     parser.add_argument('--publication-canary', type=Path,
                         help='Pinned measured full-chain Nano/metadata canary required for nano-metadata-v1')

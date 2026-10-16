@@ -23,13 +23,15 @@ import sys
 
 from dark_photon_generation import check_width_table, contract, production_settings
 from dark_photon_model import validate_native_proposal_support, validate_native_widths
+from dark_photon_sample_names import set_lab_point_name
 
 
 REFERENCE_SCHEMA = 'shift-dark-photon-grid-reference-v1'
 SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'dark_photon_gen_cfg.py',
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
-           'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py', 'pythia_generation_ledger.py')
+           'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
+           'pythia_generation_ledger.py', 'dark_photon_sample_names.py')
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
     'Compare measured <beta gamma> and lab-flight distributions with the reference estimate; do not condition on detector acceptance.',
@@ -163,13 +165,17 @@ def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
         raise ValueError('Nano group size must be at least the detector chunk size')
     if type(detector_job_base) is not int or detector_job_base < 1:
         raise ValueError('Detector stage job namespace must be positive')
-    rows = physical_plan.get('points')
+    result = copy.deepcopy(physical_plan)
+    rows = result.get('points')
     if not isinstance(rows, list) or not rows:
         raise ValueError('Require a nonempty physical point plan')
     names, runs = set(), set()
     for row in rows:
         if not isinstance(row, dict):
             raise ValueError('Invalid physical point descriptor')
+        if not isinstance(row.get('point'), str) or not re.fullmatch(r'[A-Za-z0-9_-]+', row['point']):
+            raise ValueError('Invalid physical point name')
+        set_lab_point_name(row)
         point = row.get('point')
         if (not isinstance(point, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', point) or
                 point in names or type(row.get('events')) is not int or row['events'] < 1 or
@@ -181,7 +187,6 @@ def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
                 raise ValueError('Detector stage GEN budget differs from its physical contract')
         names.add(point)
         runs.add(row['run_number'])
-    result = copy.deepcopy(physical_plan)
     next_job = detector_job_base
     for row in result['points']:
         prefix = f"{eos_base}/darkphoton_{row['point']}/{campaign}"
@@ -330,6 +335,12 @@ def reuse_physical_points(plan, previous, previous_path=None):
     old_rows = {row['point']: row for row in previous['points']}
     if len(old_rows) != len(previous['points']):
         raise ValueError('Previous physical point names are ambiguous')
+    # New LAB names retain the selector used by older frozen productions.
+    for old in previous['points']:
+        original = old.get('original_point', old['point'])
+        if original in old_rows and old_rows[original] is not old:
+            raise ValueError('Previous physical point selectors are ambiguous')
+        old_rows[original] = old
     result = copy.deepcopy(plan)
     for row in result['points']:
         old = old_rows.get(row['point'])
@@ -396,6 +407,11 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
         raise FileExistsError('Refuse to overwrite an existing grid preparation')
     if plan.get('native_width_preflight_passed') is not True:
         raise ValueError('Cannot freeze executable commands without native-width preflight')
+    plan = copy.deepcopy(plan)
+    for row in plan['points']:
+        set_lab_point_name(row)
+    if len({row['point'] for row in plan['points']}) != len(plan['points']):
+        raise ValueError('Physical points collide in their rounded LAB names')
     scripts = Path(scripts or Path(__file__).resolve().parent)
     sources = {name: scripts / name for name in SOURCES}
     templates = {f'step{i}.py': template_directory / f'step{i}.py' for i in range(1, 5)}

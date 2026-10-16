@@ -1,4 +1,121 @@
+<!-- Code style: human-code. -->
 # Generation instructions
+
+## Streaming mu-enhanced QCD (2026-10-16)
+
+The new stream consumes only completed, published true-production GEN receipts.
+Pilots, tests, unfinished files and unused high-bin DAG nodes are excluded.
+`shift_streaming_qcd_inputs.py` freezes the complete source plan and validates
+the original identities, native weights and full source-trial denominators.
+GEN remains on EOS throughout this first reconstruction pass.
+
+`prepare_shift_stream_controller.py` freezes a separate scheduler deployment.
+It does not submit. The controller and its read-only watchdog use persistent
+absolute working directories, the verified local schedd and seven-day limits.
+`prepare_shift_stream_tasks.py` then prepares immutable per-source tasks as
+new GEN publications arrive. It never submits them itself.
+
+Each source first receives a GEN feature scan in a worker. The frozen selection
+draws up to six tail events, three forward opposite-sign events and one event
+from the remainder. Scarce groups contribute fewer events; every nonempty
+group has positive inclusion probability. These are a small first pass, not
+reconstruction of all saved GEN. Selected events run individually through the
+unchanged detector chain, with the original weight and exact inclusion
+probability retained. Saved muon decays are not drawn again.
+
+The controller submits each task at most once. A durable submission intent and
+unique nonce survive disconnects. An unknown scheduler response, missing job or
+ambiguous submit does not permit another science attempt. Task completion needs
+the native exit event and the required identity, count and publication checks.
+Histogramming waits for every selected original in its source cohort. A failed
+original is not silently omitted from its cohort.
+
+Single-source raw plots can appear immediately. Rate snapshots require the
+predeclared source-index prefix in all six bins. They retain native W/p and
+apply sigmaND divided by the sum of distinct full-source trials once, after
+combining sources in the same bin. The final snapshot also includes the unequal
+full source budgets. Finishing quickly never changes membership or exposure.
+
+The first designated source is an operational canary. Bulk reconstruction waits
+until its scan, every selected detector job, histogram publication and project
+PDF readbacks have passed. The separate gate receipt is created automatically;
+the frozen policy is unchanged. This validates the working pipeline, not the
+physical detector response or the statistical reach of the tails.
+
+Quota admission protects the other sealed campaign and every whole storage slot
+the unchanged GEN guard could still admit. The stream uses only the remaining
+headroom. Its small output reservation covers EOS publication, not local worker
+scratch. Workers enforce the publication-size bound before writing outputs.
+
+A new supervisor can set `parallel_gen_completion` to release that reserve after
+GEN finishes. This authority has schema
+`shift-stream-gen-completion-authority-v1`, the absolute `manager_directory`,
+the native `manager_cluster`, and a `files` mapping with SHA-256 hashes for
+`ordinary/manifest.json`, `weighted/manifest.json`,
+`weighted/scientific_gate.json` and `production.dag`. Both final accounting
+records must close their complete fixed production budgets. Native DAG counts
+must show every node finished, and a fresh scheduler query must contain no GEN
+manager or child records. A new quota observation must start after those final
+files close. Missing or conflicting evidence keeps the full reserve. This
+storage check does not change the physics or normalization validation flags.
+Adopt supervisor changes through a reviewed cold rollover; leave active worker
+descriptors, selections and weights intact.
+
+The optional `bound_gen_reserve_by_unfinished_sources: true` also caps the GEN
+wave by its remaining canonical output budget. It derives all 1,055 IDs from
+the pinned manifests and fixed high-bin gate: 1,045 production sources and ten
+validation sources. A complete, audited, readback-verified publication stops
+claiming space only when its local receipt closed before the quota audit began
+and no corresponding GEN job remains queued or held. Missing, invalid, live and
+later publications keep their full worker reservation. Unexpected writers,
+result IDs, changed worker/publisher code or an incomplete budget retain the
+original whole-wave reserve. Unchanged receipts reuse compact inode/size/time
+proofs; a changed receipt is checked again. No source weights or trial counts
+change when a storage reservation is released.
+
+The stream also releases a completed task's old admission claim once a newer
+quota observation includes its outputs. This covers short workers that start
+and finish between scheduler polls. Release requires the exact task manifest,
+unchanged successful status, complete result, native execution and exit-zero
+events, and no matching queue record, including held jobs or earlier attempts.
+The quota observation must start after completion and every status/result/event
+log modification time. Unknown evidence keeps the claim. Release receipts bind
+the task, status, result and event-log hashes. The shared GEN admission helper
+is unchanged.
+
+For that rollover, `prepare_shift_stream_controller.py NEW --adopt-campaign OLD`
+freezes a new supervisor without copying or resetting the campaign ledger.
+Its scheduler working directory is NEW; task state, quota state, heartbeats and
+controller locks stay in OLD. Both original supervisors must be stopped before
+submitting the replacements. A frozen replacement factory command may use
+`prepare_shift_stream_tasks.py OLD --policy NEW/factory_policy.json`; that policy
+may change only `histogram_worker`, used for histogram and merge stages.
+Existing scans, reconstruction workers, sampling and descriptors stay pinned.
+Quota observations allow 600 seconds for sealed external accounting, and the
+audit job requests 1200 seconds before matching.
+
+`prepare_shift_stream_retry.py` is an explicit, cold repair for failed histogram
+tasks. It requires a fresh, successful native full-owner queue receipt with the
+expected schedd, exact query constraint and requested controller attributes.
+Old supervisors and the failed job must be absent. The tool preserves the exact
+old task and failed ledger record, hashes its unchanged working files, then
+prepares the same logical histogram in a separate attempt directory with a
+reviewed tools archive. Only that ledger entry returns to waiting; its failed
+history remains in `attempts`. It does not submit jobs. A durable intent resumes
+an interruption between task replacement and ledger replacement. An earlier
+interruption before the intent exists fails closed and needs manual review of
+the incomplete preparation directory.
+
+Scratch detector tiers are removed only after their successor passes its audit.
+Single-event EOS Nano files are retired only after the closed source's merged
+Nano and histograms pass publication readback. Exact deletion receipts remain
+beside the cohort outputs; a cleanup problem does not repeat completed science.
+Final PDF files return through Condor, pass archive and path checks, and are
+published under `tea_shift_cmssw/plots/`. Duplicate returned archives are removed
+after the project copies and their checksum receipts are verified.
+
+Campaign findings and current job status belong in `SHIFT_ANALYSIS.md`; detector
+findings belong in `SHIFT_RECONSTRUCTION.md`.
 
 ## Night reconstruction of saved QCD GEN (2026-10-14)
 

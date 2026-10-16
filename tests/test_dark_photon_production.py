@@ -1,15 +1,18 @@
 # Code style: AI-code. AI-generated BSM production isolation and resource tests.
 """Check event reuse rejection, immutable external authorities and DAG barriers."""
 import copy
+import ast
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_publication_quota import sha256, external_chunk_reservations
-from prepare_dark_photon_production import check_gen, dag_text
+from prepare_dark_photon_production import check_gen, dag_text, detector_timeout_settings, extend_worker
 
 
 def write(path, value):
@@ -171,6 +174,56 @@ class ProductionBarriers(unittest.TestCase):
         self.assertIn('PARENT D_m12_lab_1000m_000 D_m12_lab_1000m_001 D_m12_prompt_000 CHILD F_m12_lab_1000m',dag)
         self.assertIn('PARENT F_m12_prompt F_m12_lab_1000m CHILD COLLECT',dag)
         self.assertIn('MAXJOBS DETECTOR 80\nMAXJOBS FINALIZER 3',dag)
+
+
+class DetectorDeadlines(unittest.TestCase):
+    def test_defaults_and_reviewed_long_event_deadlines(self):
+        self.assertEqual(detector_timeout_settings(SimpleNamespace()), dict(
+            event_stall_timeout_seconds=1800, first_event_stall_timeout_seconds=3600,
+            detector_timeout_seconds=21600))
+        reviewed = SimpleNamespace(event_stall_timeout=7200, first_event_stall_timeout=7200,
+                                   detector_timeout=43200)
+        self.assertEqual(detector_timeout_settings(reviewed), dict(
+            event_stall_timeout_seconds=7200, first_event_stall_timeout_seconds=7200,
+            detector_timeout_seconds=43200))
+
+    def test_invalid_deadlines_are_rejected_before_preparing_files(self):
+        for changed in (dict(event_stall_timeout=0), dict(first_event_stall_timeout=-1),
+                        dict(detector_timeout=72001), dict(detector_timeout=True),
+                        dict(event_stall_timeout=7200, first_event_stall_timeout=3600),
+                        dict(detector_timeout=3600)):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                detector_timeout_settings(SimpleNamespace(**changed))
+
+    def test_generated_worker_passes_the_frozen_deadlines_to_both_guards(self):
+        qualified = Path(__file__).resolve().parents[2] / 'validation/bsm_stage2_20261013/production/chunk_worker.py'
+        if not qualified.is_file():
+            self.skipTest('Qualified deployment is not available in this checkout')
+        source = extend_worker(qualified.read_text(), 'nano-metadata-v1')
+        tree = ast.parse(source)
+        run = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'run')
+        attempt = next(node for node in run.body if isinstance(node, ast.Try))
+        command_index = next(index for index, node in enumerate(attempt.body)
+                             if isinstance(node, ast.Assign) and any(
+                                 isinstance(target, ast.Name) and target.id == 'command' for target in node.targets))
+        invocation = ast.Module(body=attempt.body[command_index:command_index+2], type_ignores=[])
+        plan = detector_timeout_settings(SimpleNamespace(event_stall_timeout=7200,
+            first_event_stall_timeout=7200, detector_timeout=43200))
+        with tempfile.TemporaryDirectory() as directory, patch('subprocess.run') as launch:
+            root = Path(directory)
+            namespace = dict(sys=sys, B=root, gen=root/'gen', output=root/'detector', work=root,
+                             chunk=dict(count=20, skip=340, job=4000017), plan=plan,
+                             subprocess=__import__('subprocess'))
+            exec(compile(invocation, '<generated-worker-invocation>', 'exec'), namespace)
+            command = launch.call_args.args[0]
+            self.assertEqual(command[command.index('--job')+1], '4000017')
+            self.assertEqual(command[command.index('--skip')+1], '340')
+            self.assertEqual(command[command.index('--count')+1], '20')
+            self.assertEqual(command[command.index('--event-stall-timeout')+1], '7200')
+            self.assertEqual(command[command.index('--first-event-stall-timeout')+1], '7200')
+            self.assertEqual(command[command.index('--timeout')+1], '43200')
+            self.assertEqual(launch.call_args.kwargs['timeout'], 43800)
+            self.assertTrue(launch.call_args.kwargs['check'])
 
 
 if __name__=='__main__':

@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import tempfile
 import time
@@ -26,7 +27,7 @@ from shift_condor_native import native_env, query
 
 SCHEMA = 'shift-dark-photon-production-controller-v1'
 CAMPAIGN_PATTERN = re.compile(r'[A-Za-z0-9_-]+')
-POINT_PATTERN = re.compile(r'm[0-9]+(?:p[0-9]+)?_(?:prompt|lab_[0-9]+(?:p[0-9]+)?m|epsilon_[0-9]+(?:p[0-9]+)?(?:e[+-]?[0-9]+)?)')
+POINT_PATTERN = re.compile(r'm[0-9]+(?:p[0-9]+)?_(?:prompt|lab_[0-9]+(?:p[0-9]+)?(?:e[mp][0-9]+)?m|epsilon_[0-9]+(?:p[0-9]+)?(?:e[+-]?[0-9]+)?)')
 DIGEST_PATTERN = re.compile(r'[0-9a-f]{64}')
 
 
@@ -112,7 +113,51 @@ class EosRpc:
             raise ValueError('Reviewed preview receipt is unavailable')
         self.verify_file(path, int(info['size']), expected_digest)
 
+    def canonical_alias_path(self, alias_path):
+        """Resolve renamed sample directories without relying on an EOS mount.
+
+        EOS file symlink updates do not traverse a symlink in the parent path.
+        Only sibling sample-directory links are accepted: publication must not
+        escape the reviewed namespace through an arbitrary remote link.
+        """
+        alias_path = Path(alias_path)
+        if (not alias_path.is_absolute() or '..' in alias_path.parts
+                or not CAMPAIGN_PATTERN.fullmatch(alias_path.name)):
+            raise ValueError('Invalid EOS alias path')
+        parent = alias_path.parent
+        namespace = parent.parent
+        visited = set()
+        for unused in range(32):
+            if parent in visited:
+                raise ValueError('EOS alias parent contains a symlink loop')
+            visited.add(parent)
+            info = self.metadata(parent)
+            if info is None:
+                raise ValueError('EOS alias parent is unavailable: ' + str(parent))
+            if info.get('status') != 'symlink':
+                try:
+                    mode = int(info.get('mode', '0'), 8)
+                except ValueError:
+                    mode = 0
+                if not stat.S_ISDIR(mode):
+                    raise ValueError('Refuse a non-directory EOS alias parent')
+                return parent / alias_path.name
+            target = info.get('target')
+            if not isinstance(target, str) or not target:
+                raise ValueError('EOS alias parent symlink has no target')
+            destination = Path(target)
+            if not destination.is_absolute():
+                destination = parent.parent / destination
+            if '..' in destination.parts or destination.parent != namespace:
+                raise ValueError('EOS alias parent symlink leaves its sample namespace')
+            parent = destination
+        raise ValueError('EOS alias parent has too many symlinks')
+
     def alias_target(self, alias_path):
+        alias_path = self.canonical_alias_path(alias_path)
+        return self._alias_target(alias_path)
+
+    def _alias_target(self, alias_path):
         info = self.metadata(alias_path)
         if info is None:
             return None
@@ -123,7 +168,8 @@ class EosRpc:
     def publish_alias(self, alias_path, campaign, allowed_campaigns):
         if campaign not in allowed_campaigns or not CAMPAIGN_PATTERN.fullmatch(campaign):
             raise ValueError('Alias target is outside reviewed compatible runs')
-        previous = self.alias_target(alias_path)
+        alias_path = self.canonical_alias_path(alias_path)
+        previous = self._alias_target(alias_path)
         if previous == campaign:
             return False
         if previous is not None and previous not in allowed_campaigns:
@@ -135,7 +181,7 @@ class EosRpc:
             arguments.append('-f')
         arguments.extend([str(alias_path), campaign])
         self.command(arguments)
-        if self.alias_target(alias_path) != campaign:
+        if self._alias_target(alias_path) != campaign:
             raise ValueError('EOS alias update did not confirm the expected target')
         return True
 

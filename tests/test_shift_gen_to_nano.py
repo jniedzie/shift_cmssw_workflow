@@ -21,6 +21,29 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_consumed_scratch_input_has_a_deletion_receipt_and_rejects_external_paths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, output = root/'step1.root', root/'step2.root'
+            source.write_bytes(b'validated SIM')
+            output.write_bytes(b'validated DIGI')
+            expected = worker.sha(source)
+            report = {}
+            with patch.object(worker.Path, 'cwd', return_value=root):
+                worker.remove_consumed_input(source, output, report)
+                self.assertFalse(source.exists())
+                self.assertEqual(report['removed_scratch_inputs'], [dict(
+                    path='step1.root', bytes=13, sha256=expected, consumed_by='step2.root')])
+                with self.assertRaisesRegex(ValueError, 'outside this worker'):
+                    worker.remove_consumed_input(root.parent/'gen.root', output, report)
+                canonical = root/'canonical.root'
+                canonical.write_bytes(b'preserve')
+                link = root/'gen.root'
+                link.symlink_to(canonical)
+                with self.assertRaisesRegex(ValueError, 'outside this worker'):
+                    worker.remove_consumed_input(link, output, report)
+                self.assertEqual(canonical.read_bytes(), b'preserve')
+
     def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); gen = root/'gen'; gen.mkdir()
@@ -36,17 +59,20 @@ class HandoffTests(unittest.TestCase):
                 (templates/f'step{stage}.py').write_text('# synthetic template\n')
             output = root/'detector'
             launched = []
+            audit_limits = []
             def run(command, **kwargs):
                 launched.append(command)
                 if Path(command[1]).name == 'run_shift_gen_to_nano.py':
                     (output/'report.json').write_text(json.dumps(dict(complete=True)))
                 elif command[2] == 'audit-replay':
                     (output/'signal_audit.json').write_text('{}\n')
+                    audit_limits.append(kwargs['timeout'])
                 else:
                     self.fail('Unexpected external command')
                 return subprocess.CompletedProcess(command, 0)
             arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
-                         '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600']
+                         '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600',
+                         '--audit-timeout', '900']
             with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
                     patch.object(signal_runner.shutil, 'which', return_value='cmsRun'), \
                     patch.object(signal_runner.subprocess, 'run', side_effect=run), redirect_stdout(io.StringIO()):
@@ -57,6 +83,42 @@ class HandoffTests(unittest.TestCase):
             self.assertTrue((output/'shift_storage_paths.py').is_file())
             self.assertEqual(launched[0][launched[0].index('--event-stall-timeout') + 1], '1800')
             self.assertEqual(launched[0][launched[0].index('--first-event-stall-timeout') + 1], '3600')
+            self.assertEqual(audit_limits, [900])
+
+    def test_signal_graph_audit_reads_only_exact_selected_gen_records(self):
+        from types import SimpleNamespace
+        identities = [[123, 1, event] for event in (1, 4, 8, 11, 19)]
+
+        class SelectedEvents:
+            def __init__(self):
+                self.position = None
+                self.visited = []
+
+            def __iter__(self):
+                raise AssertionError('The complete GEN population must not be scanned per chunk')
+
+            def to(self, position):
+                self.position = position
+                self.visited.append(position)
+
+            def eventAuxiliary(self):
+                run, lumi, event = identities[self.position]
+                return SimpleNamespace(run=lambda: run, luminosityBlock=lambda: lumi, event=lambda: event)
+
+        events = SelectedEvents()
+        selected = [identities[3], identities[1]]
+        hashes = signal_runner.selected_genparticle_hashes(
+            events, identities, selected, lambda source: 'hash-'+str(source.position))
+        self.assertEqual(events.visited, [3, 1])
+        self.assertEqual(hashes, {(123, 1, 11): 'hash-3', (123, 1, 4): 'hash-1'})
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            signal_runner.selected_genparticle_hashes(events, identities+[identities[0]], selected, lambda _: '')
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            signal_runner.selected_genparticle_hashes(events, identities, selected+selected, lambda _: '')
+        with self.assertRaisesRegex(ValueError, 'absent'):
+            signal_runner.selected_genparticle_hashes(events, identities, [[123, 1, 5]], lambda _: '')
+        with self.assertRaisesRegex(ValueError, 'frozen identity'):
+            signal_runner.selected_genparticle_hashes(events, list(reversed(identities)), [identities[1]], lambda _: '')
 
     def test_publication_paths_keep_nano_and_metadata_in_current_layout(self):
         descriptor = dict(storage_contract='shift-process-bin-detector-v1',
@@ -208,7 +270,9 @@ class HandoffTests(unittest.TestCase):
             previous=Path.cwd()
             try:
                 os.chdir(root)
-                with patch.object(sys,'argv',['worker',str(source),'--skip','0','--count','1','--job','7','--publish']), \
+                with patch.object(sys,'argv',['worker',str(source),'--skip','0','--count','1','--job','7','--publish',
+                                              '--remove-consumed-intermediates', '--absolute-stage-timeouts',
+                                              '--stage-timeouts', '7200,3600,7200,7200']), \
                      patch.object(worker,'command',side_effect=run),patch.object(worker,'signatures',return_value=[row]), \
                      patch.object(worker,'audit_edm',return_value={'events':1}),patch.object(worker,'audit_nano',return_value=nano), \
                      redirect_stdout(io.StringIO()):
@@ -217,6 +281,11 @@ class HandoffTests(unittest.TestCase):
                 os.chdir(previous)
             receipt=root/'report.json';data=json.loads(receipt.read_text())
             self.assertTrue(data['complete'])
+            self.assertEqual([item['path'] for item in data['removed_scratch_inputs']],
+                             ['gen.root', 'step1.root', 'step2.root', 'step3.root'])
+            self.assertTrue((root/'nano.root').is_file())
+            self.assertFalse((root/'nano_readback.root').exists())
+            self.assertEqual(data['nano_sha256'], data['nano_readback_sha256'])
             self.assertEqual(remote['root://eosuser.cern.ch//eos/production/job0000007/complete.json'],receipt.read_bytes())
             archived=remote['root://eosuser.cern.ch//eos/production/job0000007/evidence.tar.gz']
             self.assertEqual(archived,(root/'evidence.tar.gz').read_bytes())

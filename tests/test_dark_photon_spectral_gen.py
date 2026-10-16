@@ -30,6 +30,13 @@ class SpectralGenerationTest(unittest.TestCase):
         for mass in [2., 5., 10.]:
             validate_point(mass, 1.e-7, .01)
 
+    def test_experimental_low_mass_dy_does_not_open_subgev_region(self):
+        for mass in [1.4, 1.5, 1.8]:
+            validate_point(mass, 1.e-7, .01, experimental_low_mass_dy=True)
+        for mass in [.22, 1., 1.39]:
+            with self.assertRaises(ValueError):
+                validate_point(mass, 1.e-7, .01, experimental_low_mass_dy=True)
+
     def test_contract_retains_physical_width_and_accepted_identity_budget(self):
         args = SimpleNamespace(mass=2., epsilon=1.e-7, sampling_epsilon=.01,
                                events=10, seed=1234, run_number=5678)

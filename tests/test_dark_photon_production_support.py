@@ -168,7 +168,7 @@ class WorkerProfiles(unittest.TestCase):
 class CompleteGroupReports(unittest.TestCase):
     def setUp(self):
         physical = dict(native_width_preflight_passed=True,
-                        points=[dict(point='m15_prompt', events=23, run_number=8001)])
+                        points=[dict(point='m15_prompt', mass_gev=15., events=23, run_number=8001)])
         stage = plan_detector_stage(physical, '20261014-statistics', '/eos/user/t/test/shift',
                                    events_per_job=5, group_events=12, detector_job_base=4000001)
         self.row = dict(stage['points'][0], group_events=12)

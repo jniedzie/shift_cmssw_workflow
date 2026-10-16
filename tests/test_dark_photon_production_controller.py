@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import watch_dark_photon_production as controller
+from dark_photon_sample_names import physical_point_name
 
 
 class ProductionControllerTest(unittest.TestCase):
@@ -131,6 +132,24 @@ class ProductionControllerTest(unittest.TestCase):
         self.assertEqual((epsilon['output'].parent / 'latest').readlink().name,
                          epsilon['source']['campaign'])
         self.assertTrue(state['points']['m15_prompt']['ready'])
+
+    def test_canonical_lab_exponents_load_as_candidates_and_owned_points(self):
+        productions = []
+        for index, flight in enumerate((2.5787102372956833e-8, 999.9)):
+            point = physical_point_name(15., flight)
+            production = self.production('20261016-lab-exponent-' + str(index), 50,
+                                         point=point)
+            self.complete(production)
+            productions.append(production)
+        self.config['owned_points'] = [production['row']['point'] for production in productions]
+        self.save_config()
+        state = self.step()
+        self.assertEqual(set(state['points']), {'m15_lab_2p58em08m', 'm15_lab_1ep03m'})
+        self.assertTrue(state['complete'])
+        for production in productions:
+            self.assertTrue(state['points'][production['row']['point']]['ready'])
+            self.assertEqual((production['output'].parent / 'latest').readlink().name,
+                             production['source']['campaign'])
 
     def test_restart_reuses_state_without_republishing_or_losing_old_output(self):
         self.complete(self.old)
@@ -284,10 +303,25 @@ class SchedulerStatusTest(unittest.TestCase):
 
 
 class RpcSafetyTest(unittest.TestCase):
+    def test_rpc_directory_resolution_uses_native_eos_fileinfo_mode(self):
+        legacy = '/eos/user/j/jniedzie/shift_cmssw/darkphoton_m5_lab_5m'
+        canonical = '/eos/user/j/jniedzie/shift_cmssw/darkphoton_m5_ctau_39p640715mm'
+        # Directory fileinfo has no status/type; EOS reports an octal mode.
+        outputs = [f'keylength.file=53 file={legacy} size=30 status=symlink '
+                   'target=darkphoton_m5_ctau_39p640715mm mode=0000',
+                   f'keylength.file=63 file={canonical} treesize=334960488 '
+                   'treecontainers=75 treefiles=272 container=3 files=2 mode=42755 uid=32542']
+        with tempfile.TemporaryDirectory() as temporary:
+            rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
+            with patch.object(rpc, 'command', side_effect=outputs) as command:
+                self.assertEqual(rpc.canonical_alias_path(legacy + '/latest'), Path(canonical) / 'latest')
+            self.assertEqual([call.args[0][2:] for call in command.call_args_list],
+                             [['fileinfo', legacy, '-m'], ['fileinfo', canonical, '-m']])
+
     def test_rpc_cannot_replace_a_real_file_or_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
-            with patch.object(rpc, 'metadata', return_value=dict(status='file')), \
+            with patch.object(rpc, 'metadata', side_effect=[dict(mode='42755', container='3', files='2'), dict(status='file')]), \
                     patch.object(rpc, 'command') as command:
                 with self.assertRaisesRegex(ValueError, 'real alias directory'):
                     rpc.publish_alias('/eos/user/point/latest', '20261013-new', ['20261013-new'])
@@ -296,14 +330,78 @@ class RpcSafetyTest(unittest.TestCase):
     def test_rpc_replacement_requires_reviewed_previous_target_and_confirms_new_target(self):
         with tempfile.TemporaryDirectory() as temporary:
             rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
-            with patch.object(rpc, 'metadata', side_effect=[dict(status='symlink', target='20261012-old'),
+            with patch.object(rpc, 'metadata', side_effect=[dict(mode='42755', container='3', files='2'),
+                                                          dict(status='symlink', target='20261012-old'),
                                                           dict(status='symlink', target='20261013-new')]), \
                     patch.object(rpc, 'command') as command:
                 self.assertTrue(rpc.publish_alias('/eos/user/point/latest', '20261013-new',
                                                   ['20261012-old', '20261013-new']))
             arguments = command.call_args.args[0]
             self.assertEqual(arguments[2:5], ['file', 'symlink', '-f'])
+            self.assertEqual(arguments[-2:], ['/eos/user/point/latest', '20261013-new'])
             self.assertNotIn('rm', arguments)
+
+    def test_rpc_publishes_through_renamed_sample_parent_and_reads_same_alias(self):
+        for target in ('darkphoton_m5_ctau_123mm', '/eos/user/data/darkphoton_m5_ctau_123mm'):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
+                legacy = Path('/eos/user/data/darkphoton_m5_lab_5m')
+                canonical = legacy.with_name('darkphoton_m5_ctau_123mm')
+                aliases = {canonical / 'latest': '20261012-old'}
+                def metadata(path):
+                    path = Path(path)
+                    if path == legacy:
+                        return dict(status='symlink', target=target)
+                    if path == canonical:
+                        return dict(mode='42755', container='3', files='2')
+                    if path in aliases:
+                        return dict(status='symlink', target=aliases[path])
+                    self.fail('Unexpected metadata path: ' + str(path))
+                def publish(arguments):
+                    self.assertEqual(arguments[2:], ['file', 'symlink', '-f',
+                                                     str(canonical / 'latest'), '20261013-new'])
+                    aliases[canonical / 'latest'] = arguments[-1]
+                    return ''
+                with patch.object(rpc, 'metadata', side_effect=metadata), \
+                        patch.object(rpc, 'command', side_effect=publish) as command:
+                    self.assertTrue(rpc.publish_alias(legacy / 'latest', '20261013-new',
+                                                      ['20261012-old', '20261013-new']))
+                    self.assertEqual(rpc.alias_target(legacy / 'latest'), '20261013-new')
+                    self.assertFalse(rpc.publish_alias(legacy / 'latest', '20261013-new',
+                                                       ['20261012-old', '20261013-new']))
+                    command.assert_called_once()
+
+    def test_rpc_parent_links_cannot_escape_reviewed_sample_namespace(self):
+        for target in ('/eos/user/other/point', '../other/point', 'root://other/point', ''):
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
+                with patch.object(rpc, 'metadata', return_value=dict(status='symlink', target=target)), \
+                        patch.object(rpc, 'command') as command:
+                    with self.assertRaisesRegex(ValueError, 'namespace|no target'):
+                        rpc.publish_alias('/eos/user/point/latest', '20261013-new', ['20261013-new'])
+                    command.assert_not_called()
+
+    def test_rpc_parent_symlink_loop_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
+            def metadata(path):
+                return dict(status='symlink', target='second' if Path(path).name == 'point' else 'point')
+            with patch.object(rpc, 'metadata', side_effect=metadata), \
+                    patch.object(rpc, 'command') as command:
+                with self.assertRaisesRegex(ValueError, 'symlink loop'):
+                    rpc.publish_alias('/eos/user/point/latest', '20261013-new', ['20261013-new'])
+                command.assert_not_called()
+
+    def test_rpc_renamed_parent_keeps_reviewed_existing_campaign_guard(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            rpc = controller.EosRpc('root://eosuser.cern.ch', temporary)
+            with patch.object(rpc, 'metadata', side_effect=[dict(status='symlink', target='renamed'),
+                                                          dict(mode='42755', container='3', files='2'),
+                                                          dict(status='symlink', target='unreviewed')]), \
+                    patch.object(rpc, 'command') as command:
+                with self.assertRaisesRegex(ValueError, 'outside reviewed'):
+                    rpc.publish_alias('/eos/user/point/latest', '20261013-new', ['20261013-new'])
+                command.assert_not_called()
 
     def test_rpc_cache_does_not_hide_same_size_source_corruption(self):
         with tempfile.TemporaryDirectory() as temporary:

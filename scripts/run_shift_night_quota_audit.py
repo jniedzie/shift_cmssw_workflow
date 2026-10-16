@@ -20,7 +20,7 @@ def audit(request):
             Path('external_commitment_request.json').write_text(json.dumps(request))
             subprocess.run(['/usr/bin/python3', 'read_shift_external_storage_commitments.py',
                 '--request', 'external_commitment_request.json',
-                '--output', 'external_commitment_result.json'], check=True, timeout=90,
+                '--output', 'external_commitment_result.json'], check=True, timeout=600,
                 capture_output=True, text=True)
             external = json.loads(Path('external_commitment_result.json').read_text())
             if external.get('complete') is not True:

@@ -28,9 +28,11 @@ def main():
     parser.add_argument('--event-stall-timeout',type=int,default=1800)
     parser.add_argument('--first-event-stall-timeout',type=int,
                         help='Extra bounded startup/first-event time for lazy material-table initialization')
+    parser.add_argument('--audit-timeout',type=int,default=600,
+                        help='Wall-time deadline for exact selected-event graph audits; no selection changes')
     args=parser.parse_args()
-    if not 1 <= args.count <= 20 or args.skip < 0 or args.timeout <= 0:
-        parser.error('Require 1..20 events, nonnegative skip and positive timeout')
+    if not 1 <= args.count <= 20 or args.skip < 0 or min(args.timeout,args.audit_timeout) <= 0:
+        parser.error('Require 1..20 events, nonnegative skip and positive timeouts')
     if args.event_stall_timeout <= 0 or (args.first_event_stall_timeout is not None and
                                         args.first_event_stall_timeout < args.event_stall_timeout):
         parser.error('Require positive event stall limits; first-event allowance cannot be shorter')
@@ -86,7 +88,7 @@ def main():
         # state and compares the full source graph through all EDM tiers.
         with (out/'signal_audit.log').open('w') as log:
             subprocess.run([sys.executable,str(Path(__file__).resolve()),'audit-replay',str(out)],
-                           cwd=out,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=180)
+                           cwd=out,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=args.audit_timeout)
         wrapper.update(complete=True,common_report_sha256=sha(out/'report.json'),
                        signal_audit=json.loads((out/'signal_audit.json').read_text()))
     except Exception as error:
@@ -95,6 +97,25 @@ def main():
     finally:
         path.write_text(json.dumps(wrapper,indent=2)+'\n')
     print(json.dumps(dict(complete=True,events=args.count,output=str(out))))
+
+
+def selected_genparticle_hashes(events, source_ids, expected, hash_particles):
+    """Audit selected GEN records directly, retaining the frozen accepted IDs."""
+    positions = {tuple(identity): index for index, identity in enumerate(source_ids)}
+    if len(positions) != len(source_ids) or len({tuple(identity) for identity in expected}) != len(expected):
+        raise ValueError('Duplicate source or requested signal event identity')
+    result = {}
+    for identity in expected:
+        key = tuple(identity)
+        if key not in positions:
+            raise ValueError('Requested signal event is absent from the GEN ledger')
+        events.to(positions[key])
+        auxiliary = events.eventAuxiliary()
+        actual = (int(auxiliary.run()), int(auxiliary.luminosityBlock()), int(auxiliary.event()))
+        if actual != key:
+            raise ValueError('Selected signal GEN record differs from its frozen identity')
+        result[key] = hash_particles(events)
+    return result
 
 
 def audit_replay(directory):
@@ -106,12 +127,8 @@ def audit_replay(directory):
     report=json.loads((out/'signal_report.json').read_text())
     expected=report['requested_event_ids']
     known={tuple(i):h for i,h in zip(source['event_ids'],source['source_full_graph_sha256'])}
-    known_particles={}
-    for event in Events(str(out/'gen.root')):
-        aux=event.eventAuxiliary()
-        identity=(int(aux.run()),int(aux.luminosityBlock()),int(aux.event()))
-        if list(identity) in expected:
-            known_particles[identity]=genparticle_hash(event)
+    known_particles=selected_genparticle_hashes(
+        Events(str(out/'gen.root')), source['event_ids'], expected, genparticle_hash)
     tiers={}
     for stage in (1,2,3):
         identities=[];hep_checked=0;particles_checked=0

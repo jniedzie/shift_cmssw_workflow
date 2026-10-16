@@ -28,6 +28,20 @@ def sha(path):
     return h.hexdigest()
 
 
+def remove_consumed_input(path, output, report):
+    """Delete only this worker's scratch input after its successor was audited."""
+    path, output = Path(path), Path(output)
+    if (path.parent.resolve() != Path.cwd().resolve()
+            or path.name not in ('gen.root', 'step1.root', 'step2.root', 'step3.root')
+            or output.resolve() == path.resolve() or not output.is_file()
+            or path.is_symlink()):
+        raise ValueError('Refuse to remove an input outside this worker scratch chain')
+    receipt = dict(path=path.name, bytes=path.stat().st_size, sha256=sha(path),
+                   consumed_by=output.name)
+    path.unlink()
+    report.setdefault('removed_scratch_inputs', []).append(receipt)
+
+
 def copy_gen_input(descriptor, target):
     """Read frozen local pilots or existing XRootD inputs; verify both identically."""
     mode = descriptor.get('gen_transport', 'xrootd')
@@ -421,6 +435,10 @@ def main():
     parser.add_argument('--canary', action='store_true')
     parser.add_argument('--stage-timeouts', default='10800,1800,5400,14400',
                         help='SIM,DIGIHLT,RECO,NANO wall limits in seconds')
+    parser.add_argument('--absolute-stage-timeouts', action='store_true',
+                        help='Use the supplied limits for this slice without per-100-event scaling')
+    parser.add_argument('--remove-consumed-intermediates', action='store_true',
+                        help='Remove scratch GEN/SIM/DIGI/RECO only after its successor passes audit')
     parser.add_argument('--config-timeout', type=int, default=600)
     parser.add_argument('--event-stall-timeout', type=int, default=1800)
     parser.add_argument('--first-event-stall-timeout', type=int,
@@ -448,8 +466,9 @@ def main():
                 not isinstance(p, (int, float)) or not math.isfinite(p) or not 0 < p <= 1
                 for p in all_probabilities):
             raise ValueError('Sampling probabilities do not cover the exact selected GEN events')
-        limits = [max(floor, math.ceil(limit * args.count / 100))
-                  for limit, floor in zip(limits, (1800, 900, 1800, 5400))]
+        if not args.absolute_stage_timeouts:
+            limits = [max(floor, math.ceil(limit * args.count / 100))
+                      for limit, floor in zip(limits, (1800, 900, 1800, 5400))]
     # Measured high-bin shower transport has long, finite event times. Keep
     # the event-stall guard independent of the absolute slice time budget.
     if descriptor['stratum'] == 'qcd_20toinf':
@@ -476,6 +495,8 @@ def main():
               'seed': 230000000 + args.job * 100, 'stages': {},
               'event_stall_timeout_seconds': args.event_stall_timeout,
               'first_event_stall_timeout_seconds': first_event_limit,
+              'absolute_stage_timeouts': args.absolute_stage_timeouts,
+              'remove_consumed_intermediates': args.remove_consumed_intermediates,
               'normalization_ready': False, 'physics_valid': False,
               'canary': args.canary,
               'normalization_record': descriptor.get('normalization_record'),
@@ -503,6 +524,8 @@ def main():
         expected = [descriptor['event_ids'][i] for i in indices]
         if [row['id'] for row in before] != expected:
             raise ValueError('GEN event order differs from source receipt')
+        report['selected_event_ids_sha256'] = hashlib.sha256(
+            json.dumps(expected, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         if 'weights' in descriptor:
             for row, weight in zip(before, (descriptor['weights'][i] for i in indices)):
                 if not math.isclose(row['weight'], weight, rel_tol=1e-12, abs_tol=0):
@@ -574,6 +597,8 @@ def main():
                         {k:v for k,v in row.items() if k != 'timing_persisted_in_input'} for row in before]:
                     raise ValueError('Simulation changed GEN kinematics, vertices, nominal physical timing or weights')
             validated[tiers[stage]] = args.count
+            if args.remove_consumed_intermediates:
+                remove_consumed_input(input_file, output, report)
             progress(report, tiers[stage]+'_VALIDATED', validated)
             input_file = output
         if probabilities is not None:
@@ -588,6 +613,16 @@ def main():
         report['stage_deadline_epoch'] = time.time() + 3600
         progress(report, 'PUBLISHING' if args.publish else 'COMPLETE', validated)
         if args.publish:
+            archive_evidence(work, args.source)
+            report['evidence_sha256'] = sha(work / 'evidence.tar.gz')
+            report['publication_bytes_before_receipt'] = (
+                report['nano_bytes'] + (work / 'evidence.tar.gz').stat().st_size)
+            maximum_publication = descriptor.get('maximum_publication_bytes')
+            if maximum_publication is not None and (
+                    type(maximum_publication) is not int or maximum_publication <= 65536
+                    or report['publication_bytes_before_receipt']
+                       + len(json.dumps(report).encode()) + 65536 > maximum_publication):
+                raise ValueError('Validated output exceeds its reserved publication space')
             report['nano_path'], metadata_destination = publication_paths(
                 descriptor, args.job, args.canary)
             command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', metadata_destination], timeout=120)
@@ -598,10 +633,10 @@ def main():
             command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/' + report['nano_path'], str(readback)], timeout=900)
             if sha(readback) != report['nano_sha256'] or audit_nano(readback, before, probabilities) != report['nano']:
                 raise ValueError('Published NanoAOD does not match validated local output')
-            archive_evidence(work, args.source)
+            report['nano_readback_sha256'] = sha(readback)
+            readback.unlink()
             command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
                      'root://eosuser.cern.ch/' + metadata_destination + '/evidence.tar.gz'], timeout=900)
-            report['evidence_sha256'] = sha(work / 'evidence.tar.gz')
             progress(report, 'COMPLETE', validated)
             command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'report.json'),
                      'root://eosuser.cern.ch/' + metadata_destination + '/complete.json'], timeout=120)

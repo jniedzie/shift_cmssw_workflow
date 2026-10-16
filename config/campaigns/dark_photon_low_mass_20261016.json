@@ -1,0 +1,25 @@
+{
+  "code_style": "human-code",
+  "campaign": "dark_photon_low_mass_20261016",
+  "stage": "GEN-only experimental DY validation; detector production not submitted",
+  "masses_gev": [1.8, 1.5],
+  "epsilon": 0.001,
+  "sampling_epsilon": 0.01,
+  "accepted_events_per_point": 20,
+  "seeds": [761016001, 761016002],
+  "run_numbers": [1761016001, 1761016002],
+  "experimental_low_mass_dy": true,
+  "low_mass_mechanisms_complete": false,
+  "physics_validated": false,
+  "detector_simulated": false,
+  "meson_masses_for_next_stage_gev": [0.22, 0.25, 0.3, 0.4, 0.5, 0.7, 0.9],
+  "meson_stage_requires": ["absolute parent source and full trial ledger", "transition form factors", "HepMC integration", "detector response"],
+  "meson_parent_source": {
+    "muon_filter": false,
+    "full_fixed_source_trials_required": true,
+    "all_parent_mesons_per_interaction": true,
+    "rate_convention": "sigma_source * sum(native_event_weight * sum_parent(BR_parent_to_gamma_Aprime * BR_Aprime_to_mumu)) / full_source_trials",
+    "existing_muon_filtered_background_is_not_an_inclusive_parent_source": true
+  },
+  "higher_mass_deployments_untouched": true
+}

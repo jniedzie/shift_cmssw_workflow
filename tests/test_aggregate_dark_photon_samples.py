@@ -7,6 +7,7 @@ import json
 import math
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -14,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from aggregate_dark_photon_samples import (combined_rate, event_rows, execute, group_inputs,
+from aggregate_dark_photon_samples import (combined_rate, completed_histogram_input, event_rows, execute, group_inputs,
                                          qualified_finalizer, sha, unique_populations,
                                          validate_event_rows, verify_aggregate_seal)
 
@@ -158,6 +159,187 @@ class DeploymentIntegrity(unittest.TestCase):
                 qualified = qualified_finalizer(directory)
             self.assertEqual(qualified.validate_histogram_axes(None, None), 1081)
             self.assertEqual(Path(qualified.__file__), directory / 'qualified_finalizer.py')
+
+
+class HistogramOnly(unittest.TestCase):
+    def test_clean_process_imports_the_qualified_finalizer_after_its_guard(self):
+        with tempfile.TemporaryDirectory(prefix='20261016-aggregate-import-', dir='/tmp') as temporary:
+            base = Path(temporary)
+            deployment, guard = base / 'deployment', base / 'guard'
+            scripts = deployment / 'frozen/scoring/workflow/scripts'
+            scripts.mkdir(parents=True)
+            guard.mkdir()
+            marker = base / 'qualified_imported.txt'
+            (scripts / 'run_merged_dimuon_bdt.py').write_text('io = None\n')
+            (deployment / 'scoring_components.json').write_text(json.dumps(dict(model_sha256='b' * 64)))
+            (guard / 'seal.json').write_text('{}\n')
+            (guard / 'chunk_worker.py').write_text(
+                "MARKER = 'reviewed publication guard'\n"
+                'def verify_seal(*args, **kwargs): pass\n'
+                'def prepare_publication_guard(*args): pass\n'
+                'def check_headroom():\n'
+                "    raise RuntimeError('reached the publication guard')\n")
+            (deployment / 'qualified_finalizer.py').write_text(
+                'from pathlib import Path\n'
+                'from chunk_worker import MARKER\n'
+                f'Path({str(marker)!r}).write_text(MARKER)\n'
+                'def validate_histogram_axes(*args): return 1081\n')
+            plan = dict(scoring_deployment=dict(path=str(deployment)), publication_guard=dict(
+                deployment_path=str(guard), seal_sha256=sha(guard / 'seal.json'), point='point'))
+            plan_path = base / 'plan.json'
+            plan_path.write_text(json.dumps(plan))
+            child = '''import json, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from aggregate_dark_photon_samples import execute_histogram_only
+assert 'chunk_worker' not in sys.modules
+plan = json.loads(Path(sys.argv[2]).read_text())
+try:
+    execute_histogram_only(plan, {}, [], {}, [], 'e'*64, 'f'*64,
+                          Path(sys.argv[2]).parent, Path(sys.argv[2]).parent)
+except RuntimeError as error:
+    assert str(error) == 'reached the publication guard', str(error)
+else:
+    raise AssertionError('Expected the synthetic publication guard to stop execution')
+'''
+            result = subprocess.run([sys.executable, '-c', child,
+                str(Path(__file__).resolve().parents[1] / 'scripts'), str(plan_path)],
+                capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(marker.read_text(), 'reviewed publication guard')
+
+    def source(self, value, path):
+        value = copy.deepcopy(value)
+        count = len(value['parent']['event_ids'])
+        value['contract'] = dict(common=['frozen'], cp5=['frozen'], timing='fixed')
+        value['inputs'][0].update(sha256='a' * 64, bytes=100)
+        value['report'] = dict(final_output_base='/eos/user/t/test/darkphoton_point/source_' + str(count),
+            score_histograms=dict(marker=dict(complete=True, events=count, selection_applied=False,
+                model_sha256='b' * 64, pairs=count, published=dict(histograms=dict(
+                    path='/eos/user/t/test/darkphoton_point/source_' + str(count) + '/histograms_merged/ntuple_0.root',
+                    sha256=sha(path), bytes=path.stat().st_size)))))
+        return value
+
+    def test_incomplete_foreign_model_and_unpinned_source_histograms_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'source.root'
+            path.write_bytes(b'synthetic publication')
+            source = self.source(population(), path)
+            self.assertEqual(completed_histogram_input(source, 'b' * 64)['events'], 2)
+            for change in (dict(complete=False), dict(events=1), dict(selection_applied=True),
+                           dict(model_sha256='c' * 64), dict(pairs=-1)):
+                damaged = copy.deepcopy(source)
+                damaged['report']['score_histograms']['marker'].update(change)
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'Source histogram'):
+                    completed_histogram_input(damaged, 'b' * 64)
+            for change in (dict(path='/eos/user/t/test/foreign.root'), dict(bytes=0), dict(sha256='missing')):
+                damaged = copy.deepcopy(source)
+                damaged['report']['score_histograms']['marker']['published']['histograms'].update(change)
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'Source histogram'):
+                    completed_histogram_input(damaged, 'b' * 64)
+
+    def run_merge(self, base, *, corrupt_source=False):
+        import numpy as np
+        import uproot
+        if shutil.which('hadd') is None:
+            self.skipTest('The existing ROOT runtime with hadd is required')
+        from uproot.writing.identify import to_TAxis, to_TH1x
+        deployment, scratch = base / 'deployment', base / 'scratch'
+        (deployment / 'frozen/scoring').mkdir(parents=True)
+        scratch.mkdir()
+        (deployment / 'frozen/scoring/sm_axis_authority.root').write_bytes(b'synthetic axis authority')
+        (deployment / 'scoring_components.json').write_text(json.dumps(dict(model_sha256='b' * 64)))
+        populations, remote, reads, writes, checks = [], {}, [], [], []
+        for index, value in enumerate((population(), population(20, 8, 300, 4., .2))):
+            path = base / ('source_' + str(index) + '.root')
+            count = len(value['parent']['event_ids'])
+            edges = np.asarray([0., 1., 4., 8.])
+            with uproot.recreate(path) as root:
+                for name in ('rawEventsCutFlow', 'cutFlow', 'diagnostic'):
+                    values = np.asarray([2., float(count), 3., 4., 5.])
+                    variances = np.asarray([4., float(count), 9., 16., 25.])
+                    root[name] = to_TH1x(None, name, values, float(count), float(values.sum()),
+                        float(variances.sum()), 0., 0., variances,
+                        to_TAxis('xaxis', '', 3, 0., 8., edges))
+            source = self.source(value, path)
+            item = source['report']['score_histograms']['marker']['published']['histograms']
+            remote[item['path']] = path
+            populations.append(source)
+        if corrupt_source:
+            populations[0]['report']['score_histograms']['marker']['published']['histograms']['sha256'] = 'e' * 64
+
+        def get_remote(source, destination):
+            self.assertNotIn('/nanoAOD_', source)
+            reads.append(source)
+            shutil.copyfile(remote[source], destination)
+
+        def put_remote(source, destination):
+            self.assertNotIn('/nanoAOD_', destination)
+            writes.append(destination)
+            target = base / ('published_' + str(len(writes)))
+            shutil.copyfile(source, target)
+            remote[destination] = target
+
+        def check_counts(path, count, weight):
+            with uproot.open(path) as root:
+                self.assertEqual(root['rawEventsCutFlow'].values()[0], count)
+                self.assertEqual(root['cutFlow'].values()[0], weight)
+            checks.append(count)
+
+        io = SimpleNamespace(get_remote=get_remote, put_remote=put_remote,
+            remote_exists=lambda path: path in remote, transfer=lambda arguments: None)
+        scorer = SimpleNamespace(io=io, check_standard_histograms=check_counts)
+        guard = SimpleNamespace(verify_seal=lambda *a, **k: None,
+            prepare_publication_guard=lambda *a: None, check_headroom=lambda: None)
+        qualified = SimpleNamespace(validate_histogram_axes=lambda *arguments: 1081)
+        plan = dict(campaign='additive', histogram_only=True, conditions=dict(sha256='c' * 64),
+            scoring_deployment=dict(path=str(deployment)), publication_guard=dict(deployment_path=str(deployment),
+                seal_sha256='d' * 64, point='point'), points=[dict(point='point', events=10,
+                final_output_base='/eos/user/t/test/darkphoton_point/additive',
+                sources=[dict(index=0), dict(index=0), dict(index=1)])])
+        with patch('aggregate_dark_photon_samples.verify_aggregate_seal'), patch(
+                'aggregate_dark_photon_samples.load_plan', return_value=plan), patch(
+                'aggregate_dark_photon_samples.checked', side_effect=lambda path, digest: Path(path)), patch(
+                'aggregate_dark_photon_samples.load_source', side_effect=lambda source, *args: populations[source['index']]), patch(
+                'aggregate_dark_photon_samples.qualified_finalizer', return_value=qualified), patch.dict(
+                sys.modules, run_merged_dimuon_bdt=scorer, chunk_worker=guard):
+            report = execute(base / 'plan.json', 'e' * 64, 'f' * 64, 'point', base / 'cache', scratch, base / 'results')
+        return report, remote, reads, writes, checks
+
+    def test_histograms_keep_flow_errors_and_full_ledgers_without_new_nano_files(self):
+        import uproot
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            report, remote, reads, writes, checks = self.run_merge(base)
+            self.assertEqual(checks, [2, 8, 10])
+            self.assertEqual(report['events'], 10)
+            self.assertTrue(report['histogram_only'])
+            self.assertFalse(report['union']['new_nano_files_created'])
+            self.assertEqual(report['union']['parent_gen_ledger_count'], 2)
+            self.assertEqual(len(report['source_histograms']), 2)
+            self.assertEqual(report['union']['groups'][0]['grouped']['path'], 'nano_10')
+            self.assertTrue(report['histogram_merge']['flow_bins_checked'])
+            self.assertTrue(report['histogram_merge']['sum_weights_squared_checked'])
+            item = report['score_histograms']['marker']['published']['histograms']
+            with uproot.open(remote[item['path']]) as root:
+                self.assertEqual(list(root['diagnostic'].values(flow=True)), [4., 10., 6., 8., 10.])
+                self.assertEqual(list(root['diagnostic'].variances(flow=True)), [8., 10., 18., 32., 50.])
+                self.assertEqual(list(root['diagnostic'].axis().edges()), [0., 1., 4., 8.])
+            rate = json.loads(remote[report['final_output_base'] + '/cross_sections.json'].read_text())
+            self.assertEqual(rate['full_gen']['accepted_events'], 10)
+            self.assertEqual(rate['physical_selected_cross_sections_pb'][0]['value_pb'], 3.5)
+            self.assertFalse(rate['combination']['cross_sections_summed'])
+            self.assertTrue((base / 'results/completed_points/point.json').is_file())
+            self.assertEqual(len(writes), 5)
+            self.assertEqual(writes[-1], report['final_output_base'] + '/metadata/point_receipt.json')
+
+    def test_wrong_source_sha_prevents_any_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            with self.assertRaisesRegex(ValueError, 'checksum/size'):
+                self.run_merge(base, corrupt_source=True)
+            self.assertFalse((base / 'results/completed_points/point.json').exists())
+            self.assertFalse(any(base.glob('published_*')))
 
 
 class SemanticRoot(unittest.TestCase):
