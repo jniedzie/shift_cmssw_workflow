@@ -39,6 +39,36 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
 
 
 class PopulationAccounting(unittest.TestCase):
+    def test_meson_rates_use_fixed_source_exposure_and_keep_signal_counts_separate(self):
+        first, second = population(10, 2, 900, 2., .1), population(20, 18, 100, 4., .2)
+        for item, count, mean in ((first, 100, .01), (second, 300, .02)):
+            rate = item['rate']
+            rate.update(mechanism='eta-etaprime-radiative', meson_model_card={'pinned': 'same model'},
+                rate_scope='non-diffractive pp only', corrections={'combined': mean},
+                source_exposure=dict(fixed_source_collisions=count, source_collisions=count,
+                    native_n_accepted=count, accepted_signal_events=rate['full_gen']['accepted_events'],
+                    coefficient_sum=mean*count, coefficient_sum_squared=mean**2*count,
+                    physical_probability_sum=mean*count, physical_probability_sum_squared=mean**2*count))
+            rate['full_gen']['source_collisions'] = count
+        result = combined_rate([first, second], point='meson', campaign='additive')
+        self.assertEqual(result['combination']['normalized_weights'], [.25, .75])
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'], 3.5)
+        self.assertAlmostEqual(result['physical_selected_cross_sections_pb'][0]['error_pb'], math.hypot(.025, .15))
+        self.assertEqual(result['full_gen']['accepted_events'], 20)
+        self.assertEqual(result['full_gen']['source_collisions'], 400)
+        self.assertEqual(result['full_gen']['n_tried'], 1000)
+        self.assertEqual(result['source_exposure']['physical_probability_sum'], 7.)
+        wrong = copy.deepcopy(second)
+        wrong['rate']['source_exposure']['source_collisions'] = 18
+        with self.assertRaisesRegex(ValueError, 'Meson source exposure'):
+            combined_rate([first, wrong], point='meson', campaign='additive')
+        wrong = copy.deepcopy(second)
+        wrong['rate']['meson_model_card']['pinned'] = 'different model'
+        with self.assertRaisesRegex(ValueError, 'identical physics'):
+            combined_rate([first, wrong], point='meson', campaign='additive')
+        with self.assertRaisesRegex(ValueError, 'identical physics'):
+            combined_rate([first, population(30)], point='meson', campaign='additive')
+
     def test_recovery_views_count_the_same_gen_population_once(self):
         base, fresh = population(), population(20)
         recovery = copy.deepcopy(base)

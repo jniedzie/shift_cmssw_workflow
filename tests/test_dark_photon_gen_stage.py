@@ -68,6 +68,34 @@ def remote_transport(payload):
     return transport
 
 
+def audited_meson_population(base):
+    row, config, payload = audited_population(base)
+    gen = Path(row['gen_directory'])
+    (gen / 'meson_source_ledger.jsonl').write_text('Complete source rows already scanned by the runtime audit\n')
+    model = dict(schema='shift-dark-photon-meson-model-v1', parents=[])
+    write_new(gen / 'meson_model.json', model)
+    exposure = dict(schema='shift-meson-source-exposure-v1', fixed_source_collisions=103,
+        source_collisions=103, accepted_signal_events=3, sum_native_weights=103.,
+        sum_native_weights_squared=103., native_n_tried=110, native_n_accepted=103,
+        unit_output_gen_weights=True, coefficient_includes_br_mumu=True,
+        coefficient_excludes_epsilon_squared=True, source_ledger_sha256=sha256(gen / 'meson_source_ledger.jsonl'))
+    write_new(gen / 'source_exposure.json', exposure)
+    contract = read(gen / 'contract.json')
+    contract.update(production_mechanism='eta-etaprime-radiative', source_exposure=exposure,
+        meson_model_card=model, source_exposure_sha256=sha256(gen / 'source_exposure.json'),
+        source_ledger_sha256=sha256(gen / 'meson_source_ledger.jsonl'),
+        meson_model_card_sha256=sha256(gen / 'meson_model.json'))
+    (gen / 'contract.json').write_text(json.dumps(contract))
+    Path(row['signal_contract']).write_text(json.dumps(contract))
+    audit = read(gen / 'validation.json')
+    audit.update(source_exposure=exposure, source_exposure_sha256=contract['source_exposure_sha256'],
+        source_ledger_sha256=contract['source_ledger_sha256'],
+        proposal_ledger=dict(n_tried=110,n_selected=105,n_accepted=103))
+    audit['full_gen_denominator']['source_collisions']=103
+    (gen / 'validation.json').write_text(json.dumps(audit))
+    return row, config, payload
+
+
 class DetachedGenStageTest(unittest.TestCase):
     def test_preparation_rejects_old_runs_before_materializing_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -204,6 +232,41 @@ class DetachedGenStageTest(unittest.TestCase):
                 [], 0, 'Volume Name Quota Used\nvolume 2048000 819200\n', '')):
             with self.assertRaisesRegex(ValueError, 'positive AFS metadata'):
                 check_afs_margin(config)
+
+
+class MesonGenStageTest(unittest.TestCase):
+    def test_conditional_signal_and_source_counts_pass_without_recomputing_physics(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            row, config, unused = audited_meson_population(Path(temporary))
+            # Only hashes are needed here; the runtime audit owned the full
+            # ledger scan and no meson physics module is imported at handoff.
+            with patch('export_dark_photon_cross_sections.meson_source_exposure', side_effect=AssertionError('Repeated scan')):
+                audit, unused_manifest, unused_contract = validate_population(row, config)
+            self.assertEqual(audit['events'],3)
+            self.assertEqual(audit['proposal_ledger']['n_accepted'],103)
+
+    def test_each_pinned_meson_input_is_checked(self):
+        for filename in ('source_exposure.json','meson_source_ledger.jsonl','meson_model.json'):
+            with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:
+                row, config, unused = audited_meson_population(Path(temporary))
+                with (Path(row['gen_directory'])/filename).open('a') as output:output.write('\nchanged')
+                with self.assertRaisesRegex(ValueError,'Pinned meson source .*changed'):
+                    validate_population(row,config)
+
+    def test_changed_source_runtime_boundary_is_rejected(self):
+        mutations=[lambda audit:audit['proposal_ledger'].update(n_accepted=3),
+            lambda audit:audit['proposal_ledger'].update(n_tried=111),
+            lambda audit:audit['source_exposure'].update(fixed_source_collisions=3),
+            lambda audit:audit['source_exposure'].update(accepted_signal_events=103),
+            lambda audit:audit['full_gen_denominator'].update(source_collisions=3),
+            lambda audit:audit.update(source_ledger_sha256='changed'),
+            lambda audit:audit.update(source_exposure_sha256='changed')]
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as temporary:
+                row, config, unused = audited_meson_population(Path(temporary))
+                path=Path(row['gen_directory'])/'validation.json'
+                audit=read(path);mutation(audit);path.write_text(json.dumps(audit))
+                with self.assertRaises(ValueError):validate_population(row,config)
 
 
 if __name__ == '__main__':

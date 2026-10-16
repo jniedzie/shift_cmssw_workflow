@@ -22,7 +22,7 @@ import subprocess
 import sys
 
 from export_dark_photon_cross_sections import rate_record
-from pythia_generation_ledger import read_pythia_generation_ledger
+from pythia_generation_ledger import read_pythia_generation_ledger, same_ledger_content
 
 
 SCHEMA = 'shift-dark-photon-additive-plan-v1'
@@ -163,9 +163,14 @@ def combined_rate(populations, *, point, campaign):
     """
     populations = unique_populations(populations)
     first = populations[0]['rate']
+    meson = first.get('mechanism') == 'eta-etaprime-radiative'
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
-              'sampling_epsilon', 'beam_energy_GeV', 'source_model', 'corrections',
+              'sampling_epsilon', 'beam_energy_GeV', 'source_model',
               'generated_mass_support_gev')
+    # A meson correction contains the measured all-collision mean probability,
+    # which fluctuates between independent source populations. The model card
+    # and source definition must agree; the measured means need not be equal.
+    fields += ('meson_model_card', 'rate_scope') if meson else ('corrections',)
     if any(any(population['rate'].get(key) != first.get(key) for key in fields)
            for population in populations[1:]):
         raise ValueError('Rate estimates require identical physics and generation proposals')
@@ -176,6 +181,13 @@ def combined_rate(populations, *, point, campaign):
             raise ValueError('A per-run trial ledger is required for multi-run GEN files')
         rate = record['physical_selected_cross_sections_pb'][0]
         trial = record['proposal_ledger']['n_tried']
+        if meson:
+            source = record['source_exposure']
+            trial = source['fixed_source_collisions']
+            if (source['source_collisions'] != trial or source['native_n_accepted'] != trial or
+                    record['full_gen']['source_collisions'] != trial or
+                    source['accepted_signal_events'] != record['full_gen']['accepted_events']):
+                raise ValueError('Meson source exposure differs from its complete signal population')
         if (type(trial) is not int or trial <= 0 or not math.isfinite(rate['value_pb'])
                 or rate['value_pb'] <= 0 or not math.isfinite(rate['error_pb']) or rate['error_pb'] < 0):
             raise ValueError('Invalid authoritative cross section or GEN trial count')
@@ -188,7 +200,7 @@ def combined_rate(populations, *, point, campaign):
     identities = [identity for population in populations for identity in population['parent']['event_ids']]
     counts = {key: sum(population['rate']['proposal_ledger'][key] for population in populations)
               for key in ('n_tried', 'n_selected', 'n_accepted')}
-    return dict(schema='shift-dark-photon-additive-cross-sections-v1', point=point, campaign=campaign,
+    result = dict(schema='shift-dark-photon-additive-cross-sections-v1', point=point, campaign=campaign,
         **{key: first[key] for key in MODEL_FIELDS},
         physical_br_mumu=first['physical_br_mumu'], mechanism=first['mechanism'], model=first['model'],
         cross_section_convention=first['cross_section_convention'],
@@ -206,6 +218,19 @@ def combined_rate(populations, *, point, campaign):
             record=population['rate'], duplicate_views=population.get('duplicate_views', [])) for population in populations],
         parent_gen_ledger_count=len(populations), normalization_ready=False, physics_valid=False,
         production_rate_validated=False)
+    if meson:
+        result['combination']['method'] = 'Independent identical meson-source estimates weighted by fixed source-collision exposure'
+        result['combination']['source_collisions_is_luminosity'] = False
+        result['full_gen']['source_collisions'] = total_trials
+        result['source_exposure'] = dict(schema='shift-additive-meson-source-exposure-v1',
+            fixed_source_collisions=total_trials, source_collisions=total_trials,
+            accepted_signal_events=len(identities),
+            **{key: math.fsum(population['rate']['source_exposure'][key] for population in populations)
+               for key in ('coefficient_sum', 'coefficient_sum_squared',
+                           'physical_probability_sum', 'physical_probability_sum_squared')})
+        result['meson_model_card'] = first['meson_model_card']
+        result['rate_scope'] = first['rate_scope']
+    return result
 
 
 def load_source(source, expected_model, conditions_digest):
@@ -234,14 +259,19 @@ def load_source(source, expected_model, conditions_digest):
                       ('manifest.json', 'manifest_sha256')]:
         contracts[name] = read(checked(gen / name, parent[key]))
     contract, audit, manifest = [contracts[name] for name in ('contract.json', 'validation.json', 'manifest.json')]
+    meson = contract.get('production_mechanism') == 'eta-etaprime-radiative'
+    native_count = contract['source_exposure']['source_collisions'] if meson else row['events']
+    fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
+    ledger_matches = (same_ledger_content(fresh_ledger, audit['proposal_ledger']) if meson
+                      else fresh_ledger == audit['proposal_ledger'])
     if (audit['event_ids'] != parent['event_ids'] or audit['sum_weights'] != parent['native_sumw']
             or audit['sum_weights_squared'] != parent['native_sumw2']
             or manifest['output_sha256'] != parent['gen_sha256']
-            or read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=row['events']) != audit['proposal_ledger']):
+            or not ledger_matches):
         raise ValueError('Source full GEN audit differs from its inventory')
     rate = rate_record(contract, audit, point=source['point'], campaign=plan['campaign'],
         source_hashes={name: sha(gen / name) for name in ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log')},
-        gen_path=parent['gen_path'], gen_sha256=parent['gen_sha256'])
+        gen_path=parent['gen_path'], gen_sha256=parent['gen_sha256'], source_directory=gen)
     report_path = Path(source.get('completed_point_path', directory / 'completed_points' / (source['point'] + '.json')))
     if source.get('completed_point_sha256'):
         checked(report_path, source['completed_point_sha256'])
@@ -443,7 +473,7 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     populations = unique_populations([load_source(source, row, plan['conditions']['sha256']) for source in row['sources']])
     if len(populations) < 2:
         raise ValueError('Additive production requires at least two independent GEN populations')
-    settings = ('common', 'cp5', 'beam_settings', 'process_settings', 'source_z_mm',
+    settings = ('common', 'cp5', 'beam_settings', 'process_settings', 'source_settings', 'source_z_mm',
                 'source_sigma_z_mm', 'source_model', 'timing', 'hadron_decay_policy',
                 'signal_decay_policy', 'lifetime_owner', 'signal_parent_transport')
     first_contract = populations[0]['contract']

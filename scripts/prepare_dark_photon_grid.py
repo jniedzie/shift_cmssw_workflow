@@ -137,6 +137,68 @@ def repartition_detector_chunks(chunks, event_ids, retained_chunks, events_per_j
     return result
 
 
+def meson_width_qualification(points):
+    """Bind the physical spectral widths to already-audited meson GEN files.
+
+    Meson injection does not use a native Pythia dark-photon resonance. Keep
+    its qualification distinct from the native-resonance preflight flag.
+    This validates runtime evidence, not the absolute hadron-production model.
+    """
+    qualified = {}
+    for row in points:
+        gen = Path(row['gen_directory'])
+        contract_path = Path(row['signal_contract'])
+        contract = json.loads(contract_path.read_text())
+        audit_path = gen / 'validation.json'
+        audit = json.loads(audit_path.read_text())
+        width = contract['physical_width_table']
+        total = width['total_width_gev']
+        partials = width['partial_widths_gev']
+        if (contract.get('production_mechanism') != 'eta-etaprime-radiative' or
+                contract.get('filtering') != 'none' or audit.get('runtime_validated') is not True or
+                audit.get('events') != row['events'] or contract.get('requested_events') != row['events'] or
+                any(contract[key] != row[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number')) or
+                contract != json.loads((gen / 'contract.json').read_text()) or
+                audit.get('source_exposure') != contract.get('source_exposure') or
+                width.get('spectral_source') != contract.get('width_authority')):
+            raise ValueError('Meson GEN lacks its exact physical-width/runtime qualification')
+        if (type(total) not in (int, float) or not math.isfinite(total) or total <= 0 or
+                not partials or any(not math.isfinite(value) or value < 0 for value in partials.values()) or
+                not math.isclose(math.fsum(partials.values()), total, rel_tol=1.e-10) or
+                not math.isclose(width['ctau_mm'] * total, 1.973269804e-13, rel_tol=1.e-10) or
+                width['mass_gev'] != row['mass_gev'] or width['epsilon'] != row['epsilon'] or
+                ('proper_ctau_mm' in row and not math.isclose(row['proper_ctau_mm'], width['ctau_mm'], rel_tol=1.e-10)) or
+                not math.isclose(width['br_mumu'], partials['mu_mu'] / total, rel_tol=1.e-10)):
+            raise ValueError('Meson physical partial widths, lifetime or dimuon BR do not close')
+        source = contract['source_exposure']
+        if (source.get('source_collisions') != source.get('fixed_source_collisions') or
+                type(source.get('source_collisions')) is not int or source['source_collisions'] < 2 or
+                source.get('accepted_signal_events') != row['events'] or
+                source.get('native_n_accepted') != source['source_collisions']):
+            raise ValueError('Meson source exposure was confused with its conditional output count')
+        if row['point'] in qualified:
+            raise ValueError('Meson physical points are repeated')
+        qualified[row['point']] = dict(contract_sha256=digest(contract_path),
+            validation_sha256=digest(audit_path), model_card_sha256=contract['meson_model_card_sha256'])
+    if not qualified:
+        raise ValueError('Require a nonempty audited meson population')
+    return dict(schema='shift-meson-physical-width-preflight-v1', points=qualified,
+                absolute_production_rate_validated=False)
+
+
+def validate_physical_preflight(plan):
+    if not isinstance(plan, dict):
+        raise ValueError('Require a qualified physical GEN plan')
+    if plan.get('native_width_preflight_passed') is True:
+        if plan.get('production_mechanism') == 'eta-etaprime-radiative':
+            raise ValueError('Meson injection cannot claim native-resonance qualification')
+        return
+    if (plan.get('production_mechanism') != 'eta-etaprime-radiative' or
+            plan.get('physical_width_preflight_passed') is not True or
+            plan.get('meson_width_qualification') != meson_width_qualification(plan['points'])):
+        raise ValueError('Detector stages require completed physical-width preflight')
+
+
 def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
                         group_events=2000, detector_job_base=1000000):
     """Prepare complete detector slices and same-point Nano groups, without I/O.
@@ -146,8 +208,7 @@ def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
     weights, and group all slices before starting any histogramming. A group
     boundary may shorten a slice; different physical points never share a file.
     """
-    if not isinstance(physical_plan, dict) or physical_plan.get('native_width_preflight_passed') is not True:
-        raise ValueError('Detector stages require completed native-width preflight')
+    validate_physical_preflight(physical_plan)
     if not isinstance(campaign, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', campaign):
         raise ValueError('Require a valid detector stage campaign name')
     dates = re.findall(r'(?<![0-9])(20[0-9]{6})(?![0-9])', campaign)

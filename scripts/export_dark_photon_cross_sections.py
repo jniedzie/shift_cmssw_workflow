@@ -8,7 +8,9 @@ It never submits, edits a sealed deployment, overwrites a different artifact,
 or combines independent cross-section estimates without their trial weights.
 """
 import argparse
+import atexit
 from datetime import datetime, timezone
+import gzip
 import hashlib
 import json
 import math
@@ -19,11 +21,22 @@ import shutil
 import subprocess
 import tempfile
 
-from pythia_generation_ledger import read_pythia_generation_ledger
+from pythia_generation_ledger import read_pythia_generation_ledger, same_ledger_content
 
 
 SCHEMA = "shift-dark-photon-cross-sections-v1"
 SAFE_NAME = re.compile(r"[A-Za-z0-9_-]+")
+_MESON_LEDGER_READBACKS = {}
+
+
+def cleanup_meson_ledger_readbacks():
+    """Remove only temporary remote readbacks created by this process."""
+    for temporary, unused_path in _MESON_LEDGER_READBACKS.values():
+        temporary.cleanup()
+    _MESON_LEDGER_READBACKS.clear()
+
+
+atexit.register(cleanup_meson_ledger_readbacks)
 
 
 def sha256(path):
@@ -85,8 +98,388 @@ def dimuon_branching(table):
     return value
 
 
-def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256):
+def nonnegative(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError("Require finite nonnegative " + name)
+    return float(value)
+
+
+def same_number(actual, expected, name):
+    if not math.isclose(nonnegative(actual, name), expected, rel_tol=1e-10, abs_tol=1e-100):
+        raise ValueError("Meson source accounting differs: " + name)
+
+
+def same_signed_number(actual, expected, name):
+    if (type(actual) not in (int, float) or not math.isfinite(actual) or
+            not math.isclose(actual, expected, rel_tol=1e-10, abs_tol=1e-100)):
+        raise ValueError("Meson native precision accounting differs: " + name)
+
+
+def open_meson_ledger(path):
+    """Read the exact JSONL text without expanding a compressed ledger on disk."""
+    path = Path(path)
+    return gzip.open(path, "rt", encoding="utf-8") if path.suffix == ".gz" else path.open(encoding="utf-8")
+
+
+def meson_ledger_readback(path, receipt):
+    """Fetch a frozen ledger when this worker has no native EOS mount.
+
+    One verified download per immutable receipt is reused within a process.
+    The caller still checks the actual encoded and original hashes. Temporary
+    files remain in worker scratch or /tmp and are removed at process exit.
+    """
+    key = (str(path), receipt['sha256'], receipt['bytes'],
+           receipt['uncompressed_sha256'], receipt['uncompressed_bytes'])
+    if key in _MESON_LEDGER_READBACKS:
+        return _MESON_LEDGER_READBACKS[key][1]
+    scratch = Path(os.environ.get('_CONDOR_SCRATCH_DIR', '/tmp'))
+    if not scratch.is_absolute() or str(scratch).startswith(('/afs/', '/eos/')):
+        raise ValueError('Meson ledger readback requires local worker scratch or /tmp')
+    temporary = tempfile.TemporaryDirectory(prefix='dp-meson-ledger-', dir=scratch)
+    target = Path(temporary.name) / path.name
+    environment = {key: value for key, value in os.environ.items() if key not in
+                   ('PYTHONPATH', 'PYTHONHOME', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'ROOTSYS')}
+    environment['PATH'] = '/usr/bin:/bin'
+    try:
+        subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
+            'root://eosuser.cern.ch/' + str(path), str(target)],
+            env=environment, check=True, capture_output=True, text=True, timeout=1800)
+        if target.stat().st_size != receipt['bytes'] or sha256(target) != receipt['sha256']:
+            raise ValueError('Remote meson ledger readback failed SHA-256/size verification')
+    except Exception:
+        temporary.cleanup()
+        raise
+    _MESON_LEDGER_READBACKS[key] = (temporary, target)
+    return target
+
+
+def resolve_meson_ledger(directory, contract):
+    """Resolve one local ledger or a pinned canonical EOS publication.
+
+    The receipt preserves both stored and original byte identities. It never
+    substitutes for reading the actual publication, including decompressed
+    bytes for gzip. No inventory discovery or compatibility alias is used.
+    """
+    directory = Path(directory)
+    expected = contract["source_ledger_sha256"]
+    local = directory / "meson_source_ledger.jsonl"
+    if local.is_file():
+        if sha256(local) != expected:
+            raise ValueError("Pinned meson source input changed: meson_source_ledger.jsonl")
+        return local
+    receipt = read(directory / "meson_ledger_publication.json")
+    if receipt.get("schema") != "shift-meson-source-ledger-publication-v1":
+        raise ValueError("Unknown meson source ledger publication receipt")
+    name = receipt.get("path")
+    if not isinstance(name, str):
+        raise ValueError("Meson source ledger publication requires an explicit EOS path")
+    path = Path(name)
+    allowed = ("/eos/user/j/jniedzie/shift_cmssw/", "/eos/user/j/jniedzie/shift_cmssw_support/")
+    if (not path.is_absolute() or ".." in path.parts or str(path) != name or
+            not name.startswith(allowed)):
+        raise ValueError("Meson source ledger publication is outside its canonical EOS namespace")
+    encoding = receipt.get("encoding")
+    filename = "meson_source_ledger.jsonl.gz" if encoding == "gzip" else "meson_source_ledger.jsonl"
+    if encoding not in ("identity", "gzip") or path.name != filename:
+        raise ValueError("Meson source ledger encoding or canonical filename changed")
+    if (type(receipt.get("bytes")) is not int or receipt["bytes"] <= 0 or
+            type(receipt.get("uncompressed_bytes")) is not int or receipt["uncompressed_bytes"] <= 0 or
+            receipt.get("sha256") != receipt.get("readback_sha256") or
+            receipt.get("uncompressed_sha256") != expected):
+        raise ValueError("Meson source ledger publication proof differs from its frozen authority")
+    try:
+        stored_size = path.stat().st_size
+    except FileNotFoundError:
+        path = meson_ledger_readback(path, receipt)
+        stored_size = path.stat().st_size
+    if stored_size != receipt["bytes"] or sha256(path) != receipt["sha256"]:
+        raise ValueError("Published meson source ledger failed SHA-256/size readback")
+    if encoding == "identity":
+        if receipt["sha256"] != expected or receipt["bytes"] != receipt["uncompressed_bytes"]:
+            raise ValueError("Uncompressed meson source ledger identity changed")
+    else:
+        checksum, size = hashlib.sha256(), 0
+        with gzip.open(path, "rb") as source:
+            for block in iter(lambda: source.read(1048576), b""):
+                size += len(block)
+                checksum.update(block)
+        if size != receipt["uncompressed_bytes"] or checksum.hexdigest() != expected:
+            raise ValueError("Decompressed meson source ledger differs from its full original bytes")
+    return path
+
+
+def meson_source_exposure(contract, directory):
+    """Reconstruct the fixed collision exposure, including failures and zeroes.
+
+    The collision probability already includes BR(A' -> mumu). Pythia's
+    successful source count is independent of the number of emitted signal
+    events. Never replace its terminal counters with the latter.
+    """
+    from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_form_factor_abs2
+
+    directory = Path(directory)
+    exposure_path = directory / "source_exposure.json"
+    ledger_path = resolve_meson_ledger(directory, contract)
+    model_path = directory / "meson_model.json"
+    for path, key in [(exposure_path, "source_exposure_sha256"),
+                      (model_path, "meson_model_card_sha256")]:
+        if not path.is_file() or sha256(path) != contract.get(key):
+            raise ValueError("Pinned meson source input changed: " + path.name)
+    exposure, card = read(exposure_path), read(model_path)
+    if exposure != contract.get("source_exposure") or card != contract.get("meson_model_card"):
+        raise ValueError("Frozen meson source/model differs from its contract")
+    if exposure.get("schema") != "shift-meson-source-exposure-v1":
+        raise ValueError("Unknown meson source exposure schema")
+    if card.get("schema") != "shift-dark-photon-meson-model-v1":
+        raise ValueError("Unknown meson physical model card")
+    parents = {item["pdg_id"]: item for item in card["parents"]}
+    if not parents or set(parents) - {221, 331} or len(parents) != len(card["parents"]):
+        raise ValueError("Require distinct eta/eta-prime parent models")
+    for flag in ("coefficient_includes_br_mumu", "coefficient_excludes_epsilon_squared", "unit_output_gen_weights"):
+        if exposure.get(flag) is not True:
+            raise ValueError("Meson source convention is missing: " + flag)
+    if exposure.get("source_ledger_sha256") != contract["source_ledger_sha256"]:
+        raise ValueError("Meson source ledger ownership changed")
+    count = exposure["fixed_source_collisions"]
+    if type(count) is not int or count <= 1 or exposure["source_collisions"] != count:
+        raise ValueError("Require a fixed source exposure of at least two collisions")
+    bound = positive(exposure["analytic_coefficient_bound"], "analytic meson coefficient bound")
+    epsilon = positive(contract["epsilon"], "physical meson epsilon")
+    if epsilon > .1 or positive(contract["mass_gev"], "dimuon mass") <= 2 * MUON_MASS_GEV:
+        raise ValueError("Meson signal requires an open dimuon channel and small physical mixing")
+    width = contract["physical_width_table"]
+    branching = dimuon_branching(width)
+    same_number(width["mass_gev"], contract["mass_gev"], "physical width mass")
+    same_number(width["epsilon"], epsilon, "physical width epsilon")
+    positive(width["ctau_mm"], "physical proper lifetime")
+    total_width = positive(width["total_width_gev"], "physical total width")
+    same_number(math.fsum(nonnegative(value, "partial width")
+                          for value in width["partial_widths_gev"].values()), total_width, "partial width sum")
+    same_number(width["partial_widths_gev"]["mu_mu"] / total_width, branching, "physical dimuon branching")
+    same_number(width["ctau_mm"] * total_width, 1.973269804e-13, "proper lifetime-width relation")
+    if width.get("spectral_source") != contract.get("width_authority"):
+        raise ValueError("Meson width table differs from its pinned spectral authority")
+    precision = contract.get("source_precision")
+    precision_models = {}
+    if precision is not None:
+        from dark_photon_meson_source import model_precision_budget, resolve_parent_kinematics
+        if precision.get("check_event") is not True:
+            raise ValueError("The native Pythia event check must remain enabled")
+        positive(precision["mass_tolerance"], "native Pythia mass tolerance")
+        positive(precision["energy_tolerance"], "native Pythia energy tolerance")
+        reference = Path(precision["reference"])
+        if reference.name != "ErrorChecks.xml" or sha256(reference) != precision["reference_sha256"]:
+            raise ValueError("Pinned native Pythia precision reference changed")
+        if precision.get("prescription") != "native generated mass for branching and bound; unchanged p4 invariant for decay":
+            raise ValueError("Native parent precision prescription changed")
+        for support in precision["parents"]:
+            pdg = support["pdg_id"]
+            if pdg not in parents or pdg in precision_models:
+                raise ValueError("Native parent mass support has changed or repeated species")
+            lower = positive(support["mass_min_gev"], "native minimum parent mass")
+            upper = positive(support["mass_max_gev"], "native maximum parent mass")
+            if upper < lower:
+                raise ValueError("Native parent mass support is reversed")
+            parent = parents[pdg]
+            opened = upper > contract["mass_gev"]
+            precision_models[pdg] = dict(mass_min_gev=lower, mass_max_gev=upper,
+                br_gamma_gamma=parent["br_gamma_gamma"],
+                form_factor_abs2=transition_form_factor_abs2(contract["mass_gev"], parent["transition_form_factor"]) if opened else 1.,
+                relative_model_uncertainty=model_precision_budget(parent, contract["mass_gev"]) if opened else 0.)
+            stored_model = contract["resolved_parent_models"][str(pdg)]
+            for key, value in precision_models[pdg].items():
+                same_number(stored_model[key], value, "resolved parent " + key)
+        if set(precision_models) != set(parents):
+            raise ValueError("Native precision support does not cover every parent species")
+    calls = successes = failures = zeroes = 0
+    slots = []
+    totals = {name: [0., 0.] for name in ("coefficient_sum", "coefficient_sum_squared",
+              "physical_probability_sum", "physical_probability_sum_squared")}
+    if precision is not None:
+        totals["coefficient_precision_difference_sum"] = [0., 0.]
+    maximum_precision_shift = 0.
+
+    def accumulate(name, value):
+        # Compensated sums keep full-source ledgers bounded in memory.
+        total, lost = totals[name]
+        adjusted = value - lost
+        updated = total + adjusted
+        totals[name] = [updated, (updated - total) - adjusted]
+
+    # Stream the complete ledger without keeping all collisions in memory.
+    with open_meson_ledger(ledger_path) as source:
+        for line in source:
+            row = json.loads(line)
+            calls += 1
+            if row.get("schema") != "shift-meson-source-trial-v1" or type(row.get("trial")) is not int or row["trial"] != calls:
+                raise ValueError("Meson source trial identities are missing or duplicated")
+            if type(row.get("generator_success")) is not bool or type(row.get("accepted")) is not bool:
+                raise ValueError("Meson source trial flags must be explicit booleans")
+            coefficient = nonnegative(row["coefficient_sum"], "collision coefficient")
+            probability = nonnegative(row["physical_probability"], "collision physical probability")
+            acceptance = nonnegative(row["acceptance_probability"], "conditional acceptance probability")
+            if not row["generator_success"]:
+                failures += 1
+                if (row.get("native_weight") is not None or row["parents"] or coefficient or probability or acceptance
+                        or row["accepted"] or row.get("parent_index") is not None or row.get("accepted_slot") is not None):
+                    raise ValueError("Failed generator call was counted as a source collision")
+                continue
+            successes += 1
+            if row["native_weight"] != 1. or type(row["native_weight"]) is bool:
+                raise ValueError("Meson source requires unit native collision weights")
+            identities, weights = set(), {}
+            checked_parents = {}
+            if precision is not None:
+                checked_parents = {parent["index"]: parent for parent in resolve_parent_kinematics(
+                    row["parents"], precision["mass_tolerance"], contract["mass_gev"], precision_models, branching)}
+            for parent in row["parents"]:
+                identity, pdg = parent["index"], parent["pdg_id"]
+                if type(identity) is not int or identity <= 0 or identity in identities or pdg not in parents:
+                    raise ValueError("Meson parent identities are duplicated or unsupported")
+                identities.add(identity)
+                mass = positive(parent["mass_gev"], "generated parent mass")
+                p4 = parent["p4"]
+                if len(p4) != 4 or not all(type(value) in (int, float) and math.isfinite(value) for value in p4) or p4[0] <= 0:
+                    raise ValueError("Invalid source parent four-vector")
+                invariant = p4[0]**2 - math.fsum(value**2 for value in p4[1:])
+                if precision is not None:
+                    checked_parent = checked_parents[identity]
+                    same_number(parent["native_mass_gev"], mass, "native generated mass")
+                    model = precision_models[pdg]
+                    if not model["mass_min_gev"] <= mass <= model["mass_max_gev"]:
+                        raise ValueError("Native generated mass violates its frozen support")
+                    for key in ("kinematic_mass_gev", "native_mass_shell_deviation",
+                                "coefficient_relative_precision_shift", "coefficient_difference_from_kinematic_mass"):
+                        same_signed_number(parent[key], checked_parent[key], key)
+                    shift = parent["coefficient_relative_precision_shift"]
+                    maximum_precision_shift = max(maximum_precision_shift, abs(shift))
+                    accumulate("coefficient_precision_difference_sum", parent["coefficient_difference_from_kinematic_mass"])
+                elif not math.isclose(invariant, mass**2, rel_tol=1e-6, abs_tol=1e-8):
+                    raise ValueError("Source parent four-vector and mass disagree")
+                if mass <= contract["mass_gev"]:
+                    weights[identity] = 0.
+                    continue
+                model = parents[pdg]
+                form_factor = transition_form_factor_abs2(contract["mass_gev"], model["transition_form_factor"])
+                weights[identity] = radiative_branching(mass, contract["mass_gev"], 1e-3,
+                    model["br_gamma_gamma"], math.sqrt(form_factor)) / 1e-6 * branching
+            expected = math.fsum(weights.values())
+            same_number(coefficient, expected, "per-collision parent branching sum")
+            same_number(probability, epsilon**2 * coefficient, "epsilon-squared probability")
+            same_number(acceptance, coefficient / bound, "conditional source acceptance")
+            if acceptance > 1. + 1e-12 or probability > 1.:
+                raise ValueError("Meson collision probability exceeds its physical/analytic bound")
+            if expected == 0:
+                zeroes += 1
+            if row["accepted"]:
+                slot = row.get("accepted_slot")
+                if type(slot) is not int or slot != len(slots) + 1 or weights.get(row.get("parent_index"), 0.) <= 0:
+                    raise ValueError("Accepted meson signal lacks a unique physical parent/slot")
+                slots.append(slot)
+            elif row.get("accepted_slot") is not None or row.get("parent_index") is not None:
+                raise ValueError("Rejected source collision owns an emitted signal")
+            accumulate("coefficient_sum", coefficient)
+            accumulate("coefficient_sum_squared", coefficient**2)
+            accumulate("physical_probability_sum", probability)
+            accumulate("physical_probability_sum_squared", probability**2)
+    if successes != count:
+        raise ValueError("Meson source ledger does not cover its full fixed exposure")
+    expected = dict(source_calls=calls, source_collisions=successes, generator_failures=failures,
+        zero_eligible_parent_collisions=zeroes, sum_native_weights=float(successes),
+        sum_native_weights_squared=float(successes),
+        **{name: value[0] for name, value in totals.items()},
+        accepted_signal_events=len(slots))
+    for name, value in expected.items():
+        if type(value) is int and type(exposure[name]) is not int:
+            raise ValueError("Meson source counter must be an integer: " + name)
+        if name == "coefficient_precision_difference_sum":
+            same_signed_number(exposure[name], value, name)
+        else:
+            same_number(exposure[name], value, name)
+    if precision is not None:
+        same_number(exposure["maximum_coefficient_relative_precision_shift"], maximum_precision_shift, "maximum parent precision shift")
+        same_signed_number(exposure["relative_rate_precision_shift"],
+            expected["coefficient_precision_difference_sum"]/expected["coefficient_sum"], "full-source relative rate precision shift")
+    if len(slots) != contract["requested_events"] or not slots:
+        raise ValueError("Meson output count differs from its accepted source slots")
+    sigma = positive(exposure["sigma_source_mb"], "unfiltered source cross section in mb")
+    error = nonnegative(exposure["sigma_source_error_mb"], "source cross-section error in mb")
+    mean = expected["physical_probability_sum"] / count
+    residual = expected["physical_probability_sum_squared"] - expected["physical_probability_sum"]**2 / count
+    tolerance = 1e-12 * expected["physical_probability_sum_squared"]
+    if residual < -tolerance:
+        raise ValueError("Meson source variance is negative")
+    variance = max(0., residual) / (count * (count - 1))
+    source_error = error * 1e9 * mean
+    collision_error = sigma * 1e9 * math.sqrt(variance)
+    rate = dict(value_pb=sigma * 1e9 * mean, error_pb=math.hypot(source_error, collision_error))
+    return exposure, rate, dict(source_cross_section_error_pb=source_error,
+        collision_probability_error_pb=collision_error, mean_collision_probability=mean,
+        variance_of_mean_collision_probability=variance,
+        error_combination="Source cross-section and collision-probability statistical errors in quadrature; correlation not evaluated")
+
+
+def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256, source_directory):
+    if source_directory is None:
+        raise ValueError("Meson rate retention requires its full frozen source directory")
+    exposure, rate, uncertainty = meson_source_exposure(contract, source_directory)
+    events = audit["events"]
+    if (contract.get("schema") != "shift-dark-photon-gen-v1" or contract.get("decay_mode") != "mumu"
+            or contract.get("filtering") != "none" or audit.get("runtime_validated") is not True):
+        raise ValueError("Require a completed, unfiltered meson signal runtime audit")
+    if type(events) is not int or events <= 0 or events != contract["requested_events"]:
+        raise ValueError("Full meson GEN output count differs from its contract")
+    expected_ids = [[contract["run_number"], 1, slot] for slot in range(1, events + 1)]
+    if audit["event_ids"] != expected_ids or audit["sum_weights"] != events or audit["sum_weights_squared"] != events:
+        raise ValueError("Meson output identities or unit-weight denominators differ")
+    ledger = audit["proposal_ledger"]
+    count = exposure["source_collisions"]
+    if (ledger["n_accepted"] != count or ledger["n_tried"] != exposure["native_n_tried"]
+            or ledger["n_accepted"] != exposure["native_n_accepted"]
+            or not ledger["n_tried"] >= ledger["n_selected"] >= count):
+        raise ValueError("Native Pythia source counters were replaced by signal output counts")
+    # Printed Pythia statistics have fewer significant figures than sigmaGen.
+    if not math.isclose(ledger["printed_cross_section_mb"], exposure["sigma_source_mb"], rel_tol=1e-3):
+        raise ValueError("Native source cross section differs from its printed mb diagnostic")
+    width, branching = contract["physical_width_table"], dimuon_branching(contract["physical_width_table"])
+    identity_digest = hashlib.sha256(json.dumps(audit["event_ids"], separators=(",", ":")).encode()).hexdigest()
+    return dict(schema=SCHEMA, point=point, campaign=campaign,
+        mass_gev=contract["mass_gev"], epsilon=contract["epsilon"], sampling_epsilon=contract["epsilon"],
+        proper_ctau_mm=width["ctau_mm"], physical_br_mumu=branching,
+        corrections=dict(common_amplitude=contract["epsilon"]**2, branching_ratio=1.,
+            combined=uncertainty["mean_collision_probability"], applications=1,
+            parent_branching_and_dimuon_branching_in_source_coefficient=True,
+            extra_decay_branching_fraction_applied=False, extra_detector_or_generator_filter_efficiency_applied=False),
+        native_source_cross_sections_pb=[dict(value_pb=exposure["sigma_source_mb"]*1e9,
+            error_pb=exposure["sigma_source_error_mb"]*1e9)],
+        physical_selected_cross_sections_pb=[rate],
+        physical_inclusive_cross_sections_pb=[dict(value_pb=rate["value_pb"]/branching, error_pb=rate["error_pb"]/branching)],
+        inclusive_rate_derivation="Single-A-prime eta/eta-prime rate before the forced dimuon channel; selected rate divided by physical BR_mumu once",
+        cross_section_authority="Full-precision unfiltered Pythia sigmaGen [mb] times the fixed all-collision mean physical radiative probability; converted to pb",
+        cross_section_convention="sigma_source_mb * 1e9 * sum_collision_probability / fixed_source_collisions; probability includes radiative and dimuon BRs once",
+        source_exposure=exposure, source_exposure_sha256=contract["source_exposure_sha256"],
+        source_ledger_sha256=contract["source_ledger_sha256"], rate_uncertainty=uncertainty,
+        combination_rule="Independent identical meson-source estimates require fixed source-collision exposure; never use signal N or Pythia n_tried weights",
+        full_gen=dict(accepted_events=events, sum_weights=float(events), sum_weights_squared=float(events),
+            event_ids_sha256=identity_digest, event_ids_file="metadata/GEN/validation.json",
+            n_tried=ledger["n_tried"], n_selected=ledger["n_selected"], n_accepted=ledger["n_accepted"],
+            source_collisions=count, full_gen_denominator=audit["full_gen_denominator"],
+            interpretation="accepted_events counts conditional unit-weight signal outputs; native counters count the unfiltered parent source; rate denominator is fixed source_collisions"),
+        proposal_ledger=ledger, physical_width_authority=width, meson_model_card=contract["meson_model_card"],
+        meson_model_card_sha256=contract["meson_model_card_sha256"], mechanism="eta-etaprime-radiative",
+        model=contract["model"], generated_mass_support_gev=contract["generated_mass_support_gev"],
+        beam_energy_GeV=contract["beam_energy_GeV"], source_model=contract["source_model"],
+        seed=contract["seed"], run_number=contract["run_number"], rate_scope=audit["rate_scope"],
+        runtime_validated=True, physics_valid=False, normalization_ready=False, production_rate_validated=False,
+        low_mass_mechanisms_included=True, prompt_interference_included=False,
+        gen_path=gen_path, gen_sha256=gen_sha256, source_sha256=source_hashes, exporter_sha256=sha256(__file__))
+
+
+def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256, source_directory=None):
     """Keep proposal and physical dimuon rates distinct; correct exactly once."""
+    if contract.get("production_mechanism") == "eta-etaprime-radiative":
+        return meson_rate_record(contract, audit, point=point, campaign=campaign,
+            source_hashes=source_hashes, gen_path=gen_path, gen_sha256=gen_sha256, source_directory=source_directory)
     if contract.get("schema") != "shift-dark-photon-gen-v1" or contract.get("decay_mode") != "mumu":
         raise ValueError("Exporter currently requires the audited dimuon GEN contract")
     if audit.get("runtime_validated") is not True or contract.get("filtering") != "none":
@@ -175,6 +568,12 @@ def input_files(directory, manifest):
     """Retain source/config/log authorities and spectral inputs; no ROOT copies."""
     directory = Path(directory)
     names = {"contract.json", "manifest.json", "validation.json", "cmsRun.log", "resolved_cfg.py", "audit.log"}
+    if read(directory / "contract.json").get("production_mechanism") == "eta-etaprime-radiative":
+        names.update({"source_exposure.json", "meson_model.json"})
+        if (directory / "meson_source_ledger.jsonl").is_file():
+            names.add("meson_source_ledger.jsonl")
+        else:
+            names.add("meson_ledger_publication.json")
     for name, expected in manifest.get("source_sha256", {}).items():
         path = directory / name
         if not path.is_file() or sha256(path) != expected:
@@ -268,8 +667,12 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
         if (audit["event_ids"] != parent["event_ids"] or audit["sum_weights"] != parent["native_sumw"] or
                 audit["sum_weights_squared"] != parent["native_sumw2"] or manifest["output_sha256"] != parent["gen_sha256"]):
             raise ValueError("Production GEN population differs from its retained audit")
-        fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=audit["events"])
-        if fresh_ledger != audit["proposal_ledger"]:
+        meson = contract.get("production_mechanism") == "eta-etaprime-radiative"
+        expected_native = contract["source_exposure"]["source_collisions"] if meson else audit["events"]
+        fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=expected_native)
+        ledger_matches = (same_ledger_content(fresh_ledger, audit["proposal_ledger"]) if meson
+                          else fresh_ledger == audit["proposal_ledger"])
+        if not ledger_matches:
             raise ValueError("Generator log differs from the retained trial ledger")
         if publication:
             proof = published[name]
@@ -279,7 +682,7 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
         elif sha256(parent["gen_path"]) != parent["gen_sha256"]:
             raise ValueError("Retained local GEN differs from its full audit")
         record = rate_record(contract, audit, point=name, campaign=campaign,
-            source_hashes=source_hashes, gen_path=parent["gen_path"], gen_sha256=parent["gen_sha256"])
+            source_hashes=source_hashes, gen_path=parent["gen_path"], gen_sha256=parent["gen_sha256"], source_directory=gen)
         base = Path(row["final_output_base"])
         if base.name != campaign or base.parent.name != "darkphoton_" + name:
             raise ValueError("Point publication directory does not match its campaign")
@@ -288,7 +691,18 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
         for filename in input_files(gen, manifest):
             source = gen / filename
             local = stage / "metadata" / "GEN" / filename
-            retain_bytes(local, source.read_bytes())
+            if meson and filename == "meson_source_ledger.jsonl":
+                local.parent.mkdir(parents=True, exist_ok=True)
+                if local.exists():
+                    if sha256(local) != sha256(source):
+                        raise ValueError("Refuse to overwrite different retained meson source ledger")
+                else:
+                    with source.open("rb") as incoming, local.open("xb") as outgoing:
+                        shutil.copyfileobj(incoming, outgoing)
+                if local.stat().st_size != source.stat().st_size or sha256(local) != sha256(source):
+                    raise ValueError("Retained meson source ledger failed SHA-256/size readback")
+            else:
+                retain_bytes(local, source.read_bytes())
             retained.append(dict(local_path=str(local), path=str(base / "metadata" / "GEN" / filename),
                                  bytes=local.stat().st_size, sha256=sha256(local)))
         record["retained_gen_metadata"] = [dict(path=item["path"], bytes=item["bytes"], sha256=item["sha256"]) for item in retained]

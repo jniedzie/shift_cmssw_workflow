@@ -17,6 +17,23 @@ class DurableSubmission(unittest.TestCase):
         row.update(changes)
         return row
 
+    def test_history_lookup_uses_one_exact_match_for_a_known_job(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            for cluster, limit in ((123, '1'), (None, '2')):
+                with self.subTest(cluster=cluster), \
+                     patch.object(controller, 'scheduler_arguments', return_value=[]), \
+                     patch.object(controller, 'run_condor',
+                                  return_value=json.dumps([self.ad(directory)])) as command:
+                    self.assertEqual(controller.verify_submitted_job({}, directory, [], cluster), 123)
+                    arguments = command.call_args.args[0]
+                    self.assertEqual(arguments[arguments.index('-limit') + 1], limit)
+                    if cluster is not None:
+                        self.assertIn('123.0', arguments)
+                        self.assertNotIn('-constraint', arguments)
+                    else:
+                        self.assertIn('-constraint', arguments)
+
     def test_ambiguous_intent_never_resubmits(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
@@ -110,6 +127,17 @@ class DurableSubmission(unittest.TestCase):
 
 
 class AggregateSubmission(unittest.TestCase):
+    def prepare(self, point, sources, target):
+        target.mkdir(parents=True)
+        controller.new(target / 'plan.json', dict(schema='shift-dark-photon-additive-plan-v1',
+            histogram_only=True, campaign='synthetic', points=[dict(point=point, sources=sources)]))
+        template = target / 'aggregate.sub.in'
+        template.write_text('arguments = SEAL_DIGEST\nqueue\n')
+        controller.new(target / 'seal.json', dict(files={str(path): controller.sha(path)
+            for path in (target / 'plan.json', template)}))
+        (target / 'aggregate.sub').write_text(template.read_text().replace(
+            'SEAL_DIGEST', controller.sha(target / 'seal.json')))
+
     def test_crash_after_native_submission_recovers_the_same_aggregate(self):
         class ControllerCrash(BaseException):
             pass
@@ -132,11 +160,8 @@ class AggregateSubmission(unittest.TestCase):
             original_save = controller.save
 
             def prepare(config, point, sources, target):
-                target.mkdir(parents=True)
                 prepared.append(target)
-                controller.new(target / 'plan.json', dict(campaign='synthetic', points=[]))
-                controller.new(target / 'seal.json', {})
-                (target / 'aggregate.sub').write_text('queue\n')
+                self.prepare(point, sources, target)
 
             def queue(config, constraint):
                 return queued
@@ -175,6 +200,157 @@ class AggregateSubmission(unittest.TestCase):
             self.assertEqual(prepared, [directory / 'aggregates/m15_prompt/v0001'])
             self.assertEqual(list((directory / 'aggregates/m15_prompt').iterdir()), prepared)
             self.assertEqual(controller.read(state_path)['aggregates']['m15_prompt']['cluster'], 123)
+
+    def test_committed_warning_and_lost_controller_state_recover_v1_without_resubmitting(self):
+        class Transport:
+            def __init__(self, host, cache_directory):
+                self.cache_directory = Path(cache_directory)
+                self.cache_directory.mkdir(exist_ok=True)
+
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            controller.new(directory / 'worklist.json', dict(waves=[dict(batches=[dict(point='m15_prompt')])]))
+            config = dict(directory=str(directory), aggregate_workers=1,
+                          worklist=str(directory / 'worklist.json'))
+            populations = [dict(point='m15_prompt', plan_path=str(path)) for path in
+                           (directory / 'baseline.json', directory / 'waves/w000/production/plan.json')]
+            queued, submissions = [], []
+
+            def command(arguments, **options):
+                if '-dry-run' in arguments:
+                    return ''
+                submissions.append(arguments)
+                target = directory / 'aggregates/m15_prompt/v0001'
+                queued.append(dict(ClusterId=123, ProcId=0, JobStatus=2, Iwd=str(target),
+                                   ShiftDPStatisticsTask=str(target)))
+                raise RuntimeError('Scheduler state unknown: warning after committed submission')
+
+            with patch('watch_dark_photon_production.EosRpc', Transport), \
+                 patch.object(controller, 'available_sources', return_value={'m15_prompt': populations}), \
+                 patch.object(controller, 'aggregate_plan', side_effect=lambda config, point, sources, target:
+                              self.prepare(point, sources, target)) as prepare, \
+                 patch.object(controller, 'scheduler_arguments', return_value=[]), \
+                 patch.object(controller, 'jobs', side_effect=lambda *args: queued), \
+                 patch.object(controller, 'run_condor', side_effect=command):
+                with self.assertRaisesRegex(RuntimeError, 'committed submission'):
+                    controller.publish(config, {})
+                # Reproduce the old controller's lost pending state after the error.
+                restarted = {}
+                controller.publish(config, restarted)
+            self.assertEqual(len(submissions), 1)
+            self.assertEqual(prepare.call_count, 1)
+            self.assertEqual(restarted['aggregates']['m15_prompt']['cluster'], 123)
+            self.assertEqual([path.name for path in (directory / 'aggregates/m15_prompt').iterdir()], ['v0001'])
+
+    def test_orphan_intent_with_unknown_scheduler_state_blocks_a_new_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            populations = [dict(plan_path='/baseline.json'), dict(plan_path='/waves/w000/production/plan.json')]
+            target = directory / 'aggregates/m15_prompt/v0001'
+            self.prepare('m15_prompt', populations, target)
+            controller.new(target / 'submission_intent.json', dict(task=str(target),
+                submit_sha256=controller.sha(target / 'aggregate.sub')))
+            state = {}
+            recovered = controller.reconcile_aggregate(dict(directory=str(directory)), state, 'm15_prompt', populations)
+            with patch.object(controller, 'jobs', return_value=[]), \
+                 patch.object(controller, 'scheduler_arguments', return_value=[]), \
+                 patch.object(controller, 'run_condor', return_value='[]') as command:
+                with self.assertRaisesRegex(RuntimeError, 'Ambiguous submitted job'):
+                    controller.submission({}, recovered['directory'], target / 'aggregate.sub')
+            self.assertEqual(command.call_count, 1)
+            self.assertIn('condor_history', command.call_args.args[0][0])
+            self.assertEqual(list(target.parent.iterdir()), [target])
+
+    def test_multiple_or_changed_orphans_fail_closed_before_submission(self):
+        for mode in ('multiple', 'changed_source', 'changed_template', 'changed_pending'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                populations = [dict(plan_path='/baseline.json', plan_sha256='a'),
+                               dict(plan_path='/waves/w000/production/plan.json', plan_sha256='b')]
+                target = directory / 'aggregates/m15_prompt/v0001'
+                self.prepare('m15_prompt', populations, target)
+                state = {}
+                if mode == 'multiple':
+                    self.prepare('m15_prompt', populations, target.parent / 'v0002')
+                elif mode == 'changed_source':
+                    populations = [dict(item, plan_sha256='changed') for item in populations]
+                elif mode == 'changed_template':
+                    (target / 'aggregate.sub.in').write_text('changed\n')
+                else:
+                    state = dict(aggregates=dict(m15_prompt=dict(directory='/another/path')))
+                with patch.object(controller, 'submission') as submit:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        controller.reconcile_aggregate(dict(directory=str(directory)), state, 'm15_prompt', populations)
+                    submit.assert_not_called()
+
+    def test_new_sources_do_not_replace_the_single_pending_population(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            populations = [dict(plan_path='/baseline.json'), dict(plan_path='/waves/w000/production/plan.json')]
+            target = directory / 'aggregates/m15_prompt/v0001'
+            self.prepare('m15_prompt', populations, target)
+            state = {}
+            record = controller.reconcile_aggregate(dict(directory=str(directory)), state, 'm15_prompt',
+                populations + [dict(plan_path='/waves/w001/production/plan.json')])
+            self.assertEqual(record['source_plans'], [item['plan_path'] for item in populations])
+            self.assertEqual(controller.read(target / 'aggregate_intent.json'), record)
+
+    def test_verified_previous_publication_allows_the_next_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            populations = [dict(plan_path='/baseline.json'), dict(plan_path='/waves/w000/production/plan.json')]
+            target = directory / 'aggregates/m15_prompt/v0001'
+            self.prepare('m15_prompt', populations, target)
+            receipt = target / 'completed_points/m15_prompt.json'
+            receipt.parent.mkdir()
+            controller.new(receipt, dict(complete=True))
+            state = dict(published=dict(m15_prompt=dict(point_receipt_path=str(receipt),
+                point_receipt_sha256=controller.sha(receipt), source_plans=[item['plan_path'] for item in populations])))
+            self.assertIsNone(controller.reconcile_aggregate(dict(directory=str(directory)), state, 'm15_prompt', populations))
+
+
+class AggregateDescription(unittest.TestCase):
+    def test_only_redundant_inherited_el9_requirement_is_removed_before_sealing(self):
+        for requirement in ('(TARGET.OpSysMajorVer == 9)', '(TARGET.Memory >= 4000)'):
+            with self.subTest(requirement=requirement), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                tools = directory / 'tools'
+                tools.mkdir()
+                for name in ('aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
+                             'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py',
+                             'dark_photon_meson.py', 'dark_photon_meson_source.py'):
+                    (tools / name).write_text('# synthetic helper\n')
+                meson = 'Memory' in requirement
+                guard = directory / ('batches/meson_canary/production' if meson else 'waves/w000/production')
+                guard.mkdir(parents=True)
+                controller.new(guard / 'seal.json', {})
+                controller.new(guard / 'plan.json', dict(points=[dict(point='m15_prompt')]))
+                (guard / 'finalizer_worker.sh').write_text('#!/bin/bash\npython3 ' + str(guard / 'finalize_point.py') + '\n')
+                (guard / 'finalizer.sub').write_text('initialdir = ' + str(guard) + '\nrequirements = ' + requirement +
+                    '\nrequest_memory = 4000 MB\narguments = old\nqueue\n')
+                sources = []
+                for index in range(2):
+                    path = directory / ('source' + str(index) + '.json')
+                    controller.new(path, dict(points=[dict(point='m15_prompt', mass_gev=15, epsilon=1e-5,
+                        proper_ctau_mm=0, sampling_epsilon=.01, events=20)]))
+                    sources.append(dict(point='m15_prompt', plan_path=str(path)))
+                config = dict(directory=str(directory), tools=str(tools), campaign_prefix='synthetic',
+                              eos_base='/eos/synthetic', conditions={})
+                if meson:
+                    config.update(production_mechanism='eta-etaprime-radiative', aggregation_guard=str(guard))
+                target = directory / 'aggregates/m15_prompt/v0001'
+                controller.aggregate_plan(config, 'm15_prompt', sources, target)
+                description = (target / 'aggregate.sub').read_text()
+                self.assertNotIn('OpSysMajorVer', description)
+                self.assertIn('request_memory = 4000 MB', description)
+                if 'Memory' in requirement:
+                    self.assertIn('requirements = ' + requirement, description)
+                    self.assertTrue((target / 'dark_photon_meson.py').is_file())
+                    plan = controller.read(target / 'plan.json')
+                    self.assertEqual(plan['scoring_deployment']['path'], str(guard))
+                    self.assertEqual(plan['dependencies'][str(target / 'dark_photon_meson_source.py')],
+                                     controller.sha(tools / 'dark_photon_meson_source.py'))
+                controller.aggregate_record(target, 'm15_prompt', sources)
 
 
 class CanaryAndAdmission(unittest.TestCase):

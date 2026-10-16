@@ -140,7 +140,9 @@ def validate_publication_canary(path, budget, maximum_chunk_events):
             raise ValueError('Publication canary artifact differs from its audited output')
         dependencies.append(local)
     import uproot
-    with uproot.open(artifacts['nanoAOD']['path']) as source:
+    # These are verified local files. Use the same direct file reader as the
+    # qualified finalizer; the generic fsspec reader can stall on basket reads.
+    with uproot.open(artifacts['nanoAOD']['path'], handler=uproot.source.file.MemmapSource) as source:
         arrays = source['Events'].arrays(['run', 'luminosityBlock', 'event', 'genWeight'], library='np')
         actual = [[int(run), int(lumi), int(event)] for run, lumi, event in
                   zip(arrays['run'], arrays['luminosityBlock'], arrays['event'])]
@@ -185,7 +187,7 @@ def histogram_inventory(path):
     import numpy as np
     import uproot
     result = {}
-    with uproot.open(path) as source:
+    with uproot.open(path, handler=uproot.source.file.MemmapSource) as source:
         for name, classname in source.classnames(recursive=True, cycle=False).items():
             if not classname.startswith(('TH1', 'TH2', 'TH3')):
                 continue

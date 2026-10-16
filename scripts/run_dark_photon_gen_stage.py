@@ -96,6 +96,47 @@ def verify_remote_root(remote, expected, size, config=None):
             raise ValueError('Published GEN readback differs from the complete audited source')
 
 
+def validate_meson_metadata(gen, contract, audit, signal_events):
+    """Check the audited source boundary without repeating its physics scan.
+
+    The runtime audit already reconstructed every collision coefficient.
+    Handoff verifies its pinned bytes and keeps source M separate from the
+    conditional unit-weight signal output N.
+    """
+    from export_dark_photon_cross_sections import resolve_meson_ledger
+
+    resolve_meson_ledger(gen, contract)
+    for name, key in [('source_exposure.json', 'source_exposure_sha256'),
+                      ('meson_model.json', 'meson_model_card_sha256')]:
+        if sha256(gen / name) != contract[key]:
+            raise ValueError('Pinned meson source metadata changed: ' + name)
+    exposure = read(gen / 'source_exposure.json')
+    if (exposure.get('schema') != 'shift-meson-source-exposure-v1' or
+            exposure != contract.get('source_exposure') or exposure != audit.get('source_exposure') or
+            read(gen / 'meson_model.json') != contract.get('meson_model_card') or
+            audit.get('source_exposure_sha256') != contract['source_exposure_sha256'] or
+            audit.get('source_ledger_sha256') != contract['source_ledger_sha256'] or
+            exposure.get('source_ledger_sha256') != contract['source_ledger_sha256']):
+        raise ValueError('Meson source metadata differs from its frozen runtime audit')
+    count = exposure.get('fixed_source_collisions')
+    if (type(count) is not int or count < max(2, signal_events) or
+            exposure.get('source_collisions') != count or
+            exposure.get('accepted_signal_events') != signal_events or
+            exposure.get('sum_native_weights') != count or
+            exposure.get('sum_native_weights_squared') != count or
+            audit['full_gen_denominator'].get('source_collisions') != count or
+            exposure.get('unit_output_gen_weights') is not True or
+            exposure.get('coefficient_includes_br_mumu') is not True or
+            exposure.get('coefficient_excludes_epsilon_squared') is not True):
+        raise ValueError('Meson fixed source exposure or conditional signal count changed')
+    ledger = audit['proposal_ledger']
+    if (ledger['n_accepted'] != count or exposure.get('native_n_accepted') != count or
+            ledger['n_tried'] != exposure.get('native_n_tried') or
+            not ledger['n_tried'] >= ledger['n_selected'] >= count):
+        raise ValueError('Meson native Pythia counters differ from the fixed source exposure')
+    return count
+
+
 def validate_population(row, config=None):
     """Require the complete accepted population and its original event identities."""
     gen = Path(row['gen_directory'])
@@ -104,12 +145,15 @@ def validate_population(row, config=None):
     if not manifest['status'].startswith('GEN runtime audit passed') or not audit.get('runtime_validated'):
         raise ValueError('GEN has not passed the complete runtime audit: ' + row['point'])
     count = row['events']
+    native_count = count
+    if contract.get('production_mechanism') == 'eta-etaprime-radiative':
+        native_count = validate_meson_metadata(gen, contract, audit, count)
     identities = audit['event_ids']
     if (audit['events'] != count or len(identities) != count or
             len(set(map(tuple, identities))) != count or
             audit['sum_weights'] != count or audit['sum_weights_squared'] != count or
             len(audit['event_rows']) != count or any(item['weight'] != 1. for item in audit['event_rows']) or
-            audit['proposal_ledger']['n_accepted'] != count):
+            audit['proposal_ledger']['n_accepted'] != native_count):
         raise ValueError('GEN full population or native weights changed: ' + row['point'])
     maximum = contract['maximum_framework_events']
     for identity in identities:

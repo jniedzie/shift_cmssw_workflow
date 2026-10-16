@@ -149,6 +149,107 @@ def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bo
                 rejection_probability_bound=rejection_probability_bound)
 
 
+def generation_accounting(directory, contract):
+    """Keep the unfiltered hadronic source distinct from conditional signals."""
+    directory = Path(directory)
+    if contract.get('production_mechanism') == 'eta-etaprime-radiative':
+        from export_dark_photon_cross_sections import meson_source_exposure
+        exposure, rate, uncertainty = meson_source_exposure(contract, directory)
+        ledger = read_pythia_generation_ledger(
+            directory / 'cmsRun.log', expected_accepted=exposure['source_collisions'])
+        if (ledger['n_tried'] != exposure['native_n_tried'] or
+                ledger['n_accepted'] != exposure['native_n_accepted']):
+            raise ValueError('Meson source counters differ from their native Pythia log')
+        return dict(proposal_ledger=ledger, source_exposure=exposure,
+                    target_cross_sections=[rate], source_rate_uncertainty=uncertainty,
+                    physical_width=contract['physical_width_table'])
+    return dict(proposal_ledger=read_pythia_generation_ledger(
+        directory / 'cmsRun.log', expected_accepted=contract['requested_events']),
+        physical_width=contract['width_authority'])
+
+
+def meson_accepted_slots(path, contract):
+    """Read the pinned full source stream, retaining only emitted parent rows."""
+    from export_dark_photon_cross_sections import open_meson_ledger
+    slots, digest = {}, hashlib.sha256()
+    with open_meson_ledger(path) as source:
+        for line in source:
+            digest.update(line.encode())
+            row = json.loads(line)
+            if not row['accepted']:
+                continue
+            slot = row['accepted_slot']
+            if type(slot) is not int or slot != len(slots)+1:
+                raise ValueError('Meson accepted source slots are missing or duplicated')
+            parents = [parent for parent in row['parents'] if parent['index'] == row['parent_index']]
+            if len(parents) != 1:
+                raise ValueError('Meson accepted slot does not select exactly one source parent')
+            slots[slot] = dict(parent=parents[0], graph=row['selected_parent_graph'],
+                sampled_decay=row['sampled_decay'], trial=row['trial'], slot=slot)
+    if digest.hexdigest() != contract['source_ledger_sha256'] or len(slots) != contract['requested_events']:
+        raise ValueError('Meson source ledger hash/count differs from its contract')
+    return slots
+
+
+def validate_meson_radiative_record(record, selected):
+    """Pin the selected native meson, recoil photon and physical decay vertex."""
+    parent, graph = selected['parent'], selected['graph']
+    if (record['mother_barcode'] != parent['index'] or graph['barcode'] != parent['index'] or
+            record['mother_pdg_id'] != parent['pdg_id'] or parent['pdg_id'] not in (221,331) or
+            graph['pdg_id'] != parent['pdg_id']):
+        raise ValueError('Radiative meson mother differs from the selected source index')
+    if (record['mother_p4'] != parent['p4'] or
+            record['mother_generated_mass_gev'] != parent['native_mass_gev'] or
+            graph['native_mass_gev'] != parent['native_mass_gev']):
+        raise ValueError('Radiative meson momentum/mass differs from the native source')
+    if (record['mother_production_position_mm'] != graph['production_position_mm'] or
+            record['decay_position_mm'] != graph['decay_position_mm']):
+        raise ValueError('Radiative meson source position changed')
+    daughters = record['outgoing']
+    if sorted(row['pdg_id'] for row in daughters) != [22,32]:
+        raise ValueError('Meson radiative vertex must contain exactly gamma and A-prime')
+    dark, = [row for row in daughters if row['pdg_id'] == 32]
+    photon, = [row for row in daughters if row['pdg_id'] == 22]
+    if dark['status'] != 3 or photon['status'] != 1:
+        raise ValueError('Radiative recoil/signal status changed')
+    sample = selected['sampled_decay']
+    if dark['p4'] != sample['dark_photon_p4'] or photon['p4'] != sample['photon_p4']:
+        raise ValueError('Radiative daughter momentum differs from its sampled decay')
+    outgoing = [math.fsum(row['p4'][axis] for row in daughters) for axis in range(4)]
+    residual = max(abs(a-b) for a,b in zip(outgoing,parent['p4']))
+    if residual > 1.e-6*max(1.,parent['p4'][0]):
+        raise ValueError('Meson radiative decay violates four-momentum conservation')
+    return dict(source_trial=selected['trial'], accepted_slot=selected['slot'],
+        selected_parent_barcode=parent['index'], parent_pdg_id=parent['pdg_id'],
+        maximum_momentum_residual_gev=residual)
+
+
+def validate_meson_radiative_graph(dark, selected):
+    vertex = dark.production_vertex()
+    incoming = list(objects(vertex.particles_in_const_begin(), vertex.particles_in_const_end()))
+    if len(incoming) != 1:
+        raise ValueError('Radiative A-prime must have exactly one parent meson')
+    mother = incoming[0]
+    if not mother.production_vertex():
+        raise ValueError('Selected native meson production vertex is missing')
+
+    def position(vertex):
+        point = vertex.position()
+        return [float(point.x()),float(point.y()),float(point.z()),float(point.t())]
+
+    def momentum(particle):
+        vector = particle.momentum()
+        return [float(vector.e()),float(vector.px()),float(vector.py()),float(vector.pz())]
+
+    record = dict(mother_barcode=int(mother.barcode()), mother_pdg_id=int(mother.pdg_id()),
+        mother_generated_mass_gev=float(mother.generated_mass()), mother_p4=momentum(mother),
+        mother_production_position_mm=position(mother.production_vertex()),
+        decay_position_mm=position(vertex), outgoing=[dict(pdg_id=int(child.pdg_id()),
+            status=int(child.status()),p4=momentum(child)) for child in
+            objects(vertex.particles_out_const_begin(),vertex.particles_out_const_end())])
+    return validate_meson_radiative_record(record, selected)
+
+
 def audit(directory):
     import ROOT
     from DataFormats.FWLite import Events, Runs
@@ -156,8 +257,12 @@ def audit(directory):
     contract = json.loads((out / 'contract.json').read_text())
     if contract['schema'] != 'shift-dark-photon-gen-v1':
         raise ValueError('Wrong signal audit contract')
-    proposal_ledger = read_pythia_generation_ledger(
-        out / 'cmsRun.log', expected_accepted=contract['requested_events'])
+    accounting = generation_accounting(out, contract)
+    proposal_ledger = accounting['proposal_ledger']
+    meson_slots = None
+    if 'source_exposure' in accounting:
+        from export_dark_photon_cross_sections import resolve_meson_ledger
+        meson_slots = meson_accepted_slots(resolve_meson_ledger(out,contract),contract)
     root = ROOT.TFile.Open(str(out / 'gen.root'))
     if not root or root.IsZombie() or root.TestBit(ROOT.TFile.kRecovered):
         raise ValueError('Unreadable/recovered signal GEN')
@@ -226,6 +331,8 @@ def audit(directory):
                     native_parent.generated_mass() != mass):
                 raise ValueError('Missing or changed original signal parent')
             native_mom = native_parent.momentum()
+            radiative = (validate_meson_radiative_graph(native_parent,meson_slots[identity[2]])
+                         if meson_slots is not None else None)
             native_components = [float(native_mom.px()), float(native_mom.py()),
                                  float(native_mom.pz()), float(native_mom.e())]
             if native_components != components:
@@ -251,6 +358,10 @@ def audit(directory):
             signal_decays.append(dict(parent_barcode=int(parent.barcode()), mass_gev=mass,
                 proper_length_mm=length, position_mm=[float(decay.x()),float(decay.y()),float(decay.z()),float(decay.t())],
                 inside_reference_cylinder=inside))
+            if radiative is not None:
+                signal_decays[-1]['radiative_source'] = radiative
+        if meson_slots is not None and len(signal_decays) != 1:
+            raise ValueError('A meson source collision must emit exactly one radiative signal')
         if not signal_decays:
             raise ValueError('No physical terminal signal decay')
         decayed = int(read_product(event, ('shiftMuonDecays', 'decayedParents'), 'unsigned int')[0])
@@ -263,16 +374,17 @@ def audit(directory):
     if max_source_error > 1e-7:
         raise ValueError('Common physical source timing changed')
     native_xsecs = []
-    for run in Runs(str(out / 'gen.root')):
-        run_info = read_product(run, 'generator', 'GenRunInfoProduct')
-        cross = run_info.internalXSec()
-        if not math.isfinite(cross.value()) or cross.value() <= 0:
-            raise ValueError('No positive native signal cross section')
-        native_xsecs.append(dict(value_pb=float(cross.value()), error_pb=float(cross.error())))
-    if not native_xsecs:
-        raise ValueError('Missing native signal run information')
+    if 'source_exposure' not in accounting:
+        for run in Runs(str(out / 'gen.root')):
+            run_info = read_product(run, 'generator', 'GenRunInfoProduct')
+            cross = run_info.internalXSec()
+            if not math.isfinite(cross.value()) or cross.value() <= 0:
+                raise ValueError('No positive native signal cross section')
+            native_xsecs.append(dict(value_pb=float(cross.value()), error_pb=float(cross.error())))
+        if not native_xsecs:
+            raise ValueError('Missing native signal run information')
     generated_mean = sum(lengths) / len(lengths)
-    requested_mean = contract['width_authority']['ctau_mm']
+    requested_mean = accounting['physical_width']['ctau_mm']
     lifetime_audit=validate_lifetime_sample(lengths,requested_mean)
     lifetime_pull=lifetime_audit['mean_lifetime_pull']
     report = dict(schema='shift-dark-photon-gen-audit-v1', runtime_validated=True,
@@ -287,10 +399,10 @@ def audit(directory):
             selection='none; outside-envelope decays retained',
             interpretation='Technical Pythia trial counts are not proton collisions or luminosity'),
         beams=beam_summary, native_cross_sections=native_xsecs,
-        target_cross_sections=[dict(value_pb=x['value_pb']*contract['production_rate_correction'],
+        target_cross_sections=accounting.get('target_cross_sections') or [dict(value_pb=x['value_pb']*contract['production_rate_correction'],
                                     error_pb=x['error_pb']*contract['production_rate_correction'])
                                for x in native_xsecs],
-        production_rate_correction=contract['production_rate_correction'],
+        production_rate_correction=contract.get('production_rate_correction'),
         rate_scope='pure DY narrow-width pilot; physical closure and normalization not yet approved',
         cross_section_convention=contract['cross_section_convention'],
         maximum_source_timing_error_mm=max_source_error, maximum_flight_error_mm=max_flight_error,
@@ -299,6 +411,17 @@ def audit(directory):
         mean_lifetime_pull=lifetime_pull,
         lifetime_audit=lifetime_audit)
     report['lifetime_measurement_source'] = 'Original unshifted generator HepMC; translated spacetime checked separately'
+    if 'source_exposure' in accounting:
+        report.update(source_exposure=accounting['source_exposure'],
+            source_rate_uncertainty=accounting['source_rate_uncertainty'],
+            source_ledger_sha256=contract['source_ledger_sha256'],
+            source_exposure_sha256=contract['source_exposure_sha256'],
+            event_hepmc_cross_section_convention=contract.get('event_hepmc_cross_section_convention',
+                'Original unfiltered ND source cross section; physical conditional signal rate comes from full-source accounting'),
+            rate_scope='eta/eta-prime radiative signal in unfiltered non-diffractive pp; parent production and precision model remain provisional')
+        report['full_gen_denominator'].update(
+            source_collisions=accounting['source_exposure']['source_collisions'],
+            interpretation='Accepted GEN counts conditional unit-weight signals; fixed unfiltered source collisions determine the physical production rate')
     (out / 'validation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k!='event_rows'},indent=2))
     return report

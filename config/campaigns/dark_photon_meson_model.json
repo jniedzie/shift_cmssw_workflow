@@ -1,0 +1,110 @@
+{
+  "code_style": "AI-code. AI-generated model inputs.",
+  "schema": "shift-dark-photon-meson-model-v1",
+  "model": "visible-photon-like-dark-photon",
+  "mechanism": "eta-etaprime-radiative-decays",
+  "physics_scope": "Non-diffractive pp meson benchmark; not an inclusive low-mass production model or a validated limit prediction.",
+  "radiative_branching_formula": "2 * epsilon^2 * BR(P -> gamma gamma) * (1 - mass^2 / parent_mass^2)^3 * abs(F(mass^2)/F(0))^2",
+  "radiative_branching_reference": "https://arxiv.org/pdf/2401.09136v2#page=4",
+  "radiative_branching_reference_note": "Eq. 6 is pointlike; multiplying by the measured transition form factor follows the electromagnetic transition amplitude in Eqs. 1-5.",
+  "muon_mass_gev": 0.1056583755,
+  "parents": [
+    {
+      "pdg_id": 221,
+      "name": "eta",
+      "mass_gev": 0.547862,
+      "mass_uncertainty_gev": 0.000017,
+      "br_gamma_gamma": 0.3936,
+      "br_gamma_gamma_uncertainty": 0.0018,
+      "pdg_reference": "https://pdgweb.lbl.gov/2025/listings/rpp2025-list-eta.pdf",
+      "transition_form_factor": {
+        "kind": "single-pole",
+        "squared_formula": "1 / (1 - q2/lambda^2)^2",
+        "lambda_gev": 0.749,
+        "lambda_stat_gev": 0.027,
+        "lambda_syst_gev": 0.008,
+        "systematic_choice": "Conservative conclusion value; the abstract quotes 0.007 GeV.",
+        "reference": "https://arxiv.org/pdf/2401.09136v2",
+        "equation": 3,
+        "physical_dimuon_mass_range_gev": [0.211316751, 0.547862]
+      }
+    },
+    {
+      "pdg_id": 331,
+      "name": "eta-prime",
+      "mass_gev": 0.95778,
+      "mass_uncertainty_gev": 0.00006,
+      "br_gamma_gamma": 0.02307,
+      "br_gamma_gamma_uncertainty": 0.00035,
+      "branching_error_choice": "Conservative detailed PDG fit error; the summary table quotes 0.00033.",
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-eta-prime-958.pdf",
+      "transition_form_factor": {
+        "kind": "finite-width-multipole",
+        "squared_formula": "lambda^2 * (lambda^2 + gamma^2) / ((lambda^2 - q2)^2 + lambda^2 * gamma^2)",
+        "lambda_gev": 0.802,
+        "lambda_stat_gev": 0.007,
+        "lambda_syst_gev": 0.008,
+        "gamma_gev": 0.113,
+        "gamma_stat_gev": 0.01,
+        "gamma_syst_gev": 0.002,
+        "reference": "https://arxiv.org/pdf/2401.09136v2",
+        "equation": 5,
+        "physical_dimuon_mass_range_gev": [0.211316751, 0.95778],
+        "validity_note": "Effective measured timelike parametrization, finite through the vector pole. Narrow rho-omega interference and endpoint precision are not validated by this benchmark. Do not replace it with a zero-width pole."
+      }
+    }
+  ],
+  "form_factor_uncertainty": {
+    "prescription": "Store central values and individual parameter shifts; a box envelope with statistical and systematic errors combined in quadrature is a diagnostic, not a joint confidence interval.",
+    "parameter_covariance_available": false,
+    "parent_rate_uncertainties_are_correlated_across_mass_points": true,
+    "parent_spectrum_uncertainty_included": false
+  },
+  "width_authority": {
+    "provider": "DarkCast 2.1",
+    "commit": "5a2a53a8984827be06e2939e6c3705f79d180048",
+    "reference": "https://arxiv.org/abs/1801.04847",
+    "source": "https://gitlab.com/darkcast/releases",
+    "provider_function": "run_dark_photon_spectral_gen.physical_width_table",
+    "electromagnetic_coupling_magnitude": 0.302822,
+    "provider_muon_mass_gev": 0.10566,
+    "muon_mass_note": "The pinned provider threshold is 3.249 keV above the decay-kernel threshold. The initial grid starts at 0.22 GeV; sub-keV threshold scans require a recorded consistent mass override.",
+    "hadronic_width": "Pinned data-driven electromagnetic exclusive spectral channels, including low-mass hadrons and resonances; do not replace with free-quark R or add another running-alpha factor.",
+    "hidden_decay_channels": false,
+    "neutral_current_width_included": false,
+    "physical_width_validated": false
+  },
+  "source": {
+    "beam_energy_gev": 6800.0,
+    "target": "stationary proton",
+    "source_class": "SoftQCD:nonDiffractive",
+    "additional_pythia_settings": ["SigmaTotal:mode=1"],
+    "cross_section_model": "Pythia 8.317 energy-dependent SaS/Donnachie-Landshoff non-diffractive pp; CP5 hadronization/MPI settings retained",
+    "cross_section_reference": "https://pythia.org/latest-manual/TotalCrossSections.html",
+    "cross_section_note": "Explicit mode 1 replaces the CP5 mode 0 fixed LHC total/elastic rates. ND-only generator prediction at the actual fixed-target energy; parent spectra and absolute normalization are provisional, not a data calibration.",
+    "muon_filter": false,
+    "unit_source_event_weights": true,
+    "all_successful_source_interactions_in_denominator": true,
+    "zero_parent_interactions_in_denominator": true,
+    "count_distinct_physical_parent_mesons": true,
+    "include_eta_feeddown_from_etaprime": true,
+    "normalization_formula": "sigma_source * epsilon^2 * mean_full_source(sum_parent(BR_parent_to_gamma_Aprime / epsilon^2)) * BR_Aprime_to_mumu",
+    "unit_weight_signal_proposal": "Accept a full collision proportional to its sum of parent radiative coefficients, then select exactly one parent proportional to its coefficient; force only that decay and the dimuon channel.",
+    "no_geometry_or_decay_position_filter": true,
+    "force_decay_branching_correction_count": 1,
+    "multiple_rare_decays_order_epsilon4_neglected": true,
+    "double_counting_rule": "Keep DY and this meson mechanism distinct. Sum different physical mechanisms with their own rates; never average their generator cross sections."
+  },
+  "initial_grid": {
+    "masses_gev": [0.22, 0.25, 0.3, 0.4, 0.5, 0.7, 0.9],
+    "mean_lab_flight_m": [5, 30, 100, 1000],
+    "prompt": true,
+    "lab_to_ctau": "Use the measured mean A-prime beta*gamma of this mass and eta/eta-prime proposal. Do not reuse DY or parent-meson boosts.",
+    "endpoint_diagnostics_gev": [0.2114, 0.5478, 0.802, 0.9577]
+  },
+  "omitted_mechanisms": ["diffractive source interactions", "proton bremsstrahlung", "direct vector-meson mixing", "thick-target secondary production"],
+  "pi0_to_dimuon_signal_kinematically_closed": true,
+  "normalization_ready": false,
+  "detector_simulated": false,
+  "production_rate_validated": false
+}

@@ -11,6 +11,7 @@ import shutil
 
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
+from prepare_dark_photon_grid import validate_physical_preflight
 from dark_photon_production_support import (
     PROFILES, validate_complete_groups, validate_publication_canary,
 )
@@ -235,8 +236,9 @@ def prepare(args):
         if sha256(path) != expected:
             raise ValueError('Qualified template dependency changed: ' + path)
     plan = copy.deepcopy(read(args.preparation))
-    if plan.get('native_width_preflight_passed') is not True or plan.get('detector_stage_prepared') is not True:
-        raise ValueError('Production requires a prepared complete native-width-qualified detector grid')
+    validate_physical_preflight(plan)
+    if plan.get('detector_stage_prepared') is not True:
+        raise ValueError('Production requires a prepared complete physical-width-qualified detector grid')
     names = [row['point'] for row in plan['points']]
     if (len(names) != len(set(names)) or not args.canary_points or
             len(set(args.canary_points)) != len(args.canary_points) or not set(args.canary_points) <= set(names)):
@@ -294,6 +296,9 @@ def prepare(args):
         if name.endswith('.sub'):
             text = re.sub(r'^\+JobBatchName = .*$', '+JobBatchName = "SHIFT_BSM_' + plan['campaign'] + '"',
                           text, flags=re.MULTILINE)
+            # CERN supplies the supported EL9 requirement. Its submit hook warns
+            # after committing jobs that also request this obsolete attribute.
+            text = text.replace('requirements = (TARGET.OpSysMajorVer == 9)\n', '')
         if name == 'preserve_failure.py':
             text = re.sub(r'^REMOTE_BASE = .*$', 'REMOTE_BASE = ' + repr(args.failure_base), text,
                           flags=re.MULTILINE)

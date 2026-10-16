@@ -88,11 +88,13 @@ def verify_submitted_job(config, directory, rows, cluster=None):
     """Accept one exact native job, including after a controller restart."""
     identity = str(directory)
     if not rows:
-        constraint = 'ShiftDPStatisticsTask == ' + json.dumps(identity)
         if cluster is not None:
-            constraint += ' && ClusterId == ' + str(cluster)
+            selection = [str(cluster) + '.0', '-limit', '1']
+        else:
+            constraint = 'ShiftDPStatisticsTask == ' + json.dumps(identity)
+            selection = ['-constraint', constraint, '-limit', '2']
         rows = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
-            '-constraint', constraint, '-limit', '2', '-json'], timeout=45))
+            *selection, '-json'], timeout=45))
     if len(rows) != 1:
         raise RuntimeError('Ambiguous submitted job state; preserve intent for review: ' + identity)
     row = rows[0]
@@ -285,8 +287,11 @@ def aggregate_plan(config, point, sources, directory):
     for name in ('logs', 'completed_points', 'failures'):
         (directory / name).mkdir()
     dependencies = {}
-    for name in ('aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
-                 'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py'):
+    helpers = ('aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
+               'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py')
+    if config.get('production_mechanism') == 'eta-etaprime-radiative':
+        helpers += ('dark_photon_meson.py', 'dark_photon_meson_source.py')
+    for name in helpers:
         target = directory / name
         shutil.copy2(Path(config['tools']) / name, target)
         dependencies[str(target)] = sha(target)
@@ -298,7 +303,7 @@ def aggregate_plan(config, point, sources, directory):
               for row in source_rows]
     if any(model != models[0] for model in models):
         raise ValueError('Cumulative histogram sources change the physical point')
-    guard = wave_directory(config, 0) / 'production'
+    guard = Path(config.get('aggregation_guard', wave_directory(config, 0) / 'production'))
     campaign = config['campaign_prefix'] + '-' + point + '-v' + directory.name[1:]
     prefix = config['eos_base'] + '/darkphoton_' + point + '/' + campaign
     row = dict(point=point, **models[0], events=sum(item['events'] for item in source_rows),
@@ -325,6 +330,10 @@ def aggregate_plan(config, point, sources, directory):
     target.chmod(0o750)
     submit = (guard / 'finalizer.sub').read_text().replace(str(guard), str(directory))
     submit = submit.replace('finalizer_worker.sh', 'aggregate_worker.sh')
+    # CERN supplies the EL9 requirement. Repeating this inherited expression
+    # makes standalone condor_submit warn after committing the job.
+    submit = re.sub(r'^requirements\s*=\s*\(TARGET\.OpSysMajorVer\s*==\s*9\)\s*$',
+                    '', submit, flags=re.MULTILINE | re.IGNORECASE)
     submit = re.sub(r'^arguments = .*$', 'arguments = ' + point + ' SEAL_DIGEST', submit, flags=re.MULTILINE)
     submit = submit.replace('\nqueue', '\n+ShiftDPStatisticsTask = ' + json.dumps(str(directory)) +
         '\npoint = ' + point + '\nkind = aggregate\nchunk = all\nqueue')
@@ -334,6 +343,100 @@ def aggregate_plan(config, point, sources, directory):
         files={str(path): sha(path) for path in directory.iterdir() if path.is_file()}))
     (directory / 'aggregate.sub').write_text(submit.replace('SEAL_DIGEST', sha(directory / 'seal.json')))
     return row
+
+
+def aggregate_record(directory, point, populations):
+    """Recover the source identity from the sealed aggregate, not live state."""
+    directory = Path(directory)
+    plan_path, seal_path = directory / 'plan.json', directory / 'seal.json'
+    plan, seal = read(plan_path), read(seal_path)
+    if (plan.get('schema') != 'shift-dark-photon-additive-plan-v1'
+            or plan.get('histogram_only') is not True
+            or len(plan.get('points', [])) != 1 or plan['points'][0].get('point') != point):
+        raise ValueError('Invalid existing aggregate plan: ' + str(directory))
+    if seal.get('files', {}).get(str(plan_path)) != sha(plan_path):
+        raise ValueError('Existing aggregate plan is outside its seal: ' + str(directory))
+    for path, digest in seal['files'].items():
+        if Path(path).parent != directory or sha(path) != digest:
+            raise ValueError('Existing aggregate input changed: ' + path)
+    template = directory / 'aggregate.sub.in'
+    if seal['files'].get(str(template)) != sha(template):
+        raise ValueError('Existing aggregate submit template is outside its seal')
+    submit = directory / 'aggregate.sub'
+    if submit.read_text() != template.read_text().replace('SEAL_DIGEST', sha(seal_path)):
+        raise ValueError('Existing aggregate submit description changed')
+    clusters = set()
+    for name in ('submission_intent.json', 'submission.json'):
+        path = directory / name
+        if not path.exists():
+            continue
+        submitted = read(path)
+        if (submitted.get('task') != str(directory)
+                or submitted.get('submit_sha256') != sha(submit)):
+            raise ValueError('Existing aggregate submission identity changed: ' + str(path))
+        cluster = submitted.get('cluster')
+        if cluster is not None:
+            if type(cluster) is not int or cluster <= 0:
+                raise ValueError('Invalid aggregate native cluster: ' + str(path))
+            clusters.add(cluster)
+        elif name == 'submission.json':
+            raise ValueError('Aggregate submission receipt has no native cluster')
+    if len(clusters) > 1:
+        raise ValueError('Aggregate submission intent and receipt disagree about the native cluster')
+    sources = plan['points'][0].get('sources', [])
+    if (len(sources) < 2 or len({json.dumps(item, sort_keys=True) for item in sources}) != len(sources)
+            or any(item not in populations for item in sources)):
+        raise ValueError('Existing aggregate source identity changed: ' + str(directory))
+    return dict(directory=str(directory),
+        sources_sha256=hashlib.sha256(json.dumps(sources, sort_keys=True).encode()).hexdigest(),
+        source_plans=[item['plan_path'] for item in sources], plan_sha256=sha(plan_path),
+        seal_sha256=sha(seal_path), submit_sha256=sha(submit))
+
+
+def reconcile_aggregate(config, state, point, populations):
+    """One unresolved on-disk version owns a point, including lost-state restarts."""
+    root = Path(config['directory']) / 'aggregates' / point
+    pending = state.setdefault('aggregates', {}).get(point)
+    published = state.setdefault('published', {}).get(point, {})
+    published_version = None
+    if published.get('point_receipt_path'):
+        receipt = Path(published['point_receipt_path'])
+        directory = receipt.parent.parent
+        if (directory.parent != root or receipt.parent.name != 'completed_points'
+                or receipt.name != point + '.json' or not re.fullmatch(r'v[0-9]+', directory.name)
+                or published.get('point_receipt_sha256') != sha(receipt)):
+            raise ValueError('Published aggregate receipt changed: ' + point)
+        published_version = int(directory.name[1:])
+    candidates = []
+    for directory in sorted(root.glob('v*')):
+        if not directory.is_dir() or not re.fullmatch(r'v[0-9]+', directory.name):
+            raise ValueError('Unexpected aggregate version: ' + str(directory))
+        record = aggregate_record(directory, point, populations)
+        if published_version is not None and int(directory.name[1:]) <= published_version:
+            if not set(record['source_plans']).issubset(published.get('source_plans', [])):
+                raise ValueError('Older aggregate has unpublished sources: ' + str(directory))
+            continue
+        intent = directory / 'aggregate_intent.json'
+        if intent.is_file() and read(intent) != record:
+            raise ValueError('Existing aggregate intent changed: ' + str(directory))
+        candidates.append(record)
+    if len(candidates) > 1:
+        raise RuntimeError('Ambiguous existing aggregate versions; preserve intents for review: ' + point)
+    if not candidates:
+        if pending:
+            raise RuntimeError('Pending aggregate has no unresolved sealed version: ' + point)
+        return None
+    record = candidates[0]
+    if pending and any(pending.get(key) != value for key, value in record.items()):
+        raise ValueError('Pending aggregate differs from its sealed version: ' + point)
+    if pending and 'cluster' in pending:
+        record['cluster'] = pending['cluster']
+    intent = Path(record['directory']) / 'aggregate_intent.json'
+    if not intent.exists():
+        new(intent, {key: value for key, value in record.items() if key != 'cluster'})
+    state['aggregates'][point] = record
+    save(Path(config['directory']) / 'state.json', state)
+    return record
 
 
 def published_canary(config, state):
@@ -362,10 +465,12 @@ def publish(config, state):
             continue
         signature = hashlib.sha256(json.dumps(populations, sort_keys=True).encode()).hexdigest()
         old = state.setdefault('published', {}).get(point, {})
+        pending = reconcile_aggregate(config, state, point, populations)
         if old.get('sources_sha256') == signature:
+            if pending:
+                raise RuntimeError('Unresolved aggregate duplicates an already published population: ' + point)
             continue
         root = Path(config['directory']) / 'aggregates' / point
-        pending = state.setdefault('aggregates', {}).get(point)
         if pending:
             directory = Path(pending['directory'])
             for name, key in (('plan.json', 'plan_sha256'), ('seal.json', 'seal_sha256'),
@@ -403,13 +508,14 @@ def publish(config, state):
             continue
         if active >= config['aggregate_workers']:
             continue
-        version = len(list(root.glob('v*'))) + 1 if root.exists() else 1
+        version = max((int(path.name[1:]) for path in root.glob('v*')), default=0) + 1
         directory = root / f'v{version:04d}'
         aggregate_plan(config, point, populations, directory)
         pending = dict(directory=str(directory), sources_sha256=signature,
             source_plans=[item['plan_path'] for item in populations],
             plan_sha256=sha(directory / 'plan.json'), seal_sha256=sha(directory / 'seal.json'),
             submit_sha256=sha(directory / 'aggregate.sub'))
+        new(directory / 'aggregate_intent.json', pending)
         state['aggregates'][point] = pending
         save(Path(config['directory']) / 'state.json', state)
         receipt = submission(config, directory, directory / 'aggregate.sub')

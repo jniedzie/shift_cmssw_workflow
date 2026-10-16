@@ -1,3 +1,4 @@
+# Code style: human-code.
 """Extract one frozen GEN run's proposal counters from Pythia statistics.
 
 CMS can print the same terminal Pythia table twice. Identical tables count
@@ -16,6 +17,21 @@ import re
 
 _START = "PYTHIA Event and Cross Section Statistics"
 _END = "End " + _START
+
+
+def same_ledger_content(actual, expected):
+    """Allow a retained log to move while checking all its original content."""
+    if not isinstance(actual, dict) or not isinstance(expected, dict):
+        return False
+    for ledger in (actual, expected):
+        checksum = ledger.get("log_sha256")
+        if not isinstance(checksum, str) or not re.fullmatch(r"[0-9a-f]{64}", checksum):
+            return False
+    actual_content = dict(actual)
+    expected_content = dict(expected)
+    actual_content.pop("log_path", None)
+    expected_content.pop("log_path", None)
+    return actual_content == expected_content
 
 
 def _counter_values(text):

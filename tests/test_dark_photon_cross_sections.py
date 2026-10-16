@@ -1,9 +1,13 @@
 # Code style: AI-code. AI-generated rate-retention and correction regression tests.
 """Check native/physical rate separation and full GEN denominator retention."""
 import copy
+from contextlib import contextmanager
+import gzip
 import hashlib
 import json
+import math
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -11,7 +15,11 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from export_dark_photon_cross_sections import canonical_bytes, publish_file, publish_file_rpc, rate_record, retain_bytes
+from export_dark_photon_cross_sections import (canonical_bytes, cleanup_meson_ledger_readbacks, export_plan, input_files, open_meson_ledger,
+    publish_file, publish_file_rpc, rate_record, resolve_meson_ledger, retain_bytes)
+from pythia_generation_ledger import read_pythia_generation_ledger
+from dark_photon_meson import radiative_branching, transition_form_factor_abs2
+from dark_photon_meson_source import model_precision_budget, resolve_parent_kinematics
 
 
 class CrossSectionAccounting(unittest.TestCase):
@@ -98,6 +106,338 @@ class CrossSectionAccounting(unittest.TestCase):
             with self.assertRaises(ValueError):
                 self.record()
             self.contract,self.audit=original_contract,original_audit
+
+
+    def test_dy_exporter_import_still_works_without_meson_runtime_files(self):
+        scripts=Path(__file__).resolve().parents[1]/"scripts"
+        with tempfile.TemporaryDirectory() as temporary:
+            for filename in ("export_dark_photon_cross_sections.py","pythia_generation_ledger.py"):
+                (Path(temporary)/filename).write_bytes((scripts/filename).read_bytes())
+            subprocess.run([sys.executable,"-I","-c",
+                "import sys; sys.dont_write_bytecode=True; sys.path.insert(0,sys.argv[1]); "
+                "import export_dark_photon_cross_sections; assert 'dark_photon_meson' not in sys.modules",temporary],
+                cwd=temporary,check=True,capture_output=True,text=True)
+
+
+class MesonCrossSectionAccounting(unittest.TestCase):
+    """The physical rate uses all pp collisions, not conditional signal N."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.card = json.loads((Path(__file__).resolve().parents[1] /
+            "config/campaigns/dark_photon_meson_model.json").read_text())
+        self.models = {row["pdg_id"]: row for row in self.card["parents"]}
+        self.epsilon, self.mass, self.branching = 1e-3, .3, .4
+        self.width_authority = dict(provider="DarkCast 2.1", commit="test-pinned-source")
+        self.width = dict(mass_gev=self.mass, epsilon=self.epsilon, br_mumu=self.branching,
+            ctau_mm=1.973269804e-3, total_width_gev=1e-10,
+            partial_widths_gev={"e_e":6e-11,"mu_mu":4e-11,"hadrons":0.},
+            spectral_source=self.width_authority)
+        eta, etaprime = self.parent(1,221), self.parent(2,331)
+        populations = [None, [], [eta], [eta,etaprime], [eta]]
+        self.rows = []
+        slot = 0
+        for trial, parents in enumerate(populations,1):
+            coefficient = math.fsum(self.coefficient(parent) for parent in parents) if parents else 0.
+            accepted = trial in (3,4)
+            slot += int(accepted)
+            self.rows.append(dict(schema="shift-meson-source-trial-v1",trial=trial,
+                generator_success=parents is not None,native_weight=1. if parents is not None else None,
+                parents=parents or [],coefficient_sum=coefficient,
+                physical_probability=self.epsilon**2*coefficient,acceptance_probability=coefficient/100.,
+                accepted=accepted,parent_index=1 if accepted else None,accepted_slot=slot if accepted else None))
+        coefficients=[row["coefficient_sum"] for row in self.rows if row["generator_success"]]
+        probabilities=[row["physical_probability"] for row in self.rows if row["generator_success"]]
+        self.exposure=dict(schema="shift-meson-source-exposure-v1",fixed_source_collisions=4,
+            source_calls=5,source_collisions=4,generator_failures=1,zero_eligible_parent_collisions=1,
+            sum_native_weights=4.,sum_native_weights_squared=4.,sigma_source_mb=30.,sigma_source_error_mb=.3,
+            native_n_tried=8,native_n_accepted=4,coefficient_sum=math.fsum(coefficients),
+            coefficient_sum_squared=math.fsum(value**2 for value in coefficients),
+            physical_probability_sum=math.fsum(probabilities),physical_probability_sum_squared=math.fsum(value**2 for value in probabilities),
+            accepted_signal_events=2,analytic_coefficient_bound=100.,coefficient_includes_br_mumu=True,
+            coefficient_excludes_epsilon_squared=True,unit_output_gen_weights=True)
+        self.contract=dict(schema="shift-dark-photon-gen-v1",production_mechanism="eta-etaprime-radiative",
+            decay_mode="mumu",filtering="none",mass_gev=self.mass,epsilon=self.epsilon,requested_events=2,
+            physical_width_table=self.width,width_authority=self.width_authority,
+            model="visible-photon-like-dark-photon",generated_mass_support_gev=[self.mass,self.mass],
+            beam_energy_GeV=6800.,source_model="fixed-target unfiltered ND benchmark",seed=17,run_number=77)
+        self.audit=dict(runtime_validated=True,events=2,event_ids=[[77,1,1],[77,1,2]],sum_weights=2.,sum_weights_squared=2.,
+            proposal_ledger=dict(n_tried=8,n_selected=5,n_accepted=4,printed_cross_section_mb=30.),
+            full_gen_denominator=dict(accepted_events=2,source_collisions=4),rate_scope="ND meson benchmark")
+        self.freeze()
+
+    def parent(self,index,pdg):
+        mass=self.models[pdg]["mass_gev"]
+        return dict(index=index,pdg_id=pdg,mass_gev=mass,p4=[mass,0.,0.,0.])
+
+    def coefficient(self,parent):
+        model=self.models[parent["pdg_id"]]
+        ff=transition_form_factor_abs2(self.mass,model["transition_form_factor"])
+        return radiative_branching(parent["mass_gev"],self.mass,1e-3,model["br_gamma_gamma"],math.sqrt(ff))/1e-6*self.branching
+
+    def freeze(self):
+        ledger=b"".join((json.dumps(row,sort_keys=True)+"\n").encode() for row in self.rows)
+        (self.directory/"meson_source_ledger.jsonl").write_bytes(ledger)
+        self.contract["source_ledger_sha256"]=hashlib.sha256(ledger).hexdigest()
+        self.exposure["source_ledger_sha256"]=self.contract["source_ledger_sha256"]
+        for name,value,key in [("source_exposure.json",self.exposure,"source_exposure_sha256"),
+                               ("meson_model.json",self.card,"meson_model_card_sha256")]:
+            content=canonical_bytes(value)
+            (self.directory/name).write_bytes(content)
+            self.contract[key]=hashlib.sha256(content).hexdigest()
+        self.contract["source_exposure"]=copy.deepcopy(self.exposure)
+        self.contract["meson_model_card"]=copy.deepcopy(self.card)
+        (self.directory/"contract.json").write_bytes(canonical_bytes(self.contract))
+
+    def record(self):
+        return rate_record(self.contract,self.audit,point="m0p3_lab_30m",campaign="meson_conditions",
+            source_hashes={"contract.json":"a"*64},gen_path="/eos/user/t/test/gen.root",gen_sha256="b"*64,
+            source_directory=self.directory)
+
+    def enable_native_precision(self):
+        reference=self.directory/"ErrorChecks.xml"
+        reference.write_text('Synthetic primary-reference fixture for native Check:mTolErr\n')
+        support=[dict(pdg_id=pdg,mass_min_gev=model["mass_gev"],mass_max_gev=model["mass_gev"])
+                 for pdg,model in self.models.items()]
+        self.contract["source_precision"]=dict(check_event=True,mass_tolerance=.001,energy_tolerance=.01,
+            reference=str(reference),reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            parents=support,prescription="native generated mass for branching and bound; unchanged p4 invariant for decay")
+        resolved={pdg:dict(mass_min_gev=model["mass_gev"],mass_max_gev=model["mass_gev"],
+            br_gamma_gamma=model["br_gamma_gamma"],form_factor_abs2=transition_form_factor_abs2(self.mass,model["transition_form_factor"]),
+            relative_model_uncertainty=model_precision_budget(model,self.mass)) for pdg,model in self.models.items()}
+        self.contract["resolved_parent_models"]={str(pdg):model for pdg,model in resolved.items()}
+        # Real observed Pythia momentum precision example: retain it exactly.
+        self.rows[2]["parents"][0]["p4"]=[570.5010019649538,-.7004529990853869,.7446772589972893,-570.4998228797658]
+        differences=[];shifts=[]
+        for row in self.rows:
+            for parent in row["parents"]:parent["native_mass_gev"]=parent["mass_gev"]
+            row["parents"]=resolve_parent_kinematics(row["parents"],.001,self.mass,resolved,self.branching)
+            differences.extend(parent["coefficient_difference_from_kinematic_mass"] for parent in row["parents"])
+            shifts.extend(abs(parent["coefficient_relative_precision_shift"]) for parent in row["parents"])
+        self.exposure.update(coefficient_precision_difference_sum=math.fsum(differences),
+            maximum_coefficient_relative_precision_shift=max(shifts),
+            relative_rate_precision_shift=math.fsum(differences)/self.exposure["coefficient_sum"])
+        self.freeze()
+
+    @contextmanager
+    def remote_ledger(self, encoding):
+        raw=(self.directory/"meson_source_ledger.jsonl").read_bytes()
+        encoded=gzip.compress(raw,mtime=0) if encoding=="gzip" else raw
+        filename="meson_source_ledger.jsonl"+(".gz" if encoding=="gzip" else "")
+        remote=Path("/eos/user/j/jniedzie/shift_cmssw_support/unit-fixture")/filename
+        stored=self.directory/"stored_ledger";stored.write_bytes(encoded)
+        receipt=dict(schema="shift-meson-source-ledger-publication-v1",path=str(remote),encoding=encoding,
+            bytes=len(encoded),sha256=hashlib.sha256(encoded).hexdigest(),readback_sha256=hashlib.sha256(encoded).hexdigest(),
+            uncompressed_bytes=len(raw),uncompressed_sha256=hashlib.sha256(raw).hexdigest())
+        (self.directory/"meson_ledger_publication.json").write_bytes(canonical_bytes(receipt))
+        (self.directory/"meson_source_ledger.jsonl").unlink()
+        original_open,original_stat,original_gzip=Path.open,Path.stat,gzip.open
+        def path_open(path,*args,**kwargs):return original_open(stored if path==remote else path,*args,**kwargs)
+        def path_stat(path,*args,**kwargs):return original_stat(stored if path==remote else path,*args,**kwargs)
+        def gzip_open(path,*args,**kwargs):return original_gzip(stored if Path(path)==remote else path,*args,**kwargs)
+        with patch.object(Path,"open",path_open),patch.object(Path,"stat",path_stat),patch("gzip.open",side_effect=gzip_open):
+            yield remote,receipt,stored
+
+    def test_full_fixed_exposure_and_mb_conversion_not_signal_count(self):
+        result=self.record()
+        expected=30e9*self.exposure["physical_probability_sum"]/4
+        self.assertAlmostEqual(result["physical_selected_cross_sections_pb"][0]["value_pb"],expected)
+        self.assertEqual(result["native_source_cross_sections_pb"][0]["value_pb"],30e9)
+        self.assertNotIn("native_selected_cross_sections_pb",result)
+        self.assertEqual(result["full_gen"]["accepted_events"],2)
+        self.assertEqual(result["full_gen"]["n_accepted"],4)
+        self.assertEqual(result["source_exposure"]["zero_eligible_parent_collisions"],1)
+        self.assertEqual(result["proposal_ledger"]["n_tried"],8)
+
+    def test_whole_collision_variance_preserves_multiple_parent_correlation(self):
+        result=self.record()
+        total=self.exposure["physical_probability_sum"]
+        squared=self.exposure["physical_probability_sum_squared"]
+        variance=(squared-total**2/4)/(4*3)
+        expected=math.hypot(30e9*math.sqrt(variance),.3e9*total/4)
+        self.assertAlmostEqual(result["physical_selected_cross_sections_pb"][0]["error_pb"],expected)
+        self.assertAlmostEqual(result["rate_uncertainty"]["variance_of_mean_collision_probability"],variance)
+
+    def test_explicit_native_mass_precision_keeps_momenta_and_generated_mass_rate(self):
+        before=self.record()["physical_selected_cross_sections_pb"]
+        self.enable_native_precision()
+        retained_p4=copy.deepcopy(self.rows[2]["parents"][0]["p4"])
+        result=self.record()
+        self.assertEqual(result["physical_selected_cross_sections_pb"],before)
+        self.assertEqual(self.rows[2]["parents"][0]["p4"],retained_p4)
+        self.assertGreater(result["source_exposure"]["maximum_coefficient_relative_precision_shift"],0.)
+        self.assertGreater(result["source_exposure"]["relative_rate_precision_shift"],0.)
+
+    def test_native_precision_metadata_and_frozen_tolerance_are_checked(self):
+        self.enable_native_precision()
+        original=copy.deepcopy((self.contract,self.exposure,self.rows))
+        for mutation in [lambda:self.contract["source_precision"].update(check_event=False),
+                         lambda:self.contract["source_precision"].update(mass_tolerance=1e-14),
+                         lambda:self.rows[2]["parents"][0].update(coefficient_relative_precision_shift=1.),
+                         lambda:self.exposure.update(relative_rate_precision_shift=1.)]:
+            mutation();self.freeze()
+            with self.assertRaises(ValueError):self.record()
+            self.contract,self.exposure,self.rows=copy.deepcopy(original)
+            self.freeze()
+
+    def test_branching_is_in_parent_coefficient_exactly_once(self):
+        result=self.record()
+        selected=result["physical_selected_cross_sections_pb"][0]["value_pb"]
+        inclusive=result["physical_inclusive_cross_sections_pb"][0]["value_pb"]
+        self.assertAlmostEqual(inclusive*self.branching,selected)
+        self.assertEqual(result["corrections"]["applications"],1)
+        self.assertFalse(result["corrections"]["extra_decay_branching_fraction_applied"])
+        self.rows[2]["coefficient_sum"]*=self.branching
+        self.freeze()
+        with self.assertRaisesRegex(ValueError,"parent branching sum"):
+            self.record()
+
+    def test_source_model_and_full_collision_ledger_are_retained(self):
+        files=input_files(self.directory,{})
+        for name in ("source_exposure.json","meson_source_ledger.jsonl","meson_model.json"):
+            self.assertIn(name,files)
+
+    def test_remote_identity_ledger_is_verified_and_only_pointer_is_retained(self):
+        expected=self.record()["physical_selected_cross_sections_pb"]
+        with self.remote_ledger("identity") as (remote,unused_receipt,unused_stored):
+            self.assertEqual(resolve_meson_ledger(self.directory,self.contract),remote)
+            self.assertEqual(self.record()["physical_selected_cross_sections_pb"],expected)
+            files=input_files(self.directory,{})
+            self.assertIn("meson_ledger_publication.json",files)
+            self.assertNotIn("meson_source_ledger.jsonl",files)
+
+    def test_remote_gzip_preserves_exact_raw_ledger_and_rates_without_expansion(self):
+        expected=self.record()["physical_selected_cross_sections_pb"]
+        with self.remote_ledger("gzip") as (remote,unused_receipt,unused_stored):
+            self.assertEqual(resolve_meson_ledger(self.directory,self.contract),remote)
+            with open_meson_ledger(remote) as source:self.assertEqual(sum(1 for unused in source),5)
+            self.assertEqual(self.record()["physical_selected_cross_sections_pb"],expected)
+            self.assertFalse((self.directory/"meson_source_ledger.jsonl").exists())
+
+    def test_remote_ledger_receipt_and_actual_bytes_must_agree(self):
+        with self.remote_ledger("gzip") as (unused_remote,receipt,stored):
+            pointer=self.directory/"meson_ledger_publication.json"
+            for key,value in [("path","/tmp/unapproved/meson_source_ledger.jsonl.gz"),
+                              ("readback_sha256","changed"),("uncompressed_sha256","changed"),
+                              ("uncompressed_bytes",1),("bytes",1)]:
+                changed=dict(receipt);changed[key]=value;pointer.write_bytes(canonical_bytes(changed))
+                with self.assertRaises(ValueError):resolve_meson_ledger(self.directory,self.contract)
+            pointer.write_bytes(canonical_bytes(receipt))
+            stored.write_bytes(b"different stored bytes")
+            with self.assertRaisesRegex(ValueError,"readback"):
+                resolve_meson_ledger(self.directory,self.contract)
+
+    def test_worker_without_eos_mount_downloads_and_reuses_verified_local_gzip(self):
+        self.addCleanup(cleanup_meson_ledger_readbacks)
+        with self.remote_ledger("gzip") as (remote,unused_receipt,stored):
+            previous_stat=Path.stat
+            def missing_mount(path,*args,**kwargs):
+                if path==remote:raise FileNotFoundError(str(path))
+                return previous_stat(path,*args,**kwargs)
+            def download(argv,**options):
+                self.assertEqual(argv[0],"/usr/bin/xrdcp")
+                self.assertEqual(argv[-2],"root://eosuser.cern.ch/"+str(remote))
+                self.assertNotIn("LD_LIBRARY_PATH",options["env"])
+                self.assertEqual(options["env"]["PATH"],"/usr/bin:/bin")
+                Path(argv[-1]).write_bytes(stored.read_bytes())
+                return SimpleNamespace(returncode=0)
+            with patch.object(Path,"stat",missing_mount),patch(
+                    "export_dark_photon_cross_sections.subprocess.run",side_effect=download) as transport:
+                path=resolve_meson_ledger(self.directory,self.contract)
+                self.assertNotEqual(path,remote)
+                self.assertFalse(str(path).startswith("/afs/"))
+                with open_meson_ledger(path) as rows:self.assertEqual(sum(1 for unused in rows),5)
+                self.assertEqual(resolve_meson_ledger(self.directory,self.contract),path)
+                self.assertEqual(transport.call_count,1)
+                path.write_bytes(b"corrupted local cache")
+                with self.assertRaisesRegex(ValueError,"readback"):
+                    resolve_meson_ledger(self.directory,self.contract)
+                self.assertEqual(transport.call_count,1)
+
+    def test_failed_native_ledger_transport_is_unknown_and_not_a_stale_cache_hit(self):
+        self.addCleanup(cleanup_meson_ledger_readbacks)
+        with self.remote_ledger("identity") as (remote,unused_receipt,unused_stored):
+            previous_stat=Path.stat
+            def missing_mount(path,*args,**kwargs):
+                if path==remote:raise FileNotFoundError(str(path))
+                return previous_stat(path,*args,**kwargs)
+            with patch.object(Path,"stat",missing_mount),patch(
+                    "export_dark_photon_cross_sections.subprocess.run",
+                    side_effect=subprocess.CalledProcessError(54,["xrdcp"],stderr="Connection failed")):
+                with self.assertRaises(subprocess.CalledProcessError):resolve_meson_ledger(self.directory,self.contract)
+
+    def test_changed_pinned_source_file_fails_before_rate_export(self):
+        with (self.directory/"meson_source_ledger.jsonl").open("a") as stream:stream.write("{}\n")
+        with self.assertRaisesRegex(ValueError,"Pinned meson source input changed"):
+            self.record()
+
+    def test_incomplete_or_inconsistent_source_accounting_is_rejected(self):
+        mutations=[lambda:self.exposure.update(fixed_source_collisions=5),
+            lambda:self.exposure.update(source_collisions=2),
+            lambda:self.exposure.update(sum_native_weights=2.),
+            lambda:self.exposure.update(coefficient_includes_br_mumu=False),
+            lambda:self.exposure.update(zero_eligible_parent_collisions=0),
+            lambda:self.exposure.update(physical_probability_sum_squared=0.),
+            lambda:self.exposure.update(sigma_source_mb=30e9),
+            lambda:self.rows[0].update(physical_probability=1.),
+            lambda:self.rows[1].update(trial=1),
+            lambda:self.rows[2].update(native_weight=2.),
+            lambda:self.rows[2].update(accepted_slot=2),
+            lambda:self.rows[2].update(parent_index=999),
+            lambda:self.rows[3]["parents"].append(copy.deepcopy(self.rows[3]["parents"][0]))]
+        for mutation in mutations:
+            original=copy.deepcopy((self.contract,self.audit,self.exposure,self.rows))
+            mutation();self.freeze()
+            with self.assertRaises(ValueError):self.record()
+            self.contract,self.audit,self.exposure,self.rows=original
+            self.freeze()
+
+    def test_native_source_counters_and_unit_signal_ids_stay_distinct(self):
+        for mutation in [lambda:self.audit["proposal_ledger"].update(n_accepted=2),
+                         lambda:self.audit.update(event_ids=[[77,1,1],[77,1,1]]),
+                         lambda:self.audit.update(sum_weights_squared=1.)]:
+            original=copy.deepcopy(self.audit)
+            mutation()
+            with self.assertRaises(ValueError):self.record()
+            self.audit=original
+
+
+    def test_export_plan_reads_native_source_log_and_retains_full_meson_inputs(self):
+        log="\n".join([
+            " *------- PYTHIA Event and Cross Section Statistics -------*",
+            " | Subprocess Code | Number of events | sigma +- delta |",
+            " | | Tried Selected Accepted | (estimated) (mb) |",
+            " | non-diffractive 101 | 8 5 4 | 3.000e+01 3.000e-01 |",
+            " | sum | 8 5 4 | 3.000e+01 3.000e-01 |",
+            " *------- End PYTHIA Event and Cross Section Statistics -------*",""])
+        (self.directory/"cmsRun.log").write_text(log)
+        self.audit["proposal_ledger"]=read_pythia_generation_ledger(self.directory/"cmsRun.log",4)
+        # The immutable audit records the original worker scratch location.
+        # Retention moves its byte-identical log without rewriting evidence.
+        self.audit["proposal_ledger"]["log_path"]="/pool/condor/original-source/gen/cmsRun.log"
+        (self.directory/"validation.json").write_bytes(canonical_bytes(self.audit))
+        gen=self.directory/"events.root"
+        gen.write_bytes(b"synthetic ROOT identity; no ROOT reader is needed for retention")
+        genhash=hashlib.sha256(gen.read_bytes()).hexdigest()
+        (self.directory/"manifest.json").write_bytes(canonical_bytes(dict(output_sha256=genhash)))
+        for name in ("resolved_cfg.py","audit.log"):(self.directory/name).write_text("small retained fixture\n")
+        point,campaign="m0p3_lab_30m","meson_conditions"
+        plan=dict(campaign=campaign,points=[dict(point=point,gen_directory=str(self.directory),
+            final_output_base="/eos/user/t/test/darkphoton_"+point+"/"+campaign)])
+        planpath=self.directory/"plan.json";planpath.write_bytes(canonical_bytes(plan))
+        parent=dict(event_ids=self.audit["event_ids"],native_sumw=2.,native_sumw2=2.,gen_sha256=genhash,gen_path=str(gen))
+        for filename,key in [("contract.json","contract_sha256"),("validation.json","validation_sha256"),("manifest.json","manifest_sha256")]:
+            parent[key]=hashlib.sha256((self.directory/filename).read_bytes()).hexdigest()
+        (self.directory/"gen_inventory.json").write_bytes(canonical_bytes(dict(complete=True,points={point:parent})))
+        result=export_plan(planpath,self.directory/"retained")
+        self.assertTrue(result["complete"])
+        record=result["points"][0]["record"]
+        self.assertEqual(record["proposal_ledger"]["n_accepted"],4)
+        self.assertEqual(record["full_gen"]["accepted_events"],2)
+        retained=self.directory/"retained/points"/campaign/point/"metadata/GEN"
+        for filename in ("source_exposure.json","meson_source_ledger.jsonl","meson_model.json"):
+            self.assertEqual((retained/filename).read_bytes(),(self.directory/filename).read_bytes())
 
 
 class DurablePublication(unittest.TestCase):

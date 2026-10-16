@@ -1,3 +1,4 @@
+# Code style: human-code.
 """Fail closed on missing, duplicated or contradictory GEN proposal accounting."""
 import hashlib
 from pathlib import Path
@@ -6,7 +7,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from pythia_generation_ledger import parse_pythia_generation_ledger, read_pythia_generation_ledger
+from pythia_generation_ledger import parse_pythia_generation_ledger, read_pythia_generation_ledger, same_ledger_content
 
 
 def table(rows=None, total="1567 300 300 | 6.984e-11 3.247e-12"):
@@ -23,6 +24,25 @@ def table(rows=None, total="1567 300 300 | 6.984e-11 3.247e-12"):
 
 
 class PythiaGenerationLedgerTest(unittest.TestCase):
+    def test_log_relocation_keeps_every_content_field_and_requires_its_hash(self):
+        original = dict(parse_pythia_generation_ledger(table(), 300),
+            log_path="/pool/condor/original/cmsRun.log", log_sha256=hashlib.sha256(table().encode()).hexdigest())
+        moved = dict(original, log_path="/afs/retained/cmsRun.log")
+        self.assertTrue(same_ledger_content(moved, original))
+        self.assertEqual(original["log_path"], "/pool/condor/original/cmsRun.log")
+        for key, value in [("log_sha256", "a" * 64), ("log_sha256", ""),
+                           ("n_tried", 1568), ("expected_accepted", 299),
+                           ("printed_cross_section_mb", 1.), ("statistics_blocks_seen", 7),
+                           ("statistics_block_line_ranges", [[1, 2]])]:
+            changed = dict(moved)
+            changed[key] = value
+            with self.subTest(key=key, value=value):
+                self.assertFalse(same_ledger_content(changed, original))
+        without_hash = dict(moved)
+        del without_hash["log_sha256"]
+        self.assertFalse(same_ledger_content(without_hash, without_hash))
+        self.assertFalse(same_ledger_content(None, original))
+
     def test_identical_terminal_tables_count_once(self):
         result = parse_pythia_generation_ledger("startup\n" + table() + "\nwarning\n" + table(), 300)
         self.assertEqual((result["n_tried"], result["n_selected"], result["n_accepted"]), (1567, 300, 300))

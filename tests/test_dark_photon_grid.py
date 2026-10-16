@@ -10,7 +10,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
 from dark_photon_sample_names import physical_point_name, point_mean_lab_flight_m
-from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, reuse_physical_points, validate_references, write_plan
+from prepare_dark_photon_grid import REFERENCE_SCHEMA, SOURCES, digest, plan_points, preflight_points, plan_detector_stage, repartition_detector_chunks, reuse_physical_points, validate_references, write_plan, meson_width_qualification, validate_physical_preflight
 
 
 def fake_native(mass, epsilon, scale=1.):
@@ -414,6 +414,69 @@ class DetectorChunkReplacement(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Duplicate parent'):
             repartition_detector_chunks(self.original(), duplicate, [], 5,
                                         '/eos/user/synthetic/replacement', 970000)
+
+
+class MesonQualification(unittest.TestCase):
+    def make_plan(self, directory):
+        width = dict(mass_gev=.3, epsilon=1.e-6, total_width_gev=2.e-12,
+            partial_widths_gev={'mu_mu': 1.e-12, 'e_e': 1.e-12},
+            ctau_mm=1.973269804e-13/2.e-12, br_mumu=.5, spectral_source={'pinned': 'source'})
+        source = dict(source_collisions=100, fixed_source_collisions=100,
+                      accepted_signal_events=2, native_n_accepted=100)
+        contract = dict(production_mechanism='eta-etaprime-radiative', filtering='none',
+            requested_events=2, mass_gev=.3, epsilon=1.e-6, seed=77, run_number=88,
+            physical_width_table=width, width_authority=width['spectral_source'],
+            source_exposure=source, meson_model_card_sha256='a'*64)
+        (directory/'contract.json').write_text(json.dumps(contract))
+        (directory/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=2,
+                                                                source_exposure=source)))
+        row = dict(point='m0p3_prompt', mass_gev=.3, epsilon=1.e-6, seed=77, run_number=88,
+                   events=2, gen_directory=str(directory), signal_contract=str(directory/'contract.json'))
+        plan = dict(production_mechanism='eta-etaprime-radiative', physical_width_preflight_passed=True,
+                    points=[row])
+        plan['meson_width_qualification'] = meson_width_qualification(plan['points'])
+        return plan
+
+    def test_meson_widths_qualify_without_claiming_native_resonance_preflight(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            plan = self.make_plan(Path(temporary))
+            stage = plan_detector_stage(plan, '20261016-mesons', '/eos/user/t/test/data')
+            self.assertEqual(stage['events'], 2)
+            self.assertNotIn('native_width_preflight_passed', stage)
+            self.assertFalse(stage['meson_width_qualification']['absolute_production_rate_validated'])
+            plan['points'][0]['proper_ctau_mm'] = 2 * 1.973269804e-13/2.e-12
+            with self.assertRaisesRegex(ValueError, 'do not close'):
+                validate_physical_preflight(plan)
+            plan['points'][0].pop('proper_ctau_mm')
+            plan['native_width_preflight_passed'] = True
+            with self.assertRaisesRegex(ValueError, 'cannot claim native'):
+                validate_physical_preflight(plan)
+
+    def test_changed_qualified_evidence_and_unclosed_widths_fail(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.make_plan(directory)
+            plan['meson_width_qualification']['points']['m0p3_prompt']['validation_sha256'] = 'b'*64
+            with self.assertRaisesRegex(ValueError, 'physical-width preflight'):
+                validate_physical_preflight(plan)
+            contract = json.loads((directory/'contract.json').read_text())
+            contract['physical_width_table']['ctau_mm'] *= 2
+            (directory/'contract.json').write_text(json.dumps(contract))
+            with self.assertRaisesRegex(ValueError, 'do not close'):
+                meson_width_qualification(plan['points'])
+
+    def test_source_and_signal_denominators_cannot_be_confused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.make_plan(directory)
+            contract = json.loads((directory/'contract.json').read_text())
+            contract['source_exposure']['native_n_accepted'] = 2
+            (directory/'contract.json').write_text(json.dumps(contract))
+            audit = json.loads((directory/'validation.json').read_text())
+            audit['source_exposure'] = contract['source_exposure']
+            (directory/'validation.json').write_text(json.dumps(audit))
+            with self.assertRaisesRegex(ValueError, 'source exposure'):
+                meson_width_qualification(plan['points'])
 
 
 if __name__=='__main__': unittest.main()
