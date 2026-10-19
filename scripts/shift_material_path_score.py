@@ -70,7 +70,8 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
     start, end = vector(start), vector(end)
     length = math.dist(start, end)
     result = dict(complete=False, chord_length_cm=length, traced_length_cm=0.,
-                  column_density_g_cm2=0., interaction_depth_proxy=0., materials={})
+                  column_density_g_cm2=0., interaction_depth_proxy=0., materials={},
+                  first_depth_one_distance_cm=None)
     if length == 0:
         return dict(result, complete=True, external_chord_attenuation_proxy=1.)
     direction = [(b-a)/length for a, b in zip(start, end)]
@@ -108,7 +109,13 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
         material_lengths[str(material.GetName())] += step
         result['column_density_g_cm2'] += density*step
         if interaction > 0:
-            result['interaction_depth_proxy'] += step/interaction
+            before = result['interaction_depth_proxy']
+            increment = step/interaction
+            if before < 1. <= before+increment and result['first_depth_one_distance_cm'] is None:
+                # This navigation step is in one material. Interpolate here
+                # instead of repeatedly bisecting and retracing the whole ray.
+                result['first_depth_one_distance_cm'] = travelled-step+(1.-before)*interaction
+            result['interaction_depth_proxy'] += increment
     result['traced_length_cm'] = travelled
     result['materials'] = dict(material_lengths)
     if result['complete']:

@@ -285,14 +285,23 @@ The material score sets priority only. V1 permits one decay draw per original;
 it cannot enlarge a previous selection. The separate TEA weight consumer pins
 the exact upstream Nano SHA before appending Double likelihood weights.
 
-The source of the qualified private `CompleteShiftMuonDecayProducer` diagnostic
-is preserved under `Configuration/GenProduction/plugins/`, byte-identical to
-the tested implementation. Ordinary mode completes natural weak decays without
+The qualified private `CompleteShiftMuonDecayProducer` diagnostic is maintained
+under `Configuration/GenProduction/plugins/`; its initial import in `cf4ce80`
+was byte-identical to the earlier tested implementation. Ordinary mode completes natural weak decays without
 a cylinder cutoff. Its existing importance mode requires exact run/lumi/event,
 frozen OS-pion barcodes and proper-lifetime caps. It sums every compatible pair
 in the full mixture density and leaves native weights unchanged. Descendant
-cascade kernels stay natural. This is the bounded truncated-pair diagnostic,
-not the proposed smoother material-adapted production sampler. Bind the input
+cascade kernels stay natural. This default remains the bounded truncated-pair
+diagnostic. An optional `smoothLifetimeComponents` VPSet adds full-support
+exponential proposals for frozen one-parent or two-parent subsets. Each PSet
+declares `probability` (absolute whole-event probability), `parentBarcodes`
+and aligned `proposalMeanProperLifetimeMm`. These probabilities plus
+`ordinaryFraction` must sum to one. Smooth mode requires empty legacy pion
+bounds and exact original event identity. Every component contributes to q/f,
+including components not selected on that draw. No geometric survival factor
+enters the physics weight. The old/new ordinary and legacy-truncated graphs,
+lifetimes and metadata agree exactly in native compatibility tests; smooth
+means are still diagnostic, without a measured tail-precision gain. Bind the input
 file/graph with the external frozen receipt. Never load its private plugin
 together with a release that already registers the same module. The source
 and direct BuildFile dependencies are preserved without rebuilding the shared

@@ -65,6 +65,19 @@ class NavigationTests(unittest.TestCase):
         self.assertAlmostEqual(result['column_density_g_cm2'], 20., places=5)
         self.assertAlmostEqual(result['interaction_depth_proxy'], .5, places=5)
         self.assertAlmostEqual(result['external_chord_attenuation_proxy'], math.exp(-.5), places=5)
+        self.assertIsNone(result['first_depth_one_distance_cm'])
+
+    def test_first_depth_one_includes_upstream_vacuum_and_interpolates_inside_material(self):
+        result = score.trace_chord(self.geometry, [-80., 0., 0.], [80., 0., 0.])
+        self.assertTrue(result['complete'])
+        self.assertAlmostEqual(result['interaction_depth_proxy'],5.,places=5)
+        self.assertAlmostEqual(result['first_depth_one_distance_cm'],50.,places=5)
+
+    def test_first_depth_one_known_prefix_does_not_claim_full_unknown_path(self):
+        result = score.trace_chord(self.geometry, [-80., 0., 0.], [220., 0., 0.])
+        self.assertFalse(result['complete'])
+        self.assertIsNone(result['external_chord_attenuation_proxy'])
+        self.assertAlmostEqual(result['first_depth_one_distance_cm'],50.,places=5)
 
     def test_outside_and_missing_central_geometry_are_unknown(self):
         result = score.trace_chord(self.geometry, [200., 0., 0.], [220., 0., 0.])
