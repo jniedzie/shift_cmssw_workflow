@@ -268,6 +268,37 @@ geometry and measures material along parent chords. Its score is a ranking
 feature; it is never a survival correction or an event weight. Unknown or
 unmodelled path sections remain explicit. Neither tool changes production.
 
+`scripts/shift_gen_material_features.py` reads the complete HepMC ancestry,
+incoming momentum, unique ancestor material flights and daughter material
+column to the external/CMS boundary. Bind each row to its original source
+ledger, including when several original sources share one merged GEN file.
+Unknown paths and zero-GEN-muon records remain explicit. Prefix scans and
+intentionally selected controls do not establish representative exposure.
+
+`scripts/shift_material_preselection.py` creates a new diagnostic admission
+ledger from those features, a source/decay authority and a frozen policy.
+It preserves full original source exposure even for zero-admitted sources.
+Each event has positive inclusion probability. New random domains must be
+independent of earlier gates; record the cumulative probability and apply
+`native_weight / probability * full_event_decay_f_over_q` exactly once.
+The material score sets priority only. V1 permits one decay draw per original;
+it cannot enlarge a previous selection. The separate TEA weight consumer pins
+the exact upstream Nano SHA before appending Double likelihood weights.
+
+The source of the qualified private `CompleteShiftMuonDecayProducer` diagnostic
+is preserved under `Configuration/GenProduction/plugins/`, byte-identical to
+the tested implementation. Ordinary mode completes natural weak decays without
+a cylinder cutoff. Its existing importance mode requires exact run/lumi/event,
+frozen OS-pion barcodes and proper-lifetime caps. It sums every compatible pair
+in the full mixture density and leaves native weights unchanged. Descendant
+cascade kernels stay natural. This is the bounded truncated-pair diagnostic,
+not the proposed smoother material-adapted production sampler. Bind the input
+file/graph with the external frozen receipt. Never load its private plugin
+together with a release that already registers the same module. The source
+and direct BuildFile dependencies are preserved without rebuilding the shared
+release or changing a live campaign; a future standard SCRAM build still
+needs its own bounded qualification.
+
 Keep scientific conclusions and the remaining qualification steps in
 [SHIFT_ANALYSIS.md](../../SHIFT_ANALYSIS.md) and
 [SHIFT_RECONSTRUCTION.md](../../SHIFT_RECONSTRUCTION.md). Study receipts belong
