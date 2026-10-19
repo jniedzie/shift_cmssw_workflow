@@ -302,7 +302,9 @@ including components not selected on that draw. No geometric survival factor
 enters the physics weight. The old/new ordinary and legacy-truncated graphs,
 lifetimes and metadata agree exactly in native compatibility tests; smooth
 means are still diagnostic, without a measured tail-precision gain. Bind the input
-file/graph with the external frozen receipt. Never load its private plugin
+file/graph with the external frozen receipt. The legacy output name
+`selectedPairBarcodes` holds the chosen subset and can have one entry in smooth
+mode. Never load its private plugin
 together with a release that already registers the same module. The source
 and direct BuildFile dependencies are preserved without rebuilding the shared
 release or changing a live campaign; a future standard SCRAM build still
