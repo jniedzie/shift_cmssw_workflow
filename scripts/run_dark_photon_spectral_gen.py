@@ -41,18 +41,21 @@ def digest(path):
     return checksum.hexdigest()
 
 
-def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False):
+def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False,
+                   experimental_large_epsilon=False):
     minimum = 1.4 if experimental_low_mass_dy else 2.
     if not math.isfinite(mass) or not minimum <= mass < 12.:
         raise ValueError("Spectral DY pilot requires mass >=2 GeV, or >=1.4 GeV with the explicit experimental low-mass DY option, and mass <12 GeV")
-    if not math.isfinite(epsilon) or not 0 < epsilon <= .01:
-        raise ValueError("Physical epsilon must be finite and in (0, 0.01]")
-    if not math.isfinite(sampling_epsilon) or not epsilon <= sampling_epsilon <= .01:
-        raise ValueError("Require physical epsilon <= sampling epsilon <= 0.01")
+    maximum = .1 if experimental_large_epsilon else .01
+    if not math.isfinite(epsilon) or not 0 < epsilon <= maximum:
+        raise ValueError(f"Physical epsilon must be finite and in (0, {maximum}]")
+    if not math.isfinite(sampling_epsilon) or not epsilon <= sampling_epsilon <= maximum:
+        raise ValueError(f"Require physical epsilon <= sampling epsilon <= {maximum}")
 
 
-def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False):
-    validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy)
+def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False,
+                             experimental_large_epsilon=False):
+    validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy, experimental_large_epsilon)
     couplings = pythia_couplings(mass, epsilon, NATIVE_EW)
     scale = sampling_epsilon / epsilon
     settings = [
@@ -134,7 +137,8 @@ def build_contract(args, width, native, common, tune):
     correction = cross_section_correction(args.epsilon, args.sampling_epsilon, width["br_mumu"], native_br)
     support = validate_native_proposal_support(native, .99*args.mass, 1.01*args.mass)
     experimental = getattr(args, 'experimental_low_mass_dy', False)
-    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental)
+    large_epsilon = getattr(args, 'experimental_large_epsilon', False)
+    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental, large_epsilon)
     commands.extend(["32:tauCalc = off", f"32:tau0 = {width['ctau_mm']:.17g}",
                      "32:onMode = off", "32:onIfMatch = 13 -13"])
     return dict(schema="shift-dark-photon-gen-v1", model="PBC-BC1-visible-hypercharge",
@@ -160,6 +164,7 @@ def build_contract(args, width, native, common, tune):
         timing="proper decay after source placement; nominal Beam-B time shift once on complete graph; canonical shiftEventTime metadata",
         filtering="none", physics_valid=False, normalization_ready=False, low_mass_mechanisms_included=False,
         experimental_low_mass_dy=experimental,
+        **({'experimental_large_epsilon': True} if large_epsilon else {}),
         production_scope="DY-only experimental extension; meson/bremsstrahlung absent" if args.mass<2 else "DY-only spectral pilot",
         prompt_interference_included=False, detector_simulated=False)
 
@@ -171,6 +176,8 @@ def main():
     parser.add_argument("--sampling-epsilon", type=float, default=.01)
     parser.add_argument("--experimental-low-mass-dy", action="store_true",
                         help="Allow 1.4-2 GeV DY-only diagnostics; retain native pole-support checks and provisional physics flags")
+    parser.add_argument("--experimental-large-epsilon", action="store_true",
+                        help="Allow epsilon up to 0.1 and use full vector/axial DarkCast couplings; provisional pure-DY benchmark")
     parser.add_argument("--darkcast-path", type=Path, required=True)
     parser.add_argument("--darkcast-source-receipt", type=Path, required=True)
     parser.add_argument("--events", type=int, default=100)
@@ -179,7 +186,8 @@ def main():
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    validate_point(args.mass, args.epsilon, args.sampling_epsilon, args.experimental_low_mass_dy)
+    validate_point(args.mass, args.epsilon, args.sampling_epsilon, args.experimental_low_mass_dy,
+                   args.experimental_large_epsilon)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999823 or args.timeout <= 0:
         parser.error("Require bounded events, valid seed namespace and positive timeout")
     if args.run_number is not None and not 1 <= args.run_number <= 4294967295:
@@ -195,9 +203,10 @@ def main():
     path = output / "manifest.json"
     here = Path(__file__).resolve().parent
     try:
-        for name in SOURCES:
+        sources = SOURCES + (("dark_photon_spectral_widths.py",) if args.experimental_large_epsilon else ())
+        for name in sources:
             shutil.copy2(here / name, output / name)
-        manifest["source_sha256"] = {name: digest(output / name) for name in SOURCES}
+        manifest["source_sha256"] = {name: digest(output / name) for name in sources}
         base = Path(os.environ["CMSSW_BASE"])
         manifest["cmssw_git_head"] = subprocess.check_output(["git", "-C", str(base / "src"), "rev-parse", "HEAD"], text=True).strip()
         manifest["cmssw_git_status"] = subprocess.check_output(["git", "-C", str(base / "src"), "status", "--porcelain"], text=True)
@@ -208,12 +217,21 @@ def main():
         import darkcast
         model = darkcast.Model("dark_photon")
         width = physical_width_table(model, args.mass, args.epsilon, authority)
+        if args.experimental_large_epsilon:
+            from dark_photon_spectral_widths import full_hypercharge_model, correction_summary
+            model, photon, card = full_hypercharge_model(darkcast, args.mass, args.epsilon,
+                                                        output / 'width_inputs')
+            width = physical_width_table(model, args.mass, args.epsilon, authority)
+            width.update(width_scope='DarkCast2.1-full-vector-axial-hypercharge-benchmark',
+                         neutral_current_width_included=True, full_hypercharge_couplings=card,
+                         photon_like_comparison=correction_summary(model, photon, args.mass, args.epsilon))
         from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
         from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
         from dark_photon_pythia import _native_inspect
         common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
         tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
-        native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,args.experimental_low_mass_dy)+beam_settings(6800.))
+        native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,
+            args.experimental_low_mass_dy,args.experimental_large_epsilon)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
         (output / "contract.json").write_text(json.dumps(contract, indent=2, allow_nan=False)+"\n")
         command = ["cmsRun", str(output / "dark_photon_gen_cfg.py"), "pilotDirectory="+str(output)]

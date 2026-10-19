@@ -17,12 +17,13 @@ NATIVE_EW = ElectroweakInputs(sin2_theta_w=0.2312, m_z_gev=91.1876)
 SIGNAL_PDG_ID = 32
 
 
-def production_settings(mass_gev, epsilon, coupling_scale=1.):
+def production_settings(mass_gev, epsilon, coupling_scale=1., experimental_large_epsilon=False):
     if not math.isfinite(mass_gev) or not 12 <= mass_gev < NATIVE_EW.m_z_gev:
         raise ValueError('Native perturbative DY pilot requires 12 <= mass < mZ; low mass needs spectral inputs')
-    if not math.isfinite(epsilon) or not 0 < abs(epsilon) <= 0.01:
-        raise ValueError('Require finite nonzero abs(epsilon) <= 0.01')
-    if not math.isfinite(coupling_scale) or coupling_scale < 1 or abs(epsilon)*coupling_scale > .01:
+    epsilon_max = 0.1 if experimental_large_epsilon else 0.01
+    if not math.isfinite(epsilon) or not 0 < abs(epsilon) <= epsilon_max:
+        raise ValueError(f'Require finite nonzero abs(epsilon) <= {epsilon_max}')
+    if not math.isfinite(coupling_scale) or coupling_scale < 1 or abs(epsilon)*coupling_scale > epsilon_max:
         raise ValueError('Sampling amplitude scale must be >=1 and within the perturbative pilot range')
     couplings = pythia_couplings(mass_gev, epsilon, NATIVE_EW)
     settings = [
@@ -61,11 +62,12 @@ def check_width_table(table, mass_gev, epsilon):
         raise ValueError('Lifetime differs from the full physical width')
 
 
-def signal_settings(mass_gev, epsilon, width_table, decay_mode='mumu', coupling_scale=1.):
+def signal_settings(mass_gev, epsilon, width_table, decay_mode='mumu', coupling_scale=1.,
+                    experimental_large_epsilon=False):
     check_width_table(width_table, mass_gev, epsilon)
     if decay_mode not in ('mumu', 'inclusive'):
         raise ValueError('Unknown signal decay mode')
-    result = production_settings(mass_gev, epsilon, coupling_scale)
+    result = production_settings(mass_gev, epsilon, coupling_scale, experimental_large_epsilon)
     # Pythia's resonance tauCalc can replace an explicit tau0. The preflight
     # derives the lifetime from its own total width; freeze that value once.
     result.extend(['32:tauCalc = off',
@@ -76,7 +78,8 @@ def signal_settings(mass_gev, epsilon, width_table, decay_mode='mumu', coupling_
 
 
 def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_number,
-             common, cp5, sampling_width_table=None, coupling_scale=1., accepted_events=False):
+             common, cp5, sampling_width_table=None, coupling_scale=1., accepted_events=False,
+             experimental_large_epsilon=False):
     if not 1 <= events <= 10000 or not 1 <= seed <= 899999900:
         raise ValueError('Require 1..10000 events and valid reserved RNG seed range')
     if not 1 <= run_number <= 4294967295:
@@ -92,7 +95,8 @@ def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_numbe
     # This generator adapter is pinned to 8.317 and rejects that path.
     if sampling_width_table['total_width_gev'] < max(1e-6,1e6*math.ulp(mass_gev)):
         raise ValueError('Native pole width is numerically unresolved; use explicit narrow-width sampling')
-    commands = signal_settings(mass_gev, epsilon, width_table, decay_mode, coupling_scale)
+    commands = signal_settings(mass_gev, epsilon, width_table, decay_mode, coupling_scale,
+                               experimental_large_epsilon)
     result = dict(schema='shift-dark-photon-gen-v1', model='PBC-BC1-visible-hypercharge',
         mechanism='pure-on-shell-drell-yan', mass_gev=mass_gev, epsilon=epsilon,
         generated_mass_support_gev=[.99*mass_gev,1.01*mass_gev],
@@ -119,4 +123,7 @@ def contract(mass_gev, epsilon, width_table, decay_mode, events, seed, run_numbe
     if accepted_events:
         result.update(event_budget_mode='outputAccepted', maximum_framework_events=10 * events,
                       event_identity_policy='Original accepted run/lumi/event IDs; gaps retained')
+    if experimental_large_epsilon:
+        result['experimental_large_epsilon'] = True
+        result['large_epsilon_scope'] = 'Exact mixed couplings and native widths; pure on-shell DY, no gamma/Z interference'
     return result

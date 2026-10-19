@@ -32,6 +32,8 @@ def main():
     parser.add_argument('--decay-mode', choices=('mumu', 'inclusive'), default='mumu')
     parser.add_argument('--sampling-epsilon', type=float,
                         help='Resolvable common amplitude scale; physical epsilon and lifetime stay unchanged')
+    parser.add_argument('--experimental-large-epsilon', action='store_true',
+                        help='Allow epsilon up to 0.1 with exact mixed couplings; pure-DY benchmark only')
     parser.add_argument('--events', type=int, default=100)
     parser.add_argument('--accepted-events', action='store_true',
                         help='Write --events accepted GEN events, with input capped at10times that count')
@@ -40,9 +42,9 @@ def main():
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
-    production_settings(args.mass, args.epsilon)
+    production_settings(args.mass, args.epsilon, experimental_large_epsilon=args.experimental_large_epsilon)
     scale = 1. if args.sampling_epsilon is None else args.sampling_epsilon/abs(args.epsilon)
-    production_settings(args.mass, args.epsilon, scale)
+    production_settings(args.mass, args.epsilon, scale, args.experimental_large_epsilon)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999900 or args.timeout <= 0:
         parser.error('Require bounded events, seed and positive timeout')
     if not shutil.which('cmsRun') or not os.environ.get('CMSSW_BASE'):
@@ -77,7 +79,8 @@ def main():
     path.write_text(json.dumps(manifest, indent=2) + '\n')
     try:
         # Preflight uses all natural signal channels before any forcing.
-        width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon)
+        width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon,
+                               experimental_large_epsilon=args.experimental_large_epsilon)
                                + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
         width.update(epsilon=args.epsilon, total_width_gev=width['m_width_gev'],
                      ctau_mm=width['proper_length_mm'],
@@ -87,14 +90,15 @@ def main():
         if scale == 1:
             sampling_width = width
         else:
-            sampling_width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon, scale)
+            sampling_width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon, scale,
+                args.experimental_large_epsilon)
                 + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
             sampling_width.update(total_width_gev=sampling_width['m_width_gev'])
         sampling_width['pole_support_audit'] = validate_native_proposal_support(
             sampling_width, .99*args.mass, 1.01*args.mass)
         data = contract(args.mass, args.epsilon, width, args.decay_mode, args.events, args.seed,
                         args.run_number or args.seed, common, cp5, sampling_width, scale,
-                        accepted_events=args.accepted_events)
+                        accepted_events=args.accepted_events, experimental_large_epsilon=args.experimental_large_epsilon)
         (out / 'contract.json').write_text(json.dumps(data, indent=2) + '\n')
         command = ['cmsRun', str(out / 'dark_photon_gen_cfg.py'), 'pilotDirectory=' + str(out)]
         manifest.update(command=command, status='generating')

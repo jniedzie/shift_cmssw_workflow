@@ -9,13 +9,16 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from run_dark_photon_spectral_gen import (
-    PINNED_DARKCAST_COMMIT, build_contract, cross_section_correction,
+    PINNED_DARKCAST_COMMIT, SOURCES, build_contract, cross_section_correction,
     freeze_spectral_inputs, physical_width_table, validate_point,
 )
 from prepare_dark_photon_spectral_grid import plan_points
 
 
 class SpectralGenerationTest(unittest.TestCase):
+    def test_ordinary_spectral_deployments_keep_their_existing_source_dependencies(self):
+        self.assertNotIn('dark_photon_spectral_widths.py', SOURCES)
+
     def test_selected_rate_corrects_native_branching_fraction_once(self):
         correction = cross_section_correction(1.e-7, .01, .2, .4)
         self.assertAlmostEqual(correction / 1.e-10, .5)
@@ -36,6 +39,14 @@ class SpectralGenerationTest(unittest.TestCase):
         for mass in [.22, 1., 1.39]:
             with self.assertRaises(ValueError):
                 validate_point(mass, 1.e-7, .01, experimental_low_mass_dy=True)
+
+    def test_large_epsilon_is_explicit_and_bounded(self):
+        for epsilon in (.02, .05, .1):
+            with self.assertRaises(ValueError):
+                validate_point(2., epsilon, epsilon)
+            validate_point(2., epsilon, epsilon, experimental_large_epsilon=True)
+        with self.assertRaises(ValueError):
+            validate_point(2., .10001, .10001, experimental_large_epsilon=True)
 
     def test_contract_retains_physical_width_and_accepted_identity_budget(self):
         args = SimpleNamespace(mass=2., epsilon=1.e-7, sampling_epsilon=.01,

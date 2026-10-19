@@ -1,7 +1,7 @@
 {
   "code_style": "human-code",
   "campaign": "dark_photon_low_mass_20261016",
-  "stage": "GEN-only experimental DY validation; detector production not submitted",
+  "stage": "Experimental DY diagnostic through GEN, detector processing and merged histograms",
   "masses_gev": [1.8, 1.5],
   "epsilon": 0.001,
   "sampling_epsilon": 0.01,

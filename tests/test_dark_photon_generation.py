@@ -43,6 +43,16 @@ class SignalGenerationContractTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 production_settings(mass,eps)
 
+    def test_large_epsilon_requires_explicit_benchmark_opt_in(self):
+        for epsilon in (.02, .05, .1):
+            with self.assertRaises(ValueError):
+                production_settings(15., epsilon)
+            settings = production_settings(15., epsilon, experimental_large_epsilon=True)
+            self.assertIn('Zprime:gmZmode = 3', settings)
+        for mass, epsilon in ((15., .10001), (90., .1)):
+            with self.assertRaises(ValueError):
+                production_settings(mass, epsilon, experimental_large_epsilon=True)
+
     def test_inclusive_has_no_signal_forcing(self):
         commands = signal_settings(15.,1e-3,self.width,'inclusive')
         self.assertFalse(any('onIfMatch' in command for command in commands))

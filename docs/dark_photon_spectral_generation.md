@@ -70,11 +70,25 @@ efficiencies below the simulated mass range. The separate meson decay kernel
 and its tests cover kinematics and branching weights; parent-source rates,
 form factors and detector integration remain required.
 
+Completed low-mass GEN diagnostics can use the standard detector, ntuple
+grouping and histogram pipeline. Preserve their DY-only scope and full source
+denominators when inspecting that detector response.
+
 DarkCast uses photon-like spectral widths in this mass range; the native
 proposal uses the full hypercharge-mixing couplings. The small neutral-current
 width correction, production theory uncertainties and signal-rate closure
 still need evaluation before using these samples for epsilon limits. A passed
 runtime audit establishes the implemented event, lifetime and weight contract.
+
+The explicit `--experimental-large-epsilon` option permits epsilon up to 0.1.
+For those points only, the spectral runner constructs a frozen DarkCast model
+with the full hypercharge vector and axial fermion couplings, including
+neutrinos. It records the exact neutral mass matrix, coupling card, complete
+partial widths and comparison with the photon-like width. The native runner
+supports the same option above 12 GeV and checks its natural widths separately.
+The default epsilon bound remains 0.01. These remain pure on-shell DY samples
+in the recorded mass window; larger mixing, finite-width effects and gamma/Z
+interference need separate qualification before a sensitivity interpretation.
 
 References: [DarkCast release](https://gitlab.com/darkcast/releases),
 [spectral-width method](https://arxiv.org/abs/1801.04847),
