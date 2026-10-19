@@ -6,8 +6,8 @@ import json
 from pathlib import Path
 import shutil
 
-from run_shift_stream_controller import SUPERVISOR_OVERRIDES, load_tasks, read, save, sha
-from run_mu_enriched_qcd_admission import validate_policy
+from run_shift_stream_controller import (SUPERVISOR_OVERRIDES, load_tasks, read,
+    save, sha, stage_publication_bounds, stream_admission_policy)
 
 
 HELPERS = ('run_shift_stream_controller.py', 'run_mu_enriched_qcd_admission.py',
@@ -15,16 +15,22 @@ HELPERS = ('run_shift_stream_controller.py', 'run_mu_enriched_qcd_admission.py',
     'shift_condor_native.py', 'read_shift_external_storage_commitments.py')
 
 
-def prepare(destination, policy, extra_files=None):
+def prepare(destination, policy, extra_files=None, helper_sources=None):
     destination = Path(destination).resolve()
     if (destination.exists() or str(destination).startswith(('/tmp/', '/pool/condor/dir_'))
             or any(c.isspace() for c in str(destination))):
         raise ValueError('Use a new persistent absolute deployment directory without whitespace')
-    admission = validate_policy(policy['admission'])
+    admission = stream_admission_policy(policy)
+    stage_publication_bounds(policy, admission)
     if policy['tag'] != admission['suite_tag']:
         raise ValueError('Controller and admission identities differ')
     if policy.get('manager_runtime_seconds', 604800) < 604800:
         raise ValueError('Stream managers need at least seven days including downstream queue time')
+    submissions = policy.get('maximum_submissions_per_poll', 4)
+    if type(submissions) is not int or not 1 <= submissions <= admission['worker_ceiling']:
+        raise ValueError('Submissions per poll need a positive integer within the worker ceiling')
+    if type(policy.get('isolate_failed_cohorts', False)) is not bool:
+        raise ValueError('isolate_failed_cohorts needs an explicit boolean')
     for key in ('queue_timeout_seconds', 'worker_timeout_seconds', 'setup_timeout_seconds'):
         if type(policy.get('worker_limits', {}).get(key)) is not int or policy['worker_limits'][key] <= 0:
             raise ValueError('Explicit positive worker limit required: ' + key)
@@ -32,14 +38,17 @@ def prepare(destination, policy, extra_files=None):
     for name in ('admission', 'tasks', 'cohorts', 'operational_gates'):
         (destination / name).mkdir()
     scripts = Path(__file__).resolve().parent
+    helper_sources = helper_sources or {}
+    if set(helper_sources) - set(HELPERS) - {'run_shift_quota_audit.py'}:
+        raise ValueError('Explicit helper sources may select only known controller helpers')
     for name in HELPERS:
-        shutil.copy2(scripts / name, destination / name)
+        shutil.copy2(helper_sources.get(name, scripts / name), destination / name)
     # Admission requires the split local/remote account observation and sealed
     # external storage commitments. The older general ntuple auditor returns
     # a different schema and can never satisfy that guard. Freeze the same
     # maintained helper used by the proven GEN/night deployment, under the
     # sibling filename expected by launch_quota_audit().
-    shutil.copy2(scripts/'run_shift_night_quota_audit.py',
+    shutil.copy2(helper_sources.get('run_shift_quota_audit.py', scripts/'run_shift_night_quota_audit.py'),
                  destination/'run_shift_quota_audit.py')
     for name, source in (extra_files or {}).items():
         relative = Path(name)
@@ -57,6 +66,7 @@ initialdir = {destination}
 executable = /usr/bin/python3
 getenv = False
 notification = Never
++SendCredential = True
 +MaxRuntime = {policy.get('manager_runtime_seconds', 604800)}
 +ShiftStreamCampaign = {json.dumps(policy['tag'])}
 +ShiftStreamController = true
@@ -82,7 +92,7 @@ queue 1
     return deployment
 
 
-def adopt(destination, campaign, overrides=None, extra_files=None):
+def adopt(destination, campaign, overrides=None, extra_files=None, helper_sources=None):
     """Freeze new control code while preserving every existing task and nonce.
 
     Preparation is read-only for the old campaign. Its controller and watchdog
@@ -106,7 +116,7 @@ def adopt(destination, campaign, overrides=None, extra_files=None):
         'ledger_sha256_at_preparation': sha(campaign / 'ledger.json'),
         'task_manifest_count_at_preparation': len(tasks),
         'science_inputs_changed': False, 'submission_performed': False})
-    return prepare(destination, policy, extra_files)
+    return prepare(destination, policy, extra_files, helper_sources)
 
 
 def main():
@@ -120,16 +130,20 @@ def main():
         help='Optional scheduling-only JSON changes when adopting an existing campaign')
     parser.add_argument('--extra-files', type=Path,
         help='JSON mapping deployment relative names to existing source files')
+    parser.add_argument('--helper-sources', type=Path,
+        help='Explicit frozen source mapping for known controller helper filenames')
     args = parser.parse_args()
     if args.adopt_campaign:
         result = adopt(args.directory, args.adopt_campaign,
                        read(args.supervisor_overrides) if args.supervisor_overrides else None,
-                       read(args.extra_files) if args.extra_files else None)
+                       read(args.extra_files) if args.extra_files else None,
+                       read(args.helper_sources) if args.helper_sources else None)
     else:
         if args.supervisor_overrides:
             parser.error('--supervisor-overrides requires --adopt-campaign')
         result = prepare(args.directory, read(args.policy),
-                         read(args.extra_files) if args.extra_files else None)
+                         read(args.extra_files) if args.extra_files else None,
+                         read(args.helper_sources) if args.helper_sources else None)
     print(json.dumps({'prepared_only': True, 'files': len(result['files']),
                       'directory': str(args.directory.resolve())}))
 
