@@ -146,7 +146,7 @@ def validate_population(row, config=None):
         raise ValueError('GEN has not passed the complete runtime audit: ' + row['point'])
     count = row['events']
     native_count = count
-    if contract.get('production_mechanism') == 'eta-etaprime-radiative':
+    if contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
         native_count = validate_meson_metadata(gen, contract, audit, count)
     identities = audit['event_ids']
     if (audit['events'] != count or len(identities) != count or

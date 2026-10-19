@@ -452,6 +452,21 @@ class MesonQualification(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'cannot claim native'):
                 validate_physical_preflight(plan)
 
+    def test_unified_meson_source_keeps_the_same_width_and_source_exposure_checks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            plan = self.make_plan(directory)
+            contract = json.loads((directory/'contract.json').read_text())
+            contract['production_mechanism'] = 'meson-radiative'
+            (directory/'contract.json').write_text(json.dumps(contract))
+            plan['production_mechanism'] = 'meson-radiative'
+            plan['meson_width_qualification'] = meson_width_qualification(plan['points'])
+            stage = plan_detector_stage(plan,'unified-mesons-20261017','/eos/user/t/test/data')
+            self.assertEqual(stage['events'],2)
+            plan['native_width_preflight_passed'] = True
+            with self.assertRaisesRegex(ValueError,'cannot claim native'):
+                validate_physical_preflight(plan)
+
     def test_changed_qualified_evidence_and_unclosed_widths_fail(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)

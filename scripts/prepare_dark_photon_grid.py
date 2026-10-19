@@ -154,7 +154,7 @@ def meson_width_qualification(points):
         width = contract['physical_width_table']
         total = width['total_width_gev']
         partials = width['partial_widths_gev']
-        if (contract.get('production_mechanism') != 'eta-etaprime-radiative' or
+        if (contract.get('production_mechanism') not in ('eta-etaprime-radiative', 'meson-radiative') or
                 contract.get('filtering') != 'none' or audit.get('runtime_validated') is not True or
                 audit.get('events') != row['events'] or contract.get('requested_events') != row['events'] or
                 any(contract[key] != row[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number')) or
@@ -190,10 +190,10 @@ def validate_physical_preflight(plan):
     if not isinstance(plan, dict):
         raise ValueError('Require a qualified physical GEN plan')
     if plan.get('native_width_preflight_passed') is True:
-        if plan.get('production_mechanism') == 'eta-etaprime-radiative':
+        if plan.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
             raise ValueError('Meson injection cannot claim native-resonance qualification')
         return
-    if (plan.get('production_mechanism') != 'eta-etaprime-radiative' or
+    if (plan.get('production_mechanism') not in ('eta-etaprime-radiative', 'meson-radiative') or
             plan.get('physical_width_preflight_passed') is not True or
             plan.get('meson_width_qualification') != meson_width_qualification(plan['points'])):
         raise ValueError('Detector stages require completed physical-width preflight')
@@ -517,7 +517,8 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
         point = contracts / row['point']
         point.mkdir()
         contract_path = point / 'contract.json'
-        contract_path.write_text(json.dumps(row.pop('signal_contract'), indent=2, allow_nan=False) + '\n')
+        point_contract = row.pop('signal_contract')
+        contract_path.write_text(json.dumps(point_contract, indent=2, allow_nan=False) + '\n')
         gen = output / 'runs' / row['point'] / 'gen'
         detector = output / 'runs' / row['point'] / 'detector'
         row.update(signal_contract=str(contract_path), signal_contract_sha256=digest(contract_path),
@@ -528,6 +529,10 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
                            '--run-number', str(row['run_number']), '--output', str(gen)]
         if result.get('event_budget_mode') == 'outputAccepted':
             row['gen_argv'].append('--accepted-events')
+        if point_contract.get('experimental_large_epsilon') is True:
+            row['gen_argv'].append('--experimental-large-epsilon')
+        if point_contract.get('experimental_low_mass_dy') is True:
+            row['gen_argv'].append('--experimental-low-mass-dy')
         if 'gen_timeout_seconds' in result:
             row['gen_argv'].extend(['--timeout', str(result['gen_timeout_seconds'])])
         row['detector_argv'] = [python, str(frozen / 'run_dark_photon_detector.py'), str(gen),

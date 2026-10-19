@@ -45,45 +45,48 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(canonical.read_bytes(), b'preserve')
 
     def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); gen = root/'gen'; gen.mkdir()
-            (gen/'gen.root').write_bytes(b'synthetic GEN payload')
-            (gen/'manifest.json').write_text(json.dumps(dict(
-                status='GEN runtime audit passed fixture', output_sha256=worker.sha(gen/'gen.root'))))
-            (gen/'contract.json').write_text(json.dumps(dict(mass_gev=15.)))
-            identities = [[123, 1, event] for event in range(1, 6)]
-            (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
-                event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))
-            templates = root/'templates'; templates.mkdir()
-            for stage in range(1, 5):
-                (templates/f'step{stage}.py').write_text('# synthetic template\n')
-            output = root/'detector'
-            launched = []
-            audit_limits = []
-            def run(command, **kwargs):
-                launched.append(command)
-                if Path(command[1]).name == 'run_shift_gen_to_nano.py':
-                    (output/'report.json').write_text(json.dumps(dict(complete=True)))
-                elif command[2] == 'audit-replay':
-                    (output/'signal_audit.json').write_text('{}\n')
-                    audit_limits.append(kwargs['timeout'])
-                else:
-                    self.fail('Unexpected external command')
-                return subprocess.CompletedProcess(command, 0)
-            arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
-                         '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600',
-                         '--audit-timeout', '900']
-            with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
-                    patch.object(signal_runner.shutil, 'which', return_value='cmsRun'), \
-                    patch.object(signal_runner.subprocess, 'run', side_effect=run), redirect_stdout(io.StringIO()):
-                signal_runner.main()
-            descriptor = json.loads((output/'source.json').read_text())
-            self.assertTrue(descriptor['gen_path_resolved'])
-            self.assertEqual(descriptor['event_ids'], identities)
-            self.assertTrue((output/'shift_storage_paths.py').is_file())
-            self.assertEqual(launched[0][launched[0].index('--event-stall-timeout') + 1], '1800')
-            self.assertEqual(launched[0][launched[0].index('--first-event-stall-timeout') + 1], '3600')
-            self.assertEqual(audit_limits, [900])
+        for mechanism, mass, name in ((None, 15., 'dy'), ('eta-etaprime-radiative', .3, 'eta_etaprime'),
+                                      ('meson-radiative', .3, 'meson_radiative')):
+            with self.subTest(mechanism=mechanism), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); gen = root/'gen'; gen.mkdir()
+                (gen/'gen.root').write_bytes(b'synthetic GEN payload')
+                (gen/'manifest.json').write_text(json.dumps(dict(
+                    status='GEN runtime audit passed fixture', output_sha256=worker.sha(gen/'gen.root'))))
+                (gen/'contract.json').write_text(json.dumps(dict(mass_gev=mass, production_mechanism=mechanism)))
+                identities = [[123, 1, event] for event in range(1, 6)]
+                (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
+                    event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))
+                templates = root/'templates'; templates.mkdir()
+                for stage in range(1, 5):
+                    (templates/f'step{stage}.py').write_text('# synthetic template\n')
+                output = root/'detector'
+                launched = []
+                audit_limits = []
+                def run(command, **kwargs):
+                    launched.append(command)
+                    if Path(command[1]).name == 'run_shift_gen_to_nano.py':
+                        (output/'report.json').write_text(json.dumps(dict(complete=True)))
+                    elif command[2] == 'audit-replay':
+                        (output/'signal_audit.json').write_text('{}\n')
+                        audit_limits.append(kwargs['timeout'])
+                    else:
+                        self.fail('Unexpected external command')
+                    return subprocess.CompletedProcess(command, 0)
+                arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
+                             '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600',
+                             '--audit-timeout', '900']
+                with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
+                        patch.object(signal_runner.shutil, 'which', return_value='cmsRun'), \
+                        patch.object(signal_runner.subprocess, 'run', side_effect=run), redirect_stdout(io.StringIO()):
+                    signal_runner.main()
+                descriptor = json.loads((output/'source.json').read_text())
+                self.assertTrue(descriptor['gen_path_resolved'])
+                self.assertEqual(descriptor['event_ids'], identities)
+                self.assertEqual(descriptor['stratum'], 'darkphoton_'+name+'_m'+str(mass))
+                self.assertTrue((output/'shift_storage_paths.py').is_file())
+                self.assertEqual(launched[0][launched[0].index('--event-stall-timeout') + 1], '1800')
+                self.assertEqual(launched[0][launched[0].index('--first-event-stall-timeout') + 1], '3600')
+                self.assertEqual(audit_limits, [900])
 
     def test_signal_graph_audit_reads_only_exact_selected_gen_records(self):
         from types import SimpleNamespace

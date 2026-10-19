@@ -245,6 +245,18 @@ class MesonGenStageTest(unittest.TestCase):
             self.assertEqual(audit['events'],3)
             self.assertEqual(audit['proposal_ledger']['n_accepted'],103)
 
+    def test_unified_meson_handoff_retains_full_source_denominator(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            row, config, unused = audited_meson_population(Path(temporary))
+            gen = Path(row['gen_directory'])
+            contract = read(gen/'contract.json')
+            contract['production_mechanism'] = 'meson-radiative'
+            (gen/'contract.json').write_text(json.dumps(contract))
+            Path(row['signal_contract']).write_text(json.dumps(contract))
+            audit, unused_manifest, unused_contract = validate_population(row,config)
+            self.assertEqual(audit['events'],3)
+            self.assertEqual(audit['proposal_ledger']['n_accepted'],103)
+
     def test_each_pinned_meson_input_is_checked(self):
         for filename in ('source_exposure.json','meson_source_ledger.jsonl','meson_model.json'):
             with self.subTest(filename=filename), tempfile.TemporaryDirectory() as temporary:

@@ -163,7 +163,7 @@ def combined_rate(populations, *, point, campaign):
     """
     populations = unique_populations(populations)
     first = populations[0]['rate']
-    meson = first.get('mechanism') == 'eta-etaprime-radiative'
+    meson = first.get('mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
               'sampling_epsilon', 'beam_energy_GeV', 'source_model',
               'generated_mass_support_gev')
@@ -259,7 +259,7 @@ def load_source(source, expected_model, conditions_digest):
                       ('manifest.json', 'manifest_sha256')]:
         contracts[name] = read(checked(gen / name, parent[key]))
     contract, audit, manifest = [contracts[name] for name in ('contract.json', 'validation.json', 'manifest.json')]
-    meson = contract.get('production_mechanism') == 'eta-etaprime-radiative'
+    meson = contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     native_count = contract['source_exposure']['source_collisions'] if meson else row['events']
     fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
     ledger_matches = (same_ledger_content(fresh_ledger, audit['proposal_ledger']) if meson

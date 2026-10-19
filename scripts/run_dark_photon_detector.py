@@ -57,10 +57,15 @@ def main():
         source=args.templates.resolve()/f'step{stage}.py'
         shutil.copy2(source,templates/source.name)
         frozen_templates[str(stage)]=dict(source=str(source),sha256=sha(source))
+    production_name = 'dy'
+    if contract.get('production_mechanism') == 'eta-etaprime-radiative':
+        production_name = 'eta_etaprime'
+    elif contract.get('production_mechanism') == 'meson-radiative':
+        production_name = 'meson_radiative'
     descriptor=dict(schema='shift-bsm-pilot-source-v1',gen_transport='local',gen_path_resolved=True,
         gen=str(gen_dir/'gen.root'),gen_sha256=manifest['output_sha256'],
         receipt=str(gen_dir/'manifest.json'),receipt_sha256=sha(gen_dir/'manifest.json'),
-        stratum='darkphoton_dy_m'+str(contract['mass_gev']),event_ids=audit['event_ids'],
+        stratum='darkphoton_'+production_name+'_m'+str(contract['mass_gev']),event_ids=audit['event_ids'],
         weights=[row['weight'] for row in audit['event_rows']],
         output_base=str(out),complete_muon_decays=False,missing_filter_lumi=True,
         signal_contract_sha256=sha(gen_dir/'contract.json'),

@@ -69,6 +69,27 @@ class PopulationAccounting(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'identical physics'):
             combined_rate([first, population(30)], point='meson', campaign='additive')
 
+    def test_unified_meson_repeats_use_exposure_and_reject_old_component(self):
+        populations = [population(10, 2), population(20, 4)]
+        for item, exposure, value in zip(populations, (100, 300), (2., 4.)):
+            rate = item['rate']
+            rate.update(mechanism='meson-radiative', meson_model_card={'channels': ['eta', 'omega']},
+                rate_scope='one unified source', source_exposure=dict(fixed_source_collisions=exposure,
+                    source_collisions=exposure, native_n_accepted=exposure,
+                    accepted_signal_events=rate['full_gen']['accepted_events'],
+                    coefficient_sum=exposure * value, coefficient_sum_squared=exposure * value**2,
+                    physical_probability_sum=exposure * value,
+                    physical_probability_sum_squared=exposure * value**2))
+            rate['full_gen']['source_collisions'] = exposure
+            rate['physical_selected_cross_sections_pb'][0]['value_pb'] = value
+        result = combined_rate(populations, point='unified', campaign='repeat')
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'], 3.5)
+        self.assertEqual(result['full_gen']['accepted_events'], 6)
+        old = copy.deepcopy(populations[1])
+        old['rate']['mechanism'] = 'eta-etaprime-radiative'
+        with self.assertRaisesRegex(ValueError, 'identical physics'):
+            combined_rate([populations[0], old], point='unified', campaign='wrong')
+
     def test_recovery_views_count_the_same_gen_population_once(self):
         base, fresh = population(), population(20)
         recovery = copy.deepcopy(base)
