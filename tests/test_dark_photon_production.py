@@ -174,6 +174,8 @@ class ProductionBarriers(unittest.TestCase):
         self.assertIn('PARENT D_m12_lab_1000m_000 D_m12_lab_1000m_001 D_m12_prompt_000 CHILD F_m12_lab_1000m',dag)
         self.assertIn('PARENT F_m12_prompt F_m12_lab_1000m CHILD COLLECT',dag)
         self.assertIn('MAXJOBS DETECTOR 80\nMAXJOBS FINALIZER 3',dag)
+        weekend=dag_text(plan,Path('/unsubmitted/weekend'),['m12_prompt'],300,2)
+        self.assertIn('MAXJOBS DETECTOR 300\nMAXJOBS FINALIZER 2',weekend)
 
 
 class DetectorDeadlines(unittest.TestCase):

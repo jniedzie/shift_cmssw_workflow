@@ -269,8 +269,8 @@ def prepare(args):
             max(chunk['count'] for row in plan['points'] for chunk in row['chunks']))
     elif budget.get('publication_profile', profile) != profile:
         raise ValueError('Reviewed budget publication profile differs from the requested worker')
-    if not 1 <= args.detector_workers <= 100 or not 1 <= args.finalizers <= 3:
-        raise ValueError('Require bounded concurrency up to100detectorworkers and3finalizers')
+    if not 1 <= args.detector_workers <= 300 or not 1 <= args.finalizers <= 3:
+        raise ValueError('Require bounded concurrency up to300detectorworkers and3finalizers')
     output.mkdir(parents=True, exist_ok=False)
     for directory in ('logs', 'failures', 'statuses', 'completed_points'):
         (output / directory).mkdir()
@@ -294,6 +294,8 @@ def prepare(args):
                  'detector.sub', 'finalizer.sub', 'collect.sub'):
         text = (template / name).read_text().replace(str(template), str(output))
         if name.endswith('.sub'):
+            text = re.sub(r'^(?:\+SendCredential|on_exit_hold|on_exit_remove|periodic_release)\s*=.*\n?', '', text, flags=re.MULTILINE | re.IGNORECASE)
+            text = text.replace('\nqueue', '\n+SendCredential = True\non_exit_hold = (ExitBySignal == True) || (ExitCode != 0)\non_exit_remove = (ExitBySignal == False) && (ExitCode == 0)\nperiodic_release = False\nqueue')
             text = re.sub(r'^\+JobBatchName = .*$', '+JobBatchName = "SHIFT_BSM_' + plan['campaign'] + '"',
                           text, flags=re.MULTILINE)
             # CERN supplies the supported EL9 requirement. Its submit hook warns
@@ -316,6 +318,13 @@ def prepare(args):
             # safely acquire a longer enforced lifetime through a later qedit.
             text = re.sub(r'^\+JobFlavour = .*$', '+JobFlavour = "tomorrow"', text, flags=re.MULTILINE)
             text = text.replace('\nqueue', '\n+MaxRuntime = 86400\nqueue')
+        if name == 'detector.sub':
+            # Permit condor_chirp to publish the worker's actual stage progress.
+            if re.search(r'^\+?WantIOProxy\s*=', text, flags=re.MULTILINE | re.IGNORECASE):
+                text = re.sub(r'^\+?WantIOProxy\s*=.*$', '+WantIOProxy = True', text,
+                              flags=re.MULTILINE | re.IGNORECASE)
+            else:
+                text = text.replace('\nqueue', '\n+WantIOProxy = True\nqueue')
         (output / name).write_text(text)
         if name.endswith('.sh'):
             (output / name).chmod(0o750)

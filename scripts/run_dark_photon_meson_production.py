@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -28,8 +29,324 @@ import traceback
 import run_dark_photon_statistics as durable
 
 
+MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative')
+
+
 def read(path):
     return json.loads(Path(path).read_text())
+
+
+def pinned_path(authority):
+    path = Path(authority['path'])
+    if not path.is_absolute() or durable.sha(path) != authority['sha256']:
+        raise ValueError('Meson recovery or reservation authority changed: '+str(path))
+    return path
+
+
+def read_pinned(authority):
+    return read(pinned_path(authority))
+
+
+def source_mechanism(config):
+    mechanism = config.get('production_mechanism', 'eta-etaprime-radiative')
+    if mechanism not in MECHANISMS:
+        raise ValueError('Unsupported meson source mechanism')
+    return mechanism
+
+
+def prior_meson_configuration(config):
+    """The original eta publisher owns each point until all its batches close."""
+    if source_mechanism(config) != 'meson-radiative':
+        return None
+    previous = read_pinned(config['prior_meson_publication'])
+    directory = Path(previous.get('directory', ''))
+    batches = previous.get('batches')
+    if (previous.get('schema') != 'shift-dp-meson-production-v1'
+            or source_mechanism(previous) != 'eta-etaprime-radiative'
+            or not directory.is_absolute() or '..' in directory.parts
+            or not isinstance(batches, list) or not batches
+            or any(not isinstance(row, dict) or not row.get('batch') or not row.get('point') for row in batches)
+            or len({row['batch'] for row in batches}) != len(batches)):
+        raise ValueError('Prior meson publication requires its pinned original eta production')
+    return previous
+
+
+def prior_publication_ready(config, batch):
+    """Check fresh prior ownership without granting credit for another point."""
+    previous = prior_meson_configuration(config)
+    if previous is None:
+        return True, {}
+    root = Path(previous['directory'])
+    expected = [row for row in previous['batches'] if row['point'] == batch['point']]
+    evidence = dict(point=batch['point'], prior_directory=str(root),
+        prior_config_sha256=config['prior_meson_publication']['sha256'],
+        required_batches=[row['batch'] for row in expected], verified_batches=[],
+        allowed_previous_campaigns=[])
+    if not expected:
+        return False, dict(evidence, reason='prior_point_is_not_declared')
+    try:
+        state_bytes = (root/'state.json').read_bytes()
+        state = json.loads(state_bytes)
+        age = time.time()-datetime.fromisoformat(state['checked_utc']).timestamp()
+        terminal = state.get('complete') is True
+        if state.get('error') or (not terminal and not 0 <= age < 1200):
+            return False, dict(evidence, reason='prior_state_is_unhealthy_or_stale', state_age_seconds=age)
+        evidence['prior_state_sha256'] = hashlib.sha256(state_bytes).hexdigest()
+        evidence['prior_checked_utc'] = state['checked_utc']
+        required = previous['batches'] if terminal else expected
+        for row in required:
+            published = state.get('batches', {}).get(row['batch'], {}).get('published')
+            if not isinstance(published, dict) or published.get('batch') != row['batch']:
+                return False, dict(evidence, reason='prior_batch_is_not_published', pending_batch=row['batch'])
+            receipt = Path(published.get('point_receipt_path', ''))
+            if (not receipt.is_absolute() or '..' in receipt.parts or not receipt.is_relative_to(root)
+                    or receipt.name != row['point']+'.json'
+                    or durable.sha(receipt) != published.get('point_receipt_sha256')):
+                return False, dict(evidence, reason='prior_point_receipt_hash_or_ownership_changed', pending_batch=row['batch'])
+            report = read(receipt)
+            histogram = report.get('score_histograms', {}).get('marker', {}).get('published', {}).get('histograms', {})
+            histogram_path = Path(published.get('histogram_path', ''))
+            campaign = published.get('campaign')
+            if (report.get('complete') is not True or report.get('point') != row['point']
+                    or report.get('events') != published.get('events')
+                    or report.get('score_histograms', {}).get('marker', {}).get('complete') is not True
+                    or histogram.get('path') != published.get('histogram_path')
+                    or histogram.get('sha256') != published.get('histogram_sha256')
+                    or not isinstance(campaign, str) or not campaign
+                    or histogram_path.parent.name != 'histograms_merged'
+                    or histogram_path.parent.parent.name != campaign
+                    or histogram_path.parent.parent.parent.name != 'darkphoton_'+row['point']
+                    or report.get('final_output_base') != str(histogram_path.parent.parent)):
+                return False, dict(evidence, reason='prior_point_report_is_incomplete_or_different', pending_batch=row['batch'])
+            evidence['verified_batches'].append(dict(batch=row['batch'],
+                point=row['point'], campaign=campaign,
+                point_receipt_path=str(receipt), point_receipt_sha256=published['point_receipt_sha256']))
+            if row['point'] == batch['point'] and campaign not in evidence['allowed_previous_campaigns']:
+                evidence['allowed_previous_campaigns'].append(campaign)
+        if terminal:
+            authority = config['prior_meson_publication']['controller_receipt']
+            replacement = config.get('prior_meson_controller_replacement')
+            if replacement:
+                # Preserve the original physics authority, but follow the exact
+                # qualified supervisor that now closes its publication work.
+                path = pinned_path(replacement['config'])
+                seal_path = pinned_path(replacement['seal'])
+                submit_path = pinned_path(replacement['submit'])
+                if seal_path != path.parent/'seal.json' or submit_path != path.parent/'controller.sub':
+                    raise ValueError('Prior meson replacement is outside its exact sealed deployment')
+                operational_configuration(previous, path, replacement['seal']['sha256'])
+                receipt_path = path.parent/'submission.json'
+                receipt = read(receipt_path)
+                if receipt.get('task') != str(path.parent) or receipt.get('submit_sha256') != replacement['submit']['sha256']:
+                    raise ValueError('Prior meson replacement submission identity changed')
+                receipt_hash = durable.sha(receipt_path)
+            else:
+                receipt = read_pinned(authority)
+                receipt_hash = authority['sha256']
+            if (type(receipt.get('cluster')) is not int or receipt['cluster'] <= 0
+                    or not Path(receipt.get('task', '')).is_absolute()
+                    or durable.sha(Path(receipt['task'])/'controller.sub') != receipt.get('submit_sha256')):
+                return False, dict(evidence, reason='prior_terminal_controller_identity_changed')
+            constraint = ('ClusterId == '+str(receipt['cluster'])+
+                ' || DAGManJobId == '+str(receipt['cluster'])+' || Iwd == '+json.dumps(receipt['task']))
+            if durable.jobs(config, constraint) or native_status(config, receipt) != 'complete':
+                return False, dict(evidence, reason='prior_terminal_controller_is_still_live')
+            evidence.update(terminal_closure_verified=True,
+                prior_controller_receipt_sha256=receipt_hash, prior_controller_cluster=receipt['cluster'])
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
+        return False, dict(evidence, reason='prior_publication_evidence_unavailable', error=repr(error))
+    return True, dict(evidence, complete=True)
+
+
+def common_sample_anchor(config, batch, sample, sample_path, transport):
+    """Retain a verified common physical anchor; mechanism belongs to campaigns."""
+    from export_dark_photon_cross_sections import publish_file_rpc
+    destination = config['eos_base']+'/darkphoton_'+batch['point']+'/sample.json'
+    metadata = transport.metadata(destination)
+    if metadata is None:
+        proof = publish_file_rpc(sample_path, destination)
+        return dict(proof, retained_existing=False,
+            scope='Common mass/epsilon/lifetime/LAB reference; mechanism and rate authority are campaign-specific')
+    size = int(metadata.get('size', -1))
+    if not 0 < size <= 65536 or metadata.get('status') == 'symlink':
+        raise ValueError('Existing global sample anchor is not a bounded regular JSON file')
+    path = transport.cache_directory/'existing_global_sample.json'
+    if path.exists():
+        path.unlink()
+    transport.command(['/usr/bin/xrdcp', '--silent', '--posc', '--cksum', 'adler32',
+                       transport.host+'/'+destination, str(path)])
+    if path.stat().st_size != size:
+        raise ValueError('Existing global sample anchor changed during readback')
+    existing = read(path)
+    exact = ('schema', 'point', 'original_point', 'naming', 'selector_kind', 'mass_gev', 'epsilon',
+             'sampling_epsilon', 'target_mean_lab_flight_m', 'mean_lab_flight_m',
+             'calibration_mean_beta_gamma', 'mean_lab_flight_is_estimate')
+    if any(existing.get(key) != sample.get(key) for key in exact):
+        raise ValueError('Existing global sample anchor has different physical point or LAB reference')
+    for key in ('proper_ctau_mm', 'reference_mean_lab_flight_m'):
+        value = existing.get(key)
+        if (type(value) not in (int, float) or not math.isfinite(value)
+                or not math.isclose(value, sample[key], rel_tol=1.e-10, abs_tol=0.)):
+            raise ValueError('Existing global sample anchor has a different physical lifetime/LAB reference')
+    previous = prior_meson_configuration(config)
+    creator = existing.get('production_mechanism')
+    authority = (previous.get('calibration_authority') if creator == source_mechanism(previous)
+                 else config.get('calibration_authority') if creator == source_mechanism(config) else None)
+    if not authority or existing.get('calibration_sha256') != authority.get('sha256'):
+        raise ValueError('Existing global sample anchor has no matching pinned creator/calibration authority')
+    return dict(path=destination, bytes=size, sha256=durable.sha(path),
+        readback_sha256=durable.sha(path), retained_existing=True, historical_creator_mechanism=creator,
+        scope='Common mass/epsilon/lifetime/LAB anchor only; its historical mechanism does not describe this campaign')
+
+
+def completion_scope(config):
+    """Report the explicitly incomplete channel programme, separately from jobs."""
+    if source_mechanism(config) != 'meson-radiative':
+        return None
+    scope = read_pinned(config['meson_completion_scope'])
+    card = read(config['model_card'])
+    channels = scope.get('included_channels')
+    remaining = scope.get('remaining_channels')
+    if (scope.get('schema') not in ('shift-meson-completion-scope-v1',
+                                  'shift-dark-photon-meson-coverage-v1')
+            or scope.get('physics_complete') is not False
+            or not isinstance(channels, list) or not channels
+            or any(not isinstance(name, str) or not name for name in channels)
+            or len(set(channels)) != len(channels)
+            or channels != card.get('channels')
+            or not isinstance(remaining, list) or not remaining):
+        raise ValueError('Unified meson source requires its explicit incomplete channel scope')
+    for row in remaining:
+        if (not isinstance(row, dict) or not row.get('channel') or not row.get('reason')
+                or row.get('status') not in ('missing_model', 'needs_validation', 'missing_source')):
+            raise ValueError('Every remaining meson channel needs an explicit blocking reason')
+    return dict(included_channels=channels, remaining_channels=remaining, physics_complete=False,
+                scope_sha256=config['meson_completion_scope']['sha256'])
+
+
+def reference_point(config, batch):
+    """Keep the existing epsilon/lifetime, rather than retuning another boost."""
+    if source_mechanism(config) != 'meson-radiative':
+        return None
+    authority = read_pinned(config['lifetime_reference_authority'])
+    if authority.get('schema') != 'shift-meson-physical-point-reference-v1':
+        raise ValueError('Unified meson source requires a pinned physical point reference')
+    point = authority.get('points', {}).get(batch['point'])
+    if (not isinstance(point, dict)
+            or any(point.get(key) != batch.get(key) for key in
+                   ('mass_gev', 'epsilon', 'target_mean_lab_flight_m'))
+            or type(point.get('proper_ctau_mm')) not in (int, float)
+            or not math.isfinite(point['proper_ctau_mm']) or point['proper_ctau_mm'] <= 0):
+        raise ValueError('Unified meson sample differs from its reference epsilon/lifetime point')
+    return point
+
+
+def gen_runtime(config):
+    """Require the qualified software archive for every new unified source."""
+    if source_mechanism(config) != 'meson-radiative':
+        return None
+    runtime = config.get('gen_runtime', {})
+    provenance = read_pinned(runtime['provenance'])
+    if (not isinstance(runtime.get('url'), str)
+            or not runtime['url'].startswith('root://eosuser.cern.ch/')
+            or runtime.get('cmssw_relative') != 'CMSSW_17_0_0_pre4'
+            or runtime.get('scram_arch') != 'el9_amd64_gcc13'
+            or type(runtime.get('bytes')) is not int or not 0 < runtime['bytes'] <= 4000000000
+            or provenance.get('schema') != 'shift-bsm-gen-runtime-provenance-v1'
+            or provenance.get('archive_sha256') != runtime.get('sha256')
+            or provenance.get('archive_bytes') != runtime['bytes']
+            or provenance.get('scram_arch') != runtime['scram_arch']
+            or not provenance.get('cmssw_git_head')
+            or not isinstance(provenance.get('cmssw_git_status'), list)):
+        raise ValueError('Unified meson source requires its qualified local GEN runtime')
+    return runtime
+
+
+def unpack_gen_runtime(config, scratch):
+    """Reuse the existing frozen GEN software, with all extraction on the worker."""
+    runtime = gen_runtime(config)
+    if runtime is None:
+        return Path(config['cmssw_base']), None
+    import run_dark_photon_gen_stage as stage
+    archive = scratch / 'gen_runtime.tar.gz'
+    stage.command(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
+                   runtime['url'], str(archive)], timeout=1200)
+    if archive.stat().st_size != runtime['bytes'] or durable.sha(archive) != runtime['sha256']:
+        raise ValueError('Downloaded GEN runtime archive differs from its pinned authority')
+    destination = scratch / 'runtime'
+    destination.mkdir()
+    with tarfile.open(archive) as payload:
+        for member in payload.getmembers():
+            if (member.name.startswith('/') or '..' in Path(member.name).parts
+                    or (member.issym() and member.linkname.startswith('/afs/'))
+                    or Path(member.name).suffix in ('.gdml', '.inp', '.map')
+                    or 'data' in Path(member.name).parts):
+                raise ValueError('GEN runtime archive contains an unsafe or private payload')
+        payload.extractall(destination)
+    return destination / runtime['cmssw_relative'], archive
+
+
+def coverage_request(config):
+    request = config['coverage_audit']
+    pinned_path(request['particle_data'])
+    if request.get('source_inventory'):
+        pinned_path(request['source_inventory'])
+    masses = request.get('masses_gev')
+    expected = sorted({row['mass_gev'] for row in config['batches']})
+    if masses != expected:
+        raise ValueError('Meson coverage inventory must cover the complete declared mass grid')
+    return request
+
+
+def coverage_result(config):
+    directory = Path(config['directory']) / 'coverage'
+    status = read(directory / 'coverage_status.json')
+    report = read_pinned(status['report'])
+    request = coverage_request(config)
+    scope = completion_scope(config)
+    if (status.get('complete') is not True
+            or report.get('schema') != 'shift-dark-photon-meson-coverage-v1'
+            or report.get('model_sha256') != durable.sha(config['model_card'])
+            or report.get('particle_data_sha256') != request['particle_data']['sha256']
+            or report.get('source_inventory_sha256') != request.get('source_inventory', {}).get('sha256')
+            or report.get('code_sha256') != durable.sha(Path(config['tools']) / 'audit_dark_photon_meson_coverage.py')
+            or report.get('mass_points_gev') != request['masses_gev']
+            or report.get('included_channels') != scope['included_channels']
+            or report.get('remaining_channels') != scope['remaining_channels']
+            or report.get('physics_complete') is not False):
+        raise ValueError('Detached meson coverage result differs from its reviewed scope and inputs')
+    return dict(complete=True, report=status['report'],
+                candidate_transitions=len(report['candidate_transitions']),
+                remaining_channels=report['remaining_channels'], physics_complete=False,
+                source_sampling_verified=report.get('source_sampling_verified', False),
+                resolved_source_configuration=report.get('resolved_source_configuration', False))
+
+
+def coverage(config):
+    """Run the real finite channel inventory before any new MC admission."""
+    request = coverage_request(config)
+    directory = Path(config['directory']) / 'coverage'
+    status_path = directory / 'coverage_status.json'
+    if status_path.exists():
+        raise RuntimeError('Coverage already started; retain the original attempt for review')
+    status = dict(complete=False, started_utc=datetime.now(timezone.utc).isoformat())
+    durable.new(status_path, status)
+    try:
+        report = directory / 'report.json'
+        argv = [os.sys.executable, Path(config['tools']) / 'audit_dark_photon_meson_coverage.py',
+                '--particle-data', request['particle_data']['path'], '--model', config['model_card'],
+                '--masses', *map(str, request['masses_gev']), '--output', report]
+        if request.get('source_inventory'):
+            argv.extend(['--source-inventory', request['source_inventory']['path']])
+        durable.run_logged(argv, directory / 'audit.log', timeout=600)
+        status.update(complete=True, report=dict(path=str(report), sha256=durable.sha(report)),
+                      finished_utc=datetime.now(timezone.utc).isoformat())
+        durable.save(status_path, status)
+        return coverage_result(config)
+    except Exception as error:
+        status.update(complete=False, error=repr(error), traceback=traceback.format_exc()[-10000:])
+        durable.save(status_path, status)
+        raise
 
 
 def verify(directory, seal_digest):
@@ -47,6 +364,10 @@ def verify(directory, seal_digest):
         path=batch_directory(config,batch)
         if (path/'source.sub').read_text()!=(path/'source.sub.in').read_text().replace('SEAL_DIGEST',seal_digest):
             raise ValueError('Source submit description differs from its frozen template')
+    if source_mechanism(config) == 'meson-radiative':
+        path = directory / 'coverage'
+        if (path/'coverage.sub').read_text() != (path/'coverage.sub.in').read_text().replace('SEAL_DIGEST', seal_digest):
+            raise ValueError('Coverage submit description differs from its frozen template')
     for path, record in read(config['runtime_fingerprint'])['files'].items():
         if durable.sha(path) != record['sha256']:
             raise ValueError('Shared qualified CMSSW runtime changed: ' + path)
@@ -70,29 +391,56 @@ def operational_configuration(original,path,expected):
         if durable.sha(name)!=digest:
             raise ValueError('Replacement controller dependency changed: '+name)
     config=read(path)
-    immutable=set(original)-{'tools'}
+    # Scheduling can use the complete already budgeted grid. Source exposure,
+    # seeds, worklist order, physics and storage claims remain frozen.
+    operational={'tools','simultaneous_sources','simultaneous_detector_points',
+                 'additional_reserved_worklists'}
+    immutable=set(original)-operational
     if any(config.get(key)!=original[key] for key in immutable):
         raise ValueError('Replacement controller changed frozen production settings')
+    if 'additional_reserved_worklists' in original:
+        # A new supervisor may close the same peer allocation. Only its
+        # terminal controller evidence changes; every storage claim is kept.
+        def claims(rows):
+            return [{key:value for key,value in row.items() if key != 'completion_authority'} for row in rows]
+        if claims(config.get('additional_reserved_worklists', [])) != claims(original['additional_reserved_worklists']):
+            raise ValueError('Replacement controller changed protected peer storage claims')
+    if set(config)-set(original)-{'physics_tools', 'reviewed_detector_recoveries',
+                                   'additional_reserved_worklists', 'reviewed_terminal_native_jobs',
+                                   'adaptive_terminal_completion', 'prior_meson_controller_replacement'}:
+        raise ValueError('Replacement controller added unreviewed production settings')
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
+    for key,maximum in [('simultaneous_sources',7),('simultaneous_detector_points',35)]:
+        if key in original and (type(config.get(key)) is not int or not 1<=config[key]<=maximum):
+            raise ValueError('Replacement controller scheduling limit is outside the reviewed grid: '+key)
     return config
 
 
-def adopted_row(batch, gen):
+def adopted_row(batch, gen, config=None):
     """Adopt all conditional signal events; do not reinterpret source M as N."""
     gen = Path(gen)
     contract, audit = read(gen / 'contract.json'), read(gen / 'validation.json')
     count = contract['requested_events']
-    if (contract.get('production_mechanism') != 'eta-etaprime-radiative'
+    mechanism = source_mechanism(config or {})
+    if (contract.get('production_mechanism') != mechanism
             or type(count) is not int or count <= 0 or audit.get('runtime_validated') is not True
             or audit.get('events') != count or len(audit.get('event_ids', [])) != count
             or any(contract[key] != batch[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number'))
             or contract['source_exposure']['fixed_source_collisions'] != batch['source_collisions']
             or contract['source_exposure']['accepted_signal_events'] != count):
         raise ValueError('Meson source audit or fixed-M/random-N boundary changed')
+    if mechanism == 'meson-radiative':
+        point = reference_point(config, batch)
+        card = read(config['model_card'])
+        if (contract.get('meson_model_card_sha256') != durable.sha(config['model_card'])
+                or contract.get('meson_model_card') != card
+                or not math.isclose(contract['physical_width_table']['ctau_mm'],
+                                    point['proper_ctau_mm'], rel_tol=1.e-12, abs_tol=0.)):
+            raise ValueError('Unified source changed its qualified card or reference lifetime')
     return dict(point=batch['point'], mass_gev=batch['mass_gev'], epsilon=batch['epsilon'],
         seed=batch['seed'], run_number=batch['run_number'], events=count,
-        production_mechanism='eta-etaprime-radiative',
+        production_mechanism=mechanism,
         proper_ctau_mm=contract['physical_width_table']['ctau_mm'], sampling_epsilon=batch['epsilon'],
         target_mean_lab_flight_m=batch.get('target_mean_lab_flight_m'),
         mean_beta_gamma_reference=contract['mean_beta_gamma_reference'],
@@ -161,6 +509,8 @@ def source(config, seal_digest, batch):
         with tempfile.TemporaryDirectory(prefix='dp-meson-source-', dir=scratch_parent) as temporary:
             scratch = Path(temporary)
             os.environ['TMPDIR'] = str(scratch)
+            probe['phase'] = 'runtime_download'
+            release, runtime_archive = unpack_gen_runtime(config, scratch)
             gen = scratch / 'gen'
             probe.update(gen=gen,phase='GEN')
             runner = Path(config['tools']) / 'run_dark_photon_meson_gen.py'
@@ -169,8 +519,14 @@ def source(config, seal_digest, batch):
                 '--run-number', str(batch['run_number']), '--model-card', config['model_card'],
                 '--darkcast-path', config['darkcast_path'], '--darkcast-source-receipt', config['darkcast_source_receipt'],
                 '--timeout', str(config['gen_timeout_seconds']), '--output', str(gen)]
-            shell = ('source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
-                shlex.quote(str(Path(config['cmssw_base']) / 'src')) +
+            rename = ''
+            if runtime_archive is not None:
+                runtime = gen_runtime(config)
+                argv.extend(['--runtime-provenance', runtime['provenance']['path'],
+                             '--runtime-archive', str(runtime_archive)])
+                rename = ' && scram b ProjectRename'
+            shell = ('export SCRAM_ARCH=el9_amd64_gcc13 && source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
+                shlex.quote(str(release / 'src')) + rename +
                 ' && eval "$(scram runtime -sh)" && cd ' + shlex.quote(str(scratch)) +
                 ' && export PYTHONDONTWRITEBYTECODE=1 && exec ' + shlex.join(argv))
             with (directory / 'logs/GEN.log').open('x') as log:
@@ -210,7 +566,7 @@ def source(config, seal_digest, batch):
                     batch['final_output_base'] + '/metadata/GEN/gen_metadata.tar.gz')
                 durable.save(status_path, status)
             result.check_returncode()
-            row = adopted_row(batch, gen)
+            row = adopted_row(batch, gen, config)
             probe['phase']='GEN_publication'
             row['gen_argv'] = ['python3', str(runner)]
             publication, parent = stage.publish_gen(row, dict(config, scratch_base=str(scratch),
@@ -248,11 +604,12 @@ def adopt(config, batch):
     for path, expected in status['metadata_sha256'].items():
         if durable.sha(path) != expected:
             raise ValueError('Published GEN metadata changed before adoption')
-    row = adopted_row(batch, directory / 'gen')
+    row = adopted_row(batch, directory / 'gen', config)
+    actual_source_storage(config, batch, row, status)
     chunk_size=batch.get('events_per_job',config['events_per_job'])
     if math.ceil(row['events']/chunk_size) + 1 > batch['detector_job_capacity']:
         raise ValueError('Actual N needs a separately reviewed larger detector namespace; do not truncate it')
-    physical = dict(points=[row], production_mechanism='eta-etaprime-radiative',
+    physical = dict(points=[row], production_mechanism=source_mechanism(config),
         physical_width_preflight_passed=True, meson_width_qualification=grid.meson_width_qualification([row]))
     plan = grid.plan_detector_stage(physical, batch['campaign'], config['eos_base'],
         events_per_job=chunk_size, group_events=config['group_events'],
@@ -288,6 +645,47 @@ def adopt(config, batch):
     return plan
 
 
+def actual_source_storage(config, batch, row, status):
+    """Stop an oversized actual population before detector submission."""
+    if source_mechanism(config) != 'meson-radiative' or batch['operational_canary']:
+        return None
+    gate_path = Path(config['bulk_storage_gate'])
+    gate = read(gate_path)
+    forecasts = gate.get('per_batch_forecast_bytes', {})
+    total = gate.get('total_meson_forecast_bytes')
+    if (gate.get('complete') is not True
+            or gate.get('all_requested_mass_GEN_audits_passed') is not True
+            or gate.get('worklist_sha256') != durable.sha(Path(config['directory'])/'config.json')
+            or gate.get('model_card_sha256') != durable.sha(config['model_card'])
+            or set(forecasts) != {item['batch'] for item in config['batches']}
+            or any(type(value) is not int or value <= 0 for value in forecasts.values())
+            or type(total) is not int or not 0 < total <= 30000000000
+            or sum(forecasts.values()) != total):
+        raise ValueError('Actual source budget requires the exact reviewed bulk storage gate')
+    publication = status.get('ledger_publication')
+    receipt_path = batch_directory(config, batch)/'gen/meson_ledger_publication.json'
+    if (not isinstance(publication, dict) or publication != read(receipt_path)
+            or publication.get('encoding') != 'gzip' or type(publication.get('bytes')) is not int
+            or publication['bytes'] <= 0 or publication.get('sha256') != publication.get('readback_sha256')):
+        raise ValueError('Actual source budget requires its verified complete compressed ledger')
+    required = row['events']*326000 + publication['bytes'] + 5000000
+    result = dict(point=batch['point'], batch=batch['batch'], actual_signal_events=row['events'],
+        compressed_source_ledger_bytes=publication['bytes'], fixed_metadata_bytes=5000000,
+        event_storage_coefficient_bytes=326000, required_bytes=required,
+        forecast_bytes=forecasts[batch['batch']], storage_gate_sha256=durable.sha(gate_path),
+        ledger_publication_sha256=durable.sha(receipt_path), passed=required <= forecasts[batch['batch']],
+        source_population_preserved=True, automatic_retry_or_truncation_allowed=False)
+    path = batch_directory(config, batch)/'actual_source_storage.json'
+    if path.exists():
+        if read(path) != result:
+            raise ValueError('Earlier actual-source storage decision changed; preserve it for review')
+    else:
+        durable.new(path, result)
+    if not result['passed']:
+        raise ValueError('Actual complete source exceeds its reviewed forecast; GEN is preserved for storage review')
+    return result
+
+
 def handoff(config, batch):
     directory = batch_directory(config, batch)
     plan = adopt(config, batch)
@@ -303,27 +701,219 @@ def handoff(config, batch):
             '--gen-inventory', directory/'gen_inventory.json', '--gen-publication', directory/'gen_publication.json',
             '--storage-budget', directory/'storage_budget.json', '--output', production,
             '--prior-inventories', *config['prior_inventories'], '--canary-points', batch['point'],
-            '--failure-base', config['failure_base'], '--detector-workers', '100', '--finalizers', '2',
+            '--failure-base', config['failure_base'], '--detector-workers',
+            str(config.get('detector_workers_per_point', 100)), '--finalizers', '2',
             '--publication-profile', 'nano-metadata-v1', '--publication-canary', config['publication_canary'],
             '--event-stall-timeout','7200','--first-event-stall-timeout','7200','--detector-timeout','43200'],
             directory/'prepare_production.log', timeout=1800)
     receipt = (existing_receipt(production, production/'pipeline.dag.condor.sub')
-               if (production/'submission.json').is_file() else durable.submit_dag(config, production, 102))
+               if (production/'submission.json').is_file() else durable.submit_dag(
+                   config, production, config.get('detector_workers_per_point', 100) + 2))
     rates = directory / 'rates.json'
     if not rates.exists():
         durable.run_logged([os.sys.executable, Path(config['tools'])/'export_dark_photon_cross_sections.py',
             '--plan', production/'plan.json', '--output', directory/'rates', '--publish', '--eos-rpc'],
             directory/'export_rates.log', timeout=1800)
         durable.new(rates, dict(complete=True, production_plan_sha256=durable.sha(production/'plan.json')))
+    authority = config.get('reviewed_detector_recoveries', {}).get(batch['batch'])
+    if authority is not None:
+        return reviewed_detector_recovery(config, batch, receipt, authority)
     return receipt
+
+
+def reviewed_detector_recovery(config, batch, original, authority):
+    """Adopt one reviewed finalizer/collect DAG without rerunning detector jobs."""
+    proof = read_pinned(authority)
+    production = batch_directory(config, batch) / 'production'
+    if (proof.get('schema') != 'shift-meson-finalizer-recovery-v1'
+            or proof.get('batch') != batch['batch'] or proof.get('point') != batch['point']
+            or proof.get('original_submission') != original
+            or proof.get('original_plan_sha256') != durable.sha(production/'plan.json')
+            or proof.get('original_seal_sha256') != durable.sha(production/'seal.json')
+            or proof.get('allowed_stages') != ['finalizer', 'collect']
+            or proof.get('gen_or_detector_jobs_allowed') is not False):
+        raise ValueError('Reviewed meson recovery differs from its original population')
+    # A recorded historical failure is not enough: verify that the original
+    # manager and all its children remain absent before using a new owner.
+    constraint = ('ClusterId == '+str(original['cluster'])+
+                  ' || DAGManJobId == '+str(original['cluster'])+
+                  ' || Iwd == '+json.dumps(str(production)))
+    if durable.jobs(config, constraint):
+        raise RuntimeError('Original meson manager or children are still live')
+    # Terminal native history cannot change after exit. Keep its pinned actual
+    # readback, while querying live ownership above on every controller pass.
+    # Repeating a history scan for the same failed job can exceed 45 seconds.
+    terminal = read_pinned(proof['terminal_native_review'])
+    history = terminal['history'].get(str(original['cluster']), [])
+    if (type(proof.get('original_manager_exit_code')) is not int
+            or proof['original_manager_exit_code'] == 0
+            or len(history) != 1 or history[0].get('ClusterId') != original['cluster']
+            or history[0].get('ProcId') != 0 or history[0].get('Iwd') != str(production)
+            or history[0].get('ExitCode') != proof.get('original_manager_exit_code')
+            or history[0].get('ExitBySignal')):
+        raise RuntimeError('Reviewed failed meson manager has no matching native history')
+    finalizer = terminal['history'].get(str(proof['original_finalizer_cluster']), [])
+    if (terminal.get('queue') != [] or len(finalizer) != 1
+            or finalizer[0].get('ClusterId') != proof['original_finalizer_cluster']
+            or finalizer[0].get('ProcId') != 0 or finalizer[0].get('Iwd') != str(production)
+            or finalizer[0].get('ExitCode') != proof['original_finalizer_exit_code']
+            or finalizer[0].get('ExitBySignal')):
+        raise RuntimeError('Reviewed failed meson finalizer has no matching native history')
+    directory = Path(proof['recovery_directory'])
+    for path, expected in proof['recovery_files'].items():
+        if durable.sha(path) != expected:
+            raise ValueError('Reviewed finalizer recovery changed: '+path)
+    return existing_receipt(directory, directory/'pipeline.dag.condor.sub')
+
+
+def terminal_peer_completion(config, authority, worklist=None):
+    """Credit a closed peer only after every declared population was published."""
+    try:
+        if worklist is None:
+            candidate = dict(config, prior_meson_publication=authority)
+            previous = prior_meson_configuration(candidate)
+            state = read(Path(previous['directory'])/'state.json')
+            if state.get('complete') is not True:
+                return False
+            ready, proof = prior_publication_ready(candidate, previous['batches'][0])
+            return ready and proof.get('terminal_closure_verified') is True
+        controller = read_pinned(authority['controller_config'])
+        root = Path(controller['directory'])
+        if durable.sha(controller['worklist']) != worklist['sha256']:
+            return False
+        observed = time.time()
+        state = read(root/'state.json')
+        if (state.get('complete') is not True or state.get('finished') is not True
+                or state.get('error') or state.get('failures') or state.get('aggregates')
+                or state.get('unpublished_points') != []):
+            return False
+        allocation = read_pinned(worklist)
+        if set(state.get('waves', {})) != {str(wave['wave_index']) for wave in allocation['waves']}:
+            return False
+        for wave in allocation['waves']:
+            native_wave = state['waves'][str(wave['wave_index'])]
+            if (native_wave.get('terminal') is not True or native_wave.get('successful') is not True
+                    or native_wave.get('exit_code') != 0):
+                return False
+            plan_path = root/'waves'/f'w{wave["wave_index"]:03d}'/'production/plan.json'
+            plan = read(plan_path)
+            actual = {row['point']:row for row in plan['points']}
+            if len(actual) != len(wave['batches']) or set(actual) != {row['point'] for row in wave['batches']}:
+                return False
+            for row in wave['batches']:
+                if (any(actual[row['point']][key] != row[key] for key in ('events','seed','run_number'))
+                        or not durable.closed_primitive(plan_path.parent, row['point'], row['events'], observed)):
+                    return False
+                published = state.get('published', {}).get(row['point'], {})
+                path = Path(published.get('point_receipt_path', ''))
+                if (str(plan_path) not in published.get('source_plans', [])
+                        or not path.is_absolute() or not path.is_relative_to(root)
+                        or path.name != row['point']+'.json'
+                        or durable.sha(path) != published.get('point_receipt_sha256')):
+                    return False
+                report = read(path)
+                marker = report.get('score_histograms', {}).get('marker', {})
+                histogram = marker.get('published', {}).get('histograms', {})
+                if (report.get('complete') is not True or report.get('point') != row['point']
+                        or report.get('events') != published.get('events') or marker.get('complete') is not True
+                        or histogram.get('path') != published.get('histogram_path')
+                        or histogram.get('sha256') != published.get('histogram_sha256')):
+                    return False
+        if authority.get('current_controller_submit'):
+            submit = pinned_path(authority['current_controller_submit'])
+            if (submit.name != 'controller.sub'
+                    or authority['controller_config']['path'] != str(submit.parent/'config.json')):
+                return False
+            receipt = read(submit.parent/'submission.json')
+            if receipt.get('task') != str(submit.parent) or receipt.get('submit_sha256') != authority['current_controller_submit']['sha256']:
+                return False
+        else:
+            receipt = read_pinned(authority['current_controller_receipt'])
+        if (read(Path(receipt['task'])/'config.json')['directory'] != str(root)
+                or durable.sha(Path(receipt['task'])/'controller.sub') != receipt['submit_sha256']):
+            return False
+        constraint = ('ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])+
+                      ' || Iwd == '+json.dumps(receipt['task'])+' || regexp('+
+                      json.dumps('^'+re.escape(str(root))+'/(waves|aggregates)/')+',Iwd)')
+        return not durable.jobs(config, constraint) and native_status(config, receipt) == 'complete'
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return False
+
+
+def additional_reservations(config):
+    """Protect complete newer allocations; completion never grants credit here."""
+    total, claims = 0, []
+    for authority in config.get('additional_reserved_worklists', []):
+        allocation = read_pinned(authority['worklist'])
+        events = allocation['total_additional_events']
+        counts = [row['events'] for wave in allocation['waves'] for row in wave['batches']]
+        coefficient = authority['bytes_per_event']
+        if (type(events) is not int or events <= 0 or sum(counts) != events
+                or any(type(count) is not int or count <= 0 for count in counts)
+                or type(coefficient) is not int or coefficient < 326000):
+            raise ValueError('Additional meson storage reservation is inconsistent')
+        amount = events * coefficient
+        completed = (terminal_peer_completion(config, authority['completion_authority'], authority['worklist'])
+                     if authority.get('completion_authority') else False)
+        if completed:
+            amount = 0
+        total += amount
+        claim = dict(name=authority['name'], events=events, reserved_bytes=amount)
+        if authority.get('completion_authority'):
+            claim['terminal_completion_verified'] = completed
+        claims.append(claim)
+    for authority in config.get('additional_reserved_meson_forecasts', []):
+        forecast = read_pinned(authority['forecast'])
+        amounts = forecast.get('per_batch_forecast_bytes', {})
+        amount = forecast.get('total_meson_forecast_bytes')
+        if (forecast.get('complete') is not True or type(amount) is not int or amount <= 0
+                or not amounts or any(type(value) is not int or value <= 0 for value in amounts.values())
+                or sum(amounts.values()) != amount):
+            raise ValueError('Additional meson forecast does not cover its complete source allocation')
+        completed = (terminal_peer_completion(config, authority['completion_authority'])
+                     if authority.get('completion_authority') else False)
+        if completed:
+            amount = 0
+        total += amount
+        claim = dict(name=authority['name'], reserved_bytes=amount,
+                           forecast_sha256=authority['forecast']['sha256'],
+                           completed_peer_batches_release_no_credit=True)
+        if authority.get('completion_authority'):
+            claim['terminal_completion_verified'] = completed
+        claims.append(claim)
+    return total, claims
 
 
 def adaptive_reservation(config):
     root = Path(config['adaptive_directory'])
-    worklist, state = read(root/'worklist.json'), read(root/'state.json')
-    if ((not state.get('complete') and
-            time.time() - datetime.fromisoformat(state['checked_utc']).timestamp() > 1200) or state.get('error')):
-        raise ValueError('Adaptive reservation authority is stale or reports an error')
+    worklist = read(root/'worklist.json')
+    if 'directory' in config:
+        expected = read(Path(config['directory'])/'seal.json')['files'].get(str((root/'worklist.json').resolve()))
+        if expected != durable.sha(root/'worklist.json'):
+            raise ValueError('Adaptive storage worklist differs from its frozen meson authority')
+    total = worklist['total_additional_events']
+    counts = [row['events'] for wave in worklist['waves'] for row in wave['batches']]
+    if (type(total) is not int or total < 0 or any(type(count) is not int or count <= 0 for count in counts)
+            or sum(counts) != total):
+        raise ValueError('Adaptive full storage allocation is inconsistent')
+    full_reservation = 2000000000 + total*326000
+    if config.get('adaptive_terminal_completion'):
+        pin = dict(path=str(root/'worklist.json'), sha256=durable.sha(root/'worklist.json'))
+        terminal = durable.terminal_statistics_peer(config['adaptive_terminal_completion'],
+                                                    root, pin, time.time())
+        return 2000000000 if terminal is not None else full_reservation
+    # A stopped or unhealthy peer cannot free any future storage claim. Its
+    # complete original allocation remains protected while this workflow runs.
+    try:
+        state = read(root/'state.json')
+    except (FileNotFoundError, json.JSONDecodeError):
+        return full_reservation
+    try:
+        age = time.time() - datetime.fromisoformat(state['checked_utc']).timestamp()
+    except (KeyError, TypeError, ValueError):
+        return full_reservation
+    if state.get('error') or age > 1200 or age < -60:
+        return full_reservation
     # Only closed, published new populations release future storage claims.
     credited=0
     for wave in worklist['waves']:
@@ -336,7 +926,6 @@ def adaptive_reservation(config):
             if any(actual[row['point']][key]!=row[key] for key in ('events','seed','run_number')):
                 raise ValueError('Adaptive published primitive differs from its frozen worklist')
         credited+=sum(row['events'] for row in wave['batches'])
-    total = worklist['total_additional_events']
     if type(credited) is not int or not 0 <= credited <= total:
         raise ValueError('Adaptive published-event credit is inconsistent')
     return 2000000000 + (total - credited)*326000
@@ -350,7 +939,9 @@ def storage_gate(config, observation, bulk=False, state=None):
         if not path or not Path(path).is_file():
             return False, dict(reason='waiting_for_reviewed_bulk_storage_and_seven_mass_GEN_gates')
         gate = read(path)
-        if (gate.get('complete') is not True or gate.get('all_seven_mass_GEN_audits_passed') is not True
+        audit_flag = ('all_requested_mass_GEN_audits_passed'
+                      if source_mechanism(config) == 'meson-radiative' else 'all_seven_mass_GEN_audits_passed')
+        if (gate.get('complete') is not True or gate.get(audit_flag) is not True
                 or gate.get('model_card_sha256') != durable.sha(config['model_card'])
                 or gate.get('worklist_sha256') != durable.sha(Path(config['directory'])/'config.json')
                 or type(gate.get('total_meson_forecast_bytes')) is not int
@@ -363,10 +954,12 @@ def storage_gate(config, observation, bulk=False, state=None):
             raise ValueError('Bulk storage forecast does not cover every fixed source batch')
         published=(state or {}).get('batches',{})
         additional=sum(value for batch,value in forecasts.items() if not published.get(batch,{}).get('published'))
-    required = config['minimum_eos_free_bytes'] + reservation + additional
+    reserved, claims = additional_reservations(config)
+    required = config['minimum_eos_free_bytes'] + reservation + additional + reserved
     return observation['free_bytes'] >= required and observation['free_files'] >= config['minimum_eos_free_files'], dict(
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
-        meson_forecast_bytes=additional, required_free_bytes=required)
+        meson_forecast_bytes=additional, additional_reserved_bytes=reserved,
+        additional_reserved_worklists=claims, required_free_bytes=required)
 
 
 def cumulative_result(config,state,batch,transport,primitive):
@@ -432,6 +1025,20 @@ def publish_batch(config, state, batch):
         result=cumulative_result(config,state,batch,transport,result)
         if result is None:
             return None
+        unified = source_mechanism(config) == 'meson-radiative'
+        prior_campaigns = []
+        private_canary = (unified and batch['operational_canary']
+                          and config.get('publish_canary_aliases', False) is False)
+        if unified and not private_canary:
+            ready, evidence = prior_publication_ready(config, batch)
+            entry = state.setdefault('batches', {}).setdefault(batch['batch'], {})
+            entry['prior_publication'] = evidence
+            if not ready:
+                entry.update(stage='waiting_for_prior_publication', ready_histograms=result)
+                durable.save(Path(config['directory'])/'state.json', state)
+                return None
+            prior_campaigns = evidence['allowed_previous_campaigns']
+            entry.pop('ready_histograms', None)
         from export_dark_photon_cross_sections import publish_file_rpc
         contract=read(directory/'gen/contract.json')
         selector=batch.get('target_mean_lab_flight_m')
@@ -442,35 +1049,51 @@ def publish_batch(config, state, batch):
             reference_mean_lab_flight_m=batch['calibration_mean_beta_gamma']*contract['physical_width_table']['ctau_mm']/1000.,
             calibration_mean_beta_gamma=batch['calibration_mean_beta_gamma'],
             mean_lab_flight_is_estimate=selector is not None,
-            production_mechanism='eta-etaprime-radiative',
+            production_mechanism=source_mechanism(config),
             calibration_sha256=config['calibration_authority']['sha256'])
         sample_path=directory/'sample.json'
         if sample_path.exists() and read(sample_path)!=sample:
             raise ValueError('Existing meson sample parameters changed')
         if not sample_path.exists():
             durable.new(sample_path,sample)
-        publish_file_rpc(sample_path,config['eos_base']+'/darkphoton_'+batch['point']+'/sample.json')
+        anchor = None
+        if unified and not private_canary:
+            anchor = common_sample_anchor(config, batch, sample, sample_path, transport)
+        elif not unified:
+            publish_file_rpc(sample_path,config['eos_base']+'/darkphoton_'+batch['point']+'/sample.json')
         parameters=dict(sample,mean_lab_flight_reference_estimate_m=contract['mean_lab_flight_reference_estimate_m'],
             mean_beta_gamma_reference=contract['mean_beta_gamma_reference'],
             mean_beta_gamma_reference_standard_error=contract['mean_beta_gamma_reference_standard_error'],
             reference_definition='Independent fixed-M source estimate; shared LAB selector is the calibration anchor',
             fixed_source_collisions=batch['source_collisions'],accepted_signal_events=contract['requested_events'])
+        if unified:
+            parameters['global_anchor_reference'] = (anchor if anchor is not None else dict(
+                scope='Operational canary campaign only; global sample anchor and latest alias are not promoted'))
         parameters_path=directory/'sample_parameters.json'
         if not parameters_path.exists():
             durable.new(parameters_path,parameters)
         elif read(parameters_path)!=parameters:
             raise ValueError('Per-source meson parameters changed')
         publish_file_rpc(parameters_path,batch['final_output_base']+'/sample_parameters.json')
+        if private_canary:
+            result.update(published_utc=datetime.now(timezone.utc).isoformat(), batch=batch['batch'],
+                          alias_published=False, campaign_parameters_published=True)
+            durable.save(directory/'publication.json', result)
+            return result
         # Replacing another production mechanism requires an explicit reviewed
         # alias target in the request, rather than silently combining models.
         alias = config['eos_base']+'/darkphoton_'+batch['point']+'/latest'
         old = transport.alias_target(alias)
         allowed = list(config.get('allowed_previous_aliases',{}).get(batch['point'], []))
+        allowed.extend(prior_campaigns)
         allowed.extend(row['campaign'] for row in config['batches'] if row['point']==batch['point'])
         if old is not None and old != result['campaign'] and old not in allowed:
             raise ValueError('Existing latest target needs reviewed ownership: '+str(old))
         transport.publish_alias(alias,result['campaign'],[None,result['campaign'],*allowed])
         result.update(published_utc=datetime.now(timezone.utc).isoformat(),batch=batch['batch'])
+        if unified:
+            result.update(alias_published=True, campaign_parameters_published=True,
+                          global_anchor_reference=anchor)
         durable.save(directory/'publication.json',result)
         if result.get('sources_sha256'):
             state.setdefault('published',{})[batch['point']]=result
@@ -482,8 +1105,51 @@ def publish_batch(config, state, batch):
                 path.unlink()
 
 
+def terminal_record(receipt, native):
+    record = dict(schema='shift-meson-successful-native-job-v1', submission=receipt,
+                  terminal_native_ad=native)
+    source = Path(receipt['task'])/'source_status.json'
+    if source.is_file():
+        record['source_status'] = dict(path=str(source), sha256=durable.sha(source))
+    return record
+
+
+def validate_terminal_record(receipt, record):
+    native = record['terminal_native_ad']
+    if (record.get('schema') != 'shift-meson-successful-native-job-v1'
+            or record.get('submission') != receipt
+            or native.get('ClusterId') != receipt['cluster'] or native.get('ProcId') != 0
+            or native.get('Iwd') != receipt['task'] or native.get('JobStatus') != 4
+            or native.get('ExitBySignal') is not False or native.get('ExitCode') != 0):
+        raise ValueError('Cached meson success differs from its exact terminal native job')
+    source = Path(receipt['task'])/'source_status.json'
+    if source.is_file() or 'source_status' in record:
+        authority = record.get('source_status', {})
+        if (authority.get('path') != str(source) or durable.sha(source) != authority.get('sha256')
+                or read(source).get('complete') is not True):
+            raise ValueError('Cached completed meson source changed its native population')
+    return record
+
+
+def cached_terminal_record(config, receipt):
+    seed = config.get('reviewed_terminal_native_jobs')
+    if seed is None:
+        return None
+    reviewed = read_pinned(seed)
+    if reviewed.get('schema') != 'shift-reviewed-meson-successful-native-seed-v1':
+        raise ValueError('Unsupported reviewed meson terminal cache')
+    record = reviewed['jobs'].get(str(receipt['cluster']))
+    if record is not None:
+        return validate_terminal_record(receipt, record)
+    path = Path(config['directory'])/'native_terminal_cache'/f'{receipt["cluster"]}.json'
+    return validate_terminal_record(receipt, read(path)) if path.is_file() else None
+
+
 def native_status(config, receipt):
-    rows=durable.jobs(config,'ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster']))
+    constraint = 'ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])
+    if config.get('reviewed_terminal_native_jobs') is not None:
+        constraint += ' || Iwd == '+json.dumps(receipt['task'])
+    rows=durable.jobs(config, constraint)
     if rows:
         managers=[row for row in rows if row['ClusterId']==receipt['cluster']]
         children=[row for row in rows if row['ClusterId']!=receipt['cluster']]
@@ -512,6 +1178,8 @@ def native_status(config, receipt):
                 health.pop('no_children_since_epoch',None)
             durable.save(health_path,health)
         return 'active'
+    if cached_terminal_record(config, receipt) is not None:
+        return 'complete'
     output=durable.run_condor(['/usr/bin/condor_history',*durable.scheduler_arguments(config),
         str(receipt['cluster'])+'.0','-limit','1','-json'],timeout=45)
     rows=durable.parse_ads(output)
@@ -519,6 +1187,11 @@ def native_status(config, receipt):
             or rows[0].get('ClusterId')!=receipt['cluster']
             or rows[0].get('ExitBySignal') or rows[0].get('ExitCode')!=0):
         raise RuntimeError('Meson manager is missing or failed; no automatic retry: '+str(receipt['cluster']))
+    if config.get('reviewed_terminal_native_jobs') is not None:
+        record = validate_terminal_record(receipt, terminal_record(receipt, rows[0]))
+        path = Path(config['directory'])/'native_terminal_cache'/f'{receipt["cluster"]}.json'
+        path.parent.mkdir(exist_ok=True)
+        durable.new(path, record)
     return 'complete'
 
 
@@ -532,7 +1205,25 @@ def existing_receipt(directory, description):
 
 def step(config,state):
     state.update(checked_utc=datetime.now(timezone.utc).isoformat(),heartbeat=state.get('heartbeat',0)+1)
+    scope = completion_scope(config)
+    if scope is not None:
+        state['meson_completion'] = scope
+        # Closing this finite qualified production does not close the missing
+        # physics programme recorded by the independently reviewed catalogue.
+        state['physics_complete'] = False
     entries=state.setdefault('batches',{})
+    if scope is not None:
+        for batch in config['batches']:
+            entries.setdefault(batch['batch'], {})
+        directory = Path(config['directory']) / 'coverage'
+        receipt = (existing_receipt(directory, directory / 'coverage.sub')
+                   if (directory / 'submission.json').is_file()
+                   else durable.submission(config, directory, directory / 'coverage.sub'))
+        state['coverage_audit'] = dict(cluster=receipt['cluster'], stage='running_or_queued')
+        state['complete'] = False
+        if native_status(config, receipt) == 'active':
+            return state
+        state['coverage_audit'] = dict(cluster=receipt['cluster'], **coverage_result(config))
     source_active, detector_active=0,0
     for batch in config['batches']:
         entry=entries.setdefault(batch['batch'],{})
@@ -563,8 +1254,18 @@ def step(config,state):
         if not (production/'submission.json').exists() and not (production/'submission_intent.json').exists():
             if detector_active>=config['simultaneous_detector_points']:
                 continue
+            if scope is not None:
+                observation = durable.quota(config)
+                allowed, evidence = storage_gate(config, observation,
+                    bulk=not batch['operational_canary'], state=state)
+                state['storage_admission'] = evidence
+                if not allowed:
+                    entry['stage'] = 'waiting_for_detector_storage'
+                    continue
         detector_job=handoff(config,batch)
         entry.update(detector_cluster=detector_job['cluster'],stage='detector')
+        if batch['batch'] in config.get('reviewed_detector_recoveries', {}):
+            entry['reviewed_detector_recovery'] = config['reviewed_detector_recoveries'][batch['batch']]
         if native_status(config,detector_job)=='active':
             detector_active+=1
         published=publish_batch(config,state,batch)
@@ -600,7 +1301,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory',type=Path,required=True)
     parser.add_argument('--seal',required=True)
-    parser.add_argument('--action',choices=('source','controller'),required=True)
+    parser.add_argument('--action',choices=('source','controller','coverage'),required=True)
     parser.add_argument('--batch')
     parser.add_argument('--controller-config',type=Path)
     parser.add_argument('--controller-seal')
@@ -616,6 +1317,9 @@ def main():
         if len(rows)!=1:
             raise ValueError('Source batch has no unique frozen owner')
         source(config,args.seal,rows[0])
+        return
+    if args.action == 'coverage':
+        coverage(config)
         return
     path=args.directory/'state.json'
     with (args.directory/'controller.lock').open('a') as lock:

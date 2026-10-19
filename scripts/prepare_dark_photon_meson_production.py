@@ -14,6 +14,8 @@ from dark_photon_sample_names import physical_point_name
 from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES
 from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
 from run_dark_photon_statistics import sha, new
+from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
+    additional_reservations, gen_runtime, coverage_request, prior_meson_configuration)
 
 
 TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + (
@@ -21,11 +23,13 @@ TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + (
     'prepare_dark_photon_production.py', 'dark_photon_production_support.py',
     'dark_photon_publication_quota.py', 'run_dark_photon_gen_stage.py',
     'run_dark_photon_statistics.py', 'shift_condor_native.py', 'watch_dark_photon_production.py',
-    'aggregate_dark_photon_samples.py', 'watch_dark_photon_statistics.py'))))
+    'aggregate_dark_photon_samples.py', 'watch_dark_photon_statistics.py',
+    'audit_dark_photon_meson_coverage.py'))))
 
 
 def validate_batches(rows, prior_inventories, seed_base=761216001,
-                     run_base=1761216001, detector_job_base=5500000):
+                     run_base=1761216001, detector_job_base=5500000,
+                     mechanism='eta-etaprime-radiative'):
     if not isinstance(rows, list) or not 2 <= len(rows) <= 100:
         raise ValueError('Require two canaries and a bounded fixed-source worklist')
     old_seeds, old_runs = set(), set()
@@ -70,9 +74,15 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
         result.append(row)
         identifiers.add(batch); seeds.add(seed); runs.add(run)
     canaries = [row for row in result if row['operational_canary']]
-    if (len(canaries) != 2 or not any(row['mass_gev'] < .548 for row in canaries)
+    if mechanism == 'eta-etaprime-radiative' and (len(canaries) != 2
+            or not any(row['mass_gev'] < .548 for row in canaries)
             or not any(row['mass_gev'] > .548 for row in canaries)):
         raise ValueError('Require distinct eta and eta-prime-only full-chain canaries')
+    if mechanism == 'meson-radiative' and (len(canaries) != 2
+            or len({row['point'] for row in canaries}) != 2):
+        raise ValueError('Require two distinct declared unified-source full-chain canaries')
+    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative'):
+        raise ValueError('Unsupported meson source mechanism')
     return result
 
 
@@ -83,14 +93,55 @@ def prepare(configuration, output, scripts=None):
     config = json.loads(Path(configuration).read_text())
     if config.get('schema') != 'shift-dp-meson-production-request-v1':
         raise ValueError('Unsupported meson production request')
+    mechanism = source_mechanism(config)
+    requirements = ''
+    if mechanism == 'meson-radiative':
+        hosts = config.get('excluded_hosts', [])
+        if (not isinstance(hosts, list) or any(not isinstance(host, str)
+                or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch', host) for host in hosts)):
+            raise ValueError('Excluded hosts require explicit CERN machine names')
+        if hosts:
+            requirements = 'requirements = ' + ' && '.join(
+                '(TARGET.Machine != ' + json.dumps(host) + ')' for host in hosts) + '\n'
     batches = validate_batches(config['batches'], config['prior_inventories'],
         config.get('seed_base',761216001),config.get('run_base',1761216001),
-        config.get('detector_job_base',5500000))
-    if (not re.fullmatch(r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*', config['campaign_prefix']) or
+        config.get('detector_job_base',5500000), mechanism)
+    campaign_pattern = (r'[A-Za-z0-9_-]*20[0-9]{6}[A-Za-z0-9_-]*'
+                        if mechanism == 'meson-radiative' else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
+    if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
             not 1 <= config.get('simultaneous_sources', 2) <= 3 or
             not 1 <= config.get('simultaneous_detector_points', 2) <= 3):
         raise ValueError('Require explicit production namespaces and bounded concurrency')
+    if mechanism == 'meson-radiative':
+        config.setdefault('publish_canary_aliases', False)
+        if config['publish_canary_aliases'] is not False:
+            raise ValueError('Unified operational canaries must leave global aliases and sample anchors unchanged')
+        previous = prior_meson_configuration(config)
+        controller = config['prior_meson_publication'].get('controller_receipt')
+        if not isinstance(controller, dict) or sha(controller['path']) != controller.get('sha256'):
+            raise ValueError('Prior meson publication requires its pinned terminal-controller receipt')
+        native = json.loads(Path(controller['path']).read_text())
+        if (type(native.get('cluster')) is not int or native['cluster'] <= 0
+                or not Path(native.get('task', '')).is_absolute()
+                or json.loads((Path(native['task'])/'config.json').read_text()).get('directory') != previous['directory']
+                or sha(Path(native['task'])/'controller.sub') != native.get('submit_sha256')):
+            raise ValueError('Pinned prior meson controller does not own the original production')
+        completion_scope(config)
+        for row in batches:
+            reference_point(config, row)
+        additional_reservations(config)
+        gen_runtime(config)
+        coverage_request(config)
+        if config.get('minimum_eos_free_bytes', 100000000000) < 90000000000:
+            raise ValueError('The unified-source storage floor must retain at least 90 GB')
+        if (type(config.get('detector_workers_per_point', 10)) is not int
+                or not 1 <= config.get('detector_workers_per_point', 10) <= 100
+                or type(config.get('dag_max_idle', 5)) is not int
+                or not 1 <= config.get('dag_max_idle', 5) <= 5):
+            raise ValueError('Unified source requires bounded workers and at most five ready nodes')
+        config.setdefault('detector_workers_per_point', 10)
+        config.setdefault('dag_max_idle', 5)
     scripts = Path(scripts or Path(__file__).resolve().parent)
     output.mkdir(parents=True)
     tools = output / 'tools'
@@ -120,6 +171,52 @@ def prepare(configuration, output, scripts=None):
         shutil.copy2(calibration['path'], target)
         config['calibration_authority'] = dict(path=str(target), sha256=sha(target))
         files[str(target)] = sha(target)
+    for key in ('lifetime_reference_authority', 'meson_completion_scope'):
+        authority = config.get(key)
+        if authority is None:
+            continue
+        source = Path(authority['path']).resolve()
+        if sha(source) != authority['sha256']:
+            raise ValueError('Pinned meson scope or lifetime authority changed: ' + key)
+        target = output / (key + '.json')
+        shutil.copy2(source, target)
+        config[key] = dict(path=str(target), sha256=sha(target))
+        files[str(target)] = sha(target)
+    if mechanism == 'meson-radiative':
+        previous = config['prior_meson_publication']
+        source = Path(previous['path']).resolve()
+        if sha(source) != previous['sha256']:
+            raise ValueError('Prior meson publication configuration changed during preparation')
+        target = output/'prior_meson_publication.json'
+        shutil.copy2(source, target)
+        config['prior_meson_publication'] = dict(previous, path=str(target), sha256=sha(target))
+        files[str(target)] = sha(target)
+        authority = previous['controller_receipt']
+        source = Path(authority['path']).resolve()
+        if sha(source) != authority['sha256']:
+            raise ValueError('Prior meson controller receipt changed during preparation')
+        target = output/'prior_meson_controller_receipt.json'
+        shutil.copy2(source, target)
+        config['prior_meson_publication']['controller_receipt'] = dict(path=str(target), sha256=sha(target))
+        files[str(target)] = sha(target)
+        authority = config['gen_runtime']['provenance']
+        source = Path(authority['path']).resolve()
+        if sha(source) != authority['sha256']:
+            raise ValueError('Frozen GEN runtime provenance changed')
+        target = output / 'gen_runtime_provenance.json'
+        shutil.copy2(source, target)
+        config['gen_runtime']['provenance'] = dict(path=str(target), sha256=sha(target))
+        files[str(target)] = sha(target)
+    authorities=[]
+    for index,authority in enumerate(config.get('operational_authorities',[])):
+        if sha(authority['path'])!=authority['sha256']:
+            raise ValueError('Operational qualification authority changed')
+        target=output/'gates'/f'{index:02d}_{Path(authority["path"]).name}'
+        target.parent.mkdir(exist_ok=True)
+        shutil.copy2(authority['path'],target)
+        authorities.append(dict(path=str(target),sha256=sha(target)))
+        files[str(target)]=sha(target)
+    config['operational_authorities']=authorities
     for key in ('qualified_template', 'reference_preparation', 'cmssw_base', 'adaptive_directory',
                 'darkcast_path', 'darkcast_source_receipt'):
         if not Path(config[key]).is_absolute():
@@ -144,13 +241,49 @@ def prepare(configuration, output, scripts=None):
             raise ValueError('Spectral width authority changed')
         files[str(path)] = expected
     config.update(schema='shift-dp-meson-production-v1', directory=str(output), tools=str(tools),
-                  production_mechanism='eta-etaprime-radiative',
+                  production_mechanism=mechanism,
                   batches=batches, events_per_job=20, group_events=config.get('group_events',4000),
                   gen_timeout_seconds=43200, publication_timeout_seconds=1800,
-                  minimum_afs_free_mb=1024, minimum_eos_free_bytes=100000000000,
+                  minimum_afs_free_mb=1024, minimum_eos_free_bytes=config.get('minimum_eos_free_bytes',100000000000),
                   minimum_eos_free_files=20000, simultaneous_sources=config.get('simultaneous_sources', 2),
                   simultaneous_detector_points=config.get('simultaneous_detector_points', 2),
                   no_automatic_science_retry=True)
+    if mechanism == 'meson-radiative':
+        terminal_seed = output / 'terminal_native_seed.json'
+        new(terminal_seed, dict(schema='shift-reviewed-meson-successful-native-seed-v1', jobs={}))
+        config['reviewed_terminal_native_jobs'] = dict(path=str(terminal_seed), sha256=sha(terminal_seed))
+        files[str(terminal_seed)] = sha(terminal_seed)
+        directory = output / 'coverage'
+        directory.mkdir()
+        descriptor = f'''# Code style: AI-code. AI-generated finite meson coverage audit.
+universe = vanilla
+executable = /usr/bin/python3
+arguments = {tools}/run_dark_photon_meson_production.py --directory {output} --seal SEAL_DIGEST --action coverage
+initialdir = {directory}
+getenv = False
+environment = "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1"
+should_transfer_files = NO
+request_cpus = 1
+request_memory = 1000MB
+request_disk = 1000MB
+{requirements}+JobFlavour = "workday"
++MaxRuntime = 3600
++SendCredential = True
++WantIOProxy = True
++ShiftDPStatisticsTask = "{directory}"
++ShiftDPStatisticsReadOnly = True
++JobBatchName = "SHIFT_DP_meson_coverage"
+output = {directory}/audit.$(ClusterId).$(ProcId).out
+error = {directory}/audit.$(ClusterId).$(ProcId).err
+log = {directory}/events.log
+on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+periodic_release = False
+queue
+'''
+        path = directory / 'coverage.sub.in'
+        path.write_text(descriptor)
+        files[str(path)] = sha(path)
     for row in batches:
         directory = output / 'batches' / row['batch']
         directory.mkdir(parents=True)
@@ -168,9 +301,10 @@ should_transfer_files = NO
 request_cpus = 1
 request_memory = 4000MB
 request_disk = 64000MB
-+JobFlavour = "tomorrow"
+{requirements}+JobFlavour = "tomorrow"
 +MaxRuntime = 86400
 +SendCredential = True
++WantIOProxy = True
 +ShiftDPStatisticsTask = "{directory}"
 +JobBatchName = "SHIFT_DP_meson_fixedM"
 output = {directory}/logs/source.$(ClusterId).$(ProcId).out
@@ -204,6 +338,9 @@ exec python3 {tools}/run_dark_photon_meson_production.py --directory {output} --
     for row in batches:
         path = output / 'batches' / row['batch']
         (path / 'source.sub').write_text((path / 'source.sub.in').read_text().replace('SEAL_DIGEST', seal))
+    if mechanism == 'meson-radiative':
+        path = output / 'coverage'
+        (path / 'coverage.sub').write_text((path / 'coverage.sub.in').read_text().replace('SEAL_DIGEST', seal))
     (output / 'controller.sub').write_text(f'''# Code style: AI-code. AI-generated persistent meson supervisor.
 universe = vanilla
 executable = {wrapper}
@@ -214,7 +351,7 @@ should_transfer_files = NO
 request_cpus = 1
 request_memory = 2000MB
 request_disk = 4000MB
-+JobFlavour = "nextweek"
+{requirements}+JobFlavour = "nextweek"
 +MaxRuntime = 604800
 +SendCredential = True
 +ShiftDPStatisticsTask = "{output}"
