@@ -150,6 +150,55 @@ class StreamingQCDTest(unittest.TestCase):
             self.assertEqual(row['sampling_gen_weight'],1/expected[row['feature_stratum']])
         self.assertAlmostEqual(sum(row['sampling_gen_weight']for row in selected['selected_events']),30.)
 
+    def test_pthat_bin_quotas_do_not_change_native_weights_or_default_bin(self):
+        low = source(30)
+        high = source(30, source_id='production_qcd_20toinf_0000', run=43000000)
+        high['stratum'] = high['request']['stratum'] = high['normalization']['stratum'] = 'qcd_20toinf'
+        policy = copy.deepcopy(DEFAULT_POLICY)
+        policy['quotas_by_stratum'] = {'qcd_20toinf': dict(tail=30, forward_OS=5, remainder=2)}
+        plan = plan_for([low, high], policy)
+        labels = ['tail']*10 + ['forward_OS']*10 + ['remainder']*10
+        low_rows = select_events(low, plan, features(low, labels))['selected_events']
+        high_rows = select_events(high, plan, features(high, labels))['selected_events']
+        self.assertEqual(len(low_rows), 10)
+        self.assertEqual(len(high_rows), 17)
+        for rows, probabilities in ((low_rows, dict(tail=.6, forward_OS=.3, remainder=.1)),
+                                    (high_rows, dict(tail=1., forward_OS=.5, remainder=.2))):
+            for row in rows:
+                self.assertEqual(row['native_weight'], 1.)
+                self.assertEqual(row['sampling_probability'], probabilities[row['feature_stratum']])
+            self.assertAlmostEqual(sum(row['sampling_gen_weight'] for row in rows), 30.)
+
+    def test_fractional_sampling_keeps_all_tails_and_rounds_controls_with_exact_probability(self):
+        s = source(37)
+        policy = copy.deepcopy(DEFAULT_POLICY)
+        policy.update(mode='GEN-stratified-fixed-fraction',
+                      fractions=dict(tail=1., forward_OS=.5, remainder=.1))
+        labels = ['tail']*11 + ['forward_OS']*13 + ['remainder']*13
+        selected = select_events(s, plan_for([s], policy), features(s, labels))
+        populations = selected['sampling']['populations']
+        self.assertEqual([populations[label]['selected'] for label in ('tail', 'forward_OS', 'remainder')],
+                         [11, 7, 2])
+        self.assertEqual(populations['forward_OS']['inclusion_probability'], 7/13)
+        self.assertEqual(populations['remainder']['inclusion_probability'], 2/13)
+        self.assertEqual(len(selected['selected_events']), 20)
+        self.assertAlmostEqual(sum(row['sampling_gen_weight'] for row in selected['selected_events']), 37.)
+
+    def test_fractional_and_bin_allocation_reject_zero_unknown_and_nonfinite_support(self):
+        for bad in (0, -1, 1.01, float('nan'), float('inf'), True):
+            policy = copy.deepcopy(DEFAULT_POLICY)
+            policy.update(mode='GEN-stratified-fixed-fraction',
+                          fractions=dict(tail=1., forward_OS=.5, remainder=bad))
+            with self.subTest(fraction=bad), self.assertRaisesRegex(ValueError, 'positive sampling support'):
+                validate_policy(policy)
+        policy = copy.deepcopy(DEFAULT_POLICY)
+        policy['quotas_by_stratum'] = {'qcd_typo': dict(tail=5, forward_OS=2, remainder=1)}
+        with self.assertRaisesRegex(ValueError, 'known QCD'):
+            validate_policy(policy)
+        policy['quotas_by_stratum'] = {'qcd_20toinf': dict(tail=5, forward_OS=2, remainder=0)}
+        with self.assertRaisesRegex(ValueError, 'positive sampling support'):
+            validate_policy(policy)
+
     def test_missing_features_cannot_silently_switch_to_uniform(self):
         s=source()
         with self.assertRaisesRegex(ValueError,'matching upstream-only'):

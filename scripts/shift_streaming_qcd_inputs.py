@@ -50,17 +50,29 @@ def write_new(path, value):
 
 def validate_policy(policy):
     if policy.get('schema') != 'shift-stream-GEN-selection-v1' or policy.get('mode') not in (
-            'GEN-stratified-fixed-quota', 'uniform-fixed-quota'):
+            'GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction', 'uniform-fixed-quota'):
         raise ValueError('Unknown immutable GEN selection policy')
     if not policy.get('seed') or not policy.get('training_seed') or policy['seed'] == policy['training_seed']:
         raise ValueError('Selection and original-event training split need distinct frozen seeds')
     if type(policy.get('training_folds')) is not int or policy['training_folds'] < 2:
         raise ValueError('Need at least two independent original-event training folds')
-    quotas = policy.get('quotas')
-    if not isinstance(quotas, dict) or set(quotas) != {'tail', 'forward_OS', 'remainder'}:
-        raise ValueError('Declare all three GEN-only sampling strata')
-    if any(type(n) is not int or n < 1 for n in quotas.values()):
-        raise ValueError('Every nonempty GEN stratum needs positive sampling support')
+    fractional = policy['mode'] == 'GEN-stratified-fixed-fraction'
+    field = 'fractions' if fractional else 'quotas'
+    allocations = [policy.get(field)]
+    overrides = policy.get(field + '_by_stratum', {})
+    if not isinstance(overrides, dict) or set(overrides) - set(STRATA):
+        raise ValueError('GEN allocation overrides must name known QCD pThat bins')
+    allocations.extend(overrides.values())
+    for allocation in allocations:
+        if not isinstance(allocation, dict) or set(allocation) != {'tail', 'forward_OS', 'remainder'}:
+            raise ValueError('Declare all three GEN-only sampling strata')
+        if fractional:
+            valid = all(type(n) in (int, float) and math.isfinite(n) and 0 < n <= 1
+                        for n in allocation.values())
+        else:
+            valid = all(type(n) is int and n >= 1 for n in allocation.values())
+        if not valid:
+            raise ValueError('Every nonempty GEN stratum needs positive sampling support; fractions must be at most one')
     return policy
 
 
@@ -282,7 +294,7 @@ def select_events(source, plan, features=None):
     if len(slots) != 1 or slots[0]['request'] != source['request']:
         raise ValueError('GEN source is not a member of the predetermined cohort')
     ids, weights = source['event_ids'], source['weights']
-    if policy['mode'] == 'GEN-stratified-fixed-quota':
+    if policy['mode'] in ('GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction'):
         if (not features or features.get('schema') != 'shift-stream-GEN-features-v1'
                 or features.get('gen_sha256') != source['gen_sha256']
                 or features.get('source_id') != source['source_id']
@@ -294,15 +306,21 @@ def select_events(source, plan, features=None):
             if row['event_id'] != ids[index] or row['native_weight'] != weights[index]:
                 raise ValueError('Feature rows do not preserve source order, IDs and native weights')
             label = row['feature_stratum']
-            if label not in policy['quotas']:
+            if label not in ('tail', 'forward_OS', 'remainder'):
                 raise ValueError('Unknown GEN priority stratum')
             labels.append(label)
     else:
         labels = ['remainder']*len(ids)
     selected, populations = [], {}
+    fractional = policy['mode'] == 'GEN-stratified-fixed-fraction'
+    field = 'fractions' if fractional else 'quotas'
+    allocation = policy.get(field + '_by_stratum', {}).get(source['stratum'], policy[field])
     for label in ('tail', 'forward_OS', 'remainder'):
         population = [index for index, value in enumerate(labels) if value == label]
-        quota = policy['quotas'][label] if policy['mode'] != 'uniform-fixed-quota' else sum(policy['quotas'].values())
+        if fractional:
+            quota = math.ceil(allocation[label] * len(population))
+        else:
+            quota = allocation[label] if policy['mode'] != 'uniform-fixed-quota' else sum(allocation.values())
         number = min(quota, len(population))
         probability = number/len(population) if population else None
         populations[label] = dict(population=len(population), selected=number, inclusion_probability=probability)
