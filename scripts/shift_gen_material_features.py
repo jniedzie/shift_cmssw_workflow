@@ -141,6 +141,7 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
                 barcode=number, pdg=parent['pdg'], status=parent['status'],
                 immediate_parent_barcodes=parent['parents'],
                 birth_cm=parent['birth_cm'], end_cm=parent['end_cm'],
+                energy_GeV=parent['energy_GeV'],
                 **kinematics(parent['momentum_GeV']),
                 incoming_towards_CMS_z0=(parent['birth_cm'] is not None
                                         and parent['birth_cm'][2]*parent['momentum_GeV'][2] < 0),
@@ -161,6 +162,7 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
         known_depth = sum(item['interaction_depth_proxy'] or 0. for item in flights)
         muons.append(dict(
             barcode=row['barcode'], pdg=row['pdg'], birth_cm=row['birth_cm'],
+            energy_GeV=row['energy_GeV'],
             **motion, immediate_parent_barcodes=row['parents'],
             incoming_towards_CMS_z0=(row['birth_cm'] is not None
                                     and row['birth_cm'][2]*row['momentum_GeV'][2] < 0),
