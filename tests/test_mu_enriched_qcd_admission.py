@@ -63,6 +63,106 @@ class AdmissionTests(unittest.TestCase):
         self.observation['remote_account_workers'] = [{}] * 800
         self.assertTrue(self.decide()['admitted'])
 
+    def stream_policy(self):
+        self.policy.update(worker_ceiling=900, account_ceiling=1607,
+                           reserve_full_worker_ceiling=False)
+
+    def test_stream_admits_one_with_790_external_workers_and_900_own_limit(self):
+        self.stream_policy()
+        self.observation['remote_account_workers'] = [{'JobStatus': 2}]*790
+        result = self.decide()
+        self.assertTrue(result['admitted'], result)
+        self.assertEqual(result['account_reserved_workers'], 791)
+        self.assertEqual(result['external_capacity_workers'], 790)
+        self.policy['reserve_full_worker_ceiling'] = True
+        result = self.decide()
+        self.assertFalse(result['admitted'])
+        self.assertEqual(result['account_reserved_workers'], 1690)
+
+    def test_stream_stops_one_extra_at_the_actual_account_capacity(self):
+        self.stream_policy()
+        self.observation['remote_account_workers'] = [{'JobStatus': 2}]*790
+        own = [self.own('own_'+str(index)) for index in range(816)]
+        self.assertTrue(self.decide(ads=own)['admitted'])
+        own.append(self.own('own_816'))
+        result = self.decide(ads=own)
+        self.assertFalse(result['admitted'])
+        self.assertEqual(result['account_reserved_workers'], 1608)
+        self.assertIn('insufficient worker capacity', result['reason'])
+
+    def test_external_idle_queue_does_not_consume_the_stream_running_budget(self):
+        self.stream_policy()
+        self.observation['remote_account_workers'] = [{'JobStatus': 2}]*500 + [{'JobStatus': 1}]*1000
+        result = self.decide(ads=[dict(JobUniverse=5, JobStatus=1)]*1000)
+        self.assertTrue(result['admitted'], result)
+        self.assertEqual(result['external_queued_workers'], 2500)
+        self.assertEqual(result['external_idle_workers'], 2000)
+        self.assertEqual(result['external_capacity_workers'], 500)
+        self.observation['remote_account_workers'] = [{'JobStatus': 2}]*1607
+        self.assertFalse(self.decide()['admitted'])
+
+    def test_stream_counts_running_transferring_and_suspended_external_workers(self):
+        self.stream_policy()
+        self.observation['remote_account_workers'] = [{'JobStatus': s} for s in (1, 2, 6, 7)]
+        ads = [dict(JobUniverse=5, JobStatus=s) for s in (1, 2, 6, 7)]
+        result = self.decide(ads=ads)
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['external_capacity_workers'], 6)
+        self.assertEqual(result['external_idle_workers'], 2)
+
+    def test_stream_unknown_remote_execution_state_defers_instead_of_counting_zero(self):
+        self.stream_policy()
+        for ad in ({}, {'JobStatus': None}, {'JobStatus': '2'},
+                   {'JobStatus': 5}, {'JobStatus': 8}, {'JobStatus': True}, None):
+            with self.subTest(ad=ad):
+                self.observation['remote_account_workers'] = [ad]
+                result = self.decide()
+                self.assertFalse(result['admitted'])
+                self.assertIn('execution capacity is unknown', result['reason'])
+
+    def test_stream_own_held_and_pending_claims_still_keep_the_900_limit(self):
+        self.stream_policy()
+        held = [self.own('held_'+str(index)) | {'JobStatus': 5} for index in range(899)]
+        pending = {'pending': {'at_epoch': 999}}
+        result = self.decide(ads=held, reservations=pending)
+        self.assertFalse(result['admitted'])
+        self.assertEqual(result['reserved_workers'], 901)
+        self.assertIn('worker ceiling', result['reason'])
+        # Rechecking the same PRE does not create a second reservation.
+        result = self.decide(ads=held, reservations=pending, node='pending')
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['reserved_workers'], 900)
+        self.assertEqual(result['storage_reserved_workers'], 900)
+        # A queued node and its persistent PRE still count only once.
+        result = self.decide(ads=[self.own('pending')], reservations=pending, node='pending')
+        self.assertEqual(result['reserved_workers'], 1)
+
+    def test_stream_does_not_release_completed_storage_claims_or_bypass_coverage(self):
+        self.stream_policy()
+        previous = {'finished': {'at_epoch': 900, 'seen_queued': True}}
+        self.observation['free_bytes'] = 69
+        result = self.decide(reservations=previous)
+        self.assertFalse(result['admitted'])
+        self.assertEqual(result['reserved_workers'], 1)
+        self.assertEqual(result['storage_reserved_workers'], 2)
+        self.assertIn('EOS byte reservation', result['reason'])
+        self.observation.update(free_bytes=10000, remote_account_coverage_verified=False)
+        self.assertIn('coverage is unknown', self.decide()['reason'])
+
+    def test_pending_reservations_are_validated_before_the_full_wave_capacity_check(self):
+        self.observation['remote_account_workers'] = [{}]*801
+        with self.assertRaisesRegex(ValueError, 'persistent PRE reservation'):
+            self.decide(reservations={'bad': {'at_epoch': 'unknown'}})
+
+    def test_full_wave_policy_option_requires_a_boolean(self):
+        for invalid in (None, 0, 1, 'false'):
+            with self.subTest(invalid=invalid):
+                self.policy['reserve_full_worker_ceiling'] = invalid
+                with self.assertRaisesRegex(ValueError, 'explicit boolean'):
+                    module.validate_policy(self.policy)
+                with self.assertRaisesRegex(ValueError, 'explicit boolean'):
+                    self.decide()
+
     def test_local_other_jobs_count_towards_global_limit(self):
         ads = [dict(JobUniverse=5, JobStatus=2)] * 801
         self.assertFalse(self.decide(ads=ads)['admitted'])
@@ -136,10 +236,90 @@ class AdmissionTests(unittest.TestCase):
         self.observation['free_bytes'] = None
         self.assertFalse(self.decide()['admitted'])
 
-    def test_account_limit_above_1000_is_rejected(self):
-        self.policy['account_ceiling'] = 1001
+    def test_account_limit_above_10000_is_rejected(self):
+        self.policy['account_ceiling'] = 10001
         with self.assertRaises(ValueError):
             module.validate_policy(self.policy)
+
+    def test_explicit_4000_account_capacity_keeps_900_stream_slots_with_2400_external_jobs(self):
+        self.policy.update(worker_ceiling=900, account_ceiling=4000)
+        module.validate_policy(self.policy)
+        self.observation['remote_account_workers'] = [{'ClusterId': index} for index in range(2400)]
+        self.assertTrue(self.decide()['admitted'])
+        self.observation['remote_account_workers'].extend({'ClusterId': index} for index in range(2400, 3100))
+        self.assertTrue(self.decide()['admitted'])
+        self.observation['remote_account_workers'].append({'ClusterId': 3100})
+        rejected = self.decide()
+        self.assertFalse(rejected['admitted'])
+        self.assertIn('insufficient worker capacity', rejected['reason'])
+
+    def test_larger_account_capacity_does_not_bypass_storage_or_unknown_account_coverage(self):
+        self.policy.update(worker_ceiling=900, account_ceiling=4000, minimum_free_bytes=6000)
+        self.observation['remote_account_workers'] = [{'ClusterId': index} for index in range(2400)]
+        self.observation['free_bytes'] = 6000 + self.policy['reserved_bytes_per_worker'] - 1
+        rejected = self.decide()
+        self.assertFalse(rejected['admitted'])
+        self.assertIn('EOS byte reservation', rejected['reason'])
+        self.observation.update(free_bytes=10000, remote_account_coverage_verified=False)
+        rejected = self.decide()
+        self.assertFalse(rejected['admitted'])
+        self.assertIn('coverage is unknown', rejected['reason'])
+
+    def test_reviewed_10000_account_limit_covers_all_6200_peer_writers_and_still_stops_at_capacity(self):
+        self.policy.update(worker_ceiling=900, account_ceiling=10000)
+        module.validate_policy(self.policy)
+        self.observation['remote_account_workers'] = [{}]*6200
+        self.assertTrue(self.decide()['admitted'])
+        self.observation['remote_account_workers'] = [{}]*9101
+        self.assertFalse(self.decide()['admitted'])
+
+    def test_global_publication_cap_covers_histogram_extra_pending_and_completed_claims(self):
+        self.policy.update(worker_ceiling=900, account_ceiling=10000,
+            reserved_bytes_per_worker=6*1024**2, maximum_outstanding_publication_bytes=6144000000)
+        self.observation.update(free_bytes=10**12, free_files=100000,
+                                extra_stage_reserved_bytes=(512-6)*1024**2)
+        workers = [self.own('reco_'+str(index)) for index in range(899)]
+        self.assertIn('byte cap', self.decide(ads=workers, node='histogram')['reason'])
+        result = self.decide(ads=workers[:891], node='histogram')
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['outstanding_publication_bytes'], 892*6*1024**2+(512-6)*1024**2)
+        # A finished worker absent from the old quota still occupies one slot.
+        completed = {'finished': {'at_epoch': 900, 'seen_queued': True, 'missing_since_epoch': 1000}}
+        self.assertIn('byte cap', self.decide(ads=workers[:891], reservations=completed, node='histogram')['reason'])
+
+    def test_held_own_source_keeps_its_complete_stage_claim_after_a_new_quota(self):
+        self.policy.update(reserved_bytes_per_worker=6*1024**2, maximum_outstanding_publication_bytes=6144000000)
+        self.observation.update(free_bytes=10**12, extra_stage_reserved_bytes=(512-6)*1024**2)
+        held = self.own('held_histogram') | {'JobStatus': 5}
+        result = self.decide(ads=[held], node='held_histogram',
+            reservations={'held_histogram': {'at_epoch': 1, 'seen_queued': True, 'missing_since_epoch': 2}})
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['outstanding_publication_bytes'], 512*1024**2)
+        self.assertEqual(result['reserved_workers'], 1)
+        self.assertIn('held_histogram', result['reservations'])
+        self.observation['extra_stage_reserved_bytes'] = 0
+        result = self.decide(ads=[held], node='held_histogram', reservations=result['reservations'])
+        self.assertEqual(result['outstanding_publication_bytes'], 6*1024**2)
+
+    def test_conditional_peer_mode_keeps_full_claims_and_needs_verified_writers_and_byte_cap(self):
+        self.external_commitments(required_bytes=300, required_files=30)
+        self.policy['maximum_outstanding_publication_bytes'] = 60
+        self.observation.update(free_bytes=260, stream_peer_writers_verified=True)
+        self.observation['external_storage_commitments']['stream_capacity'] = dict(
+            constrained_required_free_bytes=240, protected_stream_bytes=60)
+        result = self.decide()
+        self.assertTrue(result['admitted'])
+        self.assertEqual(result['storage_mode'], 'constrained_within_peer_QCD_allowance')
+        self.assertEqual(result['full_peer_required_free_bytes'], 300)
+        self.assertEqual(result['required_free_bytes'], 240)
+        self.observation['free_bytes'] = 320
+        self.assertEqual(self.decide()['storage_mode'], 'full')
+        for free in (260, 320):
+            self.observation.update(free_bytes=free, stream_peer_writers_verified=False)
+            self.assertFalse(self.decide()['admitted'])
+        self.observation.update(free_bytes=260, stream_peer_writers_verified=True)
+        self.policy['maximum_outstanding_publication_bytes'] = 61
+        self.assertFalse(self.decide()['admitted'])
 
     def external_commitments(self, required_bytes=100, required_files=30):
         self.policy['external_storage_reservations'] = [{'production_directory': '/sealed/other'}]

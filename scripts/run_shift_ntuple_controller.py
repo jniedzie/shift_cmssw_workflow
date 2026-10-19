@@ -219,6 +219,7 @@ request_cpus = 1
 request_memory = 512
 request_disk = 1000
 priority = {audit_priority}
++SendCredential = True
 +MaxRuntime = 1200
 +ShiftNtupleQuotaAudit = True
 +ShiftNtupleAuditNonce = "{nonce}"

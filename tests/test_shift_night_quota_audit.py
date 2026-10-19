@@ -39,6 +39,23 @@ class NightQuotaTests(unittest.TestCase):
         self.assertFalse(result.get('remote_account_coverage_verified', False))
         self.assertFalse(result['account_coverage_verified'])
 
+    def test_remote_held_peer_identity_is_retained_without_claiming_cpu_capacity(self):
+        running = dict(ClusterId=8, ProcId=0, JobUniverse=5, JobStatus=2,
+                       Iwd='/pinned/bsm/main', ShiftSignalValidationOnly=True)
+        held = running | dict(ClusterId=9, JobStatus=5, Iwd='/unknown/bsm/writer')
+        with patch.object(audit.subprocess, 'run', return_value=self.quota()), \
+                patch.object(audit, '_account_schedds', return_value={'local', 'other'}), \
+                patch.object(audit, 'query', return_value=[running, held]) as query:
+            result = audit.audit(self.request())
+        self.assertTrue(result['remote_account_coverage_verified'])
+        self.assertEqual(result['remote_account_workers'], [running])
+        self.assertEqual(result['remote_account_peer_writer_rows'], [running, held])
+        self.assertIn('JobStatus == 5', query.call_args.args[0])
+        for attribute in ('Owner', 'GlobalJobId', 'DAGManJobId', 'Iwd', 'Cmd', 'Args',
+                          'ShiftBSMPoint', 'ShiftStreamCampaign', 'ShiftMuEnrichedQCD',
+                          'ShiftDPStatisticsReadOnly', 'ShiftDPStatisticsWatchdog'):
+            self.assertIn(attribute, query.call_args.args[1])
+
     def test_external_commitments_finish_before_the_eos_space_measurement(self):
         request = self.request() | {'external_storage_reservations': [{'production_directory': '/sealed'}]}
         calls = []

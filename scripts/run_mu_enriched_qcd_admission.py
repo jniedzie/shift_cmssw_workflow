@@ -35,8 +35,13 @@ def validate_policy(policy):
                 'observation_max_age_seconds', 'pre_reservation_seconds'):
         if type(policy.get(key)) is not int or policy[key] <= 0:
             raise ValueError('Admission policy needs a positive integer: ' + key)
-    if not policy['worker_ceiling'] <= policy['account_ceiling'] <= 1000:
-        raise ValueError('Admission account ceiling must be at most 1000')
+    if not policy['worker_ceiling'] <= policy['account_ceiling'] <= 10000:
+        raise ValueError('Reviewed admission account ceiling must be at most 10000')
+    cap = policy.get('maximum_outstanding_publication_bytes')
+    if cap is not None and (type(cap) is not int or cap <= 0):
+        raise ValueError('The optional outstanding-publication cap needs a positive integer')
+    if type(policy.get('reserve_full_worker_ceiling', True)) is not bool:
+        raise ValueError('reserve_full_worker_ceiling needs an explicit boolean')
     for key in ('account_owner', 'account_pool', 'schedd_name', 'suite_tag'):
         if not isinstance(policy.get(key), str) or not policy[key]:
             raise ValueError('Admission policy needs explicit ' + key)
@@ -46,6 +51,9 @@ def validate_policy(policy):
 def decision(policy, observation, local_ads, reservations, node, now, afs_free):
     """Compute an admission from verified observations without mutating state."""
     result = {'node': node, 'checked_at_epoch': now, 'admitted': False}
+    reserve_full_ceiling = policy.get('reserve_full_worker_ceiling', True)
+    if type(reserve_full_ceiling) is not bool:
+        raise ValueError('reserve_full_worker_ceiling needs an explicit boolean')
     for key in ('quota_observation_started_at_epoch', 'quota_checked_at_epoch',
                 'remote_account_checked_at_epoch'):
         stamp = observation.get(key)
@@ -55,23 +63,28 @@ def decision(policy, observation, local_ads, reservations, node, now, afs_free):
     if observation['quota_observation_started_at_epoch'] > observation['quota_checked_at_epoch']:
         return result | {'reason': 'EOS observation times are inconsistent'}
     minimum_bytes, minimum_files = policy['minimum_free_bytes'], policy['minimum_free_files']
+    shared_capacity = None
     if policy.get('external_storage_reservations'):
-        external = observation.get('external_storage_commitments', {})
-        stamp = external.get('checked_at_epoch')
-        if (external.get('complete') is not True
-                or external.get('authority_contracts_sha256') != hashlib.sha256(
+        peer_commitments = observation.get('external_storage_commitments', {})
+        stamp = peer_commitments.get('checked_at_epoch')
+        if (peer_commitments.get('complete') is not True
+                or peer_commitments.get('authority_contracts_sha256') != hashlib.sha256(
                     json.dumps(policy['external_storage_reservations'], sort_keys=True).encode()).hexdigest()
                 or type(stamp) not in (int, float) or not math.isfinite(stamp)
                 or not 0 <= now - stamp <= policy['observation_max_age_seconds']
                 or stamp > observation['quota_observation_started_at_epoch']
-                or type(external.get('required_free_bytes')) is not int
-                or type(external.get('required_free_files')) is not int
-                or external['required_free_bytes'] < 0 or external['required_free_files'] < 0):
+                or type(peer_commitments.get('required_free_bytes')) is not int
+                or type(peer_commitments.get('required_free_files')) is not int
+                or peer_commitments['required_free_bytes'] < 0 or peer_commitments['required_free_files'] < 0):
             return result | {'reason': 'External storage commitments are missing, stale or inconsistent'}
         # The external sealed guard already includes its own safety floors.
         # Keep both floors by taking their maximum, rather than adding twice.
-        minimum_bytes = max(minimum_bytes, external['required_free_bytes'])
-        minimum_files = max(minimum_files, external['required_free_files'])
+        minimum_bytes = max(minimum_bytes, peer_commitments['required_free_bytes'])
+        minimum_files = max(minimum_files, peer_commitments['required_free_files'])
+        shared_capacity = peer_commitments.get('stream_capacity')
+        if shared_capacity is not None and observation.get('stream_peer_writers_verified') is not True:
+            return result | {'reason': 'Shared peer writer coverage or old-SM drain is unknown',
+                             'peer_writer_error': observation.get('stream_peer_writer_error')}
     result.update(required_free_bytes=minimum_bytes, required_free_files=minimum_files)
     if (observation.get('complete') is not True
             or observation.get('remote_account_coverage_verified') is not True
@@ -83,14 +96,14 @@ def decision(policy, observation, local_ads, reservations, node, now, afs_free):
         return result | {'reason': 'Remote account worker list is unknown'}
     live = [ad for ad in local_ads if ad.get('JobUniverse') == 5
             and ad.get('JobStatus') in (1, 2, 6, 7)]
-    own = [ad for ad in live if ad.get('ShiftMuEnrichedQCD') is True
-           and ad.get('ShiftSuiteTag') == policy['suite_tag']]
-    external = len(live) - len(own) + len(remote_ads)
-    # Reserve the entire possible DAG wave against other productions. This
-    # avoids admitting an extra wave while many PRE scripts are still pending.
-    if external + policy['worker_ceiling'] > policy['account_ceiling']:
-        return result | {'reason': 'Other account jobs leave insufficient worker capacity',
-                         'external_workers': external}
+    own_live = [ad for ad in live if ad.get('ShiftMuEnrichedQCD') is True
+                and ad.get('ShiftSuiteTag') == policy['suite_tag']]
+    own_held = [ad for ad in local_ads if ad.get('JobUniverse') == 5 and ad.get('JobStatus') == 5
+                and ad.get('ShiftMuEnrichedQCD') is True and ad.get('ShiftSuiteTag') == policy['suite_tag']]
+    # A held payload keeps its whole output claim until explicitly retired.
+    # Count it toward our own cap conservatively, but not as external CPU use.
+    own = own_live + own_held
+    external = len(live) - len(own_live) + len(remote_ads)
     queued_nodes = {ad.get('ShiftMuEnrichedNodeId') for ad in own
                     if isinstance(ad.get('ShiftMuEnrichedNodeId'), str)}
     retained, pending, completed_since_quota = {}, set(), set()
@@ -125,10 +138,57 @@ def decision(policy, observation, local_ads, reservations, node, now, afs_free):
                   storage_reserved_workers=storage_reserved, reservations=retained)
     if reserved > policy['worker_ceiling']:
         return result | {'reason': 'This production has reached its worker ceiling'}
+    remote_states_known = all(isinstance(ad, dict) and type(ad.get('JobStatus')) is int
+                              and ad['JobStatus'] in (1, 2, 6, 7) for ad in remote_ads)
+    other_local = [ad for ad in live if not (ad.get('ShiftMuEnrichedQCD') is True
+                   and ad.get('ShiftSuiteTag') == policy['suite_tag'])]
+    external_running = (sum(ad['JobStatus'] in (2, 6, 7) for ad in other_local)
+                        + sum(ad['JobStatus'] in (2, 6, 7) for ad in remote_ads)
+                        if remote_states_known else None)
+    result.update(reserve_full_worker_ceiling=reserve_full_ceiling,
+                  external_queued_workers=external,
+                  external_running_or_transitioning_workers=external_running,
+                  external_idle_workers=(external - external_running
+                                         if external_running is not None else None))
+    # Existing DAGs reserve their whole possible wave. Streaming admits one
+    # task at a time, counting our queued/held/pending claims conservatively.
+    # Other productions' idle jobs do not consume the site's running ceiling.
+    if not reserve_full_ceiling and external_running is None:
+        return result | {'reason': 'Remote account execution capacity is unknown'}
+    external_capacity = external if reserve_full_ceiling else external_running
+    account_reservation = policy['worker_ceiling'] if reserve_full_ceiling else reserved
+    result.update(external_capacity_workers=external_capacity,
+                  account_reserved_workers=external_capacity + account_reservation)
+    if external_capacity + account_reservation > policy['account_ceiling']:
+        return result | {'reason': 'Other account jobs leave insufficient worker capacity'}
+    extra = observation.get('extra_stage_reserved_bytes', 0)
+    if type(extra) is not int or extra < 0:
+        return result | {'reason': 'Additional stage publication reservation is unknown'}
+    outstanding = storage_reserved * policy['reserved_bytes_per_worker'] + extra
+    result['outstanding_publication_bytes'] = outstanding
+    cap = policy.get('maximum_outstanding_publication_bytes')
+    if cap is not None and outstanding > cap:
+        return result | {'reason': 'This production has reached its outstanding-publication byte cap',
+                         'maximum_outstanding_publication_bytes': cap}
     for key in ('free_bytes', 'free_files'):
         if type(observation.get(key)) is not int or observation[key] < 0:
             return result | {'reason': 'Storage headroom is unknown'}
-    if observation['free_bytes'] < minimum_bytes + storage_reserved * policy['reserved_bytes_per_worker']:
+    result['storage_mode'] = 'full'
+    if (shared_capacity is not None
+            and observation['free_bytes'] < minimum_bytes + outstanding):
+        if observation.get('stream_requires_full_peer_mode') is True:
+            return result | {'reason': 'An active supplement writer requires full-future peer headroom'}
+        constrained = shared_capacity.get('constrained_required_free_bytes')
+        protected = shared_capacity.get('protected_stream_bytes')
+        if (type(constrained) is not int or constrained < 0 or constrained > peer_commitments['required_free_bytes']
+                or type(protected) is not int or protected <= 0
+                or cap is None or cap > protected or outstanding > protected):
+            return result | {'reason': 'Shared constrained-publication authority is inconsistent'}
+        result.update(storage_mode='constrained_within_peer_QCD_allowance',
+                      full_peer_required_free_bytes=peer_commitments['required_free_bytes'])
+        minimum_bytes = max(policy['minimum_free_bytes'], constrained)
+        result['required_free_bytes'] = minimum_bytes
+    if observation['free_bytes'] < minimum_bytes + outstanding:
         return result | {'reason': 'EOS byte reservation would consume the retained reserve'}
     if observation['free_files'] < minimum_files + storage_reserved * policy['reserved_files_per_worker']:
         return result | {'reason': 'EOS file reservation would consume the retained reserve'}
@@ -173,7 +233,7 @@ def admit(directory, node):
                 raise ValueError('Production admission has an explicit stop request')
             observation = refresh_quota(root)
             local_ads = query('Owner == ' + json.dumps(policy['account_owner'])
-                              + ' && JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 6 || JobStatus == 7)',
+                              + ' && JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 5 || JobStatus == 6 || JobStatus == 7)',
                               ['ClusterId', 'ProcId', 'JobUniverse', 'JobStatus',
                                'ShiftMuEnrichedQCD', 'ShiftSuiteTag', 'ShiftMuEnrichedNodeId'],
                               timeout=20, local_schedd=True)

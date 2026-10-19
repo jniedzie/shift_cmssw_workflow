@@ -40,19 +40,25 @@ def audit(request):
             raise ValueError('Local scheduler identity must be explicit')
         before = _account_schedds(request['account_owner'], timeout=20,
                                   local_schedd=False, pool=request['account_pool'])
-        workers = []
+        workers, peer_writers = [], []
         for schedd in sorted(before - {local_name}):
-            workers.extend(query('Owner == ' + json.dumps(request['account_owner']) + ' && '
-                'JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 6 || JobStatus == 7)',
-                ['ClusterId', 'ProcId', 'JobUniverse', 'JobStatus', 'ShiftNightCampaign'],
-                pool=request['account_pool'], schedd=schedd, local_schedd=False, timeout=20))
+            rows = query('Owner == ' + json.dumps(request['account_owner']) + ' && '
+                'JobUniverse == 5 && (JobStatus == 1 || JobStatus == 2 || JobStatus == 5 || JobStatus == 6 || JobStatus == 7)',
+                ['ClusterId', 'ProcId', 'GlobalJobId', 'Owner', 'JobUniverse', 'JobStatus',
+                 'DAGManJobId', 'ShiftNightCampaign', 'Iwd', 'Cmd', 'Args',
+                 'JobBatchName', 'ShiftSignalValidationOnly', 'ShiftBSMPoint', 'ShiftDPStatisticsTask',
+                 'ShiftDPStatisticsReadOnly', 'ShiftDPStatisticsWatchdog',
+                 'ShiftStreamCampaign', 'ShiftMuEnrichedQCD'],
+                pool=request['account_pool'], schedd=schedd, local_schedd=False, timeout=20)
+            peer_writers.extend(rows)
+            workers.extend(row for row in rows if row.get('JobStatus') in (1, 2, 6, 7))
         after = _account_schedds(request['account_owner'], timeout=20,
                                  local_schedd=False, pool=request['account_pool'])
         if before != after or local_name not in before:
             raise ValueError('Account scheduler coverage changed or omitted the local scheduler')
         result.update(remote_account_coverage_verified=True, remote_account_checked_at_epoch=time.time(),
                       account_schedds=sorted(before), excluded_local_schedd=local_name,
-                      remote_account_workers=workers)
+                      remote_account_workers=workers, remote_account_peer_writer_rows=peer_writers)
     except Exception as error:
         result['error'] = repr(error)
     result['checked_at_epoch'] = time.time()
