@@ -10,6 +10,7 @@ or resubmits jobs, and never modifies dated production payloads.
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import json
@@ -18,6 +19,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import uuid
@@ -47,8 +49,16 @@ def save(path, value):
     """Replace one small controller record without exposing partial JSON."""
     path = Path(path)
     temporary = path.with_name(path.name + '.tmp')
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False) + '\n')
-    os.replace(temporary, path)
+    content = json.dumps(value, indent=2, allow_nan=False) + '\n'
+    for attempt in range(3):
+        try:
+            temporary.write_text(content)
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT, errno.ESTALE, errno.ENOTCONN, errno.EAGAIN) or attempt == 2:
+                raise
+            time.sleep(2 * (attempt + 1))
 
 
 def checked_digest(path, expected):
@@ -558,7 +568,12 @@ def main():
                 print(json.dumps(dict(checked_utc=state['checked_utc'], ready_points=state['ready_points'],
                     expected_points=state['expected_points'], attention_required=state['attention_required'])), flush=True)
             except Exception as error:
-                save(directory / 'controller_error.json', dict(error=str(error), checked_at_epoch=time.time()))
+                try:
+                    save(directory / 'controller_error.json', dict(error=str(error), checked_at_epoch=time.time()))
+                except OSError as record_error:
+                    # AFS may be temporarily unavailable on one worker. Keep the
+                    # publisher alive; no new science jobs are submitted here.
+                    print('Controller error record unavailable:', repr(record_error), file=sys.stderr, flush=True)
                 print('Controller action waits:', str(error), flush=True)
                 if args.once:
                     raise

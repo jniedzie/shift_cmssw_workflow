@@ -1,5 +1,6 @@
 # Code style: AI-code. AI-generated checks for the read-only production watchdog.
 import importlib.util
+import errno
 import json
 from pathlib import Path
 import sys
@@ -50,6 +51,251 @@ class StatisticsWatchdogTest(unittest.TestCase):
         report = self.assess([self.child()])
         self.assertEqual(report['health'], 'ok')
         self.assertEqual(report['observed_state'], 'awaiting_payload_execution')
+
+    def test_transient_afs_write_is_retried_without_losing_the_record(self):
+        original = Path.write_text
+        attempts = []
+        def flaky(path, body):
+            attempts.append(path)
+            if len(attempts) == 1:
+                raise TimeoutError(errno.ETIMEDOUT, 'AFS timeout')
+            return original(path, body)
+        target = self.root/'health.json'
+        with patch.object(Path, 'write_text', new=flaky), patch.object(WATCH.time, 'sleep') as sleep:
+            WATCH.save(target, dict(health='ok'))
+        self.assertEqual(WATCH.read(target), dict(health='ok'))
+        self.assertEqual(len(attempts), 2)
+        sleep.assert_called_once_with(1)
+
+    def test_permanent_or_repeated_storage_errors_remain_failures(self):
+        for failure, expected_calls in ((PermissionError(errno.EACCES, 'Denied'), 1),
+                                        (TimeoutError(errno.ETIMEDOUT, 'AFS timeout'), 4)):
+            with self.subTest(failure=failure), patch.object(Path, 'write_text', side_effect=failure) as write, \
+                    patch.object(WATCH.time, 'sleep'):
+                with self.assertRaises(OSError):
+                    WATCH.save(self.root/'health.json', dict(health='ok'))
+                self.assertEqual(write.call_count, expected_calls)
+
+    def meson_recovery(self):
+        original=dict(cluster=100,task=str(self.directory),submit_sha256='original')
+        (self.directory/'submission.json').write_text(json.dumps(original))
+        for name in ('plan.json','seal.json'):
+            (self.directory/name).write_text('{}')
+        manager=dict(ClusterId=100,ProcId=0,Iwd=str(self.directory),JobStatus=4,
+                     ExitCode=1,ExitBySignal=False)
+        finalizer=dict(manager,ClusterId=101,ExitCode=124)
+        terminal=self.root/'terminal_native_review.json'
+        terminal.write_text(json.dumps(dict(queue=[],history={'100':[manager],'101':[finalizer]})))
+        recovery=self.root/'finalizer_recovery'
+        recovery.mkdir()
+        (recovery/'pipeline.dag').write_text('JOB FINALIZE finalizer.sub\nJOB COLLECT collect.sub\n')
+        (recovery/'submission.json').write_text(json.dumps(dict(cluster=400,task=str(recovery),utc='1970-01-03T07:31:20+00:00')))
+        proof=self.root/'meson_recovery.json'
+        proof.write_text(json.dumps(dict(schema='shift-meson-finalizer-recovery-v1',
+            original_submission=original,original_plan_sha256=WATCH.sha(self.directory/'plan.json'),
+            original_seal_sha256=WATCH.sha(self.directory/'seal.json'),
+            allowed_stages=['finalizer','collect'],gen_or_detector_jobs_allowed=False,
+            original_manager_exit_code=1,original_finalizer_cluster=101,original_finalizer_exit_code=124,
+            terminal_native_review=dict(path=str(terminal),sha256=WATCH.sha(terminal)),
+            recovery_directory=str(recovery),recovery_files={str(recovery/'pipeline.dag'):WATCH.sha(recovery/'pipeline.dag')})))
+        self.config['reviewed_meson_finalizer_recoveries']=[dict(path=str(proof),sha256=WATCH.sha(proof))]
+        self.config['dependencies']={str(proof):WATCH.sha(proof),str(terminal):WATCH.sha(terminal)}
+        self.receipts[400]=dict(directory=str(recovery),receipt=str(recovery/'submission.json'),
+            submitted=self.now-120,kind='production',external_prerequisite=True)
+        return manager,recovery,terminal
+
+    def test_meson_finalizer_recovery_preserves_failure_without_double_counting_events(self):
+        manager,recovery,terminal=self.meson_recovery()
+        current=dict(ClusterId=400,ProcId=0,Iwd=str(recovery),JobStatus=2,JobStartDate=self.now-120)
+        child=dict(ClusterId=401,ProcId=0,DAGManJobId=400,Iwd=str(recovery),JobStatus=2)
+        recovered_counts=dict(self.counts,completed_events=1947,complete_receipts=98)
+        def counts(path):
+            return recovered_counts if Path(path)==recovery else self.counts
+        with patch.object(WATCH,'stage_counts',side_effect=counts), \
+             patch.object(WATCH,'execute_events',return_value=['401.0']):
+            report=WATCH.assess(self.config,{},[current,child],[manager],self.receipts,self.now)
+        self.assertEqual(report['health'],'warning')
+        self.assertEqual(report['actual_planned_progress']['detector_completed_events'],0)
+        self.assertTrue(any(x['code']=='reviewed_meson_failure_100' for x in report['issues']))
+        self.assertEqual(report['reviewed_terminal_failures'][0]['failed_finalizer_native']['ExitCode'],124)
+        self.assertTrue(report['stages']['400']['external_prerequisite'])
+
+    def test_original_meson_directory_cannot_reappear_under_a_different_job_id(self):
+        manager,recovery,terminal=self.meson_recovery()
+        revived=dict(ClusterId=999,ProcId=0,Iwd=str(self.directory),JobStatus=2,DAGManJobId=100)
+        with patch.object(WATCH,'stage_counts',return_value=self.counts), \
+             patch.object(WATCH,'execute_events',return_value=[]):
+            report=WATCH.assess(self.config,{},[revived],[manager],self.receipts,self.now)
+        self.assertEqual(report['health'],'critical')
+        self.assertTrue(any(x['code']=='reviewed_failure_active_999' for x in report['issues']))
+
+    def test_meson_native_cache_and_original_plan_remain_pinned(self):
+        manager,recovery,terminal=self.meson_recovery()
+        terminal.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'population or native record'):
+            WATCH.reviewed_terminal_failures(self.config)
+
+    def operation(self, name='admission', cluster=300, *, optional=False):
+        directory=self.root/name
+        directory.mkdir()
+        iwd='/afs/project/operations/'+name
+        receipt=directory/'submission.json'
+        if not optional:
+            receipt.write_text(json.dumps(dict(cluster=cluster,submitted_epoch=self.now-120,Iwd=iwd)))
+        specification=dict(name=name,receipt=str(receipt),iwd=iwd,
+            expected_cluster=cluster,receipt_optional=optional,state_path=str(directory/'state.json'),
+            heartbeat_path=str(directory/'heartbeat.json'),require_state_complete=True)
+        self.config.setdefault('operational_jobs',[]).append(specification)
+        return directory,specification
+
+    def assess_operations(self, rows=(), history=()):
+        receipts=WATCH.operational_receipts(self.config['operational_jobs'])
+        return WATCH.assess(self.config,{},list(rows),list(history),receipts,self.now)
+
+    def test_operational_numeric_receipt_uses_explicit_iwd(self):
+        directory,specification=self.operation()
+        elsewhere=self.root/'receipt_elsewhere.json'
+        elsewhere.write_bytes((directory/'submission.json').read_bytes())
+        specification['receipt']=str(elsewhere)
+        receipt=WATCH.operational_receipts([specification])[300]
+        self.assertEqual(receipt['directory'],specification['iwd'])
+        self.assertEqual(receipt['submitted'],self.now-120)
+        self.assertEqual(receipt['kind'],'operation')
+
+    def test_operational_receipt_rejects_changed_native_identity(self):
+        directory,specification=self.operation()
+        specification['expected_cluster']=301
+        with self.assertRaisesRegex(ValueError,'identity'):
+            WATCH.operational_receipts([specification])
+        specification['expected_cluster']=300
+        specification['receipt_sha256']='f'*64
+        with self.assertRaisesRegex(ValueError,'identity'):
+            WATCH.operational_receipts([specification])
+
+    def test_numeric_state_and_separate_live_heartbeat_keep_wait_healthy(self):
+        directory,specification=self.operation()
+        (directory/'state.json').write_text(json.dumps(dict(checked_epoch=self.now-10000,
+            phase='waiting_for_actual_standalone_qualification')))
+        (directory/'heartbeat.json').write_text(json.dumps(dict(checked_epoch=self.now-10)))
+        row=dict(ClusterId=300,ProcId=0,JobStatus=2,Iwd=specification['iwd'],JobStartDate=self.now-10000)
+        report=self.assess_operations([row])
+        self.assertEqual(report['health'],'ok')
+        self.assertEqual(report['operations']['admission']['heartbeat_epoch'],self.now-10)
+        self.assertFalse(report['controller_finished'])
+
+    def test_operational_stale_heartbeat_and_recorded_failure_are_critical(self):
+        directory,specification=self.operation()
+        (directory/'state.json').write_text(json.dumps(dict(checked_epoch=self.now-10000,error='failed')))
+        row=dict(ClusterId=300,ProcId=0,JobStatus=2,Iwd=specification['iwd'],JobStartDate=self.now-10000)
+        report=self.assess_operations([row])
+        self.assertEqual(report['health'],'critical')
+        self.assertTrue(any(x['code']=='operation_heartbeat_admission' for x in report['issues']))
+        self.assertTrue(any(x['code']=='operation_error_admission' for x in report['issues']))
+
+    def test_admission_done_does_not_finish_before_future_retirement(self):
+        admission,admission_specification=self.operation()
+        retirement,specification=self.operation('retirement',400,optional=True)
+        specification['after_job']='admission'
+        self.config['finish_requires_operational_jobs']=['retirement']
+        (self.root/'state.json').write_text(json.dumps(dict(complete=True,checked_epoch=self.now)))
+        (admission/'state.json').write_text(json.dumps(dict(complete=True,checked_epoch=self.now-1200)))
+        ended=dict(ClusterId=300,ProcId=0,JobStatus=4,Iwd=admission_specification['iwd'],ExitCode=0,
+                   ExitBySignal=False,CompletionDate=self.now-1200)
+        report=self.assess_operations(history=[ended])
+        self.assertTrue(report['supervisor_finished'])
+        self.assertFalse(report['controller_finished'])
+        self.assertTrue(report['operations']['retirement']['receipt_pending'])
+        self.assertTrue(any(x['code']=='operation_handoff_retirement' for x in report['issues']))
+        (retirement/'submission.json').write_text(json.dumps(dict(cluster=400,submitted_epoch=self.now,Iwd=specification['iwd'])))
+        held=dict(ClusterId=400,ProcId=0,JobStatus=5,Iwd=specification['iwd'],HoldReason='failure')
+        report=self.assess_operations([held],[ended])
+        self.assertFalse(report['controller_finished'])
+        self.assertEqual(report['health'],'critical')
+        (retirement/'state.json').write_text(json.dumps(dict(complete=True,checked_utc='1970-01-03T07:33:20+00:00')))
+        closed=dict(held,JobStatus=4,ExitCode=0,ExitBySignal=False,CompletionDate=self.now)
+        report=self.assess_operations(history=[ended,closed])
+        self.assertTrue(report['controller_finished'])
+
+    def test_numeric_supervisor_time_and_heartbeat_fallback(self):
+        (self.root/'state.json').write_text(json.dumps(dict(checked_epoch=self.now-10000)))
+        heartbeat=self.root/'heartbeat.json'
+        heartbeat.write_text(json.dumps(dict(checked_epoch=self.now-10)))
+        self.config['supervisor_heartbeat_path']=str(heartbeat)
+        report=self.assess([])
+        self.assertFalse(any(x['code']=='supervisor_heartbeat' for x in report['issues']))
+
+    def test_invalid_numeric_timestamp_is_unknown_not_fresh(self):
+        for value in [True,float('nan'),-1]:
+            with self.assertRaises(ValueError):
+                WATCH.record_epoch(dict(checked_epoch=value),'checked_epoch')
+
+    def reviewed_failure(self):
+        for name in ('plan.json', 'seal.json', 'aggregate.sub'):
+            (self.directory / name).write_text('original failed attempt')
+        (self.directory / 'submission.json').write_text(json.dumps(dict(cluster=100)))
+        log = self.directory / 'failure.err'
+        log.write_text('Runtime download authentication failed before aggregation')
+        native = dict(ClusterId=100, ProcId=0, Iwd=str(self.directory), JobStatus=4,
+                      ExitBySignal=False, ExitCode=54)
+        record = dict(directory=str(self.directory), plan_sha256=WATCH.sha(self.directory / 'plan.json'),
+                      seal_sha256=WATCH.sha(self.directory / 'seal.json'),
+                      submit_sha256=WATCH.sha(self.directory / 'aggregate.sub'))
+        path = self.root / 'reviewed_failure.json'
+        path.write_text(json.dumps(dict(schema='shift-reviewed-aggregate-retirement-v1',
+            directory=str(self.directory), aggregate_record=record, terminal_native_ad=native,
+            payload_started=False, queue_absent=True, failure_evidence_sha256={str(log): WATCH.sha(log)})))
+        self.config['retired_aggregate_attempts'] = [dict(path=str(path), sha256=WATCH.sha(path))]
+        self.config['dependencies'] = {str(path): WATCH.sha(path)}
+        return native
+
+    def test_reviewed_failure_stays_visible_and_live_reappearance_is_critical(self):
+        native = self.reviewed_failure()
+        with patch.object(WATCH, 'stage_counts', return_value=self.counts):
+            report = WATCH.assess(self.config, {}, [], [native], self.receipts, self.now)
+            self.assertEqual(report['health'], 'ok')
+            self.assertEqual(report['reviewed_terminal_failures'][0]['native']['ExitCode'], 54)
+            active = dict(native, JobStatus=2)
+            report = WATCH.assess(self.config, {}, [active], [], self.receipts, self.now)
+            self.assertEqual(report['health'], 'critical')
+
+    def test_changed_reviewed_error_evidence_or_native_exit_is_rejected(self):
+        native = self.reviewed_failure()
+        with patch.object(WATCH, 'stage_counts', return_value=self.counts):
+            with self.assertRaisesRegex(ValueError, 'Native history'):
+                WATCH.assess(self.config, {}, [], [dict(native, ExitCode=0)], self.receipts, self.now)
+        (self.directory / 'failure.err').write_text('changed')
+        with self.assertRaisesRegex(ValueError, 'evidence changed'):
+            WATCH.reviewed_terminal_failures(self.config)
+
+    def test_recovered_handoff_requires_complete_unchanged_gen_and_tracks_pending_detector(self):
+        stage = self.root / 'waves/w001/gen_stage'
+        stage.mkdir(parents=True)
+        (stage / 'submission.json').write_text(json.dumps(dict(cluster=100)))
+        for name in ('gen_inventory.json', 'gen_publication.json'):
+            (stage / name).write_text(json.dumps(dict(complete=True)))
+        native = dict(ClusterId=100, ProcId=0, Iwd=str(stage), JobStatus=4,
+                      ExitBySignal=False, ExitCode=1)
+        proof = self.root / 'reviewed_gen_handoff.json'
+        proof.write_text(json.dumps(dict(schema='shift-reviewed-gen-handoff-v1', wave_index=1,
+            failure_kind='downstream_prepare_ImportError_only', science_rerun=False,
+            gen_cluster=100, terminal_native_ad=native, files={name: WATCH.sha(stage / name)
+                for name in ('gen_inventory.json', 'gen_publication.json')})))
+        self.config['reviewed_gen_handoffs'] = [dict(path=str(proof), sha256=WATCH.sha(proof))]
+        self.config['dependencies'] = {str(proof): WATCH.sha(proof)}
+        receipts = {100: dict(directory=str(stage), receipt='fake', kind='gen_stage', submitted=self.now - 120)}
+        with patch.object(WATCH, 'stage_counts', return_value=self.counts), \
+                patch.object(WATCH, 'execute_events', return_value=[]):
+            report = WATCH.assess(self.config, {}, [], [native], receipts, self.now)
+            self.assertEqual(report['health'], 'warning')
+            self.assertEqual(report['issues'][0]['code'], 'reviewed_handoff_pending_100')
+            production = stage.parent / 'production'
+            production.mkdir()
+            (production / 'submission.json').write_text(json.dumps(dict(cluster=300)))
+            report = WATCH.assess(self.config, {}, [], [native], receipts, self.now)
+            self.assertEqual(report['health'], 'ok')
+        (stage / 'gen_inventory.json').write_text(json.dumps(dict(complete=False)))
+        with self.assertRaisesRegex(ValueError, 'changed or unfinished'):
+            WATCH.reviewed_terminal_failures(self.config)
 
     def test_thirteen_hours_queued_is_critical(self):
         report = self.assess([self.child(age=13 * 3600)])
@@ -117,6 +363,21 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertEqual(receipts[300]['directory'], str(new.parent))
         self.assertEqual(WATCH.read(old)['cluster'], 200)
 
+    def test_external_canary_failure_is_visible_without_crediting_bulk_progress(self):
+        external = self.root / 'external_detector'
+        external.mkdir()
+        (external/'submission.json').write_text(json.dumps(dict(cluster=100, utc='1970-01-01T00:00:00+00:00')))
+        self.receipts = WATCH.manager_receipts(self.root, external_productions=[str(external)])
+        self.directory = external
+        self.counts.update(completed_events=20, complete_receipts=1)
+        report = self.assess([self.child(status=5)])
+        self.assertEqual(report['health'], 'critical')
+        self.assertTrue(report['stages']['100']['external_prerequisite'])
+        self.assertEqual(report['actual_planned_progress']['detector_completed_events'], 0)
+        self.assertEqual(report['observed_state'], 'awaiting_payload_execution')
+        with self.assertRaisesRegex(ValueError, 'persistent production receipt'):
+            WATCH.manager_receipts(self.root, external_productions=['relative/path'])
+
     def test_only_the_exact_held_or_terminal_retired_supervisor_is_ignored(self):
         self.config['retired_supervisors'] = {'200': str(self.root)}
         for status, iwd, expected in ((5, str(self.root), 'ok'), (3, str(self.root), 'ok'),
@@ -183,6 +444,57 @@ class StatisticsWatchdogTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'configured native cluster'):
                 WATCH.poll(self.config, {})
             query.assert_not_called()
+
+
+class PreSubmissionMonitor(unittest.TestCase):
+    def test_operational_receipt_keeps_the_pinned_science_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            science = root / 'science'
+            science.mkdir()
+            deployment = root / 'operations'
+            deployment.mkdir()
+            submit = deployment / 'controller.sub'
+            submit.write_text('initialdir = ' + str(deployment) + '\nqueue\n')
+            authority = deployment / 'config.json'
+            authority.write_text(json.dumps(dict(directory=str(science))))
+            receipt = deployment / 'submission.json'
+            receipt.write_text(json.dumps(dict(cluster=123, task=str(deployment),
+                submit_sha256=WATCH.sha(submit), utc='2026-10-19T00:00:00+00:00')))
+            config = dict(resolve_supervisor_from_receipt=True,
+                production_directory=str(science), supervisor_deployment_directory=str(deployment),
+                supervisor_receipt=str(receipt), dependencies={str(authority):WATCH.sha(authority)})
+            with patch.object(WATCH, 'scheduler_snapshot', return_value=([], [], 'exact')) as native, \
+                 patch.object(WATCH, 'assess', return_value={}):
+                WATCH.poll(config, {})
+                self.assertEqual(native.call_args.args[0]['production_directory'], str(science))
+                config['dependencies'] = {}
+                with self.assertRaisesRegex(ValueError, 'production authority'):
+                    WATCH.poll(config, {})
+                config['dependencies'] = {str(authority):WATCH.sha(authority)}
+                authority.write_text(json.dumps(dict(directory=str(root / 'other'))))
+                config['dependencies'][str(authority)] = WATCH.sha(authority)
+                with self.assertRaisesRegex(ValueError, 'production authority'):
+                    WATCH.poll(config, {})
+                self.assertEqual(native.call_count, 1)
+
+    def test_receipt_resolves_only_the_frozen_controller_launch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            submit = root / 'controller.sub'
+            submit.write_text('initialdir = ' + str(root) + '\nqueue\n')
+            receipt = root / 'submission.json'
+            receipt.write_text(json.dumps(dict(cluster=123, task=str(root), submit_sha256=WATCH.sha(submit), utc='2026-10-17T00:00:00+00:00')))
+            config = dict(resolve_supervisor_from_receipt=True, production_directory=str(root), supervisor_receipt=str(receipt))
+            with patch.object(WATCH, 'scheduler_snapshot', return_value=([], [], 'exact')) as native, \
+                 patch.object(WATCH, 'assess', return_value={}):
+                WATCH.poll(config, {})
+                self.assertEqual(native.call_args.args[0]['initial_supervisor_cluster'], 123)
+                self.assertNotIn('initial_supervisor_cluster', config)
+                submit.write_text('changed launch')
+                with self.assertRaisesRegex(ValueError, 'exact launch identity'):
+                    WATCH.poll(config, {})
+                self.assertEqual(native.call_count, 1)
 
 
 if __name__ == '__main__':

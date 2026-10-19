@@ -1,4 +1,5 @@
 # Code style: AI-code. AI-generated persistent-controller regression tests.
+import errno
 import json
 from pathlib import Path
 import sys
@@ -9,6 +10,29 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import watch_dark_photon_production as controller
 from dark_photon_sample_names import physical_point_name
+
+
+class DurableControllerRecords(unittest.TestCase):
+    def test_transient_afs_timeout_retries_but_permission_failure_stops(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'state.json'
+            original = Path.write_text
+            attempts = []
+            def write(target, content):
+                attempts.append(target)
+                if len(attempts) == 1:
+                    raise TimeoutError(errno.ETIMEDOUT, 'AFS temporarily unavailable')
+                return original(target, content)
+            with patch.object(Path, 'write_text', write), patch.object(controller.time, 'sleep') as delay:
+                controller.save(path, dict(heartbeat=1))
+            self.assertEqual(json.loads(path.read_text()), dict(heartbeat=1))
+            delay.assert_called_once_with(2)
+            with patch.object(Path, 'write_text', side_effect=PermissionError(errno.EACCES, 'permission denied')), \
+                    patch.object(controller.time, 'sleep') as delay:
+                with self.assertRaises(PermissionError):
+                    controller.save(path, dict(heartbeat=2))
+                delay.assert_not_called()
+            self.assertEqual(json.loads(path.read_text()), dict(heartbeat=1))
 
 
 class ProductionControllerTest(unittest.TestCase):

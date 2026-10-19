@@ -9,9 +9,11 @@ must establish that separately. Health records are bounded, persistent JSON.
 import argparse
 from collections import Counter
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -23,7 +25,7 @@ from shift_condor_native import query, run_condor, parse_ads
 ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'NumJobStarts',
               'QDate', 'JobStartDate', 'EnteredCurrentStatus', 'RemoteHost', 'HoldReason',
               'ExitCode', 'ExitBySignal', 'CompletionDate', 'Args', 'Out',
-              'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu']
+              'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu', 'Cmd']
 
 
 def read(path):
@@ -37,15 +39,69 @@ def sha(path):
 def save(path, value):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + '.next')
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + '\n')
-    os.replace(temporary, path)
+    body = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + '\n'
+    for attempt in range(4):
+        try:
+            temporary.write_text(body)
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT, errno.ESTALE, errno.EIO) or attempt == 3:
+                raise
+            time.sleep(2 ** attempt)
 
 
 def timestamp(value):
     return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
 
 
-def manager_receipts(root, supervisor_receipt=None):
+def record_epoch(record, *keys):
+    for key in keys:
+        value = record.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            return timestamp(value)
+        if type(value) not in (int, float) or not math.isfinite(value) or value <= 0:
+            raise ValueError('Invalid timestamp in ' + key)
+        return float(value)
+    return None
+
+
+def operational_receipts(specifications):
+    result = {}
+    names = set()
+    for specification in specifications:
+        name = specification['name']
+        path = Path(specification['receipt'])
+        directory = Path(specification['iwd'])
+        if (not re.fullmatch(r'[A-Za-z0-9_-]+', name) or not path.is_absolute()
+                or not directory.is_absolute() or str(directory).startswith(('/tmp/', '/pool/'))):
+            raise ValueError('Operational monitor needs exact persistent receipt and Iwd')
+        if name in names:
+            raise ValueError('Operational monitor repeats a job name')
+        names.add(name)
+        if not path.is_file() and specification.get('receipt_optional'):
+            continue
+        receipt = read(path)
+        cluster = receipt['cluster']
+        if (type(cluster) is not int or cluster <= 0
+                or specification.get('expected_cluster', cluster) != cluster
+                or receipt.get('Iwd', str(directory)) != str(directory)
+                or specification.get('receipt_sha256', sha(path)) != sha(path)):
+            raise ValueError('Operational receipt differs from its exact configured identity')
+        submitted = record_epoch(receipt, 'utc', 'submitted_epoch')
+        if submitted is None:
+            raise ValueError('Operational receipt lacks its submission time')
+        if cluster in result:
+            raise ValueError('Operational monitor repeats a native job')
+        result[cluster] = dict(directory=str(directory), receipt=str(path),
+                               submitted=submitted, kind='operation', operation_name=name,
+                               receipt_sha256=sha(path), external_prerequisite=True)
+    return result
+
+
+def manager_receipts(root, supervisor_receipt=None, external_productions=(), operational_jobs=()):
     explicit_supervisor = supervisor_receipt is not None
     supervisor_receipt = Path(supervisor_receipt) if supervisor_receipt else root / 'submission.json'
     if not supervisor_receipt.is_absolute():
@@ -53,13 +109,19 @@ def manager_receipts(root, supervisor_receipt=None):
     if explicit_supervisor and not supervisor_receipt.is_file():
         raise ValueError('Explicit supervisor receipt is missing: ' + str(supervisor_receipt))
     paths = [supervisor_receipt]
+    paths.append(root / 'coverage' / 'submission.json')
     paths += sorted((root / 'waves').glob('w*/gen_stage/submission.json'))
     paths += sorted((root / 'waves').glob('w*/production/submission.json'))
     paths += sorted((root / 'batches').glob('*/submission.json'))
     paths += sorted((root / 'batches').glob('*/production/submission.json'))
     paths += sorted((root / 'aggregates').glob('*/v*/submission.json'))
+    external = {Path(directory) for directory in external_productions}
+    for directory in external:
+        if not directory.is_absolute() or not (directory / 'submission.json').is_file():
+            raise ValueError('External prerequisite needs a persistent production receipt')
+        paths.append(directory / 'submission.json')
     result = {}
-    for path in paths:
+    for path in dict.fromkeys(paths):
         if not path.is_file():
             continue
         receipt = read(path)
@@ -67,10 +129,16 @@ def manager_receipts(root, supervisor_receipt=None):
         if type(cluster) is not int or cluster <= 0:
             raise ValueError('Invalid submission receipt: ' + str(path))
         result[cluster] = dict(directory=str(path.parent), receipt=str(path),
-                               submitted=timestamp(receipt['utc']), kind=(
+                               external_prerequisite=path.parent in external,
+                               submitted=record_epoch(receipt, 'utc', 'submitted_epoch'), kind=(
                                    'supervisor' if path == supervisor_receipt else
+                                   'production' if path.parent in external else
                                    'aggregate' if 'aggregates' in path.parts else
                                    'meson_source' if path.parent.parent == root / 'batches' else path.parent.name))
+    operations = operational_receipts(operational_jobs)
+    if set(result) & set(operations):
+        raise ValueError('Operational job duplicates another monitored manager')
+    result.update(operations)
     return result
 
 
@@ -94,6 +162,12 @@ def scheduler_snapshot(config, receipts, previous):
     present = {row['ClusterId'] for row in rows}
     history = [row for row in previous.get('terminal_history', []) if row['ClusterId'] not in present]
     known_terminal = {row['ClusterId'] for row in history}
+    # A sealed, previously read native terminal record is immutable. Reuse it
+    # rather than rescanning the same old failed manager on a fresh monitor.
+    for cluster, reviewed in reviewed_terminal_failures(config).items():
+        if cluster not in present and cluster not in known_terminal:
+            history.append(reviewed['native'])
+            known_terminal.add(cluster)
     missing = [cluster for cluster in receipts if cluster not in present and cluster not in known_terminal]
     for cluster in missing:
         # Asking for more matches than can exist scans the complete account
@@ -160,10 +234,102 @@ def stage_counts(directory):
     return counts
 
 
+def reviewed_terminal_failures(config):
+    """Keep reviewed failed attempts visible without treating them as active failures."""
+    result = {}
+    for authority in config.get('retired_aggregate_attempts', []):
+        path = Path(authority['path'])
+        if (not path.is_absolute() or config.get('dependencies', {}).get(str(path)) != authority['sha256']
+                or sha(path) != authority['sha256']):
+            raise ValueError('Reviewed failure is outside the frozen watchdog authority')
+        proof = read(path)
+        native = proof['terminal_native_ad']
+        directory = Path(proof['directory'])
+        record = proof['aggregate_record']
+        if (proof.get('schema') != 'shift-reviewed-aggregate-retirement-v1'
+                or proof.get('payload_started') is not False or proof.get('queue_absent') is not True
+                or native.get('JobStatus') != 4 or native.get('ExitBySignal') is not False
+                or native.get('ExitCode') in (None, 0) or native.get('ProcId') != 0
+                or native.get('Iwd') != str(directory) or record.get('directory') != str(directory)
+                or read(directory / 'submission.json').get('cluster') != native.get('ClusterId')):
+            raise ValueError('Reviewed failure differs from its exact terminal attempt')
+        evidence = proof.get('failure_evidence_sha256', {})
+        if not evidence:
+            raise ValueError('Reviewed failure lacks its original error evidence')
+        for name, key in [('plan.json', 'plan_sha256'), ('seal.json', 'seal_sha256'),
+                          ('aggregate.sub', 'submit_sha256')]:
+            if sha(directory / name) != record[key]:
+                raise ValueError('Reviewed failed aggregate changed')
+        if any(sha(name) != digest for name, digest in evidence.items()):
+            raise ValueError('Reviewed failure evidence changed')
+        result[native['ClusterId']] = dict(authority=authority, native=native)
+    for authority in config.get('reviewed_gen_handoffs', []):
+        path = Path(authority['path'])
+        if (not path.is_absolute() or config.get('dependencies', {}).get(str(path)) != authority['sha256']
+                or sha(path) != authority['sha256']):
+            raise ValueError('Reviewed GEN handoff is outside frozen watchdog authority')
+        proof = read(path)
+        index = proof['wave_index']
+        wave = Path(config['production_directory']) / 'waves' / f'w{index:03d}'
+        directory = wave / 'gen_stage'
+        native = proof['terminal_native_ad']
+        if (proof.get('schema') != 'shift-reviewed-gen-handoff-v1'
+                or proof.get('failure_kind') != 'downstream_prepare_ImportError_only'
+                or proof.get('science_rerun') is not False or native.get('JobStatus') != 4
+                or native.get('ExitBySignal') is not False or native.get('ExitCode') != 1
+                or native.get('ProcId') != 0 or native.get('Iwd') != str(directory)
+                or native.get('ClusterId') != proof['gen_cluster']
+                or read(directory / 'submission.json').get('cluster') != proof['gen_cluster']):
+            raise ValueError('Reviewed GEN failure differs from its exact downstream handoff')
+        for name in ('gen_inventory.json', 'gen_publication.json'):
+            if sha(directory / name) != proof['files'][name] or read(directory / name).get('complete') is not True:
+                raise ValueError('Reviewed GEN population is changed or unfinished')
+        result[native['ClusterId']] = dict(authority=authority, native=native,
+            recovery_submission=str(wave / 'production' / 'submission.json'))
+    for authority in config.get('reviewed_meson_finalizer_recoveries', []):
+        path = Path(authority['path'])
+        if (not path.is_absolute() or config.get('dependencies', {}).get(str(path)) != authority['sha256']
+                or sha(path) != authority['sha256']):
+            raise ValueError('Reviewed meson recovery is outside frozen watchdog authority')
+        proof = read(path)
+        original = proof['original_submission']
+        directory = Path(original['task'])
+        cached = proof['terminal_native_review']
+        cache_path = Path(cached['path'])
+        if (proof.get('schema') != 'shift-meson-finalizer-recovery-v1'
+                or proof.get('allowed_stages') != ['finalizer', 'collect']
+                or proof.get('gen_or_detector_jobs_allowed') is not False
+                or read(directory/'submission.json') != original
+                or sha(directory/'plan.json') != proof['original_plan_sha256']
+                or sha(directory/'seal.json') != proof['original_seal_sha256']
+                or not cache_path.is_absolute()
+                or config.get('dependencies', {}).get(str(cache_path)) != cached['sha256']
+                or sha(cache_path) != cached['sha256']):
+            raise ValueError('Reviewed meson recovery changed its original population or native record')
+        terminal = read(cache_path)
+        manager = terminal['history'].get(str(original['cluster']), [])
+        finalizer = terminal['history'].get(str(proof['original_finalizer_cluster']), [])
+        for rows, cluster, code in [(manager, original['cluster'], proof['original_manager_exit_code']),
+                                    (finalizer, proof['original_finalizer_cluster'], proof['original_finalizer_exit_code'])]:
+            if (terminal.get('queue') != [] or len(rows) != 1 or rows[0].get('ClusterId') != cluster
+                    or rows[0].get('ProcId') != 0 or rows[0].get('Iwd') != str(directory)
+                    or rows[0].get('ExitBySignal') is not False or rows[0].get('ExitCode') != code
+                    or type(code) is not int or code == 0):
+                raise ValueError('Reviewed meson failure differs from its terminal native history')
+        if any(sha(name) != digest for name, digest in proof['recovery_files'].items()):
+            raise ValueError('Reviewed meson finalizer recovery files changed')
+        recovery = Path(proof['recovery_directory'])/'submission.json'
+        result[original['cluster']] = dict(authority=authority, native=manager[0],
+            failed_finalizer_native=finalizer[0], kind='meson_finalizer_recovery',
+            original_directory=str(directory), recovery_submission=str(recovery))
+    return result
+
+
 def assess(config, previous, rows, history, receipts, now):
     root = Path(config['production_directory'])
     issues, stages = [], {}
     known_execute = set(previous.get('executed_jobs', []))
+    reviewed = reviewed_terminal_failures(config)
 
     def issue(code, level, message, **details):
         issues.append(dict(code=code, severity=level, message=message, **details))
@@ -175,10 +341,17 @@ def assess(config, previous, rows, history, receipts, now):
 
     queued = {row['ClusterId']: row for row in rows if row.get('ProcId', 0) == 0}
     ended = {row['ClusterId']: row for row in history if row.get('ProcId', 0) == 0}
+    retired_meson_directories = {value['original_directory']: cluster for cluster, value in reviewed.items()
+                                if value.get('kind') == 'meson_finalizer_recovery'}
     for row in rows:
         if row.get('ShiftDPStatisticsWatchdog'):
             continue
         cluster, status = row['ClusterId'], row['JobStatus']
+        retired_meson = retired_meson_directories.get(row.get('Iwd'))
+        if cluster in reviewed or retired_meson is not None or row.get('DAGManJobId') in reviewed:
+            issue('reviewed_failure_active_' + str(cluster), 'critical',
+                  'A reviewed terminal job has reappeared in the queue', job=cluster, status=status)
+            continue
         retired = config.get('retired_supervisors', {}).get(str(cluster))
         if retired is not None:
             if row.get('Iwd') != retired or row.get('ProcId', 0) != 0 or status not in (3, 4, 5):
@@ -223,6 +396,21 @@ def assess(config, previous, rows, history, receipts, now):
                        terminal_exit=terminal.get('ExitCode') if terminal else None,
                        execution_verified=bool(starts or counts['started_receipts'] or counts['complete_receipts']))
         stages[str(cluster)] = summary
+        if cluster in reviewed:
+            expected = reviewed[cluster]['native']
+            if terminal and any(terminal.get(key) != expected[key]
+                    for key in ('ClusterId', 'ProcId', 'Iwd', 'ExitCode', 'ExitBySignal')):
+                raise ValueError('Native history conflicts with the reviewed failed aggregate')
+            summary['reviewed_terminal_failure'] = reviewed[cluster]
+            recovery = reviewed[cluster].get('recovery_submission')
+            if reviewed[cluster].get('kind') == 'meson_finalizer_recovery':
+                issue('reviewed_meson_failure_' + str(cluster), 'warning',
+                      'Original runtime download failed; its reviewed finalizer recovery is tracked separately',
+                      job=cluster, original_exit=expected['ExitCode'])
+            if recovery and not Path(recovery).is_file():
+                issue('reviewed_handoff_pending_' + str(cluster), 'warning',
+                      'Retained inputs have no submitted recovery manager', job=cluster)
+            continue
         if counts['failed_receipts']:
             issue('failed_receipts_' + str(cluster), 'critical', 'Worker recorded a failed original; no automatic retry is permitted',
                   manager=cluster, files=counts['failed_files'])
@@ -259,8 +447,13 @@ def assess(config, previous, rows, history, receipts, now):
     controller_state = root / 'state.json'
     controller = read(controller_state) if controller_state.is_file() else {}
     supervisor = queued.get(config['initial_supervisor_cluster'])
-    if controller.get('checked_utc'):
-        age_issue('supervisor_heartbeat', now - timestamp(controller['checked_utc']),
+    controller_epoch = record_epoch(controller, 'checked_utc', 'checked_epoch')
+    heartbeat_path = config.get('supervisor_heartbeat_path')
+    if heartbeat_path and Path(heartbeat_path).is_file():
+        heartbeat_epoch = record_epoch(read(heartbeat_path), 'checked_utc', 'checked_epoch')
+        controller_epoch = max(value for value in (controller_epoch, heartbeat_epoch) if value is not None)
+    if controller_epoch is not None:
+        age_issue('supervisor_heartbeat', now - controller_epoch,
                   config['heartbeat_warning_seconds'], config['heartbeat_warning_seconds'] * 2,
                   'Supervisor heartbeat is stale')
     elif supervisor and supervisor.get('JobStatus') == 2:
@@ -268,9 +461,14 @@ def assess(config, previous, rows, history, receipts, now):
                   'Supervisor started but has not written its first heartbeat')
     if controller.get('error'):
         issue('supervisor_error', 'critical', 'Supervisor reports an error', error=controller['error'])
-    if controller.get('failures'):
+    if controller.get('native_error') or controller.get('native_unknown'):
+        issue('supervisor_native_unknown', 'warning', 'Supervisor is waiting for a fresh verified scheduler state',
+              error=controller.get('native_error') or controller.get('native_unknown'))
+    active_failures = {name: value for name, value in controller.get('failures', {}).items()
+                       if value.get('cluster') not in reviewed}
+    if active_failures:
         issue('supervisor_failure_records', 'warning', 'Supervisor has failure records requiring reconciliation',
-              records=sorted(controller['failures']))
+              records=sorted(active_failures))
     worklist = read(config['worklist'])
     published = {point: row.get('events', 0) for point, row in controller.get('published', {}).items()}
     meson = worklist.get('schema') == 'shift-dp-meson-production-v1'
@@ -278,22 +476,88 @@ def assess(config, previous, rows, history, receipts, now):
         names = {row['batch']: row['point'] for row in worklist['batches']}
         published = {names[batch]: row['published']['events']
                      for batch, row in controller.get('batches', {}).items() if row.get('published')}
-    finished = controller.get('finished', controller.get('complete', False))
+    operations = {}
+    operation_receipts = {value['operation_name']: (cluster, value) for cluster, value in receipts.items()
+                          if value['kind'] == 'operation'}
+    for specification in config.get('operational_jobs', []):
+        name = specification['name']
+        known = operation_receipts.get(name)
+        state_path = Path(specification['state_path']) if specification.get('state_path') else None
+        state = read(state_path) if state_path and state_path.is_file() else {}
+        heartbeat_path = Path(specification['heartbeat_path']) if specification.get('heartbeat_path') else None
+        heartbeat = read(heartbeat_path) if heartbeat_path and heartbeat_path.is_file() else {}
+        epochs = [record_epoch(value, 'checked_utc', 'checked_epoch') for value in (state, heartbeat)]
+        heartbeat_epoch = max((value for value in epochs if value is not None), default=None)
+        summary = dict(receipt_pending=known is None, complete=state.get('complete') is True,
+                       phase=state.get('phase'), heartbeat_epoch=heartbeat_epoch,
+                       native_success=False)
+        operations[name] = summary
+        if known is None:
+            continue
+        cluster, authority = known
+        current, terminal = queued.get(cluster), ended.get(cluster)
+        actual = current or terminal
+        summary.update(cluster=cluster, queue_status=current.get('JobStatus') if current else None,
+                       receipt_sha256=authority['receipt_sha256'],
+                       state_checked_epoch=epochs[0], native_success=bool(terminal and
+                           terminal.get('JobStatus') == 4 and terminal.get('ExitBySignal') is False
+                           and terminal.get('ExitCode') == 0))
+        old = previous.get('operations', {}).get(name, {})
+        if old.get('cluster') not in (None, cluster) or old.get('receipt_sha256') not in (None, authority['receipt_sha256']):
+            raise ValueError('Previously observed operational authority changed: ' + name)
+        if actual and (actual.get('Iwd') != specification['iwd'] or
+                       (specification.get('cmd') and actual.get('Cmd') != specification['cmd'])):
+            issue('operation_identity_' + name, 'critical', 'Operational job has an unexpected Iwd or executable', job=cluster)
+        if state.get('error'):
+            issue('operation_error_' + name, 'critical', 'Operational controller reports an error',
+                  job=cluster, error=state['error'])
+        if state.get('native_error') or state.get('native_unknown'):
+            issue('operation_native_unknown_' + name, 'warning', 'Operational controller is waiting for verified scheduler state',
+                  job=cluster, error=state.get('native_error') or state.get('native_unknown'))
+        if current and current['JobStatus'] == 2 and not summary['complete'] and heartbeat_path:
+            age = now - (heartbeat_epoch or current.get('JobStartDate', authority['submitted']))
+            limit = specification.get('heartbeat_warning_seconds', config['heartbeat_warning_seconds'])
+            age_issue('operation_heartbeat_' + name, age, limit, limit * 2,
+                      'Operational controller heartbeat is stale or missing', job=cluster)
+        if terminal and summary['native_success'] and specification.get('require_state_complete') and not summary['complete']:
+            age_issue('operation_completion_' + name, now - terminal.get('CompletionDate', now), 300, 900,
+                      'Operational job exited without its required final completion record', job=cluster)
+    for specification in config.get('operational_jobs', []):
+        name = specification['name']
+        upstream = operations.get(specification.get('after_job'))
+        if operations[name]['receipt_pending'] and upstream and upstream['complete']:
+            age_issue('operation_handoff_' + name, now - (upstream.get('state_checked_epoch') or now), 300, 900,
+                      'Completed admission has no downstream submission receipt')
+    supervisor_finished = controller.get('finished', controller.get('complete', False))
+    required = config.get('finish_requires_operational_jobs', [])
+    if any(name not in operations for name in required):
+        raise ValueError('Unknown required operational completion job')
+    finished = supervisor_finished and all(operations[name]['complete'] and operations[name]['native_success']
+                                            for name in required)
     severity = 'critical' if any(item['severity'] == 'critical' for item in issues) else 'warning' if issues else 'ok'
     report = dict(schema='shift-dp-statistics-watchdog-health-v1', checked_utc=datetime.fromtimestamp(now, timezone.utc).isoformat(),
                   health=severity, scheduler_state='verified', issues=issues, stages=stages,
                   executed_jobs=sorted(known_execute), actual_planned_progress=dict(
                       authorized_new_events=(None if meson else worklist['total_additional_events']),
                       gen_completed_events=sum(row['counts']['completed_events'] for row in stages.values()
-                                               if row['kind'] in ('gen_stage', 'meson_source')),
-                      detector_completed_events=sum(row['counts']['completed_events'] for row in stages.values() if row['kind'] == 'production'),
+                                               if row['kind'] in ('gen_stage', 'meson_source')
+                                               and not row.get('external_prerequisite')),
+                      detector_completed_events=sum(row['counts']['completed_events'] for row in stages.values()
+                          if row['kind'] == 'production' and not row.get('external_prerequisite')),
                       published_total_events_by_point=published,
                       canary_published=controller.get('canary_published', False)),
-                  supervisor_heartbeat=controller.get('checked_utc'), controller_finished=finished,
+                  supervisor_heartbeat=(datetime.fromtimestamp(controller_epoch, timezone.utc).isoformat()
+                                         if controller_epoch is not None else None),
+                  supervisor_finished=supervisor_finished, operations=operations, controller_finished=finished,
                   observed_state=('finished' if finished else 'payload_execution_verified'
                       if any(row['execution_verified'] for row in stages.values()
-                             if row['kind'] in ('gen_stage', 'meson_source', 'production')) else 'awaiting_payload_execution'),
+                             if row['kind'] in ('gen_stage', 'meson_source', 'production')
+                             and not row.get('external_prerequisite')) else 'awaiting_payload_execution'),
                   no_job_mutations=True)
+    report['reviewed_terminal_failures'] = list(reviewed.values())
+    report['reviewed_controller_failure_records'] = {
+        name: value for name, value in controller.get('failures', {}).items()
+        if value.get('cluster') in reviewed}
     if meson:
         report['actual_planned_progress'].update(
             authorized_source_collisions=sum(row['source_collisions'] for row in worklist['batches']),
@@ -302,8 +566,28 @@ def assess(config, previous, rows, history, receipts, now):
 
 
 def poll(config, previous):
+    if config.get('resolve_supervisor_from_receipt'):
+        # Freeze a monitor before its controller has a scheduler job number.
+        # Resolve only the receipt for this exact sealed submit description.
+        root = Path(config['production_directory'])
+        deployment = Path(config.get('supervisor_deployment_directory', root))
+        receipt_path = Path(config['supervisor_receipt'])
+        receipt = read(receipt_path)
+        cluster = receipt.get('cluster')
+        if (not deployment.is_absolute()
+                or receipt_path != deployment / 'submission.json' or receipt.get('task') != str(deployment)
+                or type(cluster) is not int or cluster <= 0
+                or receipt.get('submit_sha256') != sha(deployment / 'controller.sub')):
+            raise ValueError('Dynamic watchdog supervisor receipt changed its exact launch identity')
+        if deployment != root:
+            authority = str(deployment / 'config.json')
+            if (config.get('dependencies', {}).get(authority) != sha(authority)
+                    or read(authority).get('directory') != str(root)):
+                raise ValueError('Operational watchdog supervisor changed its production authority')
+        config = dict(config, initial_supervisor_cluster=cluster, initial_gen_manager_cluster=cluster)
     root = Path(config['production_directory'])
-    receipts = manager_receipts(root, config.get('supervisor_receipt'))
+    receipts = manager_receipts(root, config.get('supervisor_receipt'), config.get('external_productions', []),
+                                config.get('operational_jobs', []))
     if (config.get('supervisor_receipt') and
             receipts.get(config['initial_supervisor_cluster'], {}).get('kind') != 'supervisor'):
         raise ValueError('Explicit supervisor receipt differs from the configured native cluster')
