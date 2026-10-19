@@ -17,6 +17,7 @@ CPP = r'''
 #include <algorithm>
 #include <iomanip>
 #include <memory>
+#include <map>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -25,7 +26,7 @@ namespace ShiftMesonNative {
 class Output {
   std::unique_ptr<HepMC::IO_GenEvent> stream;
 public:
-  explicit Output(std::string const& path):stream(std::make_unique<HepMC::IO_GenEvent>(path,std::ios::out)){stream->precision(17);}
+  explicit Output(std::string const& path):stream(std::make_unique<HepMC::IO_GenEvent>(path,std::ios::out)){stream->precision(16);}
   void write(HepMC::GenEvent const* event){if(!stream)throw std::runtime_error("Closed HepMC stream");stream->write_event(event);}
   void close(){stream.reset();}
 };
@@ -47,8 +48,10 @@ public:
   HepMC::Pythia8ToHepMC converter;
   std::unique_ptr<HepMC::GenEvent> current;
   long calls=0, failures=0, collisions=0;
-  Source(std::vector<std::string> const& commands,int seed)
-      :pythia(std::string(std::getenv("PYTHIA8DATA")),false) {
+  std::vector<int> parent_ids;
+  Source(std::vector<std::string> const& commands,int seed,std::vector<int> const& parents)
+      :pythia(std::string(std::getenv("PYTHIA8DATA")),false),parent_ids(parents) {
+    if(parent_ids.empty())throw std::runtime_error("Explicit source parent inventory is empty");
     pythia.readString("Print:quiet=on");
     pythia.readString("Random:setSeed=on");
     pythia.readString("Random:seed="+std::to_string(seed));
@@ -69,7 +72,7 @@ public:
     bool first=true;
     for(int i=1;i<pythia.event.size();++i) {
       auto const& p=pythia.event[i];
-      if(p.id()!=221&&p.id()!=331)continue;
+      if(std::find(parent_ids.begin(),parent_ids.end(),p.id())==parent_ids.end())continue;
       auto daughters=p.daughterList();
       if(daughters.empty())throw std::runtime_error("An eligible meson was not naturally decayed");
       bool copy=false;
@@ -87,11 +90,11 @@ public:
       <<",\"mass_tolerance\":"<<pythia.settings.parm("Check:mTolErr")
       <<",\"energy_tolerance\":"<<pythia.settings.parm("Check:epTolErr")<<",\"parents\":[";
     bool first=true;
-    for(auto pdg:{221,331}) {
+    for(auto pdg:parent_ids) {
       auto entry=pythia.particleData.particleDataEntryPtr(pdg);
       if(!first)o<<',';first=false;
       o<<"{\"pdg_id\":"<<pdg<<",\"mass_min_gev\":"<<entry->m0Min()
-       <<",\"mass_max_gev\":"<<entry->m0Max()<<'}';
+       <<",\"mass_max_gev\":"<<entry->m0Max()<<",\"mass_width_gev\":"<<entry->mWidth()<<'}';
     }
     o<<"]}";return o.str();
   }
@@ -105,7 +108,7 @@ public:
   }
   std::string selected_parent_record(int index) const {
     auto* parent=current?current->barcode_to_particle(index):nullptr;
-    if(!parent||(parent->pdg_id()!=221&&parent->pdg_id()!=331)||
+    if(!parent||std::find(parent_ids.begin(),parent_ids.end(),parent->pdg_id())==parent_ids.end()||
        !parent->production_vertex()||!parent->end_vertex())
       throw std::runtime_error("Selected parent graph/vertices are missing");
     std::ostringstream o;o<<std::setprecision(17)<<"{\"barcode\":"<<parent->barcode()
@@ -117,11 +120,79 @@ public:
     }
     o<<'}';return o.str();
   }
-  void inject(int index,std::vector<double> const& values) {
-    if(!current||values.size()!=22)throw std::runtime_error("Invalid decay injection input");
+  void decay_recoil(HepMC::GenParticle* recoil,HepMC::FourVector const& position) {
+    // The new recoil uses the ordinary source particle tables and RNG. Only a
+    // private temporary Event is decayed; the original source record/counters
+    // are restored, including when Pythia rejects the decay.
+    Pythia8::Event original=pythia.event;
+    Pythia8::Event generated;
+    try {
+      pythia.event.reset();
+      auto const& p=recoil->momentum();
+      auto index=pythia.event.append(recoil->pdg_id(),1,0,0,p.px(),p.py(),p.pz(),p.e(),recoil->generated_mass());
+      pythia.event[index].vProd(position.x(),position.y(),position.z(),position.t());
+      pythia.event[index].tau(pythia.event[index].tau0()*pythia.rndm.exp());
+      if(!pythia.moreDecays())
+        throw std::runtime_error("The physical pseudoscalar recoil decay failed");
+      generated=pythia.event;
+    } catch(...) {pythia.event=original;throw;}
+    pythia.event=original;
+    // Long-lived pions and kaons may remain final under the ordinary source
+    // lifetime settings. Never force a decay that those settings suppress.
+    if(generated[1].isFinal())return;
+    std::map<int,HepMC::GenParticle*> particles{{1,recoil}};
+    for(int index=2;index<generated.size();++index) {
+      auto const& p=generated[index];
+      if(p.col()!=0||p.acol()!=0)throw std::runtime_error("Recoil decay unexpectedly requires hadronization");
+      auto* particle=new HepMC::GenParticle(HepMC::FourVector(p.px(),p.py(),p.pz(),p.e()),
+                                           p.id(),p.isFinal()?1:2);
+      particle->set_generated_mass(p.m());particles[index]=particle;
+    }
+    recoil->set_status(2);
+    std::set<int> attached;
+    for(int index=1;index<generated.size();++index) {
+      auto daughters=generated[index].daughterList();
+      if(daughters.empty())continue;
+      auto const& position=generated[daughters.front()].vProd();
+      auto* vertex=new HepMC::GenVertex(HepMC::FourVector(position.px(),position.py(),position.pz(),position.e()));
+      vertex->add_particle_in(particles.at(index));
+      Pythia8::Vec4 total;
+      for(auto child:daughters) {
+        auto mothers=generated[child].motherList();
+        if(mothers.size()!=1||mothers.front()!=index||!attached.insert(child).second)
+          throw std::runtime_error("Recoil natural-decay graph has ambiguous ancestry");
+        auto const& child_position=generated[child].vProd();
+        if(child_position.px()!=position.px()||child_position.py()!=position.py()||
+             child_position.pz()!=position.pz()||child_position.e()!=position.e())
+          throw std::runtime_error("Recoil daughters have different production vertices");
+        total+=generated[child].p();vertex->add_particle_out(particles.at(child));
+      }
+      auto residual=total-generated[index].p();
+      if(std::max({std::abs(residual.e()),std::abs(residual.px()),std::abs(residual.py()),std::abs(residual.pz())})>
+            1.e-6*std::max(1.,generated[index].e()))
+        throw std::runtime_error("Recoil natural decay violates momentum conservation");
+      current->add_vertex(vertex);
+    }
+    if(attached.size()!=size_t(generated.size()-2))
+      throw std::runtime_error("Recoil natural-decay graph lost a descendant");
+  }
+  void inject(int index,std::vector<double> const& values,
+              std::vector<int> const& recoil_pdgs,std::vector<double> const& recoil_masses) {
+    if(!current||recoil_pdgs.empty()||recoil_pdgs.size()!=recoil_masses.size()||
+       values.size()!=18+4*recoil_pdgs.size())throw std::runtime_error("Invalid decay injection input");
+    for(size_t i=0;i<recoil_pdgs.size();++i) {
+      auto id=std::abs(recoil_pdgs[i]);
+      if((id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321)||
+         (id==22?recoil_masses[i]!=0.:recoil_masses[i]<=0.))
+        throw std::runtime_error("Invalid exclusive electromagnetic recoil");
+    }
     auto* parent=current->barcode_to_particle(index);
-    if(!parent||(parent->pdg_id()!=221&&parent->pdg_id()!=331)||!parent->end_vertex())
+    if(!parent||std::find(parent_ids.begin(),parent_ids.end(),parent->pdg_id())==parent_ids.end()||!parent->end_vertex())
       throw std::runtime_error("Selected meson is absent from the source graph");
+    int recoil_charge=0;
+    for(auto id:recoil_pdgs)recoil_charge+=pythia.particleData.chargeType(id);
+    if(recoil_charge!=pythia.particleData.chargeType(parent->pdg_id()))
+      throw std::runtime_error("Exclusive electromagnetic decay violates charge conservation");
     auto position=parent->end_vertex()->position();
     std::set<HepMC::GenVertex*> vertices;
     std::set<HepMC::GenParticle*> descendants;
@@ -152,16 +223,22 @@ public:
     auto p4=[&](int offset){return HepMC::FourVector(values[offset+1],values[offset+2],values[offset+3],values[offset]);};
     auto* decay=new HepMC::GenVertex(position);
     auto* dark=new HepMC::GenParticle(p4(0),32,3);
-    dark->set_generated_mass(values[20]);
-    auto* photon=new HepMC::GenParticle(p4(4),22,1);
-    photon->set_generated_mass(0.);
-    decay->add_particle_in(parent);decay->add_particle_out(dark);decay->add_particle_out(photon);
+    auto const offset=12+4*recoil_pdgs.size();
+    dark->set_generated_mass(values[offset+4]);
+    std::vector<HepMC::GenParticle*> recoils;
+    decay->add_particle_in(parent);decay->add_particle_out(dark);
+    for(size_t i=0;i<recoil_pdgs.size();++i) {
+      auto* recoil=new HepMC::GenParticle(p4(4+4*i),recoil_pdgs[i],1);
+      recoil->set_generated_mass(recoil_masses[i]);
+      decay->add_particle_out(recoil);recoils.push_back(recoil);
+    }
     current->add_vertex(decay);
-    auto* endpoint=new HepMC::GenVertex(HepMC::FourVector(position.x()+values[16],
-      position.y()+values[17],position.z()+values[18],position.t()+values[19]));
-    auto* muon=new HepMC::GenParticle(p4(8),13,1);
-    auto* antimuon=new HepMC::GenParticle(p4(12),-13,1);
-    muon->set_generated_mass(values[21]);antimuon->set_generated_mass(values[21]);
+    for(auto* recoil:recoils)if(recoil->pdg_id()!=22)decay_recoil(recoil,position);
+    auto* endpoint=new HepMC::GenVertex(HepMC::FourVector(position.x()+values[offset],
+      position.y()+values[offset+1],position.z()+values[offset+2],position.t()+values[offset+3]));
+    auto* muon=new HepMC::GenParticle(p4(4+4*recoil_pdgs.size()),13,1);
+    auto* antimuon=new HepMC::GenParticle(p4(8+4*recoil_pdgs.size()),-13,1);
+    muon->set_generated_mass(values[offset+5]);antimuon->set_generated_mass(values[offset+5]);
     endpoint->add_particle_in(dark);endpoint->add_particle_out(muon);endpoint->add_particle_out(antimuon);
     current->add_vertex(endpoint);
     for(auto const& expected:spectators) {
@@ -170,6 +247,21 @@ public:
       if(!unchanged||particle_signature(unchanged)!=expected)
         throw std::runtime_error("Meson injection changed a spectator particle or its vertices");
     }
+  }
+  std::string recoil_record(int index) const {
+    auto const* parent=current?current->barcode_to_particle(index):nullptr;
+    if(!parent||!parent->end_vertex())throw std::runtime_error("Injected recoil vertex is absent");
+    std::ostringstream o;o<<std::setprecision(17)<<'[';bool first=true;
+    auto const* vertex=parent->end_vertex();
+    for(auto p=vertex->particles_out_const_begin();p!=vertex->particles_out_const_end();++p) {
+      auto const* recoil=*p;if(recoil->pdg_id()==32)continue;
+      if(!first)o<<',';first=false;
+      auto const& q=recoil->momentum();
+      o<<"{\"pdg_id\":"<<recoil->pdg_id()<<",\"mass_gev\":"<<recoil->generated_mass()
+       <<",\"status\":"<<recoil->status()<<",\"natural_decay\":"<<(recoil->end_vertex()?"true":"false")
+       <<",\"p4\":["<<q.e()<<','<<q.px()<<','<<q.py()<<','<<q.pz()<<"]}";
+    }
+    o<<']';return o.str();
   }
   std::string summary() const {
     std::ostringstream o;o<<std::setprecision(17)<<"{\"source_calls\":"<<calls
@@ -214,11 +306,15 @@ def cmssw_native_libraries():
     return libraries
 
 
-def native_source(settings, seed):
+def native_source(settings, seed, parent_ids=(221, 331)):
     if not os.environ.get('CMSSW_BASE') or not os.environ.get('PYTHIA8DATA'):
         raise RuntimeError('Enter the prepared CMSSW runtime; no shared build is performed')
     if type(seed) is not int or not 1 <= seed <= 899999900:
         raise ValueError('Require an explicit valid unused Pythia seed')
+    if (not parent_ids or len(set(parent_ids)) != len(parent_ids) or
+            any(type(pdg) is not int or pdg not in
+                (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323) for pdg in parent_ids)):
+        raise ValueError('Require distinct explicitly supported meson source parents')
     import ROOT
     libraries = cmssw_native_libraries()
     for library in libraries:
@@ -232,18 +328,41 @@ def native_source(settings, seed):
         if setting.lower().replace(' ', '').startswith('random:'):
             raise ValueError('The explicit source seed must not be overridden by generator settings')
         commands.push_back(setting)
-    return ROOT.ShiftMesonNative.Source(commands, seed)
+    parents = ROOT.std.vector('int')()
+    for pdg in parent_ids:
+        parents.push_back(pdg)
+    return ROOT.ShiftMesonNative.Source(commands, seed, parents)
 
 
 def inject_decay(source, parent_index, sampled_decay):
     import ROOT
     values = ROOT.std.vector('double')()
-    for key in ('dark_photon_p4', 'photon_p4', 'muon_p4', 'antimuon_p4'):
-        for value in sampled_decay[key]:
+    if 'recoil_p4s' in sampled_decay:
+        recoils = [dict(pdg_id=pdg, mass_gev=mass, p4=momentum) for pdg, mass, momentum in
+            zip(sampled_decay['recoil_pdg_ids'], sampled_decay['recoil_masses_gev'],
+                sampled_decay['recoil_p4s'], strict=True)]
+    elif 'recoils' in sampled_decay:
+        recoils = sampled_decay['recoils']
+    else:
+        key = 'recoil_p4' if 'recoil_p4' in sampled_decay else 'photon_p4'
+        recoils = [dict(pdg_id=sampled_decay.get('recoil_pdg_id', 22),
+            mass_gev=sampled_decay.get('recoil_mass_gev', 0.), p4=sampled_decay[key])]
+    momenta = [sampled_decay['dark_photon_p4']] + [row['p4'] for row in recoils] + [
+        sampled_decay['muon_p4'], sampled_decay['antimuon_p4']]
+    for momentum in momenta:
+        for value in momentum:
             values.push_back(value)
     for value in sampled_decay['decay_displacement_mm']:
         values.push_back(value)
     values.push_back(sampled_decay['decay_ct_mm'])
     values.push_back(sampled_decay['dark_photon_mass_gev'])
     values.push_back(sampled_decay['muon_mass_gev'])
-    source.inject(parent_index, values)
+    identifiers, masses = ROOT.std.vector('int')(), ROOT.std.vector('double')()
+    for recoil in recoils:
+        identifiers.push_back(recoil['pdg_id'])
+        masses.push_back(recoil['mass_gev'])
+    source.inject(parent_index, values, identifiers, masses)
+    # Pin the actual ordinary recoil outcome for the independent FWLite audit.
+    sampled_decay['recoil_records'] = json.loads(str(source.recoil_record(parent_index)))
+    if len(recoils) == 1:
+        sampled_decay['recoil_natural_decay_required'] = sampled_decay['recoil_records'][0]['natural_decay']

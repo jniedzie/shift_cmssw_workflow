@@ -152,7 +152,7 @@ def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bo
 def generation_accounting(directory, contract):
     """Keep the unfiltered hadronic source distinct from conditional signals."""
     directory = Path(directory)
-    if contract.get('production_mechanism') == 'eta-etaprime-radiative':
+    if contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
         from export_dark_photon_cross_sections import meson_source_exposure
         exposure, rate, uncertainty = meson_source_exposure(contract, directory)
         ledger = read_pythia_generation_ledger(
@@ -186,16 +186,25 @@ def meson_accepted_slots(path, contract):
                 raise ValueError('Meson accepted slot does not select exactly one source parent')
             slots[slot] = dict(parent=parents[0], graph=row['selected_parent_graph'],
                 sampled_decay=row['sampled_decay'], trial=row['trial'], slot=slot)
+            if contract.get('production_mechanism') == 'meson-radiative':
+                from dark_photon_meson_source import exclusive_channels
+                models = exclusive_channels(contract['resolved_parent_models'][str(parents[0]['pdg_id'])])
+                if len(models) > 1:
+                    models = [model for model in models if model.get('channel') == row.get('selected_channel')]
+                if len(models) != 1:
+                    raise ValueError('Selected exclusive meson channel is missing or ambiguous')
+                slots[slot]['resolved_model'] = models[0]
     if digest.hexdigest() != contract['source_ledger_sha256'] or len(slots) != contract['requested_events']:
         raise ValueError('Meson source ledger hash/count differs from its contract')
     return slots
 
 
 def validate_meson_radiative_record(record, selected):
-    """Pin the selected native meson, recoil photon and physical decay vertex."""
+    """Pin the selected native meson, exclusive recoil and physical vertex."""
     parent, graph = selected['parent'], selected['graph']
+    from dark_photon_meson_source import PARENTS
     if (record['mother_barcode'] != parent['index'] or graph['barcode'] != parent['index'] or
-            record['mother_pdg_id'] != parent['pdg_id'] or parent['pdg_id'] not in (221,331) or
+            record['mother_pdg_id'] != parent['pdg_id'] or parent['pdg_id'] not in PARENTS or
             graph['pdg_id'] != parent['pdg_id']):
         raise ValueError('Radiative meson mother differs from the selected source index')
     if (record['mother_p4'] != parent['p4'] or
@@ -206,14 +215,40 @@ def validate_meson_radiative_record(record, selected):
             record['decay_position_mm'] != graph['decay_position_mm']):
         raise ValueError('Radiative meson source position changed')
     daughters = record['outgoing']
-    if sorted(row['pdg_id'] for row in daughters) != [22,32]:
-        raise ValueError('Meson radiative vertex must contain exactly gamma and A-prime')
-    dark, = [row for row in daughters if row['pdg_id'] == 32]
-    photon, = [row for row in daughters if row['pdg_id'] == 22]
-    if dark['status'] != 3 or photon['status'] != 1:
-        raise ValueError('Radiative recoil/signal status changed')
     sample = selected['sampled_decay']
-    if dark['p4'] != sample['dark_photon_p4'] or photon['p4'] != sample['photon_p4']:
+    recoil_pdg = sample.get('recoil_pdg_id', 22)
+    model = selected.get('resolved_model')
+    if abs(parent['pdg_id']) in (113,213,223,333,313,323):
+        if (not model or model.get('decay_type') != 'vector-pseudoscalar' or
+                model.get('recoil_pdg_id') != recoil_pdg or
+                sample.get('recoil_mass_gev') != model.get('recoil_mass_gev') or
+                sample.get('parent_polarization') != model.get('parent_polarization') or
+                type(sample.get('recoil_natural_decay_required')) is not bool or
+                recoil_pdg in (111,221) and sample.get('recoil_natural_decay_required') is not True):
+            raise ValueError('Vector-meson recoil/spin convention differs from its explicit source model')
+    if model and model.get('decay_type') == 'pseudoscalar-dipion':
+        if (sample.get('recoil_pdg_ids') != [211,-211] or
+                sample.get('recoil_masses_gev') != [model['pion_mass_gev']]*2 or
+                len(sample.get('recoil_p4s', [])) != 2):
+            raise ValueError('Dipion recoils differ from the explicit source model')
+        expected = [(pdg, p4) for pdg,p4 in zip(sample['recoil_pdg_ids'],sample['recoil_p4s'])]
+    else:
+        recoil_key = 'photon_p4' if recoil_pdg == 22 else 'recoil_p4'
+        expected = [(recoil_pdg, sample[recoil_key])]
+    if sorted(row['pdg_id'] for row in daughters) != sorted([pdg for pdg,_ in expected]+[32]):
+        raise ValueError('Meson radiative vertex must contain exactly the exclusive recoil and A-prime')
+    dark, = [row for row in daughters if row['pdg_id'] == 32]
+    if dark['status'] != 3:
+        raise ValueError('Radiative recoil/signal status changed')
+    for pdg,momentum in expected:
+        recoil, = [row for row in daughters if row['pdg_id'] == pdg]
+        pinned = [row for row in sample.get('recoil_records',[]) if row['pdg_id'] == pdg]
+        status = pinned[0]['status'] if len(pinned) == 1 else (1 if pdg == 22 else 2)
+        if recoil['status'] != status:
+            raise ValueError('Radiative recoil/signal status changed')
+        if recoil['p4'] != momentum:
+            raise ValueError('Radiative daughter momentum differs from its sampled decay')
+    if dark['p4'] != sample['dark_photon_p4']:
         raise ValueError('Radiative daughter momentum differs from its sampled decay')
     outgoing = [math.fsum(row['p4'][axis] for row in daughters) for axis in range(4)]
     residual = max(abs(a-b) for a,b in zip(outgoing,parent['p4']))
@@ -247,7 +282,45 @@ def validate_meson_radiative_graph(dark, selected):
         decay_position_mm=position(vertex), outgoing=[dict(pdg_id=int(child.pdg_id()),
             status=int(child.status()),p4=momentum(child)) for child in
             objects(vertex.particles_out_const_begin(),vertex.particles_out_const_end())])
-    return validate_meson_radiative_record(record, selected)
+    result = validate_meson_radiative_record(record, selected)
+    sample = selected['sampled_decay']
+    if 'recoil_pdg_ids' in sample:
+        recoil_models = list(zip(sample['recoil_pdg_ids'],sample['recoil_masses_gev']))
+    else:
+        recoil_models = [(sample.get('recoil_pdg_id',22), sample.get('recoil_mass_gev',0.))]
+    for recoil_pdg, recoil_mass in recoil_models:
+        if recoil_pdg == 22:
+            continue
+        recoil, = [child for child in objects(vertex.particles_out_const_begin(), vertex.particles_out_const_end())
+                   if int(child.pdg_id()) == recoil_pdg]
+        if float(recoil.generated_mass()) != recoil_mass or (recoil_pdg in (111,221) and not recoil.end_vertex()):
+            raise ValueError('Vector recoil lost its physical mass or natural decay')
+        pending, visited, leaves = [recoil], set(), 0
+        while pending:
+            particle = pending.pop()
+            if int(particle.barcode()) in visited:
+                raise ValueError('Natural recoil graph repeats a particle')
+            visited.add(int(particle.barcode()))
+            endpoint = particle.end_vertex()
+            if not endpoint:
+                if int(particle.status()) != 1:
+                    raise ValueError('Natural recoil graph has a non-final undecayed leaf')
+                leaves += 1
+                continue
+            incoming = list(objects(endpoint.particles_in_const_begin(), endpoint.particles_in_const_end()))
+            children = list(objects(endpoint.particles_out_const_begin(), endpoint.particles_out_const_end()))
+            if len(incoming) != 1 or incoming[0].barcode() != particle.barcode() or not children:
+                raise ValueError('Natural recoil ancestry is incomplete or ambiguous')
+            if any(abs(int(child.pdg_id())) == 32 for child in children):
+                raise ValueError('Natural recoil decay contains a second signal')
+            p4 = momentum(particle)
+            total = [math.fsum(momentum(child)[axis] for child in children) for axis in range(4)]
+            if max(abs(a-b) for a,b in zip(p4,total)) > 1.e-6*max(1.,p4[0]):
+                raise ValueError('Natural recoil decay violates momentum conservation')
+            pending.extend(children)
+        result['natural_recoil_descendants'] = len(visited)-1
+        result['natural_recoil_final_particles'] = leaves
+    return result
 
 
 def audit(directory):
@@ -418,7 +491,7 @@ def audit(directory):
             source_exposure_sha256=contract['source_exposure_sha256'],
             event_hepmc_cross_section_convention=contract.get('event_hepmc_cross_section_convention',
                 'Original unfiltered ND source cross section; physical conditional signal rate comes from full-source accounting'),
-            rate_scope='eta/eta-prime radiative signal in unfiltered non-diffractive pp; parent production and precision model remain provisional')
+            rate_scope='Explicit exclusive meson-radiative channels in unfiltered non-diffractive pp; parent spectra, vector spin/zero-width approximations and rate model remain provisional')
         report['full_gen_denominator'].update(
             source_collisions=accounting['source_exposure']['source_collisions'],
             interpretation='Accepted GEN counts conditional unit-weight signals; fixed unfiltered source collisions determine the physical production rate')

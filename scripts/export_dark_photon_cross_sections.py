@@ -115,6 +115,28 @@ def same_signed_number(actual, expected, name):
         raise ValueError("Meson native precision accounting differs: " + name)
 
 
+def same_resolved_meson_model(stored, resolved, name='resolved exclusive meson model'):
+    """Compare identities exactly and floating inputs at accounting precision.
+
+    CMSSW and the standalone exporter use different Python/libm versions.
+    Their hypot results can differ by one ulp for identical physical inputs.
+    """
+    if isinstance(resolved, dict):
+        if not isinstance(stored, dict) or stored.keys() != resolved.keys():
+            raise ValueError(name + ' keys differ from the native authority')
+        for key in resolved:
+            same_resolved_meson_model(stored[key], resolved[key], name + '.' + str(key))
+    elif isinstance(resolved, list):
+        if not isinstance(stored, list) or len(stored) != len(resolved):
+            raise ValueError(name + ' list differs from the native authority')
+        for index, (actual, expected) in enumerate(zip(stored, resolved)):
+            same_resolved_meson_model(actual, expected, name + '[' + str(index) + ']')
+    elif type(resolved) is float:
+        same_signed_number(stored, resolved, name)
+    elif type(stored) is not type(resolved) or stored != resolved:
+        raise ValueError(name + ' identity differs from the native authority')
+
+
 def open_meson_ledger(path):
     """Read the exact JSONL text without expanding a compressed ledger on disk."""
     path = Path(path)
@@ -233,8 +255,14 @@ def meson_source_exposure(contract, directory):
     if card.get("schema") != "shift-dark-photon-meson-model-v1":
         raise ValueError("Unknown meson physical model card")
     parents = {item["pdg_id"]: item for item in card["parents"]}
-    if not parents or set(parents) - {221, 331} or len(parents) != len(card["parents"]):
-        raise ValueError("Require distinct eta/eta-prime parent models")
+    unified = contract.get("production_mechanism") == "meson-radiative"
+    from dark_photon_meson_source import PARENTS
+    supported = set(PARENTS) if unified else {221, 331}
+    if not parents or set(parents) - supported or (not unified and len(parents) != len(card["parents"])):
+        raise ValueError("Require distinct supported exclusive meson parent models")
+    if unified and (card.get("mechanism") != "meson-radiative" or
+                    contract.get("exclusive_channels") != card.get("channels") or not card.get("channels")):
+        raise ValueError("Unified meson channel ownership differs from its model card")
     for flag in ("coefficient_includes_br_mumu", "coefficient_excludes_epsilon_squared", "unit_output_gen_weights"):
         if exposure.get(flag) is not True:
             raise ValueError("Meson source convention is missing: " + flag)
@@ -272,7 +300,12 @@ def meson_source_exposure(contract, directory):
             raise ValueError("Pinned native Pythia precision reference changed")
         if precision.get("prescription") != "native generated mass for branching and bound; unchanged p4 invariant for decay":
             raise ValueError("Native parent precision prescription changed")
-        for support in precision["parents"]:
+        if unified:
+            from dark_photon_meson_source import resolved_parent_models
+            precision_models = resolved_parent_models(card, precision, contract["mass_gev"])
+            for pdg, model in precision_models.items():
+                same_resolved_meson_model(contract["resolved_parent_models"].get(str(pdg)), model)
+        for support in (() if unified else precision["parents"]):
             pdg = support["pdg_id"]
             if pdg not in parents or pdg in precision_models:
                 raise ValueError("Native parent mass support has changed or repeated species")
@@ -291,6 +324,10 @@ def meson_source_exposure(contract, directory):
                 same_number(stored_model[key], value, "resolved parent " + key)
         if set(precision_models) != set(parents):
             raise ValueError("Native precision support does not cover every parent species")
+        if unified:
+            from dark_photon_meson_source import coefficient_bound
+            same_number(bound, coefficient_bound(precision['ecm_gev'], branching,
+                        precision_models, contract['mass_gev']), 'analytic exclusive-channel bound')
     calls = successes = failures = zeroes = 0
     slots = []
     totals = {name: [0., 0.] for name in ("coefficient_sum", "coefficient_sum_squared",
@@ -356,6 +393,13 @@ def meson_source_exposure(contract, directory):
                     accumulate("coefficient_precision_difference_sum", parent["coefficient_difference_from_kinematic_mass"])
                 elif not math.isclose(invariant, mass**2, rel_tol=1e-6, abs_tol=1e-8):
                     raise ValueError("Source parent four-vector and mass disagree")
+                if unified:
+                    if precision is None:
+                        raise ValueError("Unified meson sources require pinned native precision support")
+                    from dark_photon_meson_source import parent_branching_coefficient
+                    weights[identity] = parent_branching_coefficient(mass, contract["mass_gev"],
+                                                                    precision_models[pdg], branching)
+                    continue
                 if mass <= contract["mass_gev"]:
                     weights[identity] = 0.
                     continue
@@ -375,6 +419,15 @@ def meson_source_exposure(contract, directory):
                 slot = row.get("accepted_slot")
                 if type(slot) is not int or slot != len(slots) + 1 or weights.get(row.get("parent_index"), 0.) <= 0:
                     raise ValueError("Accepted meson signal lacks a unique physical parent/slot")
+                if unified:
+                    from dark_photon_meson_source import exclusive_channels
+                    parent, = [item for item in row['parents'] if item['index'] == row['parent_index']]
+                    channels = exclusive_channels(precision_models[parent['pdg_id']])
+                    if len(channels) > 1 or row.get('selected_channel'):
+                        chosen = [item for item in channels if item.get('channel') == row.get('selected_channel')]
+                        if len(chosen) != 1 or parent_branching_coefficient(parent['mass_gev'],
+                                contract['mass_gev'], chosen[0], branching) <= 0:
+                            raise ValueError('Accepted meson signal lacks a unique open exclusive channel')
                 slots.append(slot)
             elif row.get("accepted_slot") is not None or row.get("parent_index") is not None:
                 raise ValueError("Rejected source collision owns an emitted signal")
@@ -454,7 +507,7 @@ def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_pa
             error_pb=exposure["sigma_source_error_mb"]*1e9)],
         physical_selected_cross_sections_pb=[rate],
         physical_inclusive_cross_sections_pb=[dict(value_pb=rate["value_pb"]/branching, error_pb=rate["error_pb"]/branching)],
-        inclusive_rate_derivation="Single-A-prime eta/eta-prime rate before the forced dimuon channel; selected rate divided by physical BR_mumu once",
+        inclusive_rate_derivation="Single-A-prime exclusive meson rate before the forced dimuon channel; selected rate divided by physical BR_mumu once",
         cross_section_authority="Full-precision unfiltered Pythia sigmaGen [mb] times the fixed all-collision mean physical radiative probability; converted to pb",
         cross_section_convention="sigma_source_mb * 1e9 * sum_collision_probability / fixed_source_collisions; probability includes radiative and dimuon BRs once",
         source_exposure=exposure, source_exposure_sha256=contract["source_exposure_sha256"],
@@ -466,7 +519,8 @@ def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_pa
             source_collisions=count, full_gen_denominator=audit["full_gen_denominator"],
             interpretation="accepted_events counts conditional unit-weight signal outputs; native counters count the unfiltered parent source; rate denominator is fixed source_collisions"),
         proposal_ledger=ledger, physical_width_authority=width, meson_model_card=contract["meson_model_card"],
-        meson_model_card_sha256=contract["meson_model_card_sha256"], mechanism="eta-etaprime-radiative",
+        meson_model_card_sha256=contract["meson_model_card_sha256"], mechanism=contract["production_mechanism"],
+        exclusive_channels=contract.get("exclusive_channels", ["eta->gamma Aprime", "eta-prime->gamma Aprime"]),
         model=contract["model"], generated_mass_support_gev=contract["generated_mass_support_gev"],
         beam_energy_GeV=contract["beam_energy_GeV"], source_model=contract["source_model"],
         seed=contract["seed"], run_number=contract["run_number"], rate_scope=audit["rate_scope"],
@@ -477,7 +531,7 @@ def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_pa
 
 def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256, source_directory=None):
     """Keep proposal and physical dimuon rates distinct; correct exactly once."""
-    if contract.get("production_mechanism") == "eta-etaprime-radiative":
+    if contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         return meson_rate_record(contract, audit, point=point, campaign=campaign,
             source_hashes=source_hashes, gen_path=gen_path, gen_sha256=gen_sha256, source_directory=source_directory)
     if contract.get("schema") != "shift-dark-photon-gen-v1" or contract.get("decay_mode") != "mumu":
@@ -568,7 +622,12 @@ def input_files(directory, manifest):
     """Retain source/config/log authorities and spectral inputs; no ROOT copies."""
     directory = Path(directory)
     names = {"contract.json", "manifest.json", "validation.json", "cmsRun.log", "resolved_cfg.py", "audit.log"}
-    if read(directory / "contract.json").get("production_mechanism") == "eta-etaprime-radiative":
+    if manifest.get('worker_local_runtime') is not None:
+        runtime = directory / 'runtime_provenance.json'
+        if sha256(runtime) != manifest.get('runtime_provenance_sha256'):
+            raise ValueError('Worker-local runtime provenance changed')
+        names.add('runtime_provenance.json')
+    if read(directory / "contract.json").get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         names.update({"source_exposure.json", "meson_model.json"})
         if (directory / "meson_source_ledger.jsonl").is_file():
             names.add("meson_source_ledger.jsonl")
@@ -667,7 +726,7 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
         if (audit["event_ids"] != parent["event_ids"] or audit["sum_weights"] != parent["native_sumw"] or
                 audit["sum_weights_squared"] != parent["native_sumw2"] or manifest["output_sha256"] != parent["gen_sha256"]):
             raise ValueError("Production GEN population differs from its retained audit")
-        meson = contract.get("production_mechanism") == "eta-etaprime-radiative"
+        meson = contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative")
         expected_native = contract["source_exposure"]["source_collisions"] if meson else audit["events"]
         fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=expected_native)
         ledger_matches = (same_ledger_content(fresh_ledger, audit["proposal_ledger"]) if meson

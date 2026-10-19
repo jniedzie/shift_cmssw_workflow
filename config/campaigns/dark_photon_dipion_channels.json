@@ -1,0 +1,116 @@
+{
+  "code_style": "AI-code. AI-generated measured dipion benchmark inputs.",
+  "schema": "shift-dark-photon-dipion-channels-v1",
+  "physics_scope": "Exclusive magnetic eta and eta-prime -> pi+ pi- A' benchmarks with coherent contact, rho and (eta-prime) omega terms. Measured Dalitz rates set one overall amplitude per parent. Independent radiative rates remain cross-checks, not extra normalization factors. These are limited-precision benchmarks, not a validated dispersive or inclusive production model.",
+  "channels": [
+    {
+      "pdg_id": 221,
+      "channel": "eta->piplus_piminus_Aprime",
+      "decay_type": "pseudoscalar-dipion",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi_gamma": 0.0438,
+      "br_pipi_gamma_stat": 0.0002,
+      "br_pipi_gamma_syst": 0.0010,
+      "br_pipi_gamma_reference": "https://arxiv.org/abs/2109.12812",
+      "dipion_model": {
+        "kind": "besiii-coherent-magnetic-dipion",
+        "reference": "https://arxiv.org/abs/2501.10130",
+        "equations": [4, 5],
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.547862,
+        "parent_mass_continuation": "fixed-pole-total-width",
+        "c1_minus_c2": 1.0,
+        "c3": 1.0,
+        "rho_mass_gev": 0.749,
+        "rho_mass_stat_gev": 0.054,
+        "rho_width_gev": 0.1491,
+        "virtual_rho_mass_gev": 0.749,
+        "virtual_width_prescription": "hadronic-pion-running-width",
+        "normalization": {
+          "channel": "pipi-lepton-pair",
+          "branching_fraction": 0.000307,
+          "branching_fraction_stat": 0.000012,
+          "branching_fraction_syst": 0.000019,
+          "lepton_mass_gev": 0.00051099895,
+          "alpha": 0.0072973525692838015,
+          "reference": "https://arxiv.org/abs/2501.10130"
+        },
+        "crosschecks": {
+          "radiative_branching_fraction": 0.0438,
+          "radiative_branching_reference": "https://arxiv.org/abs/2109.12812",
+          "muon_dalitz_upper_limit_90cl": 0.0000004,
+          "muon_dalitz_reference": "https://arxiv.org/abs/2501.10130",
+          "validated_absolute_rate": false,
+          "note": "The real-photon rate and differential spectrum are independent cross-checks. The fitted effective rho mass is uncertain, and no covariance is available. Photon-normalized prediction for the measured ee mode differs by about 10 percent. Record this discrepancy; normalization to the measured ee mode is not independent rate validation."
+        }
+      }
+    },
+    {
+      "pdg_id": 331,
+      "channel": "eta_prime->piplus_piminus_Aprime",
+      "decay_type": "pseudoscalar-dipion",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi_gamma": 0.2990,
+      "br_pipi_gamma_stat": 0.0003,
+      "br_pipi_gamma_syst": 0.0055,
+      "br_pipi_gamma_reference": "https://arxiv.org/abs/1902.03823",
+      "dipion_model": {
+        "kind": "besiii-coherent-magnetic-dipion",
+        "reference": "https://arxiv.org/abs/2402.01993",
+        "equations": [4, 6, 7, 11],
+        "fit": "Table 4, hidden gauge Model I",
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.95778,
+        "parent_mass_continuation": "fixed-pole-total-width",
+        "c1_minus_c2": 1.0,
+        "c3": 1.0,
+        "rho_mass_gev": 0.7653,
+        "rho_mass_stat_gev": 0.0012,
+        "rho_mass_syst_gev": 0.0202,
+        "rho_width_gev": 0.1491,
+        "virtual_rho_mass_gev": 0.9543,
+        "virtual_rho_mass_stat_gev": 0.0878,
+        "virtual_rho_mass_syst_gev": 0.0364,
+        "virtual_width_prescription": "hadronic-pion-running-width",
+        "omega_mixing": {
+          "mass_gev": 0.7787,
+          "mass_stat_gev": 0.0013,
+          "mass_syst_gev": 0.0173,
+          "width_gev": 0.00868,
+          "amplitude": 0.0085,
+          "amplitude_stat": 0.0014,
+          "amplitude_syst": 0.0007,
+          "phase_radians": 1.4,
+          "phase_stat_radians": 0.3,
+          "phase_syst_radians": 0.1
+        },
+        "normalization": {
+          "channel": "pipi-lepton-pair",
+          "branching_fraction": 0.0000216,
+          "branching_fraction_stat": 0.0000012,
+          "branching_fraction_syst": 0.0000006,
+          "lepton_mass_gev": 0.1056583755,
+          "alpha": 0.0072973525692838015,
+          "reference": "https://arxiv.org/abs/2402.01993"
+        },
+        "crosschecks": {
+          "radiative_branching_fraction": 0.2990,
+          "radiative_branching_reference": "https://arxiv.org/abs/1902.03823",
+          "electron_dalitz_branching_fraction": 0.00245,
+          "electron_dalitz_stat": 0.00002,
+          "electron_dalitz_syst": 0.00008,
+          "electron_dalitz_reference": "https://arxiv.org/abs/2402.01993",
+          "validated_absolute_rate": false,
+          "note": "Gamma-normalized predictions for ee and mu-mu are about 10 percent below the measured Dalitz rates. Using the measured mu-mu mode fixes one overall amplitude; it does not independently validate the real-photon prediction. Published fit covariance and numerical differential data were not available in the inspected article."
+        }
+      }
+    }
+  ],
+  "model_prescription_notes": [
+    "Replace dimensionally inconsistent printed m^2*Gamma in the dipion denominator with m*Gamma.",
+    "Use the hadronic pi-pi threshold for the virtual electromagnetic rho propagator, not a final-lepton-dependent threshold; this differs from the paper's i=l phenomenological width convention and must remain explicit.",
+    "Omit CP-violating electric and higher-order amplitudes; magnetic leading amplitude is the declared benchmark.",
+    "Do not add eta-prime->rho A' as an independent channel: that is the same coherent pi+pi-A' final state.",
+    "The fixed-total-width continuation is appropriate only for a declared narrow parent mass support."
+  ]
+}

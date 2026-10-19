@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Code style: AI-code. AI-generated fixed-exposure meson GEN production runner.
-"""Generate an audited eta/eta-prime radiative benchmark without a CMSSW build.
+"""Generate an audited exclusive meson-radiative source without a CMSSW build.
 
 The source exposure is fixed before collision or rare-decay sampling. Zero-
 parent and rejected collisions remain in the full ledger. This is an ND-only
@@ -18,35 +18,19 @@ import sys
 import time
 
 from dark_photon_meson import MUON_MASS_GEV, mean_lab_beta_gamma, radiative_branching, sample_decay, transition_form_factor_abs2
-from dark_photon_meson_source import coefficient_bound, choose_collision, source_cross_section_pb, model_precision_budget, resolve_parent_kinematics
-from dark_photon_meson_native import native_source, inject_decay
+from dark_photon_meson_source import (coefficient_bound, choose_collision, source_cross_section_pb,
+    model_precision_budget, resolve_parent_kinematics, resolved_parent_models,
+    parent_branching_coefficient, vector_parent, dipion_channel, exclusive_channels, production_mechanism)
+import dark_photon_vector_meson as vector_meson
+from dark_photon_meson_native import native_source, inject_decay, cmssw_native_libraries
 from fixed_target_generation import beam_settings
 from run_dark_photon_spectral_gen import digest, freeze_spectral_inputs, physical_width_table
 
 SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_meson_source.py',
+           'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py',
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
-
-
-def resolved_parent_models(card, configuration, mass):
-    models = {}
-    native = {row['pdg_id']: row for row in configuration['parents']}
-    for parent in card['parents']:
-        pdg = parent['pdg_id']
-        minimum, maximum = native[pdg]['mass_min_gev'], native[pdg]['mass_max_gev']
-        if not 0 < minimum <= maximum:
-            raise ValueError('Generator parent mass support is not finite and bounded')
-        # Never evaluate the irrelevant eta zero-width pole after its channel
-        # is closed. Its physical branching coefficient is exactly zero.
-        form_factor = (transition_form_factor_abs2(mass, parent['transition_form_factor'])
-                       if maximum > mass else 1.)
-        models[pdg] = dict(mass_min_gev=minimum, mass_max_gev=maximum,
-            br_gamma_gamma=parent['br_gamma_gamma'], form_factor_abs2=form_factor,
-            relative_model_uncertainty=model_precision_budget(parent, mass) if maximum > mass else 0.,
-            kinematically_open=maximum > mass, provenance=dict(pdg=parent['pdg_reference'],
-                transition=parent['transition_form_factor']['reference']))
-    return models
 
 
 def run(args):
@@ -75,13 +59,34 @@ def run(args):
             shutil.copy2(here/name, out/name)
         manifest['source_sha256'] = {name: digest(out/name) for name in SOURCES}
         release = Path(os.environ['CMSSW_BASE'])
-        manifest['cmssw_git_head'] = subprocess.check_output(
-            ['git', '-C', str(release / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
-        manifest['cmssw_git_status'] = subprocess.check_output(
-            ['git', '-C', str(release / 'src'), 'status', '--short'], text=True).splitlines()
+        runtime_provenance = getattr(args, 'runtime_provenance', None)
+        runtime_archive = getattr(args, 'runtime_archive', None)
+        if runtime_provenance is not None or runtime_archive is not None:
+            if runtime_provenance is None or runtime_archive is None:
+                raise ValueError('Archived runtime requires both frozen provenance and the actual local archive')
+            provenance = json.loads(runtime_provenance.read_text())
+            if (provenance.get('schema') != 'shift-bsm-gen-runtime-provenance-v1' or
+                    runtime_archive.stat().st_size != provenance.get('archive_bytes') or
+                    digest(runtime_archive) != provenance.get('archive_sha256') or
+                    os.environ.get('SCRAM_ARCH') != provenance.get('scram_arch')):
+                raise ValueError('Worker-local GEN runtime differs from its frozen archive authority')
+            # A runtime archive excludes .git. An unknown historical revision
+            # remains unknown; never attach the current checkout's revision.
+            manifest['cmssw_git_head'] = provenance.get('cmssw_git_head')
+            manifest['cmssw_git_status'] = provenance.get('cmssw_git_status')
+            manifest['worker_local_runtime'] = provenance
+            shutil.copy2(runtime_provenance, out/'runtime_provenance.json')
+            manifest['runtime_provenance_sha256'] = digest(out/'runtime_provenance.json')
+        else:
+            manifest['cmssw_git_head'] = subprocess.check_output(
+                ['git', '-C', str(release / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
+            manifest['cmssw_git_status'] = subprocess.check_output(
+                ['git', '-C', str(release / 'src'), 'status', '--short'], text=True).splitlines()
         card = json.loads(args.model_card.read_text())
         if card['schema'] != 'shift-dark-photon-meson-model-v1' or card['source']['source_class'] != 'SoftQCD:nonDiffractive':
             raise ValueError('Require the explicit ND meson model card')
+        mechanism = production_mechanism(card)
+        manifest['production_mechanism'] = mechanism
         shutil.copy2(args.model_card, out/'meson_model.json')
         authority = freeze_spectral_inputs(args.darkcast_path.resolve(), args.darkcast_source_receipt.resolve(), out)
         sys.path.insert(0, str(out/'width_inputs'))
@@ -94,9 +99,29 @@ def run(args):
         beam = beam_settings(card['source']['beam_energy_gev'])
         settings = common+tune+beam+['SoftQCD:nonDiffractive=on',
             f'13:m0={MUON_MASS_GEV:.17g}', '13:mayDecay=off']
-        settings.extend(f"{parent['pdg_id']}:m0={parent['mass_gev']:.17g}" for parent in card['parents'])
+        masses = {}
+        for parent in card['parents']:
+            species = abs(parent['pdg_id'])
+            if species in masses and masses[species] != parent['mass_gev']:
+                raise ValueError('Channels and charge conjugates must share one physical parent mass')
+            masses[species] = parent['mass_gev']
+        settings.extend(f'{pdg}:m0={mass:.17g}' for pdg,mass in masses.items())
         settings.extend(card['source'].get('additional_pythia_settings', []))
-        source = native_source(settings, args.seed)
+        for parent in card['parents']:
+            if vector_parent(parent):
+                if parent.get('parent_mass_model') != 'zero-width-pole':
+                    raise ValueError('No reviewed off-shell vector branching prescription is available')
+                pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
+                settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
+                settings.append(f"{abs(parent['recoil_pdg_id'])}:m0={parent['recoil_mass_gev']:.17g}")
+            elif dipion_channel(parent):
+                pdg, pole = parent['pdg_id'], parent['mass_gev']
+                settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
+                settings.append(f"211:m0={parent['pion_mass_gev']:.17g}")
+        source = native_source(settings, args.seed, list(dict.fromkeys(parent['pdg_id'] for parent in card['parents'])))
+        native_libraries = [dict(path=library, sha256=digest(Path(library)))
+                            for library in cmssw_native_libraries()]
+        manifest['native_libraries'] = native_libraries
         import ROOT
         configuration = json.loads(str(source.configuration()))
         if not configuration['check_event']:
@@ -153,12 +178,20 @@ def run(args):
                     for parent in snapshot['parents']:
                         max_precision_shift = max(max_precision_shift, abs(parent['coefficient_relative_precision_shift']))
                         accumulate('coefficient_precision_difference_sum', parent['coefficient_difference_from_kinematic_mass'])
-                        if parent['mass_gev'] <= args.mass:
-                            continue
                         model = models[parent['pdg_id']]
-                        coefficient = radiative_branching(parent['mass_gev'], args.mass, .001,
-                            model['br_gamma_gamma'], math.sqrt(model['form_factor_abs2']))/1.e-6*width['br_mumu']
-                        boost_sum += coefficient*mean_lab_beta_gamma(parent['p4'], args.mass)
+                        for channel in exclusive_channels(model):
+                            coefficient = parent_branching_coefficient(parent['mass_gev'], args.mass, channel, width['br_mumu'])
+                            if coefficient == 0:
+                                continue
+                            if dipion_channel(channel):
+                                import dark_photon_dipion_meson as dipion
+                                mean = dipion.mean_lab_beta_gamma(parent['p4'], args.mass, channel)
+                            elif vector_parent(channel):
+                                mean = vector_meson.mean_lab_beta_gamma(parent['p4'], channel['recoil_mass_gev'],
+                                    args.mass, polarization=channel['parent_polarization'])
+                            else:
+                                mean = mean_lab_beta_gamma(parent['p4'], args.mass)
+                            boost_sum += coefficient*mean
                     record['coefficient_beta_gamma_sum'] = boost_sum
                     accumulate('coefficient_beta_gamma_sum', boost_sum)
                     accumulate('coefficient_beta_gamma_sum_squared', boost_sum**2)
@@ -169,7 +202,17 @@ def run(args):
                         parent, = [row for row in snapshot['parents'] if row['index'] == decision['parent_index']]
                         event = source.convert(slots)
                         record['selected_parent_graph'] = json.loads(str(source.selected_parent_record(parent['index'])))
-                        decay = sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng)
+                        channels = exclusive_channels(models[parent['pdg_id']])
+                        model, = [row for row in channels if row['channel'] == decision['selected_channel']]
+                        if vector_parent(model):
+                            decay = vector_meson.sample_decay(parent['p4'], model['recoil_mass_gev'],
+                                args.mass, width['ctau_mm'], rng, polarization=model['parent_polarization'])
+                            decay['recoil_pdg_id'] = model['recoil_pdg_id']
+                        elif dipion_channel(model):
+                            import dark_photon_dipion_meson as dipion
+                            decay = dipion.sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng, model=model)
+                        else:
+                            decay = sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng)
                         inject_decay(source, parent['index'], decay)
                         writer.write(event)
                         record.update(accepted_slot=slots, selected_parent_pdg=parent['pdg_id'],
@@ -207,15 +250,18 @@ def run(args):
                 raise ValueError('Full-source boost-reference covariance is inconsistent')
             reference_error = math.sqrt(collisions/(collisions-1)*max(0.,residual))/sums['coefficient_sum'][0]
         contract = dict(schema='shift-dark-photon-gen-v1', model='visible-photon-like-dark-photon',
-            production_mechanism='eta-etaprime-radiative', mechanism='eta-etaprime-radiative',
+            production_mechanism=mechanism, mechanism=mechanism,
             mass_gev=args.mass, epsilon=args.epsilon, seed=args.seed, run_number=args.run_number,
             requested_events=slots, maximum_framework_events=slots, decay_mode='mumu', filtering='none',
             source_z_mm=148000., source_sigma_z_mm=500., beam_energy_GeV=6800.,
             beam_settings=beam, common=common, cp5=tune, source_settings=settings,
+            native_libraries=native_libraries,
+            worker_local_runtime=manifest.get('worker_local_runtime'),
             source_model=card['source'].get('cross_section_model', 'SoftQCD:nonDiffractive; unfiltered CP5 fixed-target pp'),
             generated_mass_support_gev=[args.mass*(1-1.e-6), args.mass*(1+1.e-6)],
             width_authority=authority, physical_width_table=width,
             meson_model_card=card, meson_model_card_sha256=digest(out/'meson_model.json'),
+            exclusive_channels=card.get('channels', ['eta->gamma Aprime', 'eta-prime->gamma Aprime']),
             source_exposure=exposure, source_exposure_sha256=digest(out/'source_exposure.json'),
             source_ledger_sha256=digest(out/'meson_source_ledger.jsonl'),
             resolved_parent_models=models,
@@ -223,7 +269,7 @@ def run(args):
             mean_beta_gamma_reference=reference,
             mean_beta_gamma_reference_standard_error=reference_error,
             mean_beta_gamma_reference_error_method='Fixed-source collision covariance; first-order delta method for ratio of means',
-            mean_beta_gamma_reference_method='Full-source radiative-coefficient-weighted exact isotropic two-body angular mean',
+            mean_beta_gamma_reference_method='Full-source exclusive-rate-weighted isotropic angular mean; dipion spectrum quadrature where applicable',
             mean_beta_gamma_accepted_closure=math.fsum(boosts)/len(boosts) if boosts else None,
             mean_lab_flight_reference_estimate_m=reference*width['ctau_mm']/1000. if reference is not None else None,
             target_cross_section_pb=source_cross_section_pb(native['sigma_source_mb'],args.epsilon,sums['coefficient_sum'][0],collisions),
@@ -268,6 +314,8 @@ def main():
     parser.add_argument('--darkcast-source-receipt', type=Path, required=True)
     parser.add_argument('--timeout', type=int, default=1800)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--runtime-provenance', type=Path)
+    parser.add_argument('--runtime-archive', type=Path)
     print(json.dumps(run(parser.parse_args())))
 
 

@@ -1,0 +1,596 @@
+{
+  "code_style": "AI-code. AI-generated model inputs with primary references.",
+  "schema": "shift-dark-photon-vector-supplement-v1",
+  "physics_scope": "Exclusive vector radiative source benchmarks; all native vector parent masses remain zero-width pole approximations. Propagator widths below concern the virtual electromagnetic transition only. No claim of complete meson physics or calibrated absolute parent production.",
+  "physics_complete": false,
+  "parents": [
+    {
+      "pdg_id": 333,
+      "name": "phi",
+      "mass_gev": 1.01946,
+      "mass_uncertainty_gev": 1.6e-05,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 0.00133,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-phi-1020.pdf",
+      "channel": "phi->pi0_Aprime",
+      "transition_form_factor": {
+        "kind": "running-width-vector-pole",
+        "reference": "https://arxiv.org/abs/1409.7708",
+        "equations": [
+          49,
+          50
+        ],
+        "valid_mass_range_gev": [
+          0.0,
+          0.8844832
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "propagator_width": "rho-pipi-pwave",
+        "pion_mass_gev": 0.13957039,
+        "kaon_mass_gev": 0.493677,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published finite-width rho VMD benchmark, not the full dispersive calculation of this reference. Keeps F(0)=1 and the physical rho width; its discrepancy from KLOE bins is tested and recorded. Native phi mass remains a pole source. No arbitrary rescaling of the measured-bin central values.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published running-width rho VMD benchmark, checked against KLOE Table1 and integrated phi-pi0 Dalitz branching fraction. Full dispersive amplitude and vector-source mass/spin uncertainties remain unresolved.",
+      "production_rate_validated": false,
+      "measured_transition_validation": {
+        "kind": "measured-bin-abs2",
+        "reference": "https://arxiv.org/abs/1601.06565",
+        "data_table": 1,
+        "valid_mass_range_gev": [
+          0.0010219979,
+          0.7
+        ],
+        "interpolation": "piecewise-constant-bin-average",
+        "bins": [
+          {
+            "mass_range_gev": [
+              0.0010219979,
+              0.03
+            ],
+            "abs2": 1,
+            "uncertainty": 0.11,
+            "effective_mass_gev": 0.009
+          },
+          {
+            "mass_range_gev": [
+              0.03,
+              0.06
+            ],
+            "abs2": 1.18,
+            "uncertainty": 0.22,
+            "effective_mass_gev": 0.0433
+          },
+          {
+            "mass_range_gev": [
+              0.06,
+              0.09
+            ],
+            "abs2": 0.93,
+            "uncertainty": 0.21,
+            "effective_mass_gev": 0.074
+          },
+          {
+            "mass_range_gev": [
+              0.09,
+              0.12
+            ],
+            "abs2": 1.09,
+            "uncertainty": 0.19,
+            "effective_mass_gev": 0.1042
+          },
+          {
+            "mass_range_gev": [
+              0.12,
+              0.15
+            ],
+            "abs2": 1.19,
+            "uncertainty": 0.23,
+            "effective_mass_gev": 0.1344
+          },
+          {
+            "mass_range_gev": [
+              0.15,
+              0.19
+            ],
+            "abs2": 1.42,
+            "uncertainty": 0.33,
+            "effective_mass_gev": 0.169
+          },
+          {
+            "mass_range_gev": [
+              0.19,
+              0.23
+            ],
+            "abs2": 1.46,
+            "uncertainty": 0.47,
+            "effective_mass_gev": 0.2091
+          },
+          {
+            "mass_range_gev": [
+              0.23,
+              0.27
+            ],
+            "abs2": 1.22,
+            "uncertainty": 0.58,
+            "effective_mass_gev": 0.2491
+          },
+          {
+            "mass_range_gev": [
+              0.27,
+              0.31
+            ],
+            "abs2": 2.3,
+            "uncertainty": 0.53,
+            "effective_mass_gev": 0.2888
+          },
+          {
+            "mass_range_gev": [
+              0.31,
+              0.35
+            ],
+            "abs2": 2.17,
+            "uncertainty": 0.65,
+            "effective_mass_gev": 0.3275
+          },
+          {
+            "mass_range_gev": [
+              0.35,
+              0.4
+            ],
+            "abs2": 3.01,
+            "uncertainty": 1.34,
+            "effective_mass_gev": 0.38
+          },
+          {
+            "mass_range_gev": [
+              0.4,
+              0.45
+            ],
+            "abs2": 3.14,
+            "uncertainty": 1.71,
+            "effective_mass_gev": 0.4266
+          },
+          {
+            "mass_range_gev": [
+              0.45,
+              0.5
+            ],
+            "abs2": 6.07,
+            "uncertainty": 2.05,
+            "effective_mass_gev": 0.4761
+          },
+          {
+            "mass_range_gev": [
+              0.5,
+              0.55
+            ],
+            "abs2": 8.49,
+            "uncertainty": 4.27,
+            "effective_mass_gev": 0.526
+          },
+          {
+            "mass_range_gev": [
+              0.55,
+              0.7
+            ],
+            "abs2": 17.4,
+            "uncertainty": 10.3,
+            "effective_mass_gev": 0.6329
+          }
+        ],
+        "validity_note": "Measured finite bin averages are used as a piecewise constant benchmark, not pointwise measurements; the last .55-.7 GeV bin is broad. No extrapolation above .7 GeV and no singular fit-pole near .704 GeV. Bin errors combine statistical and systematic uncertainties, covariance unavailable.",
+        "model_discrepancy_quantified": false
+      }
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "mass_uncertainty_gev": 0.00023,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 0.00047,
+      "br_p_gamma_uncertainty": 8e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->pi0_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.6402832
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published rho0-pi0 chiral TFF benchmark; broad physical rho spectrum and spin alignment not yet modeled.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 213,
+      "name": "rho_plus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 211,
+      "recoil_mass_gev": 0.13957039,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_plus->pi_charged_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.63553961
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Explicit isospin extension of rho0-pi0 normalized chiral TFF to charged rho-pi; measured charged radiative BR. Charged timelike shape and broad parent spectra unvalidated.",
+      "production_rate_validated": false,
+      "mass_convention": "PDG 2025 charged rho tau/e+e- pole benchmark .77511 GeV; the separate hadroproduction average .7665 GeV is not used. Native source mass-shape uncertainty remains unresolved."
+    },
+    {
+      "pdg_id": -213,
+      "name": "rho_minus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -211,
+      "recoil_mass_gev": 0.13957039,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_minus->pi_charged_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.63553961
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Explicit isospin extension of rho0-pi0 normalized chiral TFF to charged rho-pi; measured charged radiative BR. Charged timelike shape and broad parent spectra unvalidated.",
+      "production_rate_validated": false,
+      "mass_convention": "PDG 2025 charged rho tau/e+e- pole benchmark .77511 GeV; the separate hadroproduction average .7665 GeV is not used. Native source mass-shape uncertainty remains unresolved."
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "mass_uncertainty_gev": 0.00023,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.0003,
+      "br_p_gamma_uncertainty": 2.1e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->eta_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          7,
+          8,
+          10,
+          11,
+          12,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.227398
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "propagator_width": "rho-pipi-pwave",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false,
+        "pion_mass_gev": 0.13957039,
+        "kaon_mass_gev": 0.493677
+      },
+      "qualification_scope": "Published rho0-eta chiral TFF benchmark. Only .22 GeV grid point is pole-kinematically open; broad rho tails remain excluded by source approximation.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 223,
+      "name": "omega",
+      "mass_gev": 0.78266,
+      "mass_uncertainty_gev": 0.00013,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 4e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-omega-782.pdf",
+      "channel": "omega->eta_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          6,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.234798
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published omega-eta chiral TFF benchmark. Only .22 GeV grid point is pole-kinematically open.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 313,
+      "name": "kstar0",
+      "mass_gev": 0.89555,
+      "mass_uncertainty_gev": 0.0002,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 311,
+      "recoil_mass_gev": 0.497611,
+      "br_p_gamma": 0.00246,
+      "br_p_gamma_uncertainty": 0.00021,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar0->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.39793899999999993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": -313,
+      "name": "ant_kstar0",
+      "mass_gev": 0.89555,
+      "mass_uncertainty_gev": 0.0002,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -311,
+      "recoil_mass_gev": 0.497611,
+      "br_p_gamma": 0.00246,
+      "br_p_gamma_uncertainty": 0.00021,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "ant_kstar0->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.39793899999999993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 323,
+      "name": "kstar_plus",
+      "mass_gev": 0.89167,
+      "mass_uncertainty_gev": 0.00026,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 321,
+      "recoil_mass_gev": 0.493677,
+      "br_p_gamma": 0.00098,
+      "br_p_gamma_uncertainty": 9e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar_plus->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.397993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": -323,
+      "name": "kstar_minus",
+      "mass_gev": 0.89167,
+      "mass_uncertainty_gev": 0.00026,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -321,
+      "recoil_mass_gev": 0.493677,
+      "br_p_gamma": 0.00098,
+      "br_p_gamma_uncertainty": 9e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar_minus->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.397993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    }
+  ],
+  "channels": [
+    "phi->pi0_Aprime",
+    "rho0->pi0_Aprime",
+    "rho_plus->pi_charged_Aprime",
+    "rho_minus->pi_charged_Aprime",
+    "rho0->eta_Aprime",
+    "omega->eta_Aprime",
+    "kstar0->K_Aprime",
+    "ant_kstar0->K_Aprime",
+    "kstar_plus->K_Aprime",
+    "kstar_minus->K_Aprime"
+  ],
+  "unresolved_physics": [
+    "Native broad vector-parent mass spectra and off-shell partial/total widths",
+    "Vector spin alignment",
+    "Measured phi-pi0 transition shape ends at .7 GeV; finite VMD beyond it remains a model extrapolation",
+    "Differential timelike rho/Kstar data and model discrepancy",
+    "SU3 and isospin breaking of the benchmark amplitudes"
+  ]
+}

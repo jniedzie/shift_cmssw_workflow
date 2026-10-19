@@ -13,7 +13,7 @@ options.register('pilotDirectory', '', VarParsing.multiplicity.singleton,
 options.parseArguments()
 out = Path(options.pilotDirectory).resolve()
 data = json.loads((out / 'contract.json').read_text())
-if data['production_mechanism'] != 'eta-etaprime-radiative':
+if data['production_mechanism'] not in ('eta-etaprime-radiative', 'meson-radiative'):
     raise ValueError('Expected a separately normalized meson signal source')
 
 process = cms.Process('SHIFTBSMGEN', Run3_2023)

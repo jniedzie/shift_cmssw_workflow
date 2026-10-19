@@ -514,5 +514,22 @@ class DurablePublication(unittest.TestCase):
                     publish_file(source,destination)
 
 
+class NativeModelPortability(unittest.TestCase):
+    def test_one_ulp_libm_difference_preserves_exact_channel_and_model_ownership(self):
+        from export_dark_photon_cross_sections import same_resolved_meson_model
+        expected = dict(exclusive_channels=[dict(channel='eta_prime_dipion',
+            relative_model_uncertainty=0.06211299937499416, kinematically_open=True,
+            recoil_pdg_id=211)])
+        stored = copy.deepcopy(expected)
+        stored['exclusive_channels'][0]['relative_model_uncertainty'] = 0.06211299937499415
+        same_resolved_meson_model(stored,expected)
+        for key,value in [('channel','eta_gamma'), ('kinematically_open',1),
+                          ('relative_model_uncertainty',0.07), ('recoil_pdg_id',211.0)]:
+            altered = copy.deepcopy(stored)
+            altered['exclusive_channels'][0][key] = value
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                same_resolved_meson_model(altered,expected)
+
+
 if __name__ == "__main__":
     unittest.main()

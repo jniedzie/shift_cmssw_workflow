@@ -4,6 +4,7 @@ import copy
 import hashlib
 import gzip
 import json
+import random
 from pathlib import Path
 import sys
 import tempfile
@@ -65,6 +66,34 @@ class MesonRadiativeGraphTest(unittest.TestCase):
             path.write_text(payload+json.dumps(dict(accepted=False))+'\n')
             with self.assertRaises(ValueError):
                 meson_accepted_slots(path,contract)
+
+    def test_vector_recoil_mass_and_spin_are_pinned_to_the_model(self):
+        from dark_photon_vector_meson import sample_decay
+        sampled = sample_decay((.78266,0.,0.,0.),.1349768,.3,10.,random.Random(5),
+                               polarization='unpolarized')
+        sampled = {key: list(value) if isinstance(value,tuple) else value for key,value in sampled.items()}
+        sampled['recoil_pdg_id'] = 111
+        selected = copy.deepcopy(self.selected)
+        selected['parent'].update(pdg_id=223,native_mass_gev=.78266,p4=[.78266,0.,0.,0.])
+        selected['graph'].update(pdg_id=223,native_mass_gev=.78266)
+        selected['sampled_decay'] = sampled
+        selected['resolved_model'] = dict(decay_type='vector-pseudoscalar',recoil_pdg_id=111,
+            recoil_mass_gev=.1349768,parent_polarization='unpolarized')
+        record = copy.deepcopy(self.record)
+        record.update(mother_pdg_id=223,mother_generated_mass_gev=.78266,mother_p4=[.78266,0.,0.,0.],
+            outgoing=[dict(pdg_id=32,status=3,p4=sampled['dark_photon_p4']),
+                      dict(pdg_id=111,status=2,p4=sampled['recoil_p4'])])
+        result = validate_meson_radiative_record(record,selected)
+        self.assertEqual(result['parent_pdg_id'],223)
+        for key,value in [('recoil_mass_gev',.14),('parent_polarization','unknown'),
+                          ('recoil_natural_decay_required',False)]:
+            changed = copy.deepcopy(selected)
+            changed['sampled_decay'][key] = value
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'recoil/spin'):
+                validate_meson_radiative_record(record,changed)
+        record['outgoing'][1]['status'] = 1
+        with self.assertRaisesRegex(ValueError,'status'):
+            validate_meson_radiative_record(record,selected)
 
 
 class SignalAndSourceAccounting(unittest.TestCase):

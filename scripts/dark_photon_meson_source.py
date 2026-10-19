@@ -2,7 +2,7 @@
 """Unit-weight signal candidates from an explicitly normalized parent source.
 
 Keep every source collision, including those with no eligible parent, in the
-source ledger. One chosen eta or eta-prime per retained collision is replaced;
+source ledger. One chosen physical meson per retained collision is replaced;
 all other particles retain their ordinary generated decay histories.
 
 The result describes inclusive single-dark-photon production to leading order
@@ -14,13 +14,145 @@ import math
 from itertools import product
 
 from dark_photon_meson import MUON_MASS_GEV, dot, radiative_branching, transition_form_factor_abs2
+import dark_photon_vector_meson as vector_meson
 
-PARENTS = (221, 331)
+PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323)
+
+
+def exclusive_channels(model):
+    """Channels share one physical parent inventory, not separate collisions."""
+    return model.get('exclusive_channels', [model])
+
+
+def dipion_channel(model):
+    return model.get('decay_type') == 'pseudoscalar-dipion'
+
+
+def recoil_threshold(model):
+    if dipion_channel(model):
+        return 2 * model['pion_mass_gev']
+    return model.get('recoil_mass_gev', 0.) if vector_parent(model) else 0.
+
+
+def vector_parent(model):
+    return model.get('decay_type', 'pseudoscalar-photon') == 'vector-pseudoscalar'
+
+
+def production_mechanism(card):
+    mechanism = card.get('mechanism', 'eta-etaprime-radiative')
+    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative'):
+        raise ValueError('Unknown meson production mechanism: ' + str(mechanism))
+    if mechanism == 'meson-radiative' and not card.get('channels'):
+        raise ValueError('Unified radiative production requires an explicit exclusive channel inventory')
+    if mechanism == 'eta-etaprime-radiative' and any(
+            vector_parent(channel) or dipion_channel(channel)
+            for parent in card['parents'] for channel in exclusive_channels(parent)):
+        raise ValueError('Vector and dipion channels require the explicitly named meson-radiative mechanism')
+    return mechanism
+
+
+def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu):
+    """One physical exclusive channel, with epsilon squared factored out."""
+    if 'exclusive_channels' in model:
+        return math.fsum(parent_branching_coefficient(parent_mass, signal_mass, channel, br_mumu)
+                         for channel in exclusive_channels(model))
+    if dipion_channel(model):
+        import dark_photon_dipion_meson as dipion
+        return dipion.branching_coefficient(parent_mass, signal_mass, model) * br_mumu
+    if vector_parent(model):
+        value = vector_meson.radiative_branching(parent_mass, model['recoil_mass_gev'],
+            signal_mass, .001, model['br_p_gamma'], model['form_factor_abs2'])
+    else:
+        value = radiative_branching(parent_mass, signal_mass, .001,
+            model['br_gamma_gamma'], math.sqrt(model['form_factor_abs2']))
+    return value / 1.e-6 * br_mumu
+
+
+def parent_form_factor_abs2(signal_mass, parent):
+    function = (vector_meson.transition_form_factor_abs2 if vector_parent(parent)
+                else transition_form_factor_abs2)
+    return function(signal_mass, parent['transition_form_factor'])
+
+
+def resolved_parent_models(card, configuration, mass):
+    """Resolve only explicitly declared exclusive channels at native support."""
+    if card.get('mechanism') == 'meson-radiative':
+        expected = [parent.get('channel') for parent in card['parents']]
+        if (any(not isinstance(name, str) or not name for name in expected) or
+                len(set(expected)) != len(expected) or card.get('channels') != expected):
+            raise ValueError('Explicit channel names do not match the exclusive parent/recoil models')
+    models = {}
+    native = {row['pdg_id']: row for row in configuration['parents']}
+    if len(native) != len(configuration['parents']):
+        raise ValueError('Native parent species are repeated')
+    for parent in card['parents']:
+        pdg = parent['pdg_id']
+        if pdg not in native:
+            raise ValueError('Each declared parent requires unique native mass support')
+        minimum, maximum = native[pdg]['mass_min_gev'], native[pdg]['mass_max_gev']
+        if not 0 < minimum <= maximum:
+            raise ValueError('Generator parent mass support is not finite and bounded')
+        recoil = recoil_threshold(parent)
+        opened = maximum > mass + recoil
+        form_factor = parent_form_factor_abs2(mass, parent) if opened and not dipion_channel(parent) else 1.
+        model = dict(mass_min_gev=minimum, mass_max_gev=maximum,
+            form_factor_abs2=form_factor,
+            relative_model_uncertainty=model_precision_budget(parent, mass) if opened else 0.,
+            kinematically_open=opened, provenance=dict(pdg=parent['pdg_reference'],
+                transition=parent.get('transition_form_factor', parent.get('dipion_model', {}))['reference']))
+        model['channel'] = parent.get('channel', str(pdg) + '->gamma_Aprime')
+        if vector_parent(parent):
+            for key in ('decay_type', 'recoil_pdg_id', 'recoil_mass_gev', 'br_p_gamma',
+                        'parent_polarization', 'parent_mass_model'):
+                model[key] = parent[key]
+            if (native[pdg].get('mass_width_gev') != 0. or minimum != parent['mass_gev'] or
+                    maximum != parent['mass_gev']):
+                raise ValueError('Vector pole branching model requires an unchanged zero-width native source')
+        elif dipion_channel(parent):
+            for key in ('decay_type', 'pion_mass_gev', 'br_pipi_gamma', 'dipion_model'):
+                model[key] = parent[key]
+        else:
+            model['br_gamma_gamma'] = parent['br_gamma_gamma']
+        if pdg not in models:
+            models[pdg] = model
+        else:
+            previous = models[pdg]
+            channels = exclusive_channels(previous)
+            identity = lambda row: (row.get('decay_type', 'pseudoscalar-photon'),
+                                    row.get('recoil_pdg_id', 22))
+            if any(identity(row) == identity(model) for row in channels):
+                raise ValueError('Duplicate exclusive channel for one physical parent')
+            models[pdg] = dict(mass_min_gev=minimum, mass_max_gev=maximum,
+                exclusive_channels=channels + [model])
+    if set(models) != set(native):
+        raise ValueError('The source inventory includes undeclared parent channels')
+    validate_models(models)
+    return models
 
 
 def model_precision_budget(parent, signal_mass):
     """Measured BR/TFF one-sigma parameter-box envelope, not a tuned goal."""
+    if dipion_channel(parent):
+        normalization = parent['dipion_model']['normalization']
+        return math.hypot(normalization['branching_fraction_stat'],
+                          normalization['branching_fraction_syst']) / normalization['branching_fraction']
     transition = parent['transition_form_factor']
+    if vector_parent(parent):
+        if transition['kind'] != 'single-pole-slope':
+            central = parent['br_p_gamma'] * parent_form_factor_abs2(signal_mass, parent)
+            values = [branch * form for branch in
+                (parent['br_p_gamma'] - parent['br_p_gamma_uncertainty'],
+                 parent['br_p_gamma'] + parent['br_p_gamma_uncertainty'])
+                for form in vector_meson.transition_form_factor_variations(signal_mass, transition)]
+            return max(abs(value / central - 1) for value in values)
+        central = parent['br_p_gamma'] * parent_form_factor_abs2(signal_mass, parent)
+        error = math.hypot(transition['slope_stat_gev_minus2'], transition['slope_syst_gev_minus2'])
+        values = []
+        for branch_sign, slope_sign in product((-1, 1), repeat=2):
+            branching = parent['br_p_gamma'] + branch_sign * parent['br_p_gamma_uncertainty']
+            shifted = dict(transition, slope_gev_minus2=transition['slope_gev_minus2'] + slope_sign * error)
+            values.append(branching * vector_meson.transition_form_factor_abs2(signal_mass, shifted))
+        return max(abs(value / central - 1) for value in values)
     central = parent['br_gamma_gamma']*transition_form_factor_abs2(signal_mass, transition)
     lambdas = [transition['lambda_gev'] + sign*math.hypot(transition['lambda_stat_gev'],
                transition['lambda_syst_gev']) for sign in (-1, 1)]
@@ -61,15 +193,19 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
         deviation = abs(mass-native)/max(p4[0], 1.)
         if deviation > mass_tolerance:
             raise ValueError('Native parent violates the unchanged Pythia mass tolerance')
-        if (mass > signal_mass) != (native > signal_mass):
-            raise ValueError('Native precision changes whether the rare decay is open')
         model = models[parent['pdg_id']]
-        arguments = (signal_mass, .001, model['br_gamma_gamma'], math.sqrt(model['form_factor_abs2']))
-        coefficient = radiative_branching(native, *arguments)/1.e-6*br_mumu
-        kinematic = radiative_branching(mass, *arguments)/1.e-6*br_mumu
+        for channel in exclusive_channels(model):
+            recoil = recoil_threshold(channel)
+            if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
+                raise ValueError('Native precision changes whether the rare decay is open')
+            nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
+            shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu)
+            relative = shifted / nominal - 1 if nominal else 0.
+            if abs(relative) > channel['relative_model_uncertainty']:
+                raise ValueError('Native mass precision effect exceeds the measured BR/TFF uncertainty')
+        coefficient = parent_branching_coefficient(native, signal_mass, model, br_mumu)
+        kinematic = parent_branching_coefficient(mass, signal_mass, model, br_mumu)
         relative = kinematic/coefficient-1 if coefficient else 0.
-        if abs(relative) > model['relative_model_uncertainty']:
-            raise ValueError('Native mass precision effect exceeds the measured BR/TFF uncertainty')
         parent.update(mass_gev=native, kinematic_mass_gev=mass, native_mass_shell_deviation=deviation,
                       coefficient_relative_precision_shift=relative,
                       coefficient_difference_from_kinematic_mass=kinematic-coefficient)
@@ -79,23 +215,54 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
 
 def validate_models(models):
     if not models or set(models) - set(PARENTS):
-        raise ValueError('Supply explicit eta/eta-prime parent model cards')
+        raise ValueError('Supply explicit supported exclusive meson parent model cards')
     for pdg, model in models.items():
+        if 'exclusive_channels' in model:
+            channels = model['exclusive_channels']
+            if not isinstance(channels, list) or len(channels) < 2:
+                raise ValueError('A parent channel group requires several explicit channels')
+            names = [row.get('channel') for row in channels]
+            if any(not name for name in names) or len(set(names)) != len(names):
+                raise ValueError('Exclusive channel names must be unique for a physical parent')
+            for channel in channels:
+                if any(channel[key] != model[key] for key in ('mass_min_gev', 'mass_max_gev')):
+                    raise ValueError('Channels of one physical parent must share its native support')
+                validate_models({pdg: channel})
+            continue
         if not model.get('provenance'):
             raise ValueError('Parent branching/form-factor provenance is required')
-        for key in ('mass_min_gev', 'br_gamma_gamma', 'form_factor_abs2'):
+        if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion'):
+            raise ValueError('Unsupported exclusive radiative decay type')
+        branching_key = ('br_pipi_gamma' if dipion_channel(model) else
+                         'br_p_gamma' if vector_parent(model) else 'br_gamma_gamma')
+        for key in ('mass_min_gev', branching_key, 'form_factor_abs2'):
             value = model.get(key)
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError('Finite explicit parent input required: ' + key)
-        if model['mass_min_gev'] <= 0 or not 0 < model['br_gamma_gamma'] <= 1 or model['form_factor_abs2'] <= 0:
+        if model['mass_min_gev'] <= 0 or not 0 < model[branching_key] <= 1 or model['form_factor_abs2'] <= 0:
             raise ValueError('Invalid parent mass, branching fraction or form factor')
+        if vector_parent(model):
+            recoils = {113: (111,221), 213: (211,), -213: (-211,),
+                       223: (111,221), 333: (111,221), 313: (311,), -313: (-311,),
+                       323: (321,), -323: (-321,)}
+            if (abs(pdg) not in (113, 213, 223, 333, 313, 323) or model.get('parent_polarization') != 'unpolarized' or
+                    model.get('parent_mass_model') != 'zero-width-pole' or
+                    type(model.get('recoil_pdg_id')) is not int or abs(model['recoil_pdg_id']) not in (111, 211, 221, 311, 321) or
+                    not math.isfinite(model.get('recoil_mass_gev', float('nan'))) or model['recoil_mass_gev'] <= 0):
+                raise ValueError('Require an explicit narrow-width unpolarized vector and physical pseudoscalar recoil')
+            if model['recoil_pdg_id'] not in recoils[pdg]:
+                raise ValueError('Unsupported exclusive vector transition or charge-conjugate assignment')
+            if model.get('mass_max_gev') != model['mass_min_gev']:
+                raise ValueError('Pole branching fractions require an explicitly zero-width vector source')
+        elif pdg not in (221, 331):
+            raise ValueError('Pseudoscalar photon channel has an unsupported parent')
         if ('mass_max_gev' in model and (not math.isfinite(model['mass_max_gev']) or
                                        model['mass_max_gev'] < model['mass_min_gev'])):
             raise ValueError('Invalid generator-supported parent mass interval')
 
 
 def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
-    """Analytic bound on sum_parent BR(P->gamma A') BR(A'->mumu) / epsilon^2.
+    """Analytic bound on the sum of exclusive radiative probabilities / epsilon^2.
 
     Each species' physical parent count is at most floor(Ecm/mass_min).
     Separate species bounds allow eta mesons produced by eta-prime decays.
@@ -108,7 +275,24 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
     if mass_gev is not None and (not math.isfinite(mass_gev) or mass_gev <= 2*MUON_MASS_GEV):
         raise ValueError('An open physical dimuon mass is required')
     terms = []
-    for model in models.values():
+    for model in (channel for group in models.values() for channel in exclusive_channels(group)):
+        if dipion_channel(model):
+            if mass_gev is None:
+                raise ValueError('Dipion proposal bounds require a fixed signal mass')
+            # The narrow eta species have identical min/max support. A broad
+            # dipion source needs a separately established envelope.
+            if model['mass_min_gev'] != model['mass_max_gev']:
+                raise ValueError('Dipion proposal requires an explicit narrow parent source')
+            value = parent_branching_coefficient(model['mass_max_gev'], mass_gev, model, br_mumu)
+            terms.append(math.floor(ecm_gev/model['mass_min_gev']) * value)
+            continue
+        if vector_parent(model):
+            if mass_gev is None:
+                phase = model['br_p_gamma'] * model['form_factor_abs2'] * br_mumu
+            else:
+                phase = parent_branching_coefficient(model['mass_max_gev'], mass_gev, model, br_mumu)
+            terms.append(math.floor(ecm_gev/model['mass_min_gev']) * phase)
+            continue
         phase = 1.
         if mass_gev is not None and 'mass_max_gev' in model:
             phase = max(0., 1-(mass_gev/model['mass_max_gev'])**2)**3
@@ -148,11 +332,10 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
             raise ValueError('Generated parent mass violates the analytic phase-space bound')
         # epsilon=1 is not a physical parameter passed to radiative_branching:
         # divide a safely small reference epsilon back out of its exact law.
-        reference = .001
-        value = radiative_branching(parent_mass, mass_gev, reference,
-            model['br_gamma_gamma'], math.sqrt(model['form_factor_abs2'])) / reference**2 * br_mumu
-        weights.append(value)
-    total = math.fsum(weights)
+        for channel in exclusive_channels(model):
+            value = parent_branching_coefficient(parent_mass, mass_gev, channel, br_mumu)
+            weights.append((parent, channel, value))
+    total = math.fsum(value for _, _, value in weights)
     if total > bound*(1+1.e-12):
         raise ValueError('Analytic source bound is violated; refusing biased clipping')
     probability = total/bound
@@ -162,10 +345,12 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
         return result
     draw = rng.random()*total
     cumulative = 0.
-    for parent, weight in zip(parents, weights):
+    for parent, channel, weight in weights:
         cumulative += weight
         if weight > 0 and draw < cumulative:
             result.update(accepted=True, parent_index=parent['index'], gen_weight=1.)
+            if channel.get('channel'):
+                result['selected_channel'] = channel['channel']
             return result
     raise RuntimeError('Weighted parent selection failed despite a finite positive sum')
 
