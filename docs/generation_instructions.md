@@ -256,6 +256,23 @@ after the project copies and their checksum receipts are verified.
 Campaign findings and current job status belong in `SHIFT_ANALYSIS.md`; detector
 findings belong in `SHIFT_RECONSTRUCTION.md`.
 
+## Material-aware QCD study tools (2026-10-19)
+
+`scripts/audit_shift_material_scout.py` compares complete GEN graphs and native
+weights with actual transport, saved ancestry and CSC SimHits. It checks original
+event identities and preserves the full run/luminosity accounting. CSC support
+does not establish digitization, trigger or reconstruction acceptance.
+
+`scripts/shift_material_path_score.py` reads an explicitly supplied private
+geometry and measures material along parent chords. Its score is a ranking
+feature; it is never a survival correction or an event weight. Unknown or
+unmodelled path sections remain explicit. Neither tool changes production.
+
+Keep scientific conclusions and the remaining qualification steps in
+[SHIFT_ANALYSIS.md](../../SHIFT_ANALYSIS.md) and
+[SHIFT_RECONSTRUCTION.md](../../SHIFT_RECONSTRUCTION.md). Study receipts belong
+in the compact validation evidence, not in production inputs or this guide.
+
 ## Night reconstruction of saved QCD GEN (2026-10-14)
 
 `prepare_shift_night_draws.py` freezes independent draws over all saved QCD
