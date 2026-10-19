@@ -15,13 +15,22 @@ absolute working directories, the verified local schedd and seven-day limits.
 `prepare_shift_stream_tasks.py` then prepares immutable per-source tasks as
 new GEN publications arrive. It never submits them itself.
 
-Each source first receives a GEN feature scan in a worker. The frozen selection
-draws up to six tail events, three forward opposite-sign events and one event
-from the remainder. Scarce groups contribute fewer events; every nonempty
-group has positive inclusion probability. These are a small first pass, not
-reconstruction of all saved GEN. Selected events run individually through the
-unchanged detector chain, with the original weight and exact inclusion
-probability retained. Saved muon decays are not drawn again.
+Each source first receives a GEN feature scan in a worker. The initial preview
+drew up to six tail events, three forward opposite-sign events and one event
+from the remainder. Scarce groups contributed fewer events; every nonempty
+group kept positive inclusion probability. Those small preview selections ran
+one original per detector job, retaining its native weight and exact inclusion
+probability. Saved muon decays were not drawn again.
+
+The separately frozen weekend pass instead selects every GEN-tail event,
+every forward opposite-sign event and a rounded-up 1% sample of the remainder
+in all six pThat bins. It uses 20 selected originals per detector job, a fresh
+selection seed, disjoint reconstruction IDs/seeds and a separate output
+campaign. Its existing GEN inputs keep the same muon enhancement, SoftMPI
+low-pT treatment and weighted high-bin profile. About 324,000 selected originals
+is a planning forecast; actual usable statistics require closed source cohorts
+and the full normalization checks. Neither storage nor completion of that whole
+pool is guaranteed by preparing a worklist.
 
 The controller submits each task at most once. A durable submission intent and
 unique nonce survive disconnects. An unknown scheduler response, missing job or
@@ -36,16 +45,21 @@ apply sigmaND divided by the sum of distinct full-source trials once, after
 combining sources in the same bin. The final snapshot also includes the unequal
 full source budgets. Finishing quickly never changes membership or exposure.
 
-The first designated source is an operational canary. Bulk reconstruction waits
-until its scan, every selected detector job, histogram publication and project
-PDF readbacks have passed. The separate gate receipt is created automatically;
-the frozen policy is unchanged. This validates the working pipeline, not the
-physical detector response or the statistical reach of the tails.
+Designated sources are operational canaries. Bulk reconstruction waits until
+their scans, every selected detector job, histogram publication and project PDF
+readbacks have passed. The weekend pass additionally requires both real
+20-event low/high-bin canaries to fit its 6 MiB publication bound, counting
+Nano, evidence, result/receipt bytes and a further 65,536 bytes. Native queue
+proof must also show all old preview/canary payloads and their retired managers
+have drained. A successful pipeline gate does not establish physical detector
+response or the statistical reach of the tails.
 
-Quota admission protects the other sealed campaign and every whole storage slot
-the unchanged GEN guard could still admit. The stream uses only the remaining
-headroom. Its small output reservation covers EOS publication, not local worker
-scratch. Workers enforce the publication-size bound before writing outputs.
+Quota admission protects the other declared campaigns and uses only remaining
+headroom. Earlier previews also reserved every whole storage slot their parallel
+GEN guard could still admit. The new weekend pass consumes the closed GEN pool
+and uses the shared peer authority described below. Publication reservations
+cover EOS outputs, not local worker scratch. Workers enforce their size bound
+before writing outputs.
 
 A new supervisor can set `parallel_gen_completion` to release that reserve after
 GEN finishes. This authority has schema
@@ -93,6 +107,112 @@ may change only `histogram_worker`, used for histogram and merge stages.
 Existing scans, reconstruction workers, sampling and descriptors stay pinned.
 Quota observations allow 600 seconds for sealed external accounting, and the
 audit job requests 1200 seconds before matching.
+
+The historical October 16 V7 capacity rollover also permits
+`maximum_open_sources` in that replacement factory policy. This changes how
+many predefined source cohorts can advance together; source order, membership,
+selections and weights stay
+fixed. Supervisor-only overrides `admission_worker_ceiling` and
+`maximum_submissions_per_poll` raise scheduling capacity without editing the
+original campaign or its sealed admission/storage authorities. That historical
+deployment used an account ceiling of 1,000 and reserved its entire possible
+worker wave, so more than 100 external workers blocked its 900-worker stream.
+The October 16 draft's account ceiling of 10,000 is also historical; neither
+value establishes the site's current ceiling.
+
+New streaming controllers default to `reserve_full_worker_ceiling: false`.
+They reserve one proposed task plus their queued, held and pending claims,
+against other running, transferring or suspended workers. Other productions'
+idle jobs do not consume the site's running ceiling. Unknown remote execution
+state still stops admission. Standalone DAG callers retain full-wave
+reservation by default; an explicit `true` also retains it for a stream.
+The October 17 evening replacement uses the verified site ceiling of 1,607,
+with at most 900 own workers, twenty waiting jobs and twenty submissions per
+poll. Recheck the current site ceiling before any future cold replacement.
+The initial sixteen-worker and six-source limits were preview settings.
+
+A separately frozen bulk pass may use `reco_events_per_job` (1--50),
+`reco_job_stride` and `reco_job_offset`. Batches cover each selected original
+exactly once and reserve disjoint source job/seed ranges. Changing batching,
+selection, seeds or output campaign is not a supervisor rollover: prepare a new
+pass. Fixed GEN quotas or fractions can be declared separately by pThat bin;
+fractions round up to an integer sample and record that exact inclusion
+probability. Every nonempty group retains positive sampling support. A group
+sampled in full has probability one. These changes do not alter native GEN
+weights or full source-trial denominators.
+
+Task preparation hashes each shared frozen worker/archive once per invocation,
+checking inode, size and timestamps again before reuse. A change during that
+invocation fails preparation. Scientific input hashes and task pins are still
+checked separately for every task; the controller also validates its frozen
+inputs before scheduling them.
+
+After preparation and quota auditing, the controller refreshes both its real
+clock and native local queue before admission. Each PRE claim uses the actual
+admission time, so a long preparation cannot make a newer audit look as though
+it came from the future.
+
+`worker_publication_bytes` bounds reconstruction and provides the default for
+other stages. Explicit `stage_publication_bounds` may raise `histogram` and
+`merge` to at most 512 MiB. The admission guard reserves its explicit baseline
+per worker plus the difference for each actual large-stage worker, persistent
+PRE claim and new candidate. Live/held workers, pending PREs and completed tasks
+not yet covered by a newer verified quota keep that extra reservation. Unknown
+task identities or stage bounds stop admission. The shared GEN guard is
+unchanged. V7 retains its frozen 32 MiB baseline; the unsubmitted first weekend
+draft used 128 MiB. The final weekend policy instead requires the measured
+6 MiB total-publication canary gate, uses that 6 MiB baseline and reserves the
+additional 506 MiB for each actual 512 MiB histogram/merge stage.
+
+An explicit `maximum_outstanding_publication_bytes` also caps the sum of all
+baseline and large-stage claims, including held workers and completed workers
+not covered by a fresh quota. Set the admission account ceiling no higher than
+the verified current site limit from `condor_userprio`; never raise the site's
+ceiling. Replace an obsolete frozen policy through a reviewed cold deployment,
+preserving live workers and all storage checks.
+The weekend policy caps all its outstanding publication claims at exactly
+6,144,000,000 bytes, including baseline and stage differences. Thus 900 is a
+scheduler limit, not a promise that storage will admit 900 workers at once.
+
+The optional `shift-statistics-peer-storage-authority-v1` authority pins the
+existing main, meson and supplement worklists, guards, controller configurations
+and native launch identities. It reports every future canonical claim and counts the shared
+transient floor once. When full-future headroom is insufficient, its reviewed
+constrained mode protects active main/meson allocations and every possible
+transient writer, while bounding this stream by the QCD allowance already
+protected by each peer guard. Deferred supplements retain their whole-future
+admission gates. Unknown peer controllers, unknown writers and undrained old
+SM campaigns block admission in both modes. The native quota audit must test
+this authority before a new deployment is armed. Native controller Iwd, command,
+arguments and marker must match their pinned guard deployment; a replacement
+inside the same broad source directory does not inherit its predecessor's
+approval. If a deferred supplement starts a science writer, new stream admission
+requires the full-future mode. The constrained mode never reports that deferred
+future as completed or releases its scientific exposure.
+
+Optional `stage_worker_priorities` for `histogram` and `merge` keep publication
+and closed-source merging ahead of the large reconstruction queue. Quota audits
+must retain still higher priority so fresh storage observations cannot starve.
+Reconstruction batches retain source order; any batch containing a GEN-tail
+event gets the tail priority. This boosts such batches but does not put every
+tail original ahead of all other originals.
+
+A two-source operational canary may set
+`produce_snapshots: false`; this avoids presenting two bins as a complete
+six-bin rate snapshot. Normal production keeps snapshots enabled. Optional
+frozen `reference_histogram_inputs` and its SHA-256 are transferred to snapshot
+workers with `--reference-inputs` for the existing DY/Jpsi components.
+
+New controllers may opt into `isolate_failed_cohorts: true`. A failed detector
+execution or timeout is isolated only after the native execute/nonzero exit and
+the failed report prove the exact selected GEN identities, count, descriptor
+and completed GEN input audit. The report must identify an active detector
+processing tier. The whole source and every dependent snapshot are quarantined;
+other sources may continue. Failed jobs are never released or retried, and a
+failed source is never omitted from a rate denominator. Configuration, identity,
+weight and output audits, EOS publication, credentials, unknown exits and queue
+faults still stop new admissions globally. Failed evidence remains pinned by
+SHA-256 and cannot change silently.
 
 `prepare_shift_stream_retry.py` is an explicit, cold repair for failed histogram
 tasks. It requires a fresh, successful native full-owner queue receipt with the
