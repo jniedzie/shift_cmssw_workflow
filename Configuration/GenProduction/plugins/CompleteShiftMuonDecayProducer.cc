@@ -51,6 +51,37 @@ public:
           !eligiblePosition_.emplace(eligibleBarcodes_[i], i).second)
         throw cms::Exception("Configuration") << "Unique positive eligible barcodes and finite positive proper lifetimes required";
     }
+    if (config.existsAs<std::vector<edm::ParameterSet>>("smoothLifetimeComponents")) {
+      for (auto const& definition : config.getParameter<std::vector<edm::ParameterSet>>("smoothLifetimeComponents")) {
+        LifetimeComponent component{definition.getParameter<double>("probability"),
+                                    definition.getParameter<std::vector<int>>("parentBarcodes"),
+                                    definition.getParameter<std::vector<double>>("proposalMeanProperLifetimeMm")};
+        if (!(std::isfinite(component.probability) && component.probability >= 0. && component.probability <= 1.) ||
+            component.barcodes.empty() || component.barcodes.size() > 2 ||
+            component.barcodes.size() != component.means.size())
+          throw cms::Exception("Configuration") << "Smooth components need a probability and one or two aligned parent means";
+        std::set<int> unique;
+        for (unsigned int i = 0; i < component.barcodes.size(); ++i) {
+          if (component.barcodes[i] <= 0 || !unique.insert(component.barcodes[i]).second ||
+              !(std::isfinite(component.means[i]) && component.means[i] > 0.))
+            throw cms::Exception("Configuration") << "Smooth component parents must be distinct positive barcodes with positive finite means";
+        }
+        smoothComponents_.push_back(component);
+      }
+    }
+    smoothMode_ = !smoothComponents_.empty();
+    if (smoothMode_) {
+      if (!eligibleBarcodes_.empty() || !(expectedRun_ && expectedLumi_ && expectedEvent_))
+        throw cms::Exception("Configuration") << "Smooth fixed-parent diagnostics need empty legacy pion bounds and exact original identity";
+      smoothProbabilityTotal_ = ordinaryFraction_;
+      for (auto const& component : smoothComponents_) {
+        if (ordinaryFraction_ == 1. && component.probability != 0.)
+          throw cms::Exception("Configuration") << "An exactly ordinary replay cannot declare a positive smooth component";
+        smoothProbabilityTotal_ += component.probability;
+      }
+      if (!std::isfinite(smoothProbabilityTotal_) || std::abs(smoothProbabilityTotal_ - 1.) > 1.e-12)
+        throw cms::Exception("Configuration") << "Ordinary fraction plus absolute smooth component probabilities must sum to one";
+    }
     auto xy = config.getParameter<double>("decayCylinderRadiusMm");
     auto z = config.getParameter<double>("decayCylinderHalfLengthMm");
     if (!(std::isfinite(xy) && xy > 0 && std::isfinite(z) && z > 0))
@@ -177,12 +208,34 @@ public:
     }
     if (std::any_of(eligible.begin(), eligible.end(), [](auto* p) { return p == nullptr; }))
       throw cms::Exception("EventCorruption") << "Frozen eligible pion barcode missing from original stable parent set";
+    std::map<int, HepMC::GenParticle*> smoothParents;
+    if (smoothMode_) {
+      for (auto const& component : smoothComponents_) {
+        for (int barcode : component.barcodes) {
+          auto found = std::find_if(parents.begin(), parents.end(),
+                                    [barcode](auto* parent) { return parent->barcode() == barcode; });
+          if (found == parents.end())
+            throw cms::Exception("EventCorruption") << "Smooth proposal parent is absent from original stable enabled set";
+          auto* parent = *found;
+          auto const& momentum = parent->momentum();
+          double mass = parent->generated_mass();
+          double mean = pythia_.particleData.tau0(parent->pdg_id());
+          if (!parent->production_vertex() || !pythia_.particleData.isHadron(parent->pdg_id()) ||
+              !(std::isfinite(mean) && mean > 0. && std::isfinite(mass) && mass > 0. &&
+                std::isfinite(momentum.e()) && momentum.e() > 0. && std::isfinite(momentum.m2())) ||
+              std::abs(momentum.m2() - mass * mass) >
+                  std::max(1.e-7, 64. * std::numeric_limits<double>::epsilon() * momentum.e() * momentum.e()))
+            throw cms::Exception("EventCorruption") << "Smooth parent must be a physical enabled hadron with a positive natural lifetime";
+          smoothParents.emplace(barcode, parent);
+        }
+      }
+    }
     std::vector<std::pair<unsigned int, unsigned int>> pairs;
     for (unsigned int i = 0; i < eligible.size(); ++i)
       for (unsigned int j = i + 1; j < eligible.size(); ++j)
         if (eligible[i]->pdg_id() * eligible[j]->pdg_id() < 0)
           pairs.emplace_back(i, j);
-    if (pairs.empty() && ordinaryFraction_ < 1.)
+    if (!smoothMode_ && pairs.empty() && ordinaryFraction_ < 1.)
       throw cms::Exception("Configuration") << "Conditioned component requires an eligible opposite-charge pion pair";
     std::vector<double> probabilities(eligible.size());
     for (unsigned int i = 0; i < eligible.size(); ++i) {
@@ -194,8 +247,25 @@ public:
     unsigned int component = 0;
     std::set<int> conditionedBarcodes;
     std::vector<int> chosen;
+    std::map<int, double> selectedSmoothMeans;
     // Alpha=1 consumes exactly the original RNG sequence, including init.
-    if (ordinaryFraction_ < 1. && pythia_.rndm.flat() >= ordinaryFraction_) {
+    if (smoothMode_ && ordinaryFraction_ < 1.) {
+      double draw = pythia_.rndm.flat() * smoothProbabilityTotal_;
+      double cumulative = ordinaryFraction_;
+      for (unsigned int i = 0; i < smoothComponents_.size(); ++i) {
+        auto const& proposal = smoothComponents_[i];
+        cumulative += proposal.probability;
+        if (draw >= ordinaryFraction_ && draw < cumulative) {
+          component = i + 1;
+          chosen = proposal.barcodes;
+          for (unsigned int j = 0; j < chosen.size(); ++j)
+            selectedSmoothMeans.emplace(chosen[j], proposal.means[j]);
+          break;
+        }
+      }
+      if (draw >= ordinaryFraction_ && component == 0)
+        throw cms::Exception("EventCorruption") << "Smooth mixture draw did not select its declared component";
+    } else if (!smoothMode_ && ordinaryFraction_ < 1. && pythia_.rndm.flat() >= ordinaryFraction_) {
       component = 1;
       auto selected = std::min(pairs.size() - 1, static_cast<size_t>(pythia_.rndm.flat() * pairs.size()));
       auto const& pair = pairs[selected];
@@ -205,6 +275,7 @@ public:
     std::vector<int> recordedBarcodes, recordedPdgIds;
     std::vector<double> recordedLifetimes, recordedNominalLifetimes;
     std::vector<double> eligibleLifetimes(eligible.size(), std::numeric_limits<double>::quiet_NaN());
+    std::map<int, double> smoothLifetimes;
     unsigned int decayed = 0, muons = 0;
     for (auto* parent : parents) {
       if (!parent->production_vertex())
@@ -218,7 +289,10 @@ public:
       double tau0 = pythia_.particleData.tau0(parent->pdg_id());
       double tau;
       auto position = eligiblePosition_.find(parent->barcode());
-      if (conditionedBarcodes.count(parent->barcode()))
+      auto smooth = selectedSmoothMeans.find(parent->barcode());
+      if (smooth != selectedSmoothMeans.end())
+        tau = pythia_.rndm.exp() * smooth->second;
+      else if (conditionedBarcodes.count(parent->barcode()))
         tau = -tau0 * std::log1p(-pythia_.rndm.flat() * probabilities[position->second]);
       else
         tau = pythia_.rndm.exp() * tau0;
@@ -226,6 +300,8 @@ public:
         throw cms::Exception("EventCorruption") << "Invalid sampled proper lifetime";
       if (position != eligiblePosition_.end())
         eligibleLifetimes[position->second] = tau;
+      if (smoothParents.count(parent->barcode()))
+        smoothLifetimes.emplace(parent->barcode(), tau);
       recordedBarcodes.push_back(parent->barcode());
       recordedPdgIds.push_back(parent->pdg_id());
       recordedLifetimes.push_back(tau);
@@ -256,6 +332,33 @@ public:
     // Marginalize over ALL eligible pairs, not only the selected component.
     double ratio = ordinaryFraction_ + (pairs.empty() ? 0. : (1. - ordinaryFraction_) * pairDensity / pairs.size());
     double correction = 1. / ratio;
+    if (smoothMode_) {
+      // Every root lifetime is drawn before transport. Absorption never removes
+      // a latent lifetime from this full-mixture denominator or causes a retry.
+      double logRatio = std::log(ordinaryFraction_);
+      for (auto const& proposal : smoothComponents_) {
+        if (proposal.probability == 0.)
+          continue;
+        double value = std::log(proposal.probability);
+        for (unsigned int i = 0; i < proposal.barcodes.size(); ++i) {
+          int barcode = proposal.barcodes[i];
+          auto sampled = smoothLifetimes.find(barcode);
+          if (sampled == smoothLifetimes.end())
+            throw cms::Exception("EventCorruption") << "Missing latent smooth-parent lifetime";
+          double natural = pythia_.particleData.tau0(smoothParents.at(barcode)->pdg_id());
+          double mean = proposal.means[i];
+          if (mean != natural)
+            value += std::log(natural) - std::log(mean) + sampled->second / natural - sampled->second / mean;
+        }
+        if (!std::isfinite(value))
+          throw cms::Exception("EventCorruption") << "Smooth component density exceeds finite logarithmic support";
+        double high = std::max(logRatio, value), low = std::min(logRatio, value);
+        logRatio = high + std::log1p(std::exp(low - high));
+      }
+      logRatio -= std::log(smoothProbabilityTotal_);
+      ratio = std::exp(logRatio);
+      correction = std::exp(-logRatio);
+    }
     if (!(std::isfinite(ratio) && ratio > 0. && std::isfinite(correction) && correction > 0.))
       throw cms::Exception("EventCorruption") << "Invalid full-mixture proposal weight";
     event.put(std::make_unique<std::vector<int>>(recordedBarcodes), "parentBarcodes");
@@ -268,7 +371,7 @@ public:
     event.put(std::make_unique<std::vector<int>>(chosen), "selectedPairBarcodes");
     event.put(std::make_unique<unsigned int>(component), "proposalComponent");
     event.put(std::make_unique<unsigned int>(pairs.size()), "eligiblePairCount");
-    event.put(std::make_unique<double>(ordinaryFraction_), "proposalOrdinaryFraction");
+    event.put(std::make_unique<double>(smoothMode_ ? ordinaryFraction_ / smoothProbabilityTotal_ : ordinaryFraction_), "proposalOrdinaryFraction");
     event.put(std::make_unique<double>(ratio), "proposalDensityRatio");
     event.put(std::make_unique<double>(correction), "proposalCorrection");
     event.put(std::make_unique<bool>(true), "proposalAuditPassed");
@@ -291,6 +394,14 @@ private:
   std::vector<int> eligibleBarcodes_;
   std::vector<double> maximumProperLifetimeMm_;
   std::map<int, unsigned int> eligiblePosition_;
+  struct LifetimeComponent {
+    double probability;
+    std::vector<int> barcodes;
+    std::vector<double> means;
+  };
+  std::vector<LifetimeComponent> smoothComponents_;
+  bool smoothMode_ = false;
+  double smoothProbabilityTotal_ = 1.;
 };
 
 DEFINE_FWK_MODULE(CompleteShiftMuonDecayProducer);
