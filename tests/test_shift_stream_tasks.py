@@ -34,7 +34,7 @@ class FactoryTests(unittest.TestCase):
                 histogrammer='@SCRATCH@/runtime/bin/shift_histogrammer',
                 merger='@SCRATCH@/runtime/scripts/merge.py'),
             snapshot_eos_base='/eos/user/j/jniedzie/shift_cmssw_support/stream/snapshots',
-            plot_output='/unused/project/plots', canary_source_ids=['production_qcd_0to1_0000'])
+            plot_output=str(self.root/'plots'), canary_source_ids=['production_qcd_0to1_0000'])
         self.source = dict(source_id='production_qcd_0to1_0000', stratum='qcd_0to1',
             gen='/eos/user/j/jniedzie/shift_cmssw/qcd_pThat0to1GeV/20261015_mu_enriched_v1/GEN/source/gen.root',
             gen_sha256='a'*64, event_ids=[[42,1,1], [42,1,2]], weights=[1.,1.],
@@ -242,7 +242,7 @@ class FactoryTests(unittest.TestCase):
                            ('reco_job_offset', 200000), ('prioritize_GEN_strata', True)):
             with self.subTest(key=key):
                 save(replacement, self.policy | {key: value})
-                with self.assertRaisesRegex(ValueError, 'only the histogram worker'):
+                with self.assertRaisesRegex(ValueError, 'undeclared detector, source or output setting'):
                     module.prepare(self.root, replacement)
 
     def test_first_scan_must_return_before_other_sources_are_prepared(self):
@@ -315,16 +315,47 @@ class FactoryTests(unittest.TestCase):
                     self.assertEqual({path: sha(path) for path in paths}, before)
                     self.assertFalse(any(self.root.glob('tasks/snapshot_*.json')))
 
-    def test_quarantined_source_still_blocks_fixed_prefix_and_final_snapshots(self):
+    def test_failed_source_does_not_block_ready_sources_in_other_bins(self):
         slots = [dict(source_id=stratum+'_0', stratum=stratum, request={'chunk_index': 0})
                  for stratum in module.STRATA]
         ledger = {slot['source_id']+'_histogram': {'phase': 'complete'} for slot in slots}
         failed_source = slots[0]['source_id']
         ledger[failed_source+'_histogram'] = {'phase': 'waiting'}
         ledger[failed_source+'_reco_000'] = {'phase': 'failed', 'failure_scope': 'cohort'}
+        for slot in slots[1:]:
+            identity = slot['source_id']+'_histogram'
+            result = self.root/(identity+'_result.json')
+            save(result, {'complete': True, 'nano_audit': {'events': 100}})
+            save(self.root/'tasks'/(identity+'.json'), {'result_path': str(result)})
+        self.policy['plot_output'] = str(self.root/'plots')
         module.prepare_snapshots(self.root, self.policy, {'source_slots': slots}, ledger)
-        self.assertFalse(any(self.root.glob('tasks/snapshot_*.json')))
+        task = module.read(next(self.root.glob('tasks/snapshot_ready_*.json')))
+        self.assertEqual(len(task['depends_on']), 5)
+        self.assertNotIn(failed_source+'_histogram', task['depends_on'])
         self.assertEqual(ledger[failed_source+'_histogram']['phase'], 'waiting')
+
+    def test_merge_waits_for_meaningful_growth_but_not_more_than_six_hours(self):
+        slot = dict(source_id='qcd_0to1_0', stratum='qcd_0to1', request={'chunk_index': 0})
+        identity = slot['source_id']+'_histogram'
+        result = self.root/'source_result.json'
+        save(result, {'complete': True, 'nano_audit': {'events': 1100}})
+        save(self.root/'tasks'/(identity+'.json'), {'result_path': str(result)})
+        latest = Path(self.policy['plot_output'])/'latest_ready.json'
+        latest.parent.mkdir()
+        save(latest, dict(closed_cohort_ids=['older_source'], events_by_stratum={'qcd_0to1': 1000},
+                         merged_at_epoch=10000))
+        ledger = {identity: {'phase': 'complete'}}
+        with mock.patch.object(module.time, 'time', return_value=13600):
+            module.prepare_snapshots(self.root, self.policy, {'source_slots': [slot]}, ledger)
+        self.assertFalse(list(self.root.glob('tasks/snapshot_ready_*.json')))
+        with mock.patch.object(module.time, 'time', return_value=32000):
+            module.prepare_snapshots(self.root, self.policy, {'source_slots': [slot]}, ledger)
+        task = module.read(next(self.root.glob('tasks/snapshot_ready_*.json')))
+        self.assertEqual(task['depends_on'], [identity])
+        ledger[task['task_id']] = {'phase': 'submitted'}
+        with mock.patch.object(module.time, 'time', return_value=64000):
+            module.prepare_snapshots(self.root, self.policy, {'source_slots': [slot]}, ledger)
+        self.assertEqual(len(list(self.root.glob('tasks/snapshot_ready_*.json'))), 1)
 
     def test_snapshot_pins_reference_inputs_and_uses_the_reviewed_publication_bound(self):
         self.policy['worker_publication_bytes'] = 128*1024**2
@@ -342,7 +373,7 @@ class FactoryTests(unittest.TestCase):
             save(self.root/'tasks'/(identity+'.json'), {'result_path': str(result)})
             ledger[identity] = {'phase': 'complete'}
         module.prepare_snapshots(self.root, self.policy, {'source_slots': slots}, ledger)
-        task = module.read(self.root/'tasks/snapshot_prefix_000001.json')
+        task = module.read(next(self.root.glob('tasks/snapshot_ready_*.json')))
         request = module.read(Path(task['working_directory'])/'request.json')
         self.assertEqual(request['argv'][request['argv'].index('--reference-inputs')+1], references.name)
         self.assertEqual(task['input_sha256'][str(references)], sha(references))
@@ -380,15 +411,21 @@ class FactoryTests(unittest.TestCase):
         self.assertEqual(cohort['selected_events'][0]['sampling_probability'],.5)
         self.assertEqual(cohort['expected_reco_job_ids'],[10096])
 
-    def test_snapshot_never_replaces_missing_first_source_with_finished_later_one(self):
+    def test_ready_merge_includes_finished_later_sources_while_earlier_sources_wait(self):
         slots=[]
         for stratum in module.STRATA:
             for index in (0,1):
                 slots.append(dict(source_id=stratum+'_'+str(index),stratum=stratum,request={'chunk_index':index}))
         ledger={slot['source_id']+'_histogram':{'phase':'complete'} for slot in slots
                 if slot['request']['chunk_index']==1}
+        self.policy['plot_output'] = str(self.root/'plots')
+        for identity in ledger:
+            result = self.root/(identity+'_result.json')
+            save(result, {'complete': True, 'nano_audit': {'events': 100}})
+            save(self.root/'tasks'/(identity+'.json'), {'result_path': str(result)})
         module.prepare_snapshots(self.root,self.policy,{'source_slots':slots},ledger)
-        self.assertEqual(list((self.root/'tasks').glob('snapshot*')),[])
+        task = module.read(next(self.root.glob('tasks/snapshot_ready_*.json')))
+        self.assertEqual(set(task['depends_on']), set(ledger))
 
     def test_immutable_prepared_values_cannot_be_overwritten(self):
         path=self.root/'input.json';module.unchanged(path,{'a':1})
@@ -417,7 +454,7 @@ class FactoryTests(unittest.TestCase):
         for key, value in (('output_campaign', 'changed'), ('worker', {}), ('canary_source_ids', [])):
             with self.subTest(key=key):
                 save(replacement, self.policy | {key: value})
-                with self.assertRaisesRegex(ValueError, 'only the histogram worker'):
+                with self.assertRaisesRegex(ValueError, 'undeclared detector, source or output setting'):
                     module.prepare(self.root, replacement)
 
     def test_open_source_rollover_preserves_plan_and_balanced_source_order(self):

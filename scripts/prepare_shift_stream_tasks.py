@@ -12,10 +12,11 @@ import math
 from pathlib import Path
 import re
 import tarfile
+import time
 
 from run_shift_stream_controller import read, sha
 from shift_streaming_qcd_inputs import (STRATA, digest, select_events,
-    source_descriptor, validate_plan, write_new)
+    source_descriptor, validate_plan, validate_policy, write_new)
 
 
 def unchanged(path, value):
@@ -229,7 +230,13 @@ def prepare_source(root, policy, plan, slot, ordinal, ledger, worker_checksums=N
     if selected_path.exists():
         selected = read(selected_path)
     else:
-        selected = select_events(source, plan, read(scan['result_path']))
+        selection_plan = plan
+        if policy.get('selection_policy'):
+            selection_plan = dict(plan, selection_policy=policy['selection_policy'],
+                                  policy_sha256=digest(policy['selection_policy']))
+            selection_plan.pop('plan_sha256')
+            selection_plan['plan_sha256'] = digest(selection_plan)
+        selected = select_events(source, selection_plan, read(scan['result_path']))
         base = source_output(source, policy['output_campaign'])
         selected.update(storage_contract='shift-process-bin-detector-v1',
                         nano_base=base+'/nanoAOD', metadata_base=base+'/metadata/reco',
@@ -269,6 +276,8 @@ def prepare_source(root, policy, plan, slot, ordinal, ledger, worker_checksums=N
             worker_checksums=worker_checksums)
     if not reco_ids or not all(done(ledger, identity) for identity in reco_ids):
         return
+    if (root/'tasks'/(source_id+'_histogram.json')).exists():
+        return
     nano = []
     for identity, job in zip(reco_ids, jobs):
         task = read(root/'tasks'/(identity+'.json'))
@@ -292,7 +301,7 @@ def prepare_source(root, policy, plan, slot, ordinal, ledger, worker_checksums=N
         argv.extend(['--nano-integrity-runtime', str(runtime)])
     hist_request = request('histogram', cohort, 'tea', argv,
                            'histograms/cohort_complete.json', policy)
-    if tools.get('plotter'):
+    if tools.get('plotter') and policy.get('plot_source_histograms', True):
         argv.extend(['--plotter', tools['plotter'], '--plot-output', '@SCRATCH@/histograms/plots'])
         hist_request['return_files'] = ['histograms/plots']
     make_task(root, policy, source_id+'_histogram', 'histogram', cohort, hist_request,
@@ -301,54 +310,81 @@ def prepare_source(root, policy, plan, slot, ordinal, ledger, worker_checksums=N
 
 
 def prepare_snapshots(root, policy, plan, ledger, worker_checksums=None):
-    """Only predetermined complete source-index prefixes can produce rate plots."""
-    slots = plan['source_slots']
-    maximum = min(sum(slot['stratum'] == stratum for slot in slots) for stratum in STRATA)
-    # The final campaign has unequal source budgets (notably 500 and 145).
-    # Its last snapshot must include those extra predetermined sources too.
-    for prefix in list(range(1, maximum + 1)) + [None]:
-        members = [slot for slot in slots if prefix is None or slot['request']['chunk_index'] < prefix]
-        tasks = [slot['source_id']+'_histogram' for slot in members]
-        if not all(done(ledger, identity) for identity in tasks):
-            break
-        identity = 'snapshot_complete_campaign' if prefix is None else 'snapshot_prefix_'+str(prefix).zfill(6)
-        if (root/'tasks'/(identity+'.json')).exists():
-            continue
-        cohort = 'qcd_GEN_complete_production' if prefix is None else 'qcd_GEN_prefix_'+str(prefix).zfill(6)
-        directory = root/'cohorts'/cohort
-        directory.mkdir(parents=True, exist_ok=True)
-        receipts, receipt_inputs = [], []
-        for task_id in tasks:
-            task = read(root/'tasks'/(task_id+'.json'))
-            # Transfer compact receipts explicitly. Workers need no AFS read
-            # permission and do not rely on scheduler paths inside scratch.
-            receipt_path = unchanged(directory/(task_id+'_receipt.json'), read(task['result_path']))
-            receipt_inputs.append(receipt_path)
-            receipts.append(dict(path=receipt_path.name, sha256=sha(receipt_path)))
-        inventory = dict(schema='shift-streaming-histogram-snapshot-inputs-v1', snapshot_id=cohort,
-            expected_cohort_ids=['source_'+slot['source_id'] for slot in members], cohort_receipts=receipts,
-            maximum_publication_bytes=publication_bound(policy, 'merge'))
-        path = unchanged(directory/'snapshot.json', inventory)
-        argv = ['python3', policy['tools']['histograms'], 'snapshot', '--inventory', 'snapshot.json',
-            '--output-directory', '@SCRATCH@/snapshot', '--merge-script', policy['tools']['merger'],
-            '--publish-directory', policy['snapshot_eos_base']+'/'+cohort]
-        reference_inputs = policy.get('reference_histogram_inputs')
-        if reference_inputs:
-            reference_path = Path(reference_inputs)
-            if not reference_path.is_absolute() or not reference_path.is_file():
-                raise ValueError('Reference histogram inputs need an existing immutable absolute path')
-            if sha(reference_path) != policy.get('reference_histogram_inputs_sha256'):
-                raise ValueError('Reference histogram inventory differs from its frozen checksum')
-            receipt_inputs.append(reference_path)
-            argv.extend(['--reference-inputs', reference_path.name])
-        if policy['tools'].get('plotter'):
-            argv.extend(['--plotter', policy['tools']['plotter'], '--plot-output', '@SCRATCH@/snapshot/plots'])
-        payload = request('merge', cohort, 'tea', argv, 'snapshot/snapshot_complete.json', policy)
-        if policy['tools'].get('plotter'):
-            payload['return_files'] = ['snapshot/plots']
-        make_task(root, policy, identity, 'merge', cohort,
-            payload, [path]+receipt_inputs, tasks,
-            checks={'inventory_sha256': sha(path)}, canary=False, worker_checksums=worker_checksums)
+    """Periodically merge every completed source, independently across pThat bins."""
+    if any(identity.startswith('snapshot_ready_') and state['phase'] not in ('complete', 'failed')
+           for identity, state in ledger.items()):
+        return
+    members = [slot for slot in plan['source_slots']
+               if done(ledger, slot['source_id']+'_histogram')]
+    if not members:
+        return
+    tasks = [slot['source_id']+'_histogram' for slot in members]
+    cohorts = ['source_'+slot['source_id'] for slot in members]
+    events_by_stratum = {}
+    for slot, identity in zip(members, tasks):
+        task = read(root/'tasks'/(identity+'.json'))
+        result = read(task['result_path'])
+        count = result.get('nano_audit', {}).get('events', 0)
+        events_by_stratum[slot['stratum']] = events_by_stratum.get(slot['stratum'], 0) + count
+    latest_path = Path(policy['plot_output'])/'latest_ready.json'
+    previous = read(latest_path) if latest_path.exists() else {}
+    if set(cohorts).issubset(set(previous.get('closed_cohort_ids', []))):
+        return
+    now = time.time()
+    elapsed = now - previous.get('merged_at_epoch', 0)
+    if previous and elapsed < policy.get('merge_min_interval_seconds', 1800):
+        return
+    old_counts = previous.get('events_by_stratum', {})
+    meaningful = any(count - old_counts.get(name, 0) >= policy.get('merge_min_new_events', 100)
+                     and count >= old_counts.get(name, 0)*(1 + policy.get('merge_min_growth', .2))
+                     for name, count in events_by_stratum.items())
+    if previous and not meaningful and elapsed < policy.get('merge_max_interval_seconds', 21600):
+        return
+    signature = digest(tasks)[:12]
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime(now))
+    merge_tag = stamp + '_' + signature
+    identity = 'snapshot_ready_'+signature
+    if (root/'tasks'/(identity+'.json')).exists():
+        return
+    cohort = 'qcd_ready_'+merge_tag
+    directory = root/'cohorts'/cohort
+    directory.mkdir(parents=True, exist_ok=True)
+    receipts, receipt_inputs = [], []
+    for task_id in tasks:
+        task = read(root/'tasks'/(task_id+'.json'))
+        # Transfer compact receipts explicitly. Workers need no AFS read
+        # permission and do not rely on scheduler paths inside scratch.
+        receipt_path = unchanged(directory/(task_id+'_receipt.json'), read(task['result_path']))
+        receipt_inputs.append(receipt_path)
+        receipts.append(dict(path=receipt_path.name, sha256=sha(receipt_path)))
+    inventory = dict(schema='shift-streaming-histogram-snapshot-inputs-v1', snapshot_id=cohort,
+        expected_cohort_ids=['source_'+slot['source_id'] for slot in members], cohort_receipts=receipts,
+        maximum_publication_bytes=publication_bound(policy, 'merge'),
+        events_by_stratum=events_by_stratum, frozen_at_epoch=now, merge_tag=merge_tag)
+    path = unchanged(directory/'snapshot.json', inventory)
+    argv = ['python3', policy['tools']['histograms'], 'snapshot', '--inventory', 'snapshot.json',
+        '--output-directory', '@SCRATCH@/snapshot', '--merge-script', policy['tools']['merger'],
+        '--publish-directory', policy['snapshot_eos_base']+'/'+cohort]
+    if policy.get('campaign_base_path'):
+        argv.extend(['--campaign-base-path', policy['campaign_base_path'],
+                     '--campaign', policy['output_campaign']])
+    reference_inputs = policy.get('reference_histogram_inputs')
+    if reference_inputs:
+        reference_path = Path(reference_inputs)
+        if not reference_path.is_absolute() or not reference_path.is_file():
+            raise ValueError('Reference histogram inputs need an existing immutable absolute path')
+        if sha(reference_path) != policy.get('reference_histogram_inputs_sha256'):
+            raise ValueError('Reference histogram inventory differs from its frozen checksum')
+        receipt_inputs.append(reference_path)
+        argv.extend(['--reference-inputs', reference_path.name])
+    if policy['tools'].get('plotter') and policy.get('render_snapshot_plots', False):
+        argv.extend(['--plotter', policy['tools']['plotter'], '--plot-output', '@SCRATCH@/snapshot/plots'])
+    payload = request('merge', cohort, 'tea', argv, 'snapshot/snapshot_complete.json', policy)
+    if policy['tools'].get('plotter') and policy.get('render_snapshot_plots', False):
+        payload['return_files'] = ['snapshot/plots']
+    make_task(root, policy, identity, 'merge', cohort,
+        payload, [path]+receipt_inputs, tasks,
+        checks={'inventory_sha256': sha(path)}, canary=False, worker_checksums=worker_checksums)
 
 
 def publish_returned_plots(root, policy, ledger):
@@ -400,6 +436,9 @@ def publish_returned_plots(root, policy, ledger):
                     previous.get('snapshot_cohort_count', 0) > count):
                 return
         ready = dict(record, snapshot_cohort_count=count,
+                     closed_cohort_ids=result.get('closed_cohort_ids', []),
+                     events_by_stratum=result.get('events_by_stratum', {}),
+                     merged_at_epoch=result.get('merged_at_epoch', 0),
                      ready_plot_inputs=dict(path=str(target), sha256=checksum, bytes=len(contents)),
                      plot_publication=figures)
         temporary = latest.with_name('.latest_ready_' + task['cohort_id'] + '.json')
@@ -423,6 +462,8 @@ def publish_returned_plots(root, policy, ledger):
             continue
         request_data = read(directory/'request.json')
         if not request_data.get('return_files'):
+            if task['stage'] == 'merge':
+                publish_snapshot_inputs(task, [])
             continue
         status = read(task['status_path'])
         archive_path = directory/'return_payload.tar.gz'
@@ -528,18 +569,32 @@ def prepare(root, policy_path=None):
     if policy_path is not None:
         replacement = read(policy_path)
         unchanged_policy = dict(replacement)
-        unchanged_policy.pop('histogram_worker', None)
-        unchanged_policy.pop('maximum_open_sources', None)
+        allowed = ('histogram_worker', 'maximum_open_sources', 'selection_policy',
+                   'merge_min_interval_seconds', 'merge_max_interval_seconds',
+                   'merge_min_new_events', 'merge_min_growth', 'plot_source_histograms',
+                   'render_snapshot_plots', 'campaign_base_path')
         original = dict(policy)
-        original.pop('histogram_worker', None)
-        original.pop('maximum_open_sources', None)
+        for key in allowed:
+            unchanged_policy.pop(key, None)
+            original.pop(key, None)
         if unchanged_policy != original:
-            raise ValueError('Replacement factory policy may change only the histogram worker or open-source limit')
+            raise ValueError('Replacement factory policy changed an undeclared detector, source or output setting')
         policy = replacement
     if type(policy.get('maximum_open_sources', 6)) is not int or policy.get('maximum_open_sources', 6) <= 0:
         raise ValueError('The open-source limit needs a positive integer')
     if type(policy.get('produce_snapshots', True)) is not bool:
         raise ValueError('produce_snapshots needs an explicit boolean')
+    for key in ('merge_min_interval_seconds', 'merge_max_interval_seconds', 'merge_min_new_events'):
+        if key in policy and (type(policy[key]) is not int or policy[key] <= 0):
+            raise ValueError(key + ' needs a positive integer')
+    growth = policy.get('merge_min_growth', .2)
+    if type(growth) not in (int, float) or not math.isfinite(growth) or growth <= 0:
+        raise ValueError('merge_min_growth needs a finite positive fraction')
+    if 'selection_policy' in policy:
+        validate_policy(policy['selection_policy'])
+    for key in ('plot_source_histograms', 'render_snapshot_plots'):
+        if key in policy and type(policy[key]) is not bool:
+            raise ValueError(key + ' needs an explicit boolean')
     worker_host_requirements(policy)
     validate_plan(plan)
     ledger = read(root/'ledger.json') if (root/'ledger.json').exists() else {}

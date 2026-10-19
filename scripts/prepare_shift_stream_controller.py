@@ -115,7 +115,8 @@ def adopt(destination, campaign, overrides=None, extra_files=None, helper_source
         'campaign_deployment_sha256': sha(campaign / 'deployment.json'),
         'ledger_sha256_at_preparation': sha(campaign / 'ledger.json'),
         'task_manifest_count_at_preparation': len(tasks),
-        'science_inputs_changed': False, 'submission_performed': False})
+        'science_inputs_changed': 'selection_revision' in changes,
+        'existing_task_inputs_changed': False, 'submission_performed': False})
     return prepare(destination, policy, extra_files, helper_sources)
 
 

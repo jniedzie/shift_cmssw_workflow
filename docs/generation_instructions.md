@@ -39,11 +39,27 @@ the native exit event and the required identity, count and publication checks.
 Histogramming waits for every selected original in its source cohort. A failed
 original is not silently omitted from its cohort.
 
-Single-source raw plots can appear immediately. Rate snapshots require the
-predeclared source-index prefix in all six bins. They retain native W/p and
-apply sigmaND divided by the sum of distinct full-source trials once, after
-combining sources in the same bin. The final snapshot also includes the unequal
-full source budgets. Finishing quickly never changes membership or exposure.
+Each finished source publishes histograms immediately to its normal campaign
+histograms directory. Rate merges include all complete source cohorts,
+independently in each pThat bin; an unfinished or failed source and its entire
+exposure remain pending. Exact membership is frozen for each merge. Merges
+retain native W/p and apply sigmaND divided by the sum of distinct included
+full-source trials once. They publish into ordinary histograms_merged campaign
+directories before optional PDF rendering. The plotter selects the newest
+successfully closed version per bin. The controller normally re-merges after
+at least 100 new originals and 20% growth in any bin, no more often than every
+30 minutes, or after six hours with any new complete source.
+
+The October 19 selection revision applies only where selected.json does not
+exist. It keeps GEN-tail and forward-OS events with probability one and chooses
+control probabilities proportional to the native absolute weight, with a 1%
+floor and a bound of two times the native inclusive expected weight-squared
+sum. One control event has known certainty inclusion. Event selection uses an
+independent deterministic hash draw; every retained event stores its own exact
+probability and W/p. Existing selections, detector jobs, weights, training
+folds, full GEN denominators and muon-enhanced generator settings are unchanged.
+This controls inclusive sampling variance; it does not establish sufficient
+reconstructed tail statistics or physics closure.
 
 Designated sources are operational canaries. Bulk reconstruction waits until
 their scans, every selected detector job, histogram publication and project PDF
@@ -103,8 +119,11 @@ Its scheduler working directory is NEW; task state, quota state, heartbeats and
 controller locks stay in OLD. Both original supervisors must be stopped before
 submitting the replacements. A frozen replacement factory command may use
 `prepare_shift_stream_tasks.py OLD --policy NEW/factory_policy.json`; that policy
-may change only `histogram_worker`, used for histogram and merge stages.
-Existing scans, reconstruction workers, sampling and descriptors stay pinned.
+may change the reviewed histogram worker, source admission and publication
+settings. A sampling revision must separately pin the old factory, source plan
+and replacement policy; it applies only to sources without an existing
+selection. Existing scans, reconstruction workers, sampling and descriptors stay
+pinned.
 Quota observations allow 600 seconds for sealed external accounting, and the
 audit job requests 1200 seconds before matching.
 

@@ -35,7 +35,8 @@ SUPERVISOR_OVERRIDES = ('parallel_gen_completion', 'poll_seconds',
     'prepare_command', 'prepare_timeout_seconds', 'manager_runtime_seconds',
     'admission_worker_ceiling', 'maximum_submissions_per_poll', 'maximum_idle_workers',
     'nonpublishing_peer_controllers', 'accounted_peer_publication_workers',
-    'additional_peer_meson_campaigns', 'peer_storage_authority', 'prioritize_source_prefix')
+    'additional_peer_meson_campaigns', 'peer_storage_authority', 'prioritize_source_prefix',
+    'selection_revision')
 ATTRIBUTES = ['ClusterId', 'ProcId', 'GlobalJobId', 'JobStatus', 'JobUniverse', 'Owner', 'Iwd',
     'QDate', 'EnteredCurrentStatus', 'JobCurrentStartDate', 'NumJobStarts',
     'ExitCode', 'ExitBySignal', 'HoldReason', 'HoldReasonCode', 'HoldReasonSubCode',
@@ -1249,6 +1250,19 @@ class StreamController:
         self.supervision_root = Path(root).resolve()
         self.policy = read(self.supervision_root / 'policy.json')
         self.root = campaign_root(self.supervision_root, self.policy)
+        revision = self.policy.get('selection_revision')
+        if revision is not None:
+            if (revision.get('schema') != 'shift-unselected-source-sampling-revision-v1'
+                    or revision.get('existing_selections_unchanged') is not True
+                    or sha(self.root/'factory_policy.json') != revision.get('previous_factory_sha256')
+                    or sha(self.root/'source_plan.json') != revision.get('source_plan_sha256')):
+                raise ValueError('Sampling revision changed its original source or factory authority')
+            replacement = revision['factory_policy']
+            if (sha(replacement['path']) != replacement['sha256']
+                    or replacement['path'] not in self.policy.get('prepare_command', [])):
+                raise ValueError('Sampling revision needs the exact frozen preparer policy')
+            from shift_streaming_qcd_inputs import validate_policy as validate_selection_policy
+            validate_selection_policy(read(replacement['path'])['selection_policy'])
         self.reader, self.commander = reader, commander
         self.gen_publication_cache = {}
         self.admission_policy = stream_admission_policy(self.policy)

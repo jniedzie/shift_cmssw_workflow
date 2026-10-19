@@ -1355,6 +1355,28 @@ class StreamTests(unittest.TestCase):
         self.assertEqual({path: module.sha(path) for path in before}, before)
         self.assertIn('initialdir = ' + str(replacement), (replacement / 'controller.sub').read_text())
 
+    def test_new_source_sampling_revision_is_pinned_and_declared(self):
+        module.save(self.root/'ledger.json', {})
+        module.save(self.root/'factory_policy.json', {'original': True})
+        module.save(self.root/'source_plan.json', {'source_slots': []})
+        factory = self.root.parent/'factory.json'
+        module.save(factory, {'selection_policy': dict(schema='shift-stream-GEN-selection-v1',
+            mode='GEN-stratified-weight-aware', seed='new-selection', training_seed='old-training',
+            training_folds=10, minimum_probability=.01, maximum_variance_inflation=2.)})
+        revision = dict(schema='shift-unselected-source-sampling-revision-v1',
+            existing_selections_unchanged=True, previous_factory_sha256=module.sha(self.root/'factory_policy.json'),
+            source_plan_sha256=module.sha(self.root/'source_plan.json'),
+            factory_policy=dict(path=str(factory), sha256=module.sha(factory)))
+        replacement = self.root.parent/'new_selection_supervisor'
+        preparation.adopt(replacement, self.root, dict(selection_revision=revision,
+            prepare_command=['python3', 'preparer.py', '--policy', str(factory)]))
+        adopted = module.StreamController(replacement, self.reader, self.commander)
+        self.assertTrue(adopted.policy['adoption']['science_inputs_changed'])
+        self.assertFalse(adopted.policy['adoption']['existing_task_inputs_changed'])
+        module.save(factory, {'selection_policy': {}})
+        with self.assertRaisesRegex(ValueError, 'exact frozen preparer policy'):
+            module.StreamController(replacement, self.reader, self.commander)
+
     def test_supervisor_adoption_never_retries_an_ambiguous_submission(self):
         task = self.task()
         self.commander.side_effect = module.NativeCondorError('lost response')

@@ -50,12 +50,20 @@ def write_new(path, value):
 
 def validate_policy(policy):
     if policy.get('schema') != 'shift-stream-GEN-selection-v1' or policy.get('mode') not in (
-            'GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction', 'uniform-fixed-quota'):
+            'GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction', 'uniform-fixed-quota',
+            'GEN-stratified-weight-aware'):
         raise ValueError('Unknown immutable GEN selection policy')
     if not policy.get('seed') or not policy.get('training_seed') or policy['seed'] == policy['training_seed']:
         raise ValueError('Selection and original-event training split need distinct frozen seeds')
     if type(policy.get('training_folds')) is not int or policy['training_folds'] < 2:
         raise ValueError('Need at least two independent original-event training folds')
+    if policy['mode'] == 'GEN-stratified-weight-aware':
+        floor = policy.get('minimum_probability')
+        inflation = policy.get('maximum_variance_inflation')
+        if (type(floor) not in (int, float) or not math.isfinite(floor) or not 0 < floor <= 1
+                or type(inflation) not in (int, float) or not math.isfinite(inflation) or inflation < 1):
+            raise ValueError('Weight-aware selection needs positive support and a finite variance bound >= 1')
+        return policy
     fractional = policy['mode'] == 'GEN-stratified-fixed-fraction'
     field = 'fractions' if fractional else 'quotas'
     allocations = [policy.get(field)]
@@ -287,6 +295,48 @@ def hash_rank(seed, domain, identity):
     return int(digest([seed, domain, identity]), 16)
 
 
+def weight_aware_probabilities(weights, labels, minimum_probability, maximum_variance_inflation):
+    """Keep GEN tails and limit the expected inclusive W/p second moment.
+
+    Control probabilities are proportional to the native absolute weight,
+    with positive support everywhere. This controls inclusive MC precision;
+    reconstructed-tail efficiency must still be measured in the detector pass.
+    """
+    if (not math.isfinite(minimum_probability) or not 0 < minimum_probability <= 1
+            or not math.isfinite(maximum_variance_inflation) or maximum_variance_inflation < 1
+            or any(label not in ('tail', 'forward_OS', 'remainder') for label in labels)):
+        raise ValueError('Invalid weight-aware selection probabilities or GEN strata')
+    if len(weights) != len(labels) or any(not math.isfinite(w) for w in weights):
+        raise ValueError('Weight-aware selection needs finite matching GEN weights')
+    controls = [i for i, label in enumerate(labels) if label == 'remainder']
+    native_second = math.fsum(w*w for w in weights)
+    target = maximum_variance_inflation * native_second
+
+    def probabilities(threshold):
+        return [1. if label != 'remainder' or threshold == 0 else
+                max(minimum_probability, min(1., abs(w)/threshold))
+                for w, label in zip(weights, labels)]
+
+    low = 0.
+    high = max((abs(weights[i])/minimum_probability for i in controls), default=0.)
+    for _ in range(64):
+        middle = (low + high)/2
+        proposed = probabilities(middle)
+        if math.fsum(w*w/p for w, p in zip(weights, proposed)) <= target:
+            low = middle
+        else:
+            high = middle
+    result = probabilities(low)
+    if controls:
+        # A certainty control prevents a tiny source from randomly yielding
+        # no selected event. Its probability is exactly one, not a fallback weight.
+        result[max(controls, key=lambda i: abs(weights[i]))] = 1.
+    return result, dict(native_sumw2=native_second,
+        expected_corrected_sumw2=math.fsum(w*w/p for w, p in zip(weights, result)),
+        maximum_variance_inflation=maximum_variance_inflation,
+        expected_selected=math.fsum(result), minimum_probability=minimum_probability)
+
+
 def select_events(source, plan, features=None):
     validate_plan(plan)
     policy = plan['selection_policy']
@@ -294,7 +344,8 @@ def select_events(source, plan, features=None):
     if len(slots) != 1 or slots[0]['request'] != source['request']:
         raise ValueError('GEN source is not a member of the predetermined cohort')
     ids, weights = source['event_ids'], source['weights']
-    if policy['mode'] in ('GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction'):
+    if policy['mode'] in ('GEN-stratified-fixed-quota', 'GEN-stratified-fixed-fraction',
+                          'GEN-stratified-weight-aware'):
         if (not features or features.get('schema') != 'shift-stream-GEN-features-v1'
                 or features.get('gen_sha256') != source['gen_sha256']
                 or features.get('source_id') != source['source_id']
@@ -312,20 +363,36 @@ def select_events(source, plan, features=None):
     else:
         labels = ['remainder']*len(ids)
     selected, populations = [], {}
+    weighted = policy['mode'] == 'GEN-stratified-weight-aware'
+    variance = None
+    if weighted:
+        probabilities, variance = weight_aware_probabilities(weights, labels,
+            policy['minimum_probability'], policy['maximum_variance_inflation'])
     fractional = policy['mode'] == 'GEN-stratified-fixed-fraction'
     field = 'fractions' if fractional else 'quotas'
-    allocation = policy.get(field + '_by_stratum', {}).get(source['stratum'], policy[field])
+    allocation = None if weighted else policy.get(field + '_by_stratum', {}).get(source['stratum'], policy[field])
     for label in ('tail', 'forward_OS', 'remainder'):
         population = [index for index, value in enumerate(labels) if value == label]
-        if fractional:
+        if weighted:
+            chosen = [index for index in population if hash_rank(policy['seed'],
+                'weight-aware-selection', ids[index]) < int(probabilities[index]*(1 << 256))]
+            populations[label] = dict(population=len(population), selected=len(chosen),
+                expected_selected=math.fsum(probabilities[index] for index in population),
+                minimum_inclusion_probability=min((probabilities[index] for index in population), default=None),
+                maximum_inclusion_probability=max((probabilities[index] for index in population), default=None))
+        elif fractional:
             quota = math.ceil(allocation[label] * len(population))
         else:
             quota = allocation[label] if policy['mode'] != 'uniform-fixed-quota' else sum(allocation.values())
-        number = min(quota, len(population))
-        probability = number/len(population) if population else None
-        populations[label] = dict(population=len(population), selected=number, inclusion_probability=probability)
-        order = sorted(population, key=lambda index:(hash_rank(policy['seed'], 'selection', ids[index]), ids[index]))
-        for index in order[:number]:
+        if not weighted:
+            number = min(quota, len(population))
+            probability = number/len(population) if population else None
+            populations[label] = dict(population=len(population), selected=number, inclusion_probability=probability)
+            order = sorted(population, key=lambda index:(hash_rank(policy['seed'], 'selection', ids[index]), ids[index]))
+            chosen = order[:number]
+        for index in chosen:
+            if weighted:
+                probability = probabilities[index]
             selected.append(dict(raw_index=index, event_id=ids[index], native_weight=weights[index],
                 sampling_probability=probability, sampling_gen_weight=weights[index]/probability,
                 training_fold=hash_rank(policy['training_seed'], 'training', ids[index]) % policy['training_folds'],
@@ -345,6 +412,9 @@ def select_events(source, plan, features=None):
             native_weight_convention='Native W unchanged; shiftSamplingGenWeight=W/p',
             variance_note='Fixed-size samples without replacement; original events, not pairs, are independent units'),
         complete_muon_decays=False, physics_valid=False, normalization_ready=False)
+    if weighted:
+        result['sampling'].update(variance_control=variance,
+            variance_note='Independent weight-aware Bernoulli draws plus GEN-tail/forward and one control certainty event; original events are the independent units')
     return result
 
 

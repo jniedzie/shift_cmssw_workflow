@@ -69,6 +69,48 @@ def ordinary_fixture(directory, saved=3):
 
 
 class StreamingQCDTest(unittest.TestCase):
+    def test_weight_aware_sampling_bounds_variance_and_keeps_exact_native_weights(self):
+        from shift_streaming_qcd_inputs import weight_aware_probabilities
+        s = source(1000)
+        s['weights'] = [1.e-8]*900 + [1.]*100
+        labels = ['tail']*10 + ['forward_OS']*10 + ['remainder']*980
+        policy = dict(schema='shift-stream-GEN-selection-v1', mode='GEN-stratified-weight-aware',
+            seed='weighted-production-v1', training_seed='original-training-v1', training_folds=10,
+            minimum_probability=.01, maximum_variance_inflation=2.)
+        p, check = weight_aware_probabilities(s['weights'], labels, .01, 2.)
+        self.assertTrue(all(value == 1 for value in p[:20]))
+        self.assertTrue(all(.01 <= value <= 1 for value in p))
+        self.assertLessEqual(check['expected_corrected_sumw2'], 2*check['native_sumw2']*(1+1.e-12))
+        selected = select_events(s, plan_for([s], policy), features(s, labels))
+        self.assertEqual(selected, select_events(s, plan_for([s], policy), features(s, labels)))
+        self.assertEqual(selected['weights'], s['weights'])
+        self.assertEqual(selected['normalization'], s['normalization'])
+        self.assertEqual(len({tuple(row['event_id']) for row in selected['selected_events']}),
+                         len(selected['selected_events']))
+        for row in selected['selected_events']:
+            self.assertEqual(row['sampling_gen_weight'], row['native_weight']/row['sampling_probability'])
+        # The high-weight controls are retained, rather than left with W/0.01.
+        self.assertGreater(sum(row['raw_index'] >= 900 for row in selected['selected_events']), 25)
+
+    def test_weight_aware_tiny_control_has_a_known_certainty_event(self):
+        from shift_streaming_qcd_inputs import weight_aware_probabilities
+        p, check = weight_aware_probabilities([1.], ['remainder'], .01, 2.)
+        self.assertEqual(p, [1.])
+        self.assertEqual(check['expected_corrected_sumw2'], 1.)
+
+    def test_weight_aware_unbiased_expectation_and_invalid_policy(self):
+        from shift_streaming_qcd_inputs import weight_aware_probabilities
+        weights = [1., 2., 50., 100.]
+        p, check = weight_aware_probabilities(weights, ['remainder']*4, .01, 2.)
+        self.assertAlmostEqual(sum(probability*(weight/probability) for probability, weight in zip(p, weights)),
+                               sum(weights))
+        policy = dict(DEFAULT_POLICY, mode='GEN-stratified-weight-aware',
+                      minimum_probability=.01, maximum_variance_inflation=2.)
+        for changes in ({'minimum_probability': 0}, {'minimum_probability': float('nan')},
+                        {'maximum_variance_inflation': .5}, {'maximum_variance_inflation': float('inf')}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                validate_policy(dict(policy, **changes))
+
     def test_planned_prefix_ignores_availability_and_full_campaign_keeps_high_budget(self):
         from qcd_mu_enrichment import PROFILE
         strata=('qcd_0to1','qcd_1to2','qcd_2to5','qcd_5to10','qcd_10to20','qcd_20toinf')
