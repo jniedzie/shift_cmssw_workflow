@@ -100,6 +100,34 @@ class MaterialAdmissionTests(unittest.TestCase):
         self.assertAlmostEqual(result[0]['conditional_sampling_probability'],1./1.9)
         self.assertEqual(result[1]['conditional_sampling_probability'],admission.grid_probability(.1))
 
+    def test_mu_enriched_source_keeps_saved_decays_and_filter_exposure(self):
+        f,a=inputs()
+        source=a['sources'][0]
+        source.update(generator_profile='shift-qcd-mu-enriched-cylinder-v1',
+                      full_source_trials=123456, no_second_filter_efficiency=True)
+        a['events'][0]['saved_decays_unchanged']=True
+        result=admission.prepare_selection(f,a,policy())
+        row=result['events'][0]
+        self.assertEqual(row['proposal_gen_weight'],row['native_weight']/row['sampling_probability'])
+        self.assertEqual(result['sources'][0]['full_source_trials'],123456)
+        self.assertTrue(result['sources'][0]['no_second_filter_efficiency'])
+
+    def test_mu_enriched_source_cannot_silently_redraw_lifetimes(self):
+        for declaration in ({'generator_profile':'shift-qcd-mu-enriched-cylinder-v1'},
+                            {'decay_dependent_filter':True}):
+            f,a=inputs();a['sources'][0].update(declaration)
+            with self.assertRaisesRegex(ValueError,'unchanged saved decays'):
+                admission.prepare_selection(f,a,policy())
+            a['events'][0].update(saved_decays_unchanged=True, proposal_kind='importance',
+                                   proposal_correction=2.,proposal_density_ratio=.5)
+            with self.assertRaisesRegex(ValueError,'unchanged saved decays'):
+                admission.prepare_selection(f,a,policy())
+
+    def test_invalid_decay_filter_declaration_fails(self):
+        f,a=inputs();a['sources'][0]['decay_dependent_filter']='false'
+        with self.assertRaisesRegex(ValueError,'Boolean'):
+            admission.prepare_selection(f,a,policy())
+
     def test_replay_order_and_fold_identity_independent_of_proposal_draw(self):
         f,a=inputs([event(1),event(2)])
         first=admission.prepare_selection(f,a,policy())

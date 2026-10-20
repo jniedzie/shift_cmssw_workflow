@@ -181,6 +181,16 @@ def prepare_selection(features, authority, policy):
             raise ValueError('Proposal kind must be explicit')
         if row['proposal_kind'] == 'ordinary' and (density != 1. or correction != 1.):
             raise ValueError('Explicit ordinary draws require q/f=f/q=1')
+        # A saved muon filter selected a particular decay realization. Drawing
+        # new lifetimes from that subset needs a different conditional density;
+        # the unfiltered f/q supported here cannot supply that correction.
+        decay_filtered = source.get('decay_dependent_filter', False)
+        if type(decay_filtered) is not bool:
+            raise ValueError('Declare decay-dependent source filtering as a Boolean')
+        decay_filtered = decay_filtered or source.get('generator_profile') == 'shift-qcd-mu-enriched-cylinder-v1'
+        if decay_filtered and (row.get('saved_decays_unchanged') is not True
+                               or row['proposal_kind'] != 'ordinary'):
+            raise ValueError('Decay-filtered sources require unchanged saved decays; redraw before the filter')
         sha256(row['proposal_provenance_sha256'], 'proposal provenance')
         before = (native/old_p)*correction
         if not math.isfinite(before) or (native != 0. and before == 0.):

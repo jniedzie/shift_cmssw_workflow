@@ -22,6 +22,15 @@ group kept positive inclusion probability. Those small preview selections ran
 one original per detector job, retaining its native weight and exact inclusion
 probability. Saved muon decays were not drawn again.
 
+For material-priority studies on these mu-enriched sources, keep the saved
+decays unchanged. Declare the source `generator_profile` and each event's
+`saved_decays_unchanged: true` in the material sampling authority. The material
+gate keeps native weights divided by its recorded reconstruction probability;
+it does not apply the GEN filter efficiency again. The material gate rejects
+lifetime redraws from this decay-filtered subset: a new lifetime proposal must
+start before the muon filter, with its own full-source accounting. An unrelated
+unfiltered, full-lifetime diagnostic is not the weekend mu-enriched production.
+
 The separately frozen weekend pass instead selects every GEN-tail event,
 every forward opposite-sign event and a rounded-up 1% sample of the remainder
 in all six pThat bins. It uses 20 selected originals per detector job, a fresh
