@@ -58,6 +58,52 @@ class MaterialAdmissionTests(unittest.TestCase):
         row=admission.prepare_selection(f,a,policy())['events'][0]
         self.assertGreater(row['conditional_sampling_probability'],.1)
 
+    def test_new_opposite_sign_priority_keeps_other_events_as_controls(self):
+        rows=[event(1),event(2)]
+        rows[1]['muons'][1]['pdg']=-13
+        f,a=inputs(rows);p=policy();p['require_opposite_sign']=True
+        first,second=admission.prepare_selection(f,a,p)['events']
+        self.assertEqual(first['material_priority']['priority'],0.)
+        self.assertEqual(first['conditional_sampling_probability'],admission.grid_probability(.1))
+        self.assertGreater(second['material_priority']['priority'],0.)
+        self.assertGreater(second['conditional_sampling_probability'],first['conditional_sampling_probability'])
+
+    def test_opposite_sign_priority_uses_total_momentum_without_pt_cut(self):
+        row=event();row['muons'][1]['pdg']=-13
+        first=admission.pair_priority(row,20.,True)['priority']
+        for muon in row['muons']:muon['pt_GeV']=0.
+        self.assertEqual(admission.pair_priority(row,20.,True)['priority'],first)
+        for muon in row['muons']:muon['p_GeV']=80.
+        self.assertGreater(admission.pair_priority(row,20.,True)['priority'],first)
+        f,a=inputs();p=policy();p['require_opposite_sign']='true'
+        with self.assertRaisesRegex(ValueError,'Boolean'):admission.prepare_selection(f,a,p)
+
+    def test_partial_parent_path_keeps_known_prefix_and_explicit_uncertainty(self):
+        row=event(depth=10.);row['muons'][1]['pdg']=-13
+        row['parent_flights'][0]['material']['full_saved_chord_coverage']=False
+        old=admission.pair_priority(row,20.,True)
+        new=admission.pair_priority(row,20.,True,True)
+        self.assertEqual(old['priority'],0.)
+        self.assertTrue(new['unknown_potential_pair'])
+        self.assertTrue(new['ranked_with_incomplete_paths'])
+        self.assertAlmostEqual(new['priority'],math.exp(-10.)*.8**2)
+        f,a=inputs([row]);p=policy();p.update(require_opposite_sign=True,
+            rank_partial_parent_paths=True,unknown_probability=.1)
+        result=admission.prepare_selection(f,a,p)['events'][0]
+        self.assertGreater(result['conditional_sampling_probability'],.1)
+        self.assertLess(result['conditional_sampling_probability'],.101)
+
+    def test_unknown_prefix_is_not_assumed_to_absorb_or_remove_muons(self):
+        row=event();row['muons'][1]['pdg']=-13
+        row['parent_flights'][0]['material'].update(full_saved_chord_coverage=False,
+                                                   interaction_depth_proxy=None)
+        for muon in row['muons']:
+            muon['material_to_CMS_entry']['column_density_g_cm2']=1.e9
+            muon['pt_GeV']=0.
+        result=admission.pair_priority(row,20.,True,True)
+        self.assertGreater(result['priority'],0.)
+        self.assertTrue(result['unknown_potential_pair'])
+
     def test_zero_muon_and_outgoing_events_keep_control_probability(self):
         rows=[event(1),event(2)]
         rows[0]['muons']=[]

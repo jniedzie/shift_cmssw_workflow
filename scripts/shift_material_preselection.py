@@ -52,6 +52,10 @@ def validate_policy(policy):
     probability(policy['unknown_probability'], 'unknown_probability')
     if policy['unknown_probability'] < policy['control_probability']:
         raise ValueError('Unknown paths need at least the control probability')
+    if type(policy.get('require_opposite_sign', False)) is not bool:
+        raise ValueError('Opposite-sign pair priority must be a Boolean')
+    if type(policy.get('rank_partial_parent_paths', False)) is not bool:
+        raise ValueError('Partial parent-path priority must be a Boolean')
     scale = policy['momentum_scale_GeV']
     if not math.isfinite(scale) or scale <= 0:
         raise ValueError('momentum_scale_GeV must be finite and positive')
@@ -70,8 +74,12 @@ def grid_probability(value):
     return math.ceil(probability(value, 'admission probability')*(1 << 53))/float(1 << 53)
 
 
-def pair_priority(event, momentum_scale):
-    """Use either charge; shared ancestor flights contribute only once."""
+def pair_priority(event, momentum_scale, require_opposite_sign=False, rank_partial_parent_paths=False):
+    """Rank incoming pairs by total momentum and shared parent material paths.
+
+    Opposite-sign priority is opt-in for new cohorts. Other events still keep
+    the positive reconstruction control probability assigned by the ledger.
+    """
     flights = {x['barcode']: x for x in event['parent_flights']}
     if len(flights) != len(event['parent_flights']):
         raise ValueError('Repeated ancestor flight barcode')
@@ -85,8 +93,13 @@ def pair_priority(event, momentum_scale):
             'missing muon production vertex', 'muon born inside unmodelled central CMS region')
         if muon['straight_line_towards_CMS_entry'] or unknown_direction:
             candidates.append(muon)
-    best, best_pair, unknown_pair = 0., None, False
+    best, best_pair, unknown_pair, best_incomplete = 0., None, False, False
     for left, right in itertools.combinations(candidates, 2):
+        if require_opposite_sign:
+            if abs(left['pdg']) != 13 or abs(right['pdg']) != 13:
+                raise ValueError('Opposite-sign muon priority needs explicit muon PDG IDs')
+            if left['pdg']*right['pdg'] >= 0:
+                continue
         parent_numbers = set(left['transport_parent_barcodes']) | set(right['transport_parent_barcodes'])
         if any(number not in flights for number in parent_numbers):
             raise ValueError('Muon references an absent ancestor flight')
@@ -96,8 +109,14 @@ def pair_priority(event, momentum_scale):
                               and x['material_to_CMS_entry']['complete'] for x in (left, right))
         if not known:
             unknown_pair = True
-            continue
-        depths = [x['interaction_depth_proxy'] for x in parents]
+            if not rank_partial_parent_paths:
+                continue
+        # A known external prefix remains useful for ranking when the decay
+        # ends inside unscored CMS. Missing material contributes no invented
+        # depth, stays flagged unknown and never removes the control sample.
+        depths = [x.get('interaction_depth_proxy') for x in parents]
+        if not known and rank_partial_parent_paths:
+            depths = [0. if value is None else value for value in depths]
         if any(x is None or not math.isfinite(x) or x < 0 for x in depths):
             raise ValueError('Known material paths need finite nonnegative depths')
         energy = math.prod((x['p_GeV']/math.hypot(x['p_GeV'], momentum_scale))**2
@@ -105,8 +124,10 @@ def pair_priority(event, momentum_scale):
         score = math.exp(-math.fsum(depths))*energy
         if score > best:
             best, best_pair = score, [left['barcode'], right['barcode']]
+            best_incomplete = not known
     return dict(priority=best, preferred_pair_barcodes=best_pair,
-                unknown_potential_pair=unknown_pair, incoming_candidates=len(candidates))
+                unknown_potential_pair=unknown_pair, incoming_candidates=len(candidates),
+                ranked_with_incomplete_paths=best_incomplete)
 
 
 def prepare_selection(features, authority, policy):
@@ -195,7 +216,9 @@ def prepare_selection(features, authority, policy):
         before = (native/old_p)*correction
         if not math.isfinite(before) or (native != 0. and before == 0.):
             raise ValueError('Nonfinite pre-admission event weight')
-        ranking = pair_priority(event, policy['momentum_scale_GeV'])
+        ranking = pair_priority(event, policy['momentum_scale_GeV'],
+                                policy.get('require_opposite_sign', False),
+                                policy.get('rank_partial_parent_paths', False))
         records.append(dict(row, ranking=ranking, pre_admission_weight=before))
     if authorities:
         raise ValueError('Authority includes events absent from this complete feature census')

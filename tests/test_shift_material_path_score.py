@@ -13,6 +13,20 @@ FRAME = dict(model_origin_cm=[10., 20., 30.], artifact_origin_in_model_cm=[1., 2
 
 
 class FrameTests(unittest.TestCase):
+    def test_angular_map_targets_plane_with_signed_eta(self):
+        paths=score.angular_paths(dict(origin_cm=[0.,0.,100.], target_z_cm=10.,
+                                      eta_edges=[-3.,-2.], phi_edges=[-math.pi,0.,math.pi]))
+        self.assertEqual(len(paths),2)
+        self.assertTrue(all(math.isclose(p['end_cm'][2],10.) for p in paths))
+        self.assertAlmostEqual(math.dist(paths[0]['start_cm'],paths[0]['end_cm']),
+                               90./abs(math.tanh(-2.5)))
+        self.assertEqual([p['phi_index'] for p in paths],[0,1])
+
+    def test_angular_map_rejects_outgoing_or_invalid_grid(self):
+        inputs=dict(origin_cm=[0.,0.,100.], target_z_cm=10., eta_edges=[-3.,-2.],phi_edges=[0.,1.])
+        for change in (dict(eta_edges=[2.,3.]),dict(phi_edges=[1.,0.]),dict(target_z_cm=100.)):
+            with self.assertRaises(ValueError):score.angular_paths(inputs|change)
+
     def test_inverse_actual_placement_and_rotated_two_sided_placement(self):
         self.assertEqual(score.artifact_point([6., 23., 35.], FRAME), [2., 2., 2.])
         self.assertEqual(score.artifact_point([-6., 23., -35.], FRAME, mirrored=True), [2., 2., 2.])
@@ -64,6 +78,7 @@ class NavigationTests(unittest.TestCase):
         self.assertAlmostEqual(result['traced_length_cm'], 40., places=5)
         self.assertAlmostEqual(result['column_density_g_cm2'], 20., places=5)
         self.assertAlmostEqual(result['interaction_depth_proxy'], .5, places=5)
+        self.assertAlmostEqual(result['radiation_depth_proxy'], 1., places=5)
         self.assertAlmostEqual(result['external_chord_attenuation_proxy'], math.exp(-.5), places=5)
         self.assertIsNone(result['first_depth_one_distance_cm'])
 

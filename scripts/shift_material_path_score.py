@@ -71,7 +71,7 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
     length = math.dist(start, end)
     result = dict(complete=False, chord_length_cm=length, traced_length_cm=0.,
                   column_density_g_cm2=0., interaction_depth_proxy=0., materials={},
-                  first_depth_one_distance_cm=None)
+                  radiation_depth_proxy=0., first_depth_one_distance_cm=None)
     if length == 0:
         return dict(result, complete=True, external_chord_attenuation_proxy=1.)
     direction = [(b-a)/length for a, b in zip(start, end)]
@@ -95,9 +95,11 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
             break
         density = float(material.GetDensity())
         interaction = float(material.GetIntLen())
+        radiation = float(material.GetRadLen())
         if (not math.isfinite(density) or density < 0 or not math.isfinite(interaction)
-                or (density > 0 and interaction <= 0)):
-            reason = 'unknown material density or interaction length'
+                or not math.isfinite(radiation)
+                or (density > 0 and (interaction <= 0 or radiation <= 0))):
+            reason = 'unknown material density, interaction length or radiation length'
             break
         navigator.FindNextBoundaryAndStep(remaining, False)
         step = float(navigator.GetStep())
@@ -108,6 +110,8 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
         travelled += step
         material_lengths[str(material.GetName())] += step
         result['column_density_g_cm2'] += density*step
+        if radiation > 0:
+            result['radiation_depth_proxy'] += step/radiation
         if interaction > 0:
             before = result['interaction_depth_proxy']
             increment = step/interaction
@@ -124,6 +128,35 @@ def trace_chord(geometry, start, end, maximum_steps=20000):
         result['unknown_reason'] = reason
         result['external_chord_attenuation_proxy'] = None
     return result
+
+
+def angular_paths(inputs):
+    """Build straight rays from an explicit source, without detector cuts."""
+    origin = vector(inputs['origin_cm'])
+    target_z = float(inputs['target_z_cm'])
+    eta_edges, phi_edges = inputs['eta_edges'], inputs['phi_edges']
+    for edges in (eta_edges, phi_edges):
+        if (len(edges) < 2 or any(not math.isfinite(float(x)) for x in edges)
+                or any(b <= a for a, b in zip(edges, edges[1:]))):
+            raise ValueError('Angular map needs finite increasing bin edges')
+    if not math.isfinite(target_z) or target_z == origin[2]:
+        raise ValueError('Angular map needs a distinct finite target plane')
+    paths = []
+    for i, (lo, hi) in enumerate(zip(eta_edges, eta_edges[1:])):
+        eta = (lo+hi)/2.
+        if abs(eta) > 20:
+            raise ValueError('Angular map eta is outside the supported finite range')
+        uz = math.tanh(eta)
+        if uz == 0 or (target_z-origin[2])/uz <= 0:
+            raise ValueError('Angular map rays must point towards the target plane')
+        length = (target_z-origin[2])/uz
+        for j, (left, right) in enumerate(zip(phi_edges, phi_edges[1:])):
+            phi = (left+right)/2.
+            direction = [math.cos(phi)/math.cosh(eta), math.sin(phi)/math.cosh(eta), uz]
+            paths.append(dict(id=f'eta{i}:phi{j}', start_cm=origin,
+                end_cm=[a+length*b for a,b in zip(origin,direction)],
+                eta=eta, phi=phi, eta_index=i, phi_index=j))
+    return paths
 
 
 def score_paths(geometry, paths, frame):
@@ -143,6 +176,7 @@ def score_paths(geometry, paths, frame):
                       parent_pdg=path.get('parent_pdg'), external_chord_cm=external_length,
                       unmodelled_remaining_chord_cm=unmodelled,
                       full_saved_chord_coverage=record['complete'] and unmodelled == 0.)
+        record.update({name:path[name] for name in ('eta','phi','eta_index','phi_index') if name in path})
         # No external path must not be mistaken for complete physical coverage.
         if external_length == 0 and unmodelled > 0:
             record.update(complete=False, unknown_reason='parent entirely outside scored external region',
@@ -162,7 +196,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     inputs = json.loads(args.inputs.read_text())
-    if inputs.get('schema') != 'shift-gen-material-path-input-v1':
+    if inputs.get('schema') not in ('shift-gen-material-path-input-v1', 'shift-material-angular-map-input-v1'):
         raise ValueError('Unsupported material path inputs')
     import ROOT
     ROOT.TGeoManager.LockDefaultUnits(False)
@@ -171,7 +205,12 @@ def main():
     geometry = ROOT.TGeoManager.Import(str(args.geometry))
     if not geometry:
         raise ValueError('Cannot import the supplied private geometry')
-    result = score_paths(geometry, inputs['paths'], inputs['frame'])
+    angular = inputs['schema'] == 'shift-material-angular-map-input-v1'
+    paths = angular_paths(inputs) if angular else inputs['paths']
+    result = score_paths(geometry, paths, inputs['frame'])
+    if angular:
+        result['angular_grid'] = {name:inputs[name] for name in
+                                 ('origin_cm','target_z_cm','eta_edges','phi_edges')}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open('x') as target:
         json.dump(result, target, indent=2, allow_nan=False)

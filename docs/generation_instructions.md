@@ -1,6 +1,55 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Material-consistent QCD selection (2026-10-20)
+
+The weekend QCD stream and the 86-original material pilot were retired at the
+user's request. Preserve their outputs, full-source accounting and failures;
+do not restart their controllers or call their incomplete cohorts complete.
+Their shared-storage reservations remain protected until separately reconciled.
+See the October 20 consolidation in `../../SHIFT_ANALYSIS.md` and the transport
+checks in `../../SHIFT_RECONSTRUCTION.md`.
+
+The weekend V10 runtime does not contain the pilot's private incoming-hadron
+transport overlay. Its ready plots are statistical references, not a validated
+material-aware QCD prediction. The incoming-hadron kernel must transport the
+parents, allow physical interactions to interrupt their planned decays, and
+boost the daughters using the parent's actual decay state. A standalone
+Geant4 11.4.1 test in `tests/fixtures/preassigned_decay_kinematics.cc` checks the
+last step. This does not replace a full material/shower validation.
+
+Use the same muon-enhancement physics, source model and pThat bins when
+qualifying a replacement, with full root lifetimes/daughter trees and unfiltered
+source exposure established before any decay-dependent filter. The older
+finite-cylinder filtered inputs are useful for conditional selection studies;
+they do not establish complete inclusive parent/shower transport. Never redraw
+their selected decays with the unfiltered importance correction. Keep a positive
+control sample for events without the desired GEN pair, including possible
+material-created muons and charge migrations.
+
+For a new reconstruction selection, `shift_material_preselection.py` supports
+`require_opposite_sign: true`. It prioritizes two incoming opposite-sign GEN
+muons with total momentum and the union of their parent material flights.
+There is no muon-pT cut. The new `rank_partial_parent_paths: true` option can
+use the known external prefix when a parent later reaches unscored central
+CMS. Incomplete paths stay flagged; missing material is never a measured
+survival probability. The separately chosen positive `unknown_probability`
+and `control_probability` remain in the exact event weight. An offline test
+used 0.1 for both, with a fresh selection domain. These settings are a candidate
+for an independent detector test, not qualified production efficiencies.
+
+`shift_material_path_score.py` also accepts angular-map inputs and reports
+nuclear interaction lengths, radiation lengths and mass column separately.
+Straight-ray maps and the material score only guide sampling. They do not
+replace Geant4 energy loss, interactions, scattering, fields or detector
+acceptance, and they never multiply a physics weight.
+
+Freeze GEN/sampling, SIM transport and reconstruction revisions separately for
+each test. Score material survival first with parent/daughter histories and
+chamber hits, then measure Both-Both performance with the recorded reconstruction
+version. Reconstruction is being improved independently; do not rebuild or
+change the shared release for these selection studies.
+
 ## Streaming mu-enhanced QCD (2026-10-16)
 
 The new stream consumes only completed, published true-production GEN receipts.
