@@ -11,6 +11,13 @@ gate is evaluated afterwards. This is an independent detector-response test,
 not another GEN-only efficiency forecast. The current frozen V10 reconstruction
 and incoming-parent SIM overlay are separate from the other agent's reco work.
 
+There is no muon-pT threshold in this GEN filter or material preselection.
+The filter's `MinPt` is zero; the material rank uses total momentum, with a
+smooth 20 GeV scale rather than a hard cut. The legacy streamer's pT-based
+priority labels are not used by this test and must not be carried into the
+material-guided selection. Pair-pT thresholds below define diagnostic tails,
+not event admission. Keep the complementary generator pThat bins separately.
+
 Raw production GEN stores `generatorSmeared`. A timing-only CMSSW step persists
 the established nominal `shiftEventTime` translation before material features
 or SIM. It runs no generator or decay module. Native graph signatures, weights
