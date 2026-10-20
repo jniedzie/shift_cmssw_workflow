@@ -1,6 +1,60 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Independent material-response benchmark (2026-10-20)
+
+`validation/qcd_material_response_20261020_v2/` freezes 7,935 unique originals
+from nine published mu-enriched sources: 971 in pThat 5--10, 964 in 10--20,
+and 6,000 in 20+. Uniform sampling within each saved source is independent of
+the candidate score. Every benchmark original is reconstructed; the candidate
+gate is evaluated afterwards. This is an independent detector-response test,
+not another GEN-only efficiency forecast. The current frozen V10 reconstruction
+and incoming-parent SIM overlay are separate from the other agent's reco work.
+
+Raw production GEN stores `generatorSmeared`. A timing-only CMSSW step persists
+the established nominal `shiftEventTime` translation before material features
+or SIM. It runs no generator or decay module. Native graph signatures, weights
+and full source Run/Lumi products must agree after the same time translation.
+The complete saved decay trees and natural branching fractions are unchanged.
+Two real events pass this check. SIM still decides parent interactions, energy
+loss, decay and daughter kinematics; the material score never multiplies a rate.
+
+Nanos store exact Double native W/r, where r is the benchmark's fixed-size
+source inclusion probability. Pool full source trials once per pThat bin;
+never sum copied Nano Run/Lumi exposure or apply the muon-filter efficiency a
+second time. A hypothetical candidate retains W/(r p), with separate positive
+conditional probability p. The benchmark's published Nanos retain W/r.
+
+Before any detector response returned, the study declared control floors
+10%, 1% and 0.1%, with the same OS/parent-material/total-momentum score and
+native-weight protection. There is no muon-pT cut. Qualification compares
+event-grouped second moments times measured detector CPU, charging the full
+feature scan to the candidate. The two primary tails are retained OS Both-Both
+mass >20 GeV and pair pT >10 GeV; mass >50 and pT >20 are additional checks.
+Require at least 30 positive originals and observed benchmark effective count
+25, and intervals supporting a gain. Resample whole originals within pThat
+bins. The three-floor/two-primary-tail comparison uses Bonferroni-adjusted
+99.1667% percentile intervals. A few added pairs or a raw CPU forecast cannot
+pass this test. Detailed weighted shapes use the shared-reference covariance.
+
+`qualification.json` and the project PDFs `control_*_comparison.pdf` are the
+reviewed comparison outputs. The first automatic `summary.json` is preliminary;
+the final qualification uses the observed W/r effective count, rather than an
+extrapolated full-pool count. All results remain conditional on saved finite-
+cylinder mu-enriched GEN. They do not establish inclusive material/shower
+normalization, missing lifetime support, or complete outward/forward transport.
+Do not replace ordinary analysis campaigns with this validation sample.
+
+The actual scheduler lacks XRootD and matplotlib. Detector workers are kept
+unchanged, while the replacement `verifier_v3` DAG adopts the three original
+canaries and runs its completion/plot jobs in the qualified worker runtime.
+The old manager must not be released. The standalone final-analysis worker
+explicitly requests credentials and has passed real EOS readback and project
+PDF creation/removal. Its read-only watchdog covers the preserved canary,
+replacement DAG and final analysis. See `SHIFT_ANALYSIS.md` for current job IDs.
+The 1.5 GiB bound reuses part of the existing protected 6.144 GB QCD reservation;
+it does not change live peer policies or release the older pilot allocation.
+
 ## Material-consistent QCD selection (2026-10-20)
 
 The weekend QCD stream and the 86-original material pilot were retired at the

@@ -130,6 +130,16 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False, rank_parti
                 ranked_with_incomplete_paths=best_incomplete)
 
 
+def admission_probability(ranking, weight, mean_abs_weight, policy):
+    """One positive admission rule shared by production and response tests."""
+    floor = probability(policy['control_probability'], 'control probability')
+    weighted = min(1., floor*abs(weight)/mean_abs_weight) if mean_abs_weight else floor
+    value = max(floor, weighted, floor+(1.-floor)*ranking['priority'])
+    if ranking['unknown_potential_pair']:
+        value = max(value, policy['unknown_probability'])
+    return grid_probability(value)
+
+
 def prepare_selection(features, authority, policy):
     """Bind an exact GEN census to source exposure and a single decay draw."""
     validate_policy(policy)
@@ -230,12 +240,7 @@ def prepare_selection(features, authority, policy):
     output = []
     for row in records:
         rank = row.pop('ranking')
-        floor = policy['control_probability']
-        weighted_control = min(1., floor*abs(row['pre_admission_weight'])/mean_abs) if mean_abs else floor
-        conditional = max(floor, weighted_control, floor+(1.-floor)*rank['priority'])
-        if rank['unknown_potential_pair']:
-            conditional = max(conditional, policy['unknown_probability'])
-        conditional = grid_probability(conditional)
+        conditional = admission_probability(rank, row['pre_admission_weight'], mean_abs, policy)
         cumulative = probability(row['sampling_probability']*conditional, 'cumulative probability')
         group = [row['original_source_sha256'], row['event_id']]
         draw = uniform(['material-admission', policy['selection_domain'], policy['selection_seed'], group])

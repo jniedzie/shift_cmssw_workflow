@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+# Code style: AI-code. AI-generated frozen material-response detector worker.
+"""Reconstruct an independent random GEN subset, without applying the candidate gate.
+
+Saved decays and source weights are unchanged. The corrected incoming-parent
+overlay is applied only to SIM. All tiers must preserve identities, graphs and
+full source exposure before compact evidence and Nano are published.
+"""
+import gzip
+import json
+import math
+import os
+from pathlib import Path
+import resource
+import subprocess
+import sys
+import tarfile
+import time
+
+from audit_shift_material_scout import audit, digest, metadata
+from run_shift_gen_to_nano import audit_edm, audit_nano, command, event_progress, progress, signatures
+from shift_gen_material_features import event_features, hepmc_unit_names, read_hepmc
+from shift_material_preselection import admission_probability, pair_priority
+from shift_material_response import retained_tail_counts
+from shift_event_weights import annotate_proposal_weights
+
+
+def dump(path, value):
+    Path(path).write_text(json.dumps(value, indent=2, allow_nan=False)+'\n')
+
+
+def cpu():
+    values = [resource.getrusage(which) for which in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
+    return sum(x.ru_utime+x.ru_stime for x in values)
+
+
+def response(path):
+    import ROOT
+    f = ROOT.TFile.Open(str(path))
+    tree = f.Get('Events')
+    rows = []
+    for entry in tree:
+        pairs = [{name: float(getattr(entry, 'ShiftDimuonVertex_'+name)[i])
+                  for name in ('mass', 'pt', 'isOS', 'topologyMin', 'topologyMax', 'muonIdx1', 'muonIdx2')}
+                 for i in range(int(entry.nShiftDimuonVertex))]
+        for pair in pairs:
+            pair['nonfinite_fields'] = [key for key,value in pair.items() if not math.isfinite(value)]
+            for key in pair['nonfinite_fields']:
+                pair[key] = None
+        rows.append(dict(event_id=[int(entry.run), int(entry.luminosityBlock), int(entry.event)],
+                         retained_pairs=pairs, tail_counts=retained_tail_counts(pairs)))
+    f.Close()
+    return rows
+
+
+def main():
+    request_path = Path(sys.argv[1])
+    request = json.loads(request_path.read_text())
+    source, sample = request['source'], request['sample']
+    tools = Path(__file__).resolve().parent.parent
+    report = dict(schema='shift-material-response-worker-v1', complete=False,
+                  request_sha256=digest(request_path), source_id=source['source_id'],
+                  original_source_sha256=source['gen_sha256'], stages=[],
+                  source_stratum=source['stratum'],
+                  saved_decays_unchanged=True, material_survival_weight_applied=False,
+                  physics_normalization_ready=False, started_epoch=time.time())
+
+    def save():
+        dump('report.json', report)
+
+    def run_stage(name, argv, limit, env=None):
+        started, used = time.monotonic(), cpu()
+        report.update(current_stage=name, progress_epoch=time.time())
+        report.update(stage_started_epoch=time.time(), stage_deadline_epoch=time.time()+limit,
+                      stage_timeout_seconds=7200, stage_records_started=0)
+        save()
+        progress(report, name, {})
+        print(json.dumps(dict(stage=name, epoch=time.time(), sample=sample['id'])), flush=True)
+        with open(name+'.log', 'w') as stream:
+            observe = event_progress(Path(name+'.log'), report, name, {}, 3600,
+                expected_records=len(sample['indices']), first_event_stall_seconds=7200)
+            command(argv, timeout=limit, env=env, stdout=stream, stderr=subprocess.STDOUT, on_poll=observe)
+        report['stages'].append(dict(stage=name, wall_seconds=time.monotonic()-started,
+                                     cpu_seconds=cpu()-used))
+        save()
+
+    save()
+    try:
+        command(['xrdcp', '--silent', '--cksum', 'adler32', source['url'], 'gen.root'])
+        if digest('gen.root') != source['gen_sha256']:
+            raise ValueError('Source GEN hash changed')
+        for path, expected in request['private_input_hashes'].items():
+            if digest(path) != expected:
+                raise ValueError('Private input changed: '+path)
+        exposure = metadata('gen.root')
+        report['full_source_exposure'] = exposure
+        # Raw production GEN stores generatorSmeared, before the established
+        # nominal SHIFT time-coordinate translation. Persist that translation
+        # once, without running a generator, decay module or detector stage.
+        # This lets the material audit compare exact timed graphs end to end.
+        selected_rows = [dict(id=eid, weight=w) for eid,w in zip(sample['event_ids'], sample['native_weights'])]
+        dump('event_ids.json', sample['event_ids'])
+        timing = '''import json,sys
+import FWCore.ParameterSet.Config as cms
+p=cms.Process('SHIFTTIMING')
+p.load('IOMC.ShiftEventTiming.shiftEventTime_cfi')
+p.shiftEventTime.src=cms.InputTag('generatorSmeared')
+p.source=cms.Source('PoolSource',fileNames=cms.untracked.vstring('file:'+sys.argv[1]),eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))]))
+p.maxEvents=cms.untracked.PSet(input=cms.untracked.int32(int(sys.argv[3])))
+p.path=cms.Path(p.shiftEventTime)
+p.out=cms.OutputModule('PoolOutputModule',fileName=cms.untracked.string('file:'+sys.argv[2]),outputCommands=cms.untracked.vstring('keep *'))
+p.end=cms.EndPath(p.out)
+open('timing_cfg.py','w').write(p.dumpPython())
+'''
+        command([sys.executable, '-c', timing, str(Path('gen.root').resolve()),
+                 str(Path('timed_gen.root').resolve()), str(len(selected_rows))], timeout=600)
+        before = signatures(Path('gen.root'), 0, len(selected_rows), indices=sample['indices'])
+        run_stage('TIMING', ['cmsRun', 'timing_cfg.py'], 1800)
+        after = signatures(Path('timed_gen.root'), 0, len(selected_rows))
+        if [(x['id'], x['weight'], x['hepmc_sha256']) for x in before] != [(x['id'], x['weight'], x['hepmc_sha256']) for x in after]:
+            raise ValueError('Nominal timing translation changed particle graph or weights')
+        audit_edm('timed_gen.root', selected_rows)
+        if metadata('timed_gen.root') != exposure:
+            raise ValueError('Timing-only step changed full source exposure')
+        import ROOT
+        from DataFormats.FWLite import Events
+        from audit_shift_material_scout import identity
+        ROOT.TGeoManager.LockDefaultUnits(False)
+        ROOT.TGeoManager.SetDefaultUnits(ROOT.TGeoManager.kRootUnits)
+        ROOT.TGeoManager.LockDefaultUnits(True)
+        started = cpu()
+        geometry = ROOT.TGeoManager.Import(request['geometry_path'])
+        if not geometry:
+            raise ValueError('Cannot load material geometry')
+        hepmc_unit_names()
+        stream = Events('timed_gen.root')
+        if stream.size() != len(selected_rows):
+            raise ValueError('Timed source population changed')
+        features, original_rows = [], []
+        for selected_index, index in enumerate(sample['indices']):
+            stream.to(selected_index)
+            eid = list(identity(stream))
+            if eid != sample['event_ids'][selected_index]:
+                raise ValueError('GEN identity differs from source receipt')
+            particles, weight, weights, units = read_hepmc(stream, 'shiftEventTime')
+            if weight != sample['native_weights'][selected_index]:
+                raise ValueError('Native source weight changed')
+            feat = event_features(particles, eid, weight, weights, geometry, request['frame'])
+            ranking = pair_priority(feat, request['policy']['momentum_scale_GeV'], True, True)
+            p = admission_probability(ranking, weight, source['mean_abs_native_weight'], request['policy'])
+            feat.update(candidate_probability=p, ranking=ranking)
+            features.append(feat)
+            original_rows.append(dict(id=eid, weight=weight))
+        feature_cpu = cpu()-started
+        with gzip.open('features.json.gz', 'wt') as out:
+            json.dump(dict(source=source, sample=sample, events=features,
+                           policy=request['policy'], feature_cpu_seconds=feature_cpu), out, allow_nan=False)
+        report['feature_cpu_seconds'] = feature_cpu
+        dump('event_ids.json', [x['id'] for x in original_rows])
+        # Generate every stage in a fresh interpreter; CMSSW era modifiers are global.
+        # The SIM template already schedules the saved, complete HepMC directly.
+        script = '''import json,runpy,sys
+import FWCore.ParameterSet.Config as cms
+p=runpy.run_path(sys.argv[1])['process']
+p.source.fileNames=cms.untracked.vstring('file:'+sys.argv[2])
+p.source.eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))])
+p.maxEvents.input=cms.untracked.int32(int(sys.argv[4]))
+p.RandomNumberGeneratorService.g4SimHits.initialSeed=cms.untracked.uint32(int(sys.argv[5]))
+p.FEVTDEBUGoutput.fileName=cms.untracked.string('file:'+sys.argv[3])
+open('sim_cfg.py','w').write(p.dumpPython())
+'''
+        command([sys.executable, '-c', script, str(tools/'templates/material_sim.py'),
+                 str(Path('timed_gen.root').resolve()), str(Path('step1.root').resolve()),
+                 str(len(original_rows)), str(sample['seed'])], timeout=600)
+        env = dict(os.environ, LD_PRELOAD=str(tools/'plugin/libShiftCompleteIncomingBaseline.so'))
+        run_stage('SIM', ['cmsRun', 'sim_cfg.py'], request['stage_timeout_seconds'], env)
+        audit_edm('step1.root', original_rows)
+        measured = audit(Path('timed_gen.root'), Path('step1.root'), minimum_stations=1,
+                         expected_event_ids=set(tuple(x['id']) for x in original_rows))
+        if not measured['passed']:
+            raise ValueError('SIM graph, weight or exposure audit failed')
+        with gzip.open('material_audit.json.gz', 'wt') as out:
+            json.dump(measured, out, allow_nan=False)
+        previous = Path('step1.root').resolve()
+        for stage in (2, 3, 4):
+            output = Path(f'step{stage}.root').resolve()
+            command([sys.executable, str(tools/'scripts/run_shift_gen_to_nano.py'), 'make-config',
+                     str(tools/f'templates/step{stage}.py'), str(stage), str(previous), str(output),
+                     '0', str(len(original_rows)), str(sample['seed']+stage), '1', '0', f'step{stage}_cfg.py'], timeout=600)
+            run_stage(f'step{stage}', ['cmsRun', f'step{stage}_cfg.py'], request['stage_timeout_seconds'])
+            check = audit_nano(output, original_rows) if stage == 4 else audit_edm(output, original_rows)
+            report['stages'][-1]['audit'] = check
+            if stage < 4 and metadata(output) != measured['full_original_run_lumi_metadata']:
+                raise ValueError('Detector tier changed source exposure')
+            save()
+            previous = output
+        answers = response('step4.root')
+        if [x['event_id'] for x in answers] != [x['id'] for x in original_rows]:
+            raise ValueError('Response identity/order mismatch')
+        weight_rows = [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
+            event_id=x['id'], proposal_draw_id=sample['id']+':'+str(x['id']), native_weight=x['weight'],
+            sampling_probability=sample['probability'], sampling_gen_weight=x['weight']/sample['probability'],
+            proposal_density_ratio=1., proposal_correction=1.,
+            proposal_gen_weight=x['weight']/sample['probability'], admitted=True) for x in original_rows]
+        report['weight_annotation'] = annotate_proposal_weights(Path('step4.root'), weight_rows,
+            [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
+                  full_source_trials=source['full_source_trials'], original_full_Run_Lumi_metadata=exposure)],
+            expected_nano_sha256=digest('step4.root'))
+        detector_cpu = sum(x['cpu_seconds'] for x in report['stages'])
+        for answer, feat, original in zip(answers, features, original_rows):
+            answer.update(original_source_sha256=source['gen_sha256'], source_id=source['source_id'],
+                stratum=source['stratum'], native_weight=original['weight'],
+                benchmark_probability=sample['probability'], candidate_probability=feat['candidate_probability'],
+                rate_weight=original['weight']*source['sigma_nd_pb']/source['full_source_trials'],
+                detector_cpu_seconds=detector_cpu/len(answers), feature_cpu_seconds=feature_cpu/len(answers))
+        dump('response.json', dict(schema='shift-material-response-v1', events=answers,
+             source_id=source['source_id'], source_GEN_sha256=source['gen_sha256'],
+             normalization=source, full_source_exposure=exposure,
+             no_second_filter_efficiency=True, saved_decays_unchanged=True,
+             candidate_gate_applied_to_detector_sample=False))
+        report.update(events=len(answers), tail_counts={key:sum(a['tail_counts'][key] for a in answers)
+                      for key in answers[0]['tail_counts']})
+        save()
+        with tarfile.open('evidence.tar.gz', 'w:gz') as archive:
+            for name in ('response.json', 'features.json.gz', 'material_audit.json.gz', 'report.json'):
+                archive.add(name, arcname=name)
+        publication = [('step4.root', 'nano.root'), ('evidence.tar.gz', 'evidence.tar.gz')]
+        if sum(Path(p).stat().st_size for p, _ in publication)+65536 > request['publication_bound_bytes']:
+            raise ValueError('Publication exceeds registered storage allocation')
+        base = request['publication_directory']
+        command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', base])
+        published = []
+        for local, remote in publication:
+            url = 'root://eosuser.cern.ch/'+base+'/'+remote
+            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', local, url])
+            command(['xrdcp', '--silent', '--cksum', 'adler32', url, 'readback.bin'])
+            if digest('readback.bin') != digest(local):
+                raise ValueError('Publication readback differs')
+            Path('readback.bin').unlink()
+            published.append(dict(url=url, bytes=Path(local).stat().st_size, sha256=digest(local)))
+        report.update(complete=True, published=published, finished_epoch=time.time(),
+                      wall_seconds=time.time()-report['started_epoch'])
+        save()
+        command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', 'report.json',
+                 'root://eosuser.cern.ch/'+base+'/complete.json'])
+        # Scratch belongs only to this worker. All retained outputs were audited/read back.
+        report['removed_scratch_inputs'] = []
+        for name in ('gen.root', 'timed_gen.root', 'step1.root', 'step2.root', 'step3.root'):
+            path = Path(name)
+            report['removed_scratch_inputs'].append(dict(path=name, bytes=path.stat().st_size, sha256=digest(path)))
+            path.unlink()
+        save()
+    except BaseException as error:
+        report.update(complete=False, error=repr(error), failed_epoch=time.time())
+        report['log_tails'] = {p.name:p.read_text(errors='replace')[-12000:] for p in Path('.').glob('*.log')}
+        save()
+        raise
+
+
+if __name__ == '__main__':
+    main()
