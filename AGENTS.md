@@ -12,6 +12,15 @@ or use Git worktrees unless the user explicitly overrides this policy.
 
 ## Temporary scripts and cleanup
 
+- Stay focused on the agreed milestone. Ask before a side investigation or
+  new workstream would materially delay it or expand its scope; explain the
+  evidence and expected time or compute cost. Necessary small checks within
+  the agreed task do not need repeated permission. If progress stalls, report
+  the result and seek the user's judgement before starting another detour.
+- Test reconstruction fixes on several failure cases and fixed good muon and
+  dimuon controls. Keep paired iterations small and fast, preserve all failures
+  and original identities, and report control regressions as well as gains.
+
 - Generated validation reports, inventories, scheduler snapshots, archives,
   figures and deletion receipts are local artifacts. Keep them in ignored
   `validation/`, `docs/results/` or `docs/validation_retention_audit_<date>/`
