@@ -1,12 +1,19 @@
 # Code style: AI-code. AI-generated GEN-to-material trace regression tests.
 import copy
+import contextlib
+import gzip
+import io
+import json
 import math
 from pathlib import Path
 import sys
+import tarfile
+import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from trace_shift_material_response import pair_kinematics, summarize, trace_event
+from trace_shift_material_response import pair_kinematics, summarize, trace_event, collect_scans, sha
+from shift_material_response import TARGETS
 from shift_material_response import sampling_probabilities
 
 
@@ -33,6 +40,46 @@ def fixture():
 
 
 class TraceTest(unittest.TestCase):
+    def test_census_pools_full_trials_once_and_groups_original_weights(self):
+        with tempfile.TemporaryDirectory() as name:
+            directory = Path(name)
+            sources = []
+            for index, weight in enumerate([.2, .4]):
+                sid = str(index)
+                source_hash = str(index+1)*64
+                job = directory/'jobs'/sid
+                job.mkdir(parents=True)
+                (job/'request.json').write_text('{}')
+                flags = {target: target == 'mass_gt20' for target in TARGETS}
+                pair = dict(targets=flags, incoming=index == 0)
+                event = dict(event_id=[1, 1, index+1], sampling_probability=1.,
+                             native_weight=weight, GEN_tail_pairs=[pair])
+                selection = dict(source_GEN_sha256=source_hash, source_receipt_sha256='a'*64,
+                    full_source_trials=10, sigma_nd_pb=100., counts={'originals': 10},
+                    selected_events=[event])
+                payload = job/'return_payload.tar.gz'
+                data = gzip.compress(json.dumps(selection).encode())
+                with tarfile.open(payload, 'w:gz') as archive:
+                    item = tarfile.TarInfo('tail_scan/GEN_tail_selection.json.gz')
+                    item.size = len(data)
+                    archive.addfile(item, io.BytesIO(data))
+                (job/'result.json').write_text(json.dumps(dict(complete=True, targets={
+                    target: dict(tail_events=int(flags[target]),
+                                 incoming_tail_events=int(flags[target] and index == 0))
+                    for target in TARGETS})))
+                (job/'status.json').write_text(json.dumps(dict(complete=True, return_payload_sha256=sha(payload))))
+                sources.append(dict(id=sid, GEN_sha256=source_hash, source_receipt_sha256='a'*64,
+                    source_receipt_path='synthetic', worker_request_sha256=sha(job/'request.json'),
+                    full_source_trials=10, saved_events=10))
+            (directory/'plan.json').write_text(json.dumps(dict(sources=sources,
+                full_source_trials=20, saved_events=20)))
+            with contextlib.redirect_stdout(io.StringIO()):
+                collect_scans(directory, directory/'out')
+            report = json.loads((directory/'out/summary.json').read_text())['targets']['mass_gt20']
+            self.assertAlmostEqual(report['GEN_filtered_cross_section_pb'], 3.)
+            self.assertAlmostEqual(report['incoming_GEN_filtered_cross_section_pb'], 1.)
+            self.assertAlmostEqual(report['effective_originals'], 1.8)
+
     def test_tail_and_control_weights_keep_their_own_probabilities(self):
         sample = dict(event_ids=[[1, 1, 1], [1, 1, 2]], probabilities=[1., .01])
         probabilities = sampling_probabilities(sample)

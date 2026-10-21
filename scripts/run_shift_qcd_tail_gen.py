@@ -16,6 +16,41 @@ import time
 from run_shift_weighted_gen import publish, sha
 
 
+def scan_existing(request_path):
+    """Read one pinned existing source; publish only compact tail identities."""
+    request = json.loads(request_path.read_text())
+    report = dict(complete=False, source_receipt_sha256=request['source_receipt_sha256'],
+                  source_receipt_original_path=request['source_receipt_path'],
+                  existing_GEN_reused=True, physics_normalization_ready=False)
+    try:
+        original = Path(request['source_receipt_path'])
+        if sha(original) != request['source_receipt_sha256']:
+            raise ValueError('Existing native GEN receipt changed')
+        Path('source_receipt.json').write_bytes(original.read_bytes())
+        subprocess.run(['xrdcp', '--silent', '--cksum', 'adler32', request['source_url'], 'gen.root'],
+                       timeout=900, check=True)
+        from trace_shift_material_response import scan_gen
+        scan_gen(Path('gen.root'), Path('source_receipt.json'), Path('tail_scan'))
+        summary = json.loads(Path('tail_scan/summary.json').read_text())
+        if (sum(Path('tail_scan', name).stat().st_size for name in
+                ('GEN_tail_selection.json.gz', 'summary.json'))+65536 > request['publication_bound_bytes']):
+            raise ValueError('Existing-source scan exceeds its registered compact-output bound')
+        publication = publish([(Path('tail_scan/GEN_tail_selection.json.gz'), 'GEN_tail_selection.json.gz'),
+                               (Path('tail_scan/summary.json'), 'tail_summary.json')],
+                              request['publication_directory'])
+        report.update(complete=True, source_GEN_sha256=summary['source_GEN_sha256'],
+                      counts=summary['counts'], targets=summary['targets'],
+                      selected_events=summary['selected_events'], published=publication,
+                      full_source_trials=summary['full_source_trials'])
+        Path('report.json').write_text(json.dumps(report, indent=2)+'\n')
+        publish([(Path('report.json'), 'complete.json')], request['publication_directory'])
+        Path('gen.root').unlink()
+    except BaseException as error:
+        report.update(complete=False, error=repr(error))
+        Path('report.json').write_text(json.dumps(report, indent=2)+'\n')
+        raise
+
+
 def run(manifest_path, expected, node):
     started = time.time()
     manifest = json.loads(manifest_path.read_text())
@@ -64,8 +99,16 @@ def run(manifest_path, expected, node):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--manifest', required=True, type=Path)
-    parser.add_argument('--expected-sha256', required=True)
-    parser.add_argument('--node', required=True)
+    parser.add_argument('--manifest', type=Path)
+    parser.add_argument('--expected-sha256')
+    parser.add_argument('--node')
+    parser.add_argument('--scan-request', type=Path)
     args = parser.parse_args()
-    run(args.manifest, args.expected_sha256, args.node)
+    if args.scan_request:
+        if args.manifest or args.expected_sha256 or args.node:
+            parser.error('Existing source scan cannot also run a generator')
+        scan_existing(args.scan_request)
+    else:
+        if not args.manifest or not args.expected_sha256 or not args.node:
+            parser.error('GEN needs a manifest, expected SHA and node')
+        run(args.manifest, args.expected_sha256, args.node)

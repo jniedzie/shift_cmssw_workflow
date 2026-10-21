@@ -42,6 +42,29 @@ completion. The new 3.5 GB stage reservation is inside the already protected
 6.144 GB QCD allowance, alongside the unchanged older reservations. No live
 peer policy was changed. No ordinary campaign alias is switched by this test.
 
+The larger existing-source census scans forty pinned completed high-bin GEN
+files (sources 0004--0043), without regenerating or changing them. All forty
+worker audits/readbacks pass: 412,907 saved originals, 800,000 full source
+trials, thirteen OS GEN mass >20 originals, four with an incoming tail pair,
+none above mass 50. GEN pT >10 gives 1,052 originals (613 incoming); pT >20
+gives 121 (102 incoming). Keep raw counts separate from weighted precision:
+the thirteen mass originals have effective count only 1.22; the four incoming
+ones give 1.75. These are GEN-only effective counts, not reconstructed yields.
+`trace_shift_material_response.py --collect-scans` validates returned source
+SHA/identity/exposure bindings and pools full trials once before computing them.
+
+All four nominally incoming mass cases contain one muon below 0.7 GeV total
+momentum. Its straight projection to z=1100 cm is 98--146 m off-axis. An
+incoming pz sign alone is not a detector-pointing criterion. Those projections
+ignore fields/scattering and do not establish a hard veto. `mass_response/`
+replays all thirteen cases with the unchanged worker archive already qualified
+on the original 7,935-event benchmark. It is deliberately GEN-mass-selected,
+not an inclusive reconstructed-tail estimator. The separate finer-bin cohort
+retains positive no-tail/same-sign controls, and old/source-overlapping outputs
+are not merged as independent exposure. Both case cohorts preserve native
+weights, complete original decay graphs and full source metadata. Case workers,
+downstream traces and read-only watchdogs use persistent working directories.
+
 ## Independent material-response benchmark (2026-10-20)
 
 `validation/qcd_material_response_20261020_v2/` freezes 7,935 unique originals

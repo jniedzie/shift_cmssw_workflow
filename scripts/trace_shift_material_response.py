@@ -297,18 +297,99 @@ def run(directory, output, scratch, workers):
     print(json.dumps(report['all_bins'], indent=2), flush=True)
 
 
+def collect_scans(directory, output):
+    """Collect a declared existing-source census, keeping full source exposure."""
+    plan = json.loads((directory/'plan.json').read_text())
+    targets = {name: dict(raw_events=0, incoming_events=0, weights=[], incoming_weights=[])
+               for name in TARGETS}
+    cases, trials, originals, cross_sections = [], 0, 0, set()
+    source_evidence, seen = [], set()
+    for source in plan['sources']:
+        job = directory/'jobs'/source['id']
+        result, status = (json.loads((job/name).read_text()) for name in ('result.json', 'status.json'))
+        if not result['complete'] or not status['complete']:
+            raise ValueError('Incomplete GEN census worker: '+source['id'])
+        if sha(job/'request.json') != source['worker_request_sha256']:
+            raise ValueError('GEN census request changed')
+        if sha(job/'return_payload.tar.gz') != status['return_payload_sha256']:
+            raise ValueError('GEN census returned evidence changed')
+        with tarfile.open(job/'return_payload.tar.gz') as archive:
+            selection = json.loads(gzip.decompress(archive.extractfile('tail_scan/GEN_tail_selection.json.gz').read()))
+        if (selection['source_GEN_sha256'] != source['GEN_sha256']
+                or selection['source_receipt_sha256'] != source['source_receipt_sha256']
+                or selection['full_source_trials'] != source['full_source_trials']
+                or selection['counts']['originals'] != source['saved_events']):
+            raise ValueError('GEN census original source/exposure differs')
+        trials += selection['full_source_trials']
+        originals += selection['counts']['originals']
+        cross_sections.add(selection['sigma_nd_pb'])
+        source_evidence.append(dict(source_id=source['id'], source_GEN_sha256=source['GEN_sha256'],
+                                    return_payload_sha256=status['return_payload_sha256']))
+        observed = collections.Counter()
+        incoming_counts = collections.Counter()
+        for event in selection['selected_events']:
+            identity = (source['GEN_sha256'], tuple(event['event_id']))
+            if identity in seen:
+                raise ValueError('Repeated GEN census original')
+            seen.add(identity)
+            for name in TARGETS:
+                pairs = [pair for pair in event['GEN_tail_pairs'] if pair['targets'][name]]
+                if pairs:
+                    if event['sampling_probability'] != 1.:
+                        raise ValueError('Census must retain every GEN tail original')
+                    observed[name] += 1
+                    targets[name]['weights'].append(event['native_weight'])
+                    if any(pair['incoming'] for pair in pairs):
+                        incoming_counts[name] += 1
+                        targets[name]['incoming_weights'].append(event['native_weight'])
+            if any(pair['targets']['mass_gt20'] for pair in event['GEN_tail_pairs']):
+                cases.append(dict(event, source_id=source['id'], source_GEN_sha256=source['GEN_sha256'],
+                                  source_receipt_path=source['source_receipt_path']))
+        for name in TARGETS:
+            if (observed[name] != result['targets'][name]['tail_events'] or
+                    incoming_counts[name] != result['targets'][name]['incoming_tail_events']):
+                raise ValueError('Selected GEN tail population differs from complete source scan')
+            targets[name]['raw_events'] += observed[name]
+            targets[name]['incoming_events'] += incoming_counts[name]
+    if trials != plan['full_source_trials'] or originals != plan['saved_events'] or len(cross_sections) != 1:
+        raise ValueError('Census exposure or common ND cross section differs')
+    sigma = cross_sections.pop()
+    for record in targets.values():
+        for field in ('weights', 'incoming_weights'):
+            values = record.pop(field)
+            first, second = math.fsum(values), math.fsum(x*x for x in values)
+            prefix = 'incoming_' if field == 'incoming_weights' else ''
+            record[prefix+'GEN_filtered_cross_section_pb'] = sigma*first/trials
+            record[prefix+'effective_originals'] = first*first/second if second else 0.
+    output.mkdir(parents=True, exist_ok=False)
+    with gzip.open(output/'GEN_mass_tail_cases.json.gz', 'wt') as stream:
+        json.dump(dict(events=cases, source_plan_sha256=sha(directory/'plan.json'),
+                       diagnostic_only=True, saved_decays_unchanged=True), stream, allow_nan=False)
+    report = dict(complete=True, saved_GEN_originals=originals, full_source_trials=trials,
+        targets=targets, source_evidence=source_evidence, existing_GEN_reused=True,
+        physics_normalization_ready=False,
+        scope='Conditional finite-cylinder saved-GEN census. GEN rates are not material/reconstruction yields.')
+    (output/'summary.json').write_text(json.dumps(report, indent=2, allow_nan=False)+'\n')
+    print(json.dumps({key: value for key, value in report.items() if key != 'source_evidence'}, indent=2))
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('response_directory', type=Path, nargs='?')
     parser.add_argument('--gen-input', type=Path)
     parser.add_argument('--source-receipt', type=Path)
+    parser.add_argument('--collect-scans', action='store_true')
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--scratch', type=Path)
     parser.add_argument('--workers', type=int, default=4)
     options = parser.parse_args()
     if not 1 <= options.workers <= 8:
         parser.error('Use one to eight concurrent evidence readers')
-    if options.gen_input:
+    if options.collect_scans:
+        if not options.response_directory or options.gen_input:
+            parser.error('Census collection needs the declared scan directory')
+        collect_scans(options.response_directory.resolve(), options.output.resolve())
+    elif options.gen_input:
         if options.response_directory or not options.source_receipt:
             parser.error('GEN scan needs --source-receipt and no response directory')
         scan_gen(options.gen_input.resolve(), options.source_receipt.resolve(), options.output.resolve())
