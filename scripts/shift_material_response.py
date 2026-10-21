@@ -6,8 +6,12 @@ The sampling unit is an original event, not a pair. These are Poisson
 second-moment planning comparisons, conditional on the saved GEN population.
 They do not establish inclusive material normalization or trigger acceptance.
 """
+import hashlib
+import json
 import math
+from pathlib import Path
 import random
+import zipfile
 from bisect import bisect_right
 
 from shift_material_preselection import uniform, probability
@@ -18,6 +22,148 @@ TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
 
 SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 150., 200.],
                'pt': [0., 1., 2., 3., 4., 5., 7.5, 10., 15., 20., 30., 50., 100.]}
+
+
+def source_record(receipt_path):
+    """Import one audited mu-enriched source without changing W or exposure.
+
+    A composite HF source additionally needs its SHA-bound full source-path
+    proof. This admits a conditional detector diagnostic, not a production
+    normalization or an extra correction to the native generator weight.
+    """
+    from audit_shift_weighted_gen import ALGORITHM as base_algorithm, close, validate_ledger
+    from qcd_mu_enrichment import PROFILE
+    from shift_first_mpi_source_proposal import ALGORITHM as hf_algorithm, validate
+
+    def require(condition, message):
+        if not condition:
+            raise ValueError(message)
+
+    path = Path(receipt_path).resolve()
+    record = json.loads(path.read_text())
+    require(record.get('schema') == 'shift-weighted-gen-receipt-v3'
+            and all(record.get(name) is True for name in ('complete', 'generated_edm', 'publication_complete'))
+            and record.get('physics_valid') is False and record.get('normalization_ready') is False,
+            'Needs a complete audited diagnostic source receipt')
+    request, ledger, semantic = record['request'], record['ledger'], record['semantic_audit']
+    trials = validate_ledger(ledger)
+    require(record.get('generator_profile') == PROFILE and request['sample'] == 'qcd'
+            and semantic.get('generator_profile') == PROFILE and semantic.get('complete') is True
+            and semantic.get('healthy') is True and semantic['ledger'] == ledger
+            and semantic['algorithm'] == ledger['algorithm'] == base_algorithm,
+            'Muon-enriched source/native ledger audit differs')
+    require(ledger['requested_trials'] == request['trials'] == semantic['full_source_trial_denominator']
+            and ledger['run'] == request['run'] and [ledger['lower'], ledger['upper']] == request['bounds']
+            and semantic.get('no_second_filter_efficiency') is True,
+            'Full native source exposure differs from its receipt')
+    arrays = [semantic[name] for name in ('event_ids', 'weights', 'scale', 'charged')]
+    count = semantic['events']
+    require(type(count) is int and count > 0 and record['event_count'] == count
+            and all(isinstance(values, list) and len(values) == count for values in arrays),
+            'Empty or incomplete saved source census')
+    identities = set()
+    for identity, weight, scale, charged in zip(*arrays):
+        require(isinstance(identity, list) and len(identity) == 3
+                and all(type(value) is int for value in identity)
+                and identity[:2] == [ledger['run'], 1] and 1 <= identity[2] <= trials
+                and tuple(identity) not in identities, 'Repeated or out-of-budget source original')
+        identities.add(tuple(identity))
+        require(math.isfinite(weight) and weight > 0 and math.isfinite(scale)
+                and scale >= ledger['lower'] and (ledger['upper'] == -1 or scale < ledger['upper'])
+                and type(charged) is int and charged >= 0, 'Invalid recorded source W/scale/multiplicity')
+    # Reconcile only fields actually recorded in the native audit. Its SHA-
+    # bound bytes below certify the real EDM process/ownership checks; those
+    # event fields must not be invented to rerun a downstream approximation.
+    filters = semantic['filter_records']
+    require(filters and all(row['total_negative'] == row['pass_negative'] == 0 for row in filters)
+            and sum(row['total_positive'] for row in filters) == ledger['accepted']
+            and sum(row['pass_positive'] for row in filters) == count <= ledger['accepted']
+            and semantic['source_accepted'] == ledger['accepted'], 'Source filter census differs')
+    before = math.fsum(row['sum_weights'] for row in filters)
+    before2 = math.fsum(row['sum_weights2'] for row in filters)
+    after = math.fsum(arrays[1])
+    after2 = math.fsum(weight**2 for weight in arrays[1])
+    require(0 < after <= before and 0 < after2 <= before2, 'Saved weights exceed full source')
+    for actual, expected, label in (
+            (before, ledger['sumw'], 'Full source weights'),
+            (before2, ledger['sumw2'], 'Full source squared weights'),
+            (after, math.fsum(row['sum_pass_weights'] for row in filters), 'Saved weights'),
+            (after2, math.fsum(row['sum_pass_weights2'] for row in filters), 'Saved squared weights'),
+            (semantic['sumw'], after, 'Native audit saved weights'),
+            (semantic['sumw2'], after2, 'Native audit saved squared weights'),
+            (ledger['sigma_mb'], ledger['sigma_nd_mb']*before/trials, 'Full source cross section'),
+            (ledger['sigma_error_mb'], ledger['sigma_nd_mb']*math.sqrt(
+                max(0., before2-before*before/trials)/(trials*(trials-1))), 'Full source cross-section error'),
+            (semantic['sigma_weighted_mb'], ledger['sigma_nd_mb']*after/trials, 'Saved cross section'),
+            (semantic['error_weighted_mb'], ledger['sigma_nd_mb']*math.sqrt(
+                max(0., after2-after*after/trials)/(trials*(trials-1))), 'Saved cross-section error'),
+            (semantic['weighted_run_info']['internal_xsec_pb'], ledger['sigma_mb']*1.e9, 'Full source run rate'),
+            (semantic['weighted_run_info']['error_pb'], ledger['sigma_error_mb']*1.e9, 'Full source run error'),
+            (semantic['weighted_run_info']['filter_efficiency'], 1., 'No second filter efficiency')):
+        close(actual, expected, label)
+    publications = {entry['name']: entry for entry in record['publication']}
+    require(len(publications) == len(record['publication']), 'Repeated source publication')
+    def artifact(name):
+        item, declared = publications[name], record['artifacts'][name]
+        require(item.get('independent_sha256_readback') is True and item['bytes'] == declared['bytes']
+                and item['sha256'] == declared['sha256']
+                and item['path'] == record['publication_directory']+'/'+name,
+                'Source publication differs from audited artifact: '+name)
+        return item
+    gen = artifact('gen.root')
+    require(gen['sha256'] == semantic['input_sha256']
+            and artifact('proposal_ledger.json')['sha256'] == semantic['ledger_sha256']
+            and artifact('resolved_gen_cfg.py')['sha256'] == semantic['config_sha256']
+            and semantic['auditor_sha256'] == record['source_inputs']['audit_shift_weighted_gen.py'],
+            'Source GEN/native-audit provenance differs')
+    with zipfile.ZipFile(path.with_name('artifacts.zip')) as archive:
+        native_audit_bytes = archive.read('semantic_audit.json')
+        ledger_bytes = archive.read('proposal_ledger.json')
+        proof_bytes = archive.read('source_proposal_audit.json') if record['algorithm'] == hf_algorithm else None
+    require(hashlib.sha256(native_audit_bytes).hexdigest() == artifact('semantic_audit.json')['sha256']
+            and json.loads(native_audit_bytes) == semantic
+            and hashlib.sha256(ledger_bytes).hexdigest() == semantic['ledger_sha256']
+            and json.loads(ledger_bytes) == ledger, 'Native source accounting bytes differ from receipt')
+    source = dict(source_id=request['id'], stratum=request['stratum'],
+        url='root://eosuser.cern.ch/'+gen['path'], gen_sha256=gen['sha256'],
+        saved_events=count, full_source_trials=trials,
+        sigma_nd_pb=ledger['sigma_nd_mb']*1.e9,
+        mean_abs_native_weight=after/count,
+        original_receipt=str(path), original_receipt_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        generator_profile=PROFILE, generator_algorithm=record['algorithm'],
+        base_sampler_algorithm=base_algorithm, decay_dependent_filter=True,
+        saved_decays_unchanged=True, physics_normalization_ready=False)
+    if record['algorithm'] == hf_algorithm:
+        manifest = dict(algorithm=hf_algorithm, generator_profile=PROFILE,
+            source_proposal=record['source_proposal'], inputs=record['source_inputs'],
+            maximum_publication_bytes_per_worker=record['publication_size_guard']['reserved_bytes'])
+        proposal = validate(manifest, request)
+        proof = record['source_proposal_audit']
+        proof_publication = artifact('source_proposal_audit.json')
+        # The actual returned bytes bind the proof to its published SHA; do not
+        # substitute a reserialized or inferred audit for the native evidence.
+        require(hashlib.sha256(proof_bytes).hexdigest() == proof_publication['sha256']
+                and json.loads(proof_bytes) == proof, 'Missing or changed full source-path proof')
+        require(all(proof.get(name) is True for name in ('complete', 'passed', 'natural_decays',
+                    'all_intrinsic_retry_paths_checked', 'source_only_native_weight_checked'))
+                and proof['algorithm'] == hf_algorithm and proof['base_sampler_algorithm'] == base_algorithm
+                and proof['source_proposal'] == proposal and proof['full_source_trials'] == request['trials']
+                and proof['first_scatter_calls'] == ledger['proposal_calls']
+                and proof['prefilter_accepted_events'] == ledger['accepted']
+                and proof['saved_events'] == count, 'Incomplete or inconsistent HF source-path proof')
+        require(proof['GEN_sha256'] == gen['sha256'] and proof['ledger_sha256'] == semantic['ledger_sha256']
+                and proof['semantic_audit_sha256'] == artifact('semantic_audit.json')['sha256']
+                and proof['history_sha256'] == artifact('hard_channel_history.jsonl')['sha256']
+                and proof['prefilter_GEN_sha256'] == artifact('prefilter.root')['sha256']
+                and proof['auditor_sha256'] == record['source_inputs']['shift_first_mpi_source_proposal.py'],
+                'HF source proof is not bound to the published source/history/auditors')
+        source.update(source_proposal=proposal, source_proposal_audit=proof_publication,
+            native_weight_already_contains_source_correction=True,
+            detector_weight_formula='Native W / reconstruction inclusion probability; no second HF or filter factor.')
+    else:
+        require(record['algorithm'] == base_algorithm and record.get('source_proposal') is None,
+                'Unknown or undeclared source proposal algorithm')
+    return source
 
 
 def sampling_probabilities(sample):

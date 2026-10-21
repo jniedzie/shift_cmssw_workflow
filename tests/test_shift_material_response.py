@@ -1,13 +1,141 @@
 # Code style: AI-code. AI-generated event-grouped response and CPU regression tests.
 import copy
+import hashlib
+import json
 import sys
 from pathlib import Path
+import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_material_response import (compare, bootstrap_comparison, shape_comparison,
-                                     retained_tail_counts, response_reporting_scope, TARGETS)
+                                     retained_tail_counts, response_reporting_scope, source_record, TARGETS)
 from shift_material_preselection import admission_probability
+
+
+def source_receipt_fixture(directory, composite=True):
+    from test_shift_weighted_gen_audit import fixture
+    from test_qcd_mu_enrichment import filters
+    from qcd_mu_enrichment import filtered_snapshot, PROFILE
+    from shift_first_mpi_source_proposal import ALGORITHM, BASE_ALGORITHM, SCHEMA
+    ledger, events, run = fixture()
+    saved = events[:1]
+    semantic = filtered_snapshot(ledger, ledger, saved, run, filters(ledger, saved))
+    payloads = {'gen.root': b'GEN', 'resolved_gen_cfg.py': b'resolved config',
+                'proposal_ledger.json': json.dumps(ledger).encode()}
+    sha = lambda data: hashlib.sha256(data).hexdigest()
+    semantic.update(complete=True, healthy=True, ledger=ledger, algorithm=BASE_ALGORITHM,
+        generator_profile=PROFILE, weighted_run_info=run, filter_records=filters(ledger, saved),
+        input_sha256=sha(payloads['gen.root']), ledger_sha256=sha(payloads['proposal_ledger.json']),
+        config_sha256=sha(payloads['resolved_gen_cfg.py']), auditor_sha256='b'*64)
+    payloads['semantic_audit.json'] = json.dumps(semantic).encode()
+    request = dict(id='source', sample='qcd', stratum='qcd_5to10', bounds=[5., 10.],
+                   trials=4, run=ledger['run'], stage='pilot')
+    record = dict(schema='shift-weighted-gen-receipt-v3', complete=True, generated_edm=True,
+        publication_complete=True, physics_valid=False, normalization_ready=False,
+        generator_profile=PROFILE, algorithm=ALGORITHM if composite else BASE_ALGORITHM,
+        request=request, ledger=ledger, semantic_audit=semantic, event_count=1,
+        source_inputs={'audit_shift_weighted_gen.py': 'b'*64}, publication_directory='/synthetic/source')
+    if composite:
+        proposal = dict(schema=SCHEMA, algorithm=ALGORITHM, base_sampler_algorithm=BASE_ALGORITHM,
+            mode='mixture', target='heavy', component_seed=123, overlay_sha256='a'*64,
+            natural_decays=True, maximum_history_bytes=1024*1024)
+        payloads.update({'hard_channel_history.jsonl': b'original full history', 'prefilter.root': b'prefilter GEN'})
+        proof = dict(complete=True, passed=True, natural_decays=True, all_intrinsic_retry_paths_checked=True,
+            source_only_native_weight_checked=True, algorithm=ALGORITHM, base_sampler_algorithm=BASE_ALGORITHM,
+            source_proposal=proposal, full_source_trials=4, first_scatter_calls=ledger['proposal_calls'],
+            prefilter_accepted_events=ledger['accepted'], saved_events=1,
+            GEN_sha256=semantic['input_sha256'], ledger_sha256=semantic['ledger_sha256'],
+            semantic_audit_sha256=sha(payloads['semantic_audit.json']),
+            history_sha256=sha(payloads['hard_channel_history.jsonl']),
+            prefilter_GEN_sha256=sha(payloads['prefilter.root']), auditor_sha256='c'*64)
+        payloads['source_proposal_audit.json'] = json.dumps(proof).encode()
+        record.update(source_proposal=proposal, source_proposal_audit=proof,
+            publication_size_guard=dict(reserved_bytes=160000000))
+        record['source_inputs'].update({'shift_first_mpi_source_proposal.py': 'c'*64,
+                                       'libShiftMpiTailProposal.so': 'a'*64})
+    record['artifacts'] = {name: dict(bytes=len(data), sha256=sha(data)) for name, data in payloads.items()}
+    record['publication'] = [dict(name=name, path='/synthetic/source/'+name,
+        independent_sha256_readback=True, **record['artifacts'][name]) for name in payloads]
+    path = Path(directory)/'result.json'
+    path.write_text(json.dumps(record))
+    with zipfile.ZipFile(path.with_name('artifacts.zip'), 'w') as archive:
+        for name, data in payloads.items():
+            archive.writestr(name, data)
+    return path, record
+
+
+class SourceRecordTest(unittest.TestCase):
+    def test_composite_source_keeps_native_weight_and_full_before_filter_exposure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = source_receipt_fixture(directory)
+            source = source_record(path)
+            self.assertEqual(source['saved_events'], 1)
+            self.assertEqual(source['full_source_trials'], 4)
+            self.assertEqual(source['sigma_nd_pb'], 65.e9)
+            self.assertEqual(source['mean_abs_native_weight'], .2)
+            self.assertTrue(source['native_weight_already_contains_source_correction'])
+            self.assertFalse(source['physics_normalization_ready'])
+
+    def test_native_base_source_remains_supported_without_composite_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = source_receipt_fixture(directory, False)
+            source = source_record(path)
+            self.assertNotIn('source_proposal', source)
+            self.assertEqual(source['full_source_trials'], 4)
+
+    def test_composite_audit_population_provenance_and_publication_mutations_fail(self):
+        changes = [lambda r: r['source_proposal_audit'].update(passed=False),
+                   lambda r: r['source_proposal_audit'].update(saved_events=2),
+                   lambda r: r['source_proposal_audit'].update(history_sha256='d'*64),
+                   lambda r: r['source_proposal_audit'].update(prefilter_GEN_sha256='d'*64),
+                   lambda r: r['source_proposal'].update(natural_decays=False),
+                   lambda r: r['request'].update(trials=1),
+                   lambda r: r['semantic_audit']['weights'].__setitem__(0, .4),
+                   lambda r: r['publication'][-1].update(independent_sha256_readback=False)]
+        for change in changes:
+            with tempfile.TemporaryDirectory() as directory:
+                path, record = source_receipt_fixture(directory)
+                change(record);path.write_text(json.dumps(record))
+                with self.assertRaises(ValueError):
+                    source_record(path)
+
+    def test_composite_source_requires_actual_sha_bound_returned_audit_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = source_receipt_fixture(directory)
+            with zipfile.ZipFile(path.with_name('artifacts.zip')) as archive:
+                payloads = {name: archive.read(name) for name in archive.namelist()}
+            payloads['source_proposal_audit.json'] = b'{"passed":true}'
+            with zipfile.ZipFile(path.with_name('artifacts.zip'), 'w') as archive:
+                for name, data in payloads.items():
+                    archive.writestr(name, data)
+            with self.assertRaisesRegex(ValueError, 'source-path proof'):
+                source_record(path)
+
+    def test_recorded_census_and_filter_arithmetic_are_checked_without_synthetic_process_fields(self):
+        changes = [lambda r: r['semantic_audit']['event_ids'][0].__setitem__(2, 5),
+                   lambda r: r['semantic_audit']['weights'].__setitem__(0, float('nan')),
+                   lambda r: r['semantic_audit']['scale'].__setitem__(0, 10.),
+                   lambda r: r['semantic_audit']['charged'].__setitem__(0, -1),
+                   lambda r: r['semantic_audit']['filter_records'][0].update(pass_positive=0),
+                   lambda r: r['semantic_audit']['filter_records'][0].update(sum_pass_weights=.4),
+                   lambda r: r['semantic_audit']['weighted_run_info'].update(filter_efficiency=.5)]
+        for change in changes:
+            with tempfile.TemporaryDirectory() as directory:
+                path, record = source_receipt_fixture(directory, False)
+                change(record);path.write_text(json.dumps(record))
+                with self.assertRaises(ValueError):
+                    source_record(path)
+
+    def test_native_audit_bytes_are_required_for_base_source_too(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = source_receipt_fixture(directory, False)
+            with zipfile.ZipFile(path.with_name('artifacts.zip'), 'w') as archive:
+                archive.writestr('semantic_audit.json', b'{}')
+                archive.writestr('proposal_ledger.json', b'{}')
+            with self.assertRaisesRegex(ValueError, 'Native source accounting bytes'):
+                source_record(path)
 
 
 def row(event, count, probability):
