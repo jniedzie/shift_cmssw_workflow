@@ -32,6 +32,13 @@ uniform-within-source interface remains supported. No old events or weights
 are rewritten. This deliberate tail diagnosis is not a production GEN-mass
 cut: reconstruction and charge errors can move other GEN events into the tails.
 
+Before reusing a frozen detector archive, exercise its actual weight-annotation
+code with the new request. The October 21 HF canary completed all detector
+stages but failed because an older worker required scalar `sample.probability`
+and the request correctly used per-original `sample.probabilities`. A successful
+uniform-sampling benchmark does not qualify that mixed-probability interface.
+Freeze the worker and its imported helpers together; keep the original failure.
+
 The detector test uses the same frozen V10 reconstruction and incoming-parent
 overlay as the reference. It leaves the shared release, electronics and trigger
 settings untouched. A mixed tail/control canary and worker-runtime downstream
