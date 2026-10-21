@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 
-from shift_material_response import bootstrap_comparison, shape_comparison
+from shift_material_response import bootstrap_comparison, shape_comparison, response_reporting_scope
 
 
 def summarize(directory, canary=False):
@@ -58,7 +58,7 @@ def summarize(directory, canary=False):
                    conditional_saved_GEN_study=True, full_source_trials_by_bin=dict(exposure),
                    all_bins=bootstrap_comparison(rows), bins={}, publications=publications,
                    shapes=shape_comparison(rows, plan['policy']),
-                   source_population_scope='Saved finite-cylinder mu-enriched GEN; no lifetime redraws.',
+                   **response_reporting_scope(plan),
                    physics_normalization_ready=False, inclusive_transport_complete=False)
         for stratum in sorted(exposure):
             out['bins'][stratum] = bootstrap_comparison([r for r in rows if r['stratum'] == stratum])

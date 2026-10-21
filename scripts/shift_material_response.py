@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Code style: AI-code. AI-generated material-selection response qualification.
-"""Compare a frozen selection against an independent random detector sample.
+"""Compare a frozen selection against an independent detector sample.
 
 The sampling unit is an original event, not a pair. These are Poisson
 second-moment planning comparisons, conditional on the saved GEN population.
@@ -28,6 +28,37 @@ def sampling_probabilities(sample):
     if len(values) != len(sample['event_ids']):
         raise ValueError('Sampling probabilities differ from original identities')
     return [probability(value, 'original sampling probability') for value in values]
+
+
+def response_reporting_scope(plan):
+    """Describe the declared cohort without implying wider GEN coverage."""
+    sources = plan['sources']
+    sampled_sources = {sample['source_id'] for sample in plan['samples']}
+    design = plan.get('sampling_design')
+    if not design:
+        probabilities = {}
+        for sample in plan['samples']:
+            probabilities.setdefault(sample['source_id'], set()).update(sampling_probabilities(sample))
+        if all(len(values) == 1 for values in probabilities.values()):
+            design = 'Uniform inclusion within each declared saved source; not the full production.'
+        else:
+            design = 'Per-original inclusion probabilities declared in the response plan.'
+    population = plan.get('source_scope',
+        'Saved finite-cylinder mu-enriched GEN; unchanged decays. Inclusive material rate unvalidated.')
+    mechanism = plan.get('mechanism_study', 'mechanism' in (design+' '+population).lower())
+    scope = (f'{len(sampled_sources)} sources with selected originals; '
+             f'{len(sources)} declared source exposures. {design}')
+    return dict(sampling_design=design, source_population_scope=population,
+        source_inclusion_scope=scope, declared_source_count=len(sources),
+        sampled_source_count=len(sampled_sources), mechanism_study=mechanism,
+        reference_label=('GEN-mass-selected originals' if mechanism
+                         else 'Declared reconstruction sample, weighted'),
+        inclusive_reconstructed_tail_rates_estimable=False,
+        reconstructed_tail_rate_scope=(
+            'GEN-mass-selected mechanism study only. Cannot estimate inclusive reconstructed-tail rates; '
+            'excluded GEN originals can enter reco tails through charge or momentum errors.' if mechanism
+            else 'Conditional on the declared saved-GEN population and sampling design; '
+                 'inclusive material normalization remains unvalidated.'))
 
 
 def shape_comparison(rows, policy):
@@ -86,7 +117,7 @@ def retained_tail_counts(pairs):
 def compare(rows, minimum_positive_originals=30, minimum_effective_count=25.):
     """Estimate second moment times measured CPU, keeping every original once.
 
-    Baseline inclusion r is independent uniform sampling within each source.
+    Baseline inclusion r is the declared per-original response probability.
     Candidate inclusion p is frozen before detector response is observed.
     Rate weights already include the source's full trial normalization once.
     Detector CPU is a measured batch average; feature CPU is charged for every

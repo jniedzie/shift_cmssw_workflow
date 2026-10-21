@@ -5,7 +5,8 @@ from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from shift_material_response import compare, bootstrap_comparison, shape_comparison, retained_tail_counts, TARGETS
+from shift_material_response import (compare, bootstrap_comparison, shape_comparison,
+                                     retained_tail_counts, response_reporting_scope, TARGETS)
 from shift_material_preselection import admission_probability
 
 
@@ -17,6 +18,40 @@ def row(event, count, probability):
 
 
 class ResponseTest(unittest.TestCase):
+    def test_legacy_plan_scope_counts_declared_and_sampled_sources(self):
+        plan = dict(sources={'a': {}, 'b': {}, 'zero_selected': {}}, samples=[
+            dict(source_id='a', event_ids=[[1, 1, 1]], probability=.2),
+            dict(source_id='b', event_ids=[[2, 1, 1]], probability=.1)])
+        scope = response_reporting_scope(plan)
+        self.assertEqual(scope['declared_source_count'], 3)
+        self.assertEqual(scope['sampled_source_count'], 2)
+        self.assertIn('Uniform inclusion within each declared saved source', scope['sampling_design'])
+        self.assertFalse(scope['mechanism_study'])
+        self.assertFalse(scope['inclusive_reconstructed_tail_rates_estimable'])
+
+    def test_tail_control_design_is_preserved_and_never_called_uniform(self):
+        plan = dict(sources={'a': {}}, samples=[dict(source_id='a',
+            event_ids=[[1, 1, 1], [1, 1, 2]], probabilities=[1., .01])],
+            sampling_design='GEN tail certainty + independent 1% controls.',
+            source_scope='Conditional finite-cylinder saved GEN.')
+        scope = response_reporting_scope(plan)
+        self.assertEqual(scope['sampling_design'], plan['sampling_design'])
+        self.assertEqual(scope['source_population_scope'], plan['source_scope'])
+        self.assertNotIn('uniform', scope['source_inclusion_scope'].lower())
+        self.assertNotIn('Random', scope['reference_label'])
+
+    def test_gen_mass_only_scope_excludes_inclusive_reco_tail_claims(self):
+        plan = dict(sources={'a': {}, 'zero_selected': {}}, samples=[dict(source_id='a',
+            event_ids=[[1, 1, 1]], probability=1.)],
+            sampling_design='All OS GEN mass>20 originals; no inclusive reconstructed-tail rate claim.',
+            source_scope='GEN-mass-selected physical mechanism test.')
+        scope = response_reporting_scope(plan)
+        self.assertTrue(scope['mechanism_study'])
+        self.assertEqual(scope['reference_label'], 'GEN-mass-selected originals')
+        self.assertIn('Cannot estimate inclusive reconstructed-tail rates',
+                      scope['reconstructed_tail_rate_scope'])
+        self.assertIn('charge or momentum errors', scope['reconstructed_tail_rate_scope'])
+
     def test_multiple_pairs_are_one_statistical_unit(self):
         result = compare([row(1, 2, .5), row(2, 0, .1)])['targets']['mass_gt20']
         self.assertEqual(result['positive_originals'], 1)

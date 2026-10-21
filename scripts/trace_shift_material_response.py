@@ -20,7 +20,7 @@ import subprocess
 import tarfile
 import tempfile
 
-from shift_material_response import TARGETS, retained_tail_counts
+from shift_material_response import TARGETS, retained_tail_counts, response_reporting_scope
 from shift_material_preselection import uniform
 
 
@@ -284,9 +284,9 @@ def run(directory, output, scratch, workers):
         response_plan=str(directory/'plan.json'), response_plan_sha256=sha(directory/'plan.json'),
         all_bins=summarize(all_rows), by_bin=by_bin, full_source_trials_by_bin=dict(exposure),
         source_saved_events={name: source['saved_events'] for name, source in plan['sources'].items()},
-        source_inclusion_scope='Nine sources; uniform within each saved source, not the full production.',
+        **response_reporting_scope(plan),
         event_traces_sha256=sha(trace), evidence_publications=publications,
-        interpretation=['Counts are unique benchmark originals, not independent pair counts.',
+        interpretation=['Counts are unique declared-cohort originals, not independent pair counts.',
                         'GEN and matched-track columns refer to the same original GEN pair.',
                         'Reco tail column includes any OS Both-Both pair; it is not a truth-matched efficiency.',
                         'Missing saved G4 muons or parents do not prove absorption.',
