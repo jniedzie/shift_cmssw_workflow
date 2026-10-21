@@ -133,6 +133,14 @@ def crossing_probabilities(values, total, final_rounding=False):
     return result
 
 
+def sequential_sum(values):
+    """Use native double-addition order, independent of Python's sum version."""
+    result = 0.
+    for value in values:
+        result += value
+    return result
+
+
 def incoming_ratio(row):
     entries = row['PDF_entries']
     ids = [entry[0] for entry in entries]
@@ -141,8 +149,8 @@ def incoming_ratio(row):
     probabilities = []
     for side in (0, 1):
         raw = [entry[side+1] for entry in entries]
-        total = sum(raw)
-        close(total, row['PDF_sums'][side], 'Incoming PDF sum', 1.e-300)
+        total = row['PDF_sums'][side]
+        close(sequential_sum(raw), total, 'Incoming PDF sum', 1.e-300)
         values = crossing_probabilities(raw, total, True)
         for entry, value in zip(entries, values):
             close(value, entry[side+3], 'Native incoming interval')
@@ -170,8 +178,14 @@ def channel_ratio(row, target, enabled):
             'Incomplete native t/u channel cache')
     require(all([entry[1] for entry in entries] == list(range(len(entries))) for entries in by_side),
             'Repeated or missing native channel index')
-    totals = [sum(entry[5] for entry in entries) for entries in by_side]
-    total = sum(totals)
+    totals = row.get('native_side_sums')
+    require(isinstance(totals, list) and len(totals) == 2
+            and all(type(value) in (int, float) and math.isfinite(value) for value in totals),
+            'Native t/u side sums must be explicitly recorded')
+    for entries, total in zip(by_side, totals):
+        close(sequential_sum(entry[5] for entry in entries), total,
+              'Raw native channel side sum', 1.e-300)
+    total = totals[0]+totals[1]
     require(math.isfinite(total) and total > 0, 'Nonpositive native channel cache')
     close(total, row['cache_total'], 'Native channel cache sum', 1.e-300)
     probability_u = min(1., max(0., totals[1]/total))

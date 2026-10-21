@@ -62,6 +62,7 @@ def fixture():
             q = .1*.38+.9*.38/.58
             ratio = q/.38
             rows.append(dict(common,type='select',cache=cache,cache_total=5.,heavy_cache_total=3.,
+                native_side_sums=[2.9,2.1],
                 native_heavy_probability=.58,selected_side=0,selected_index=1,selected_code=121,
                 selected_mass_ids=[4,4],bias_enabled=True,proposal_applied=True,picked_other=True,
                 has_negative_raw_cache_terms=True,native_probability=.38,proposal_probability=q,
@@ -100,6 +101,7 @@ def two_tails(rare_channel=False):
         selected=next(row for row in template if row['type']=='select')
         selected.update(cache=[[0,0,121,4,4,1.e-100,5.e-101],[0,1,111,0,0,1.,.5],
             [1,0,121,4,4,0.,0.],[1,1,111,0,0,1.,.5]],cache_total=2.,heavy_cache_total=1.e-100,
+            native_side_sums=[1.,1.],
             native_heavy_probability=5.e-101,selected_index=0,has_negative_raw_cache_terms=False,
             native_probability=5.e-101,proposal_probability=.9,
             upstream_biased_density_ratio=.9/5.e-101)
@@ -184,6 +186,46 @@ class SourceProposalTest(unittest.TestCase):
                 next(row for row in changed if row['type']==kind)[field]*=multiplier
                 with self.subTest(kind=kind,field=field,multiplier=multiplier),self.assertRaises(ValueError):
                     source.audit_history(changed,ledger,saved,proposal(),prefilter)
+
+    def test_native_side_denominators_preserve_small_CDF_intervals(self):
+        # A recorded native double sum differs by one ulp from compensated sum.
+        # Near the CDF end, subtraction magnifies that into a relative error.
+        raw_u=[0.,1.7375544566378028e-11,8.67796223156199e-13,3.3706556325994176e-15,
+            3.7389540066252245e-15,2.2153811721144023e-13,1.1403905304055866e-15,
+            9.121694132761018e-16,1.19350589378342e-14,1.7107837002386378e-13,
+            6.717991908158755e-14,1.580213724504088e-13,2.2652065830365936e-14,
+            1.5228204287491516e-13,2.1334010975647238e-15,3.948060187101745e-13,
+            2.1704230182386106e-15,2.902278731372461e-16,9.864612988511411e-14,
+            6.104852782763055e-16,7.32148667259762e-17,1.4819623825384855e-13,
+            9.807591823119452e-16,1.1063913360239986e-16,8.097836136100739e-15,
+            9.239513089297456e-14,3.697071518815792e-14,9.140965748810481e-14,
+            1.479254050699301e-14,9.084335885539958e-14]
+        native=[1.9334714012454923e-11,2.003971668189427e-11]
+        self.assertNotEqual(math.fsum(raw_u),native[1])
+        probability_u=native[1]/(native[0]+native[1])
+        cache=[[0,i,111,0,0,native[0] if i==0 else 0.,1.-probability_u if i==0 else 0.]
+               for i in range(len(raw_u))]
+        cumulative,highest=0.,0.
+        for index,value in enumerate(raw_u):
+            cumulative+=value;boundary=min(1.,max(0.,cumulative/native[1]))
+            probability=probability_u*max(0.,boundary-highest);highest=max(highest,boundary)
+            cache.append([1,index,121 if index==20 else 111,4 if index==20 else 0,
+                          4 if index==20 else 0,value,probability])
+        # This exact native interval caused the first real disabled canary to fail.
+        self.assertEqual(cache[len(raw_u)+20][6],1.859452071686505e-6)
+        row=dict(cache=cache,native_side_sums=native,cache_total=native[0]+native[1],
+            heavy_cache_total=raw_u[20],native_heavy_probability=cache[len(raw_u)+20][6],
+            selected_side=1,selected_index=20,selected_code=121,selected_mass_ids=[4,4],
+            bias_enabled=False,proposal_applied=False,has_negative_raw_cache_terms=False,
+            native_probability=cache[len(raw_u)+20][6],proposal_probability=cache[len(raw_u)+20][6],
+            f_over_q=1.,upstream_biased_density_ratio=1.)
+        self.assertEqual(source.channel_ratio(row,'heavy',False),1.)
+        changed=copy.deepcopy(row);changed['native_side_sums'][1]=math.fsum(raw_u)
+        with self.assertRaisesRegex(ValueError,'Native channel interval'):
+            source.channel_ratio(changed,'heavy',False)
+        del row['native_side_sums']
+        with self.assertRaisesRegex(ValueError,'explicitly recorded'):
+            source.channel_ratio(row,'heavy',False)
 
     def test_full_source_acceptance_is_not_all_positive_prefixes(self):
         rows,ledger,saved,prefilter=fixture()
