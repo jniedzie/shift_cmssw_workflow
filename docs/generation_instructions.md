@@ -1,6 +1,47 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## GEN-tail diagnosis and finer high bins (2026-10-21)
+
+The independent 7,935-original material response test completed with only one
+OS Both-Both pair and no retained tails. `trace_shift_material_response.py`
+joins SHA-verified GEN features, saved SIM muons/chamber hits and reconstructed
+pairs by original identity. Its existing-sample census finds one GEN mass >20
+event (not incoming) and nine GEN pair-pT >10 events. Only one pT-tail original
+has two matched muons with CSC hits, both confined to the near endcap. Missing
+saved tracks do not prove absorption. The detailed detector findings remain in
+`../../SHIFT_RECONSTRUCTION.md`.
+
+The new diagnostic in `validation/qcd_gen_tail_trace_20261021_v1/` uses the
+unchanged weighted SoftQCD/MPI source and mu-enriched cylinder profile. Its
+finer half-open bins are 20--25, 25--30, 30--40 and 40+, with 20,000 fixed
+trials each, plus a separate successful 2,000-trial 40+ canary. Native GEN
+audits, resolved configurations and EOS SHA readback pass. The 20,680 saved
+events contain 66 OS GEN pair-pT >10 originals, including 32 with an incoming
+tail pair; none has OS GEN mass >20. These are raw diagnostic counts, not a
+weighted rate gain. Keep each fine bin's full trial denominator; the 40+
+denominator includes both its 2,000- and 20,000-trial sources, once each. Do
+not add the overlapping old 20+ campaign as independent bin exposure.
+
+The scanner freezes every GEN-tail original with probability one and a hashed
+1% sample of the remainder, including same-sign/no-tail controls. This yields
+281 detector-test originals (66 tails, 215 controls), grouped into 31 workers.
+`run_shift_material_response.py` now preserves an explicit per-original
+probability vector in both Nano Double W/p and response evidence. The original
+uniform-within-source interface remains supported. No old events or weights
+are rewritten. This deliberate tail diagnosis is not a production GEN-mass
+cut: reconstruction and charge errors can move other GEN events into the tails.
+
+The detector test uses the same frozen V10 reconstruction and incoming-parent
+overlay as the reference. It leaves the shared release, electronics and trigger
+settings untouched. A mixed tail/control canary and worker-runtime downstream
+verification gate the remaining workers. Final verification writes the ordinary
+comparison PDF and a fresh GEN-to-detector loss trace. Read the current native
+queue and `response/heartbeat.json` for progress; submission alone is not
+completion. The new 3.5 GB stage reservation is inside the already protected
+6.144 GB QCD allowance, alongside the unchanged older reservations. No live
+peer policy was changed. No ordinary campaign alias is switched by this test.
+
 ## Independent material-response benchmark (2026-10-20)
 
 `validation/qcd_material_response_20261020_v2/` freezes 7,935 unique originals

@@ -10,7 +10,7 @@ import math
 import random
 from bisect import bisect_right
 
-from shift_material_preselection import uniform
+from shift_material_preselection import uniform, probability
 
 
 TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
@@ -18,6 +18,16 @@ TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
 
 SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 150., 200.],
                'pt': [0., 1., 2., 3., 4., 5., 7.5, 10., 15., 20., 30., 50., 100.]}
+
+
+def sampling_probabilities(sample):
+    """Keep each original's declared inclusion probability, including controls."""
+    values = sample.get('probabilities')
+    if values is None:
+        values = [sample['probability']]*len(sample['event_ids'])
+    if len(values) != len(sample['event_ids']):
+        raise ValueError('Sampling probabilities differ from original identities')
+    return [probability(value, 'original sampling probability') for value in values]
 
 
 def shape_comparison(rows, policy):

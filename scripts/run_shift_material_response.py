@@ -21,7 +21,7 @@ from audit_shift_material_scout import audit, digest, metadata
 from run_shift_gen_to_nano import audit_edm, audit_nano, command, event_progress, progress, signatures
 from shift_gen_material_features import event_features, hepmc_unit_names, read_hepmc
 from shift_material_preselection import admission_probability, pair_priority
-from shift_material_response import retained_tail_counts
+from shift_material_response import retained_tail_counts, sampling_probabilities
 from shift_event_weights import annotate_proposal_weights
 
 
@@ -57,6 +57,7 @@ def main():
     request_path = Path(sys.argv[1])
     request = json.loads(request_path.read_text())
     source, sample = request['source'], request['sample']
+    inclusion = sampling_probabilities(sample)
     tools = Path(__file__).resolve().parent.parent
     report = dict(schema='shift-material-response-worker-v1', complete=False,
                   request_sha256=digest(request_path), source_id=source['source_id'],
@@ -64,6 +65,7 @@ def main():
                   source_stratum=source['stratum'],
                   saved_decays_unchanged=True, material_survival_weight_applied=False,
                   physics_normalization_ready=False, started_epoch=time.time())
+    report['sampling_design'] = request.get('sampling_design', 'uniform within saved source')
 
     def save():
         dump('report.json', report)
@@ -199,24 +201,25 @@ open('sim_cfg.py','w').write(p.dumpPython())
             raise ValueError('Response identity/order mismatch')
         weight_rows = [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
             event_id=x['id'], proposal_draw_id=sample['id']+':'+str(x['id']), native_weight=x['weight'],
-            sampling_probability=sample['probability'], sampling_gen_weight=x['weight']/sample['probability'],
+            sampling_probability=p, sampling_gen_weight=x['weight']/p,
             proposal_density_ratio=1., proposal_correction=1.,
-            proposal_gen_weight=x['weight']/sample['probability'], admitted=True) for x in original_rows]
+            proposal_gen_weight=x['weight']/p, admitted=True) for x, p in zip(original_rows, inclusion)]
         report['weight_annotation'] = annotate_proposal_weights(Path('step4.root'), weight_rows,
             [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
                   full_source_trials=source['full_source_trials'], original_full_Run_Lumi_metadata=exposure)],
             expected_nano_sha256=digest('step4.root'))
         detector_cpu = sum(x['cpu_seconds'] for x in report['stages'])
-        for answer, feat, original in zip(answers, features, original_rows):
+        for answer, feat, original, p in zip(answers, features, original_rows, inclusion):
             answer.update(original_source_sha256=source['gen_sha256'], source_id=source['source_id'],
                 stratum=source['stratum'], native_weight=original['weight'],
-                benchmark_probability=sample['probability'], candidate_probability=feat['candidate_probability'],
+                benchmark_probability=p, candidate_probability=feat['candidate_probability'],
                 rate_weight=original['weight']*source['sigma_nd_pb']/source['full_source_trials'],
                 detector_cpu_seconds=detector_cpu/len(answers), feature_cpu_seconds=feature_cpu/len(answers))
         dump('response.json', dict(schema='shift-material-response-v1', events=answers,
              source_id=source['source_id'], source_GEN_sha256=source['gen_sha256'],
              normalization=source, full_source_exposure=exposure,
              no_second_filter_efficiency=True, saved_decays_unchanged=True,
+             sampling_design=report['sampling_design'],
              candidate_gate_applied_to_detector_sample=False))
         report.update(events=len(answers), tail_counts={key:sum(a['tail_counts'][key] for a in answers)
                       for key in answers[0]['tail_counts']})

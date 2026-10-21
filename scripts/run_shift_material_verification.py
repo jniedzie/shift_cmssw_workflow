@@ -23,6 +23,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
     parser.add_argument('--canary', action='store_true')
+    parser.add_argument('--trace-output', type=Path)
     args = parser.parse_args()
     directory = args.directory.resolve()
     try:
@@ -44,6 +45,14 @@ if __name__ == '__main__':
                 print(json.dumps(dict(phase='waiting_for_preserved_canaries', epoch=time.time())), flush=True)
                 time.sleep(30)
         result = summarize(directory, args.canary)
+        if args.trace_output:
+            if args.canary:
+                raise ValueError('Full GEN-to-detector trace follows the complete response cohort')
+            from trace_shift_material_response import run
+            scratch = Path.cwd()/'trace_downloads'
+            scratch.mkdir(exist_ok=True)
+            run(directory, args.trace_output.resolve(), scratch, 4)
+            scratch.rmdir()
         name = 'canary_summary.json' if args.canary else 'summary.json'
         Path('report.json').write_text(json.dumps(dict(complete=True,
             summary_sha256=hashlib.sha256((directory/name).read_bytes()).hexdigest(),
