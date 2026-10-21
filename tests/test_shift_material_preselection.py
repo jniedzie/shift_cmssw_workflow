@@ -46,7 +46,128 @@ def inputs(rows=None):
                          population_scope='conditional_diagnostic')
 
 
+def pointing():
+    return dict(schema='shift-two-endcap-pointing-v1',z_planes_cm=[-100.,100.],
+                radial_scale_cm=10.,geometry_reference='synthetic two-plane geometry',
+                geometry_sha256='f'*64)
+
+
+def column_policy():
+    return dict(schema='shift-muon-column-priority-v1',
+                mass_stopping_power_GeV_cm2_g=.002,reference='synthetic mass stopping-power scale')
+
+
 class MaterialAdmissionTests(unittest.TestCase):
+    def test_muon_column_distinguishes_nearby_soft_muon_from_long_rock_path(self):
+        muon=dict(p_GeV=1.,pt_GeV=0.,material_to_CMS_entry=dict(complete=True,column_density_g_cm2=0.))
+        self.assertEqual(admission.muon_column_priority([muon],column_policy())['priority'],1.)
+        muon['material_to_CMS_entry']['column_density_g_cm2']=1000.
+        soft=admission.muon_column_priority([muon],column_policy())
+        self.assertAlmostEqual(soft['priority'],1./17.)
+        muon['pt_GeV']=1.e9
+        self.assertEqual(admission.muon_column_priority([muon],column_policy()),soft)
+        muon['p_GeV']=100.
+        self.assertGreater(admission.muon_column_priority([muon],column_policy())['priority'],.999)
+
+    def test_unknown_muon_column_preserves_unknown_protection_and_weights(self):
+        row=event();row['muons'][1]['pdg']=-13
+        for m in row['muons']:
+            m['material_to_CMS_entry'].update(complete=False,column_density_g_cm2=1.e6)
+        f,a=inputs([row]);p=policy();p['muon_column_priority']=column_policy()
+        result=admission.prepare_selection(f,a,p)['events'][0]
+        self.assertTrue(result['material_priority']['unknown_potential_pair'])
+        self.assertEqual(result['conditional_sampling_probability'],1.)
+        self.assertEqual(result['proposal_gen_weight'],result['native_weight'])
+
+    def test_known_muon_column_downgrades_admission_with_exact_inverse_probability(self):
+        row=event();row['muons'][1]['pdg']=-13
+        for m in row['muons']:
+            m['material_to_CMS_entry'].update(column_density_g_cm2=1.e6)
+        f,a=inputs([row]);p=policy();p['muon_column_priority']=column_policy()
+        result=admission.prepare_selection(f,a,p)['events'][0]
+        self.assertGreaterEqual(result['conditional_sampling_probability'],.1)
+        self.assertLess(result['conditional_sampling_probability'],.101)
+        self.assertEqual(result['proposal_gen_weight'],result['native_weight']/result['sampling_probability'])
+
+    def test_invalid_column_scale_or_material_is_rejected(self):
+        for field,value in (('mass_stopping_power_GeV_cm2_g',0.),('reference','')):
+            p=policy();p['muon_column_priority']=column_policy();p['muon_column_priority'][field]=value
+            with self.assertRaises(ValueError):admission.validate_policy(p)
+        muon=dict(p_GeV=1.,material_to_CMS_entry=dict(complete=True,column_density_g_cm2=-1.))
+        with self.assertRaisesRegex(ValueError,'nonnegative'):
+            admission.muon_column_priority([muon],column_policy())
+
+    def test_pointing_checks_far_endcap_and_keeps_missing_paths_unknown(self):
+        muon=dict(birth_cm=[0.,0.,-200.],momentum_GeV=[1.,0.,20.])
+        result=admission.two_endcap_pointing([muon],pointing())
+        self.assertEqual(result['projected_radii_cm'],[[5.,15.]])
+        self.assertAlmostEqual(result['priority'],1./(1.+1.5**4))
+        self.assertTrue(result['both_planes_forward'])
+        muon['birth_cm']=None
+        result=admission.two_endcap_pointing([muon],pointing())
+        self.assertIsNone(result['priority'])
+        self.assertTrue(result['unknown'])
+        self.assertIsNone(result['both_planes_forward'])
+
+    def test_geometry_uses_direction_not_muon_pt_or_momentum_scale(self):
+        muon=dict(birth_cm=[0.,0.,-200.],momentum_GeV=[1.,2.,20.],pt_GeV=0.)
+        first=admission.two_endcap_pointing([muon],pointing())
+        muon.update(momentum_GeV=[10.,20.,200.],pt_GeV=1.e6)
+        self.assertEqual(admission.two_endcap_pointing([muon],pointing()),first)
+
+    def test_pointing_downgrades_wide_pairs_without_removing_control_or_changing_weight(self):
+        near=event(1);far=event(2)
+        for row,radius in ((near,1.),(far,1000.)):
+            row['muons'][1]['pdg']=-13
+            for m in row['muons']:
+                m.update(birth_cm=[radius,0.,-200.],momentum_GeV=[0.,0.,40.])
+        f,a=inputs([near,far]);p=policy();p.update(two_endcap_pointing=pointing(),require_opposite_sign=True)
+        close,wide=admission.prepare_selection(f,a,p)['events']
+        self.assertGreater(close['conditional_sampling_probability'],wide['conditional_sampling_probability'])
+        self.assertGreaterEqual(wide['conditional_sampling_probability'],.1)
+        for row in (close,wide):
+            self.assertEqual(row['proposal_gen_weight'],row['native_weight']/row['sampling_probability'])
+        # Old cohorts have no added field or changed ranking.
+        self.assertNotIn('two_endcap_pointing',admission.pair_priority(near,20.))
+
+    def test_missing_pointing_is_protected_by_unknown_probability(self):
+        row=event();row['muons'][1]['pdg']=-13
+        for muon in row['muons']:
+            muon.update(birth_cm=None,momentum_GeV=[0.,0.,40.])
+        f,a=inputs([row]);p=policy();p.update(two_endcap_pointing=pointing(),require_opposite_sign=True)
+        result=admission.prepare_selection(f,a,p)['events'][0]
+        self.assertTrue(result['material_priority']['unknown_potential_pair'])
+        self.assertEqual(result['conditional_sampling_probability'],1.)
+
+    def test_backward_or_central_birth_ray_remains_a_positive_control(self):
+        for birth,pz in ((-200.,-40.),(0.,40.),(-200.,0.)):
+            row=event();row['muons'][1]['pdg']=-13
+            for muon in row['muons']:
+                muon.update(birth_cm=[1.,0.,birth],momentum_GeV=[0.,0.,pz])
+            f,a=inputs([row]);p=policy();p['two_endcap_pointing']=pointing()
+            result=admission.prepare_selection(f,a,p)['events'][0]
+            self.assertEqual(result['conditional_sampling_probability'],admission.grid_probability(.1))
+
+    def test_pointing_geometry_reference_and_coordinates_are_checked(self):
+        for field,value in (('radial_scale_cm',0.),('z_planes_cm',[100.,200.]),
+                            ('geometry_reference',''),('geometry_sha256','invalid')):
+            p=policy();p['two_endcap_pointing']=pointing();p['two_endcap_pointing'][field]=value
+            with self.assertRaises(ValueError):admission.validate_policy(p)
+        muon=dict(birth_cm=[0.,0.,-200.],momentum_GeV=[math.nan,0.,40.])
+        with self.assertRaisesRegex(ValueError,'finite CMS'):
+            admission.two_endcap_pointing([muon],pointing())
+
+    def test_known_both_both_control_keeps_its_pointing_priority(self):
+        # Source42300000:1:556, exact saved GEN vectors from the SHA-bound trace.
+        muons=[dict(birth_cm=[.04489147020913916,-.017580011158852406,14833.158994355563],
+                    momentum_GeV=p) for p in
+               ([-.14517937067652786,-.1869471164084101,-26.79979572094639],
+                [-.5747406573584914,-1.3301671672165933,-119.69973217285677])]
+        config=pointing();config.update(z_planes_cm=[-1100.,1100.],radial_scale_cm=702.)
+        result=admission.two_endcap_pointing(muons,config)
+        self.assertGreater(result['priority'],.99)
+        self.assertTrue(result['both_planes_forward'])
+
     def test_depth_orders_but_shared_parent_is_counted_once(self):
         zero=admission.pair_priority(event(depth=0),20.)['priority']
         one=admission.pair_priority(event(depth=1),20.)['priority']

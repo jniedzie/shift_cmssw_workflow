@@ -148,7 +148,11 @@ open('timing_cfg.py','w').write(p.dumpPython())
             if weight != sample['native_weights'][selected_index]:
                 raise ValueError('Native source weight changed')
             feat = event_features(particles, eid, weight, weights, geometry, request['frame'])
-            ranking = pair_priority(feat, request['policy']['momentum_scale_GeV'], True, True)
+            ranking = pair_priority(feat, request['policy']['momentum_scale_GeV'],
+                                    request['policy'].get('require_opposite_sign', True),
+                                    request['policy'].get('rank_partial_parent_paths', True),
+                                    request['policy'].get('two_endcap_pointing'),
+                                    request['policy'].get('muon_column_priority'))
             p = admission_probability(ranking, weight, source['mean_abs_native_weight'], request['policy'])
             feat.update(candidate_probability=p, ranking=ranking)
             features.append(feat)

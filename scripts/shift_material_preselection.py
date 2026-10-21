@@ -62,6 +62,113 @@ def validate_policy(policy):
     if (isinstance(policy['training_folds'], bool)
             or not isinstance(policy['training_folds'], int) or policy['training_folds'] < 2):
         raise ValueError('Need at least two original-event training folds')
+    if policy.get('two_endcap_pointing') is not None:
+        validate_pointing(policy['two_endcap_pointing'])
+    if policy.get('muon_column_priority') is not None:
+        validate_muon_column(policy['muon_column_priority'])
+
+
+def validate_pointing(config):
+    """Bind the straight-ray ranking scale to an explicit geometry reference."""
+    if config['schema'] != 'shift-two-endcap-pointing-v1':
+        raise ValueError('Unsupported two-endcap pointing policy')
+    planes = config['z_planes_cm']
+    if (len(planes) != 2 or any(isinstance(z, bool) or not math.isfinite(z) for z in planes)
+            or not min(planes) < 0 < max(planes)):
+        raise ValueError('Pointing needs one finite reference plane on each CMS endcap')
+    radius = config['radial_scale_cm']
+    if isinstance(radius, bool) or not math.isfinite(radius) or radius <= 0:
+        raise ValueError('Pointing radial scale must be finite and positive')
+    if not isinstance(config['geometry_reference'], str) or not config['geometry_reference']:
+        raise ValueError('Pointing needs an explicit geometry reference')
+    sha256(config['geometry_sha256'], 'pointing geometry reference')
+
+
+def two_endcap_pointing(muons, config):
+    """Softly rank rays near both endcaps; never declare detector acceptance.
+
+    The broad quartic radius scale omits the beam hole, chamber gaps, magnetic
+    bending and scattering. A ray missing this envelope is still reconstructed
+    through the positive random control. Missing vertices remain unknown.
+    """
+    validate_pointing(config)
+    score, radii, unknown, forward = 1., [], False, True
+    for muon in muons:
+        birth, momentum = muon.get('birth_cm'), muon.get('momentum_GeV')
+        if birth is None or momentum is None:
+            unknown = True
+            radii.append(None)
+            continue
+        if (len(birth) != 3 or len(momentum) != 3
+                or any(isinstance(x, bool) or not math.isfinite(x)
+                       for x in itertools.chain(birth, momentum))):
+            raise ValueError('Pointing needs finite CMS birth and momentum coordinates')
+        leg = []
+        for z in config['z_planes_cm']:
+            if momentum[2] == 0 or (z-birth[2])/momentum[2] < 0:
+                leg.append(None)
+                forward = False
+                continue
+            distance = (z-birth[2])/momentum[2]
+            radius = math.hypot(birth[0]+distance*momentum[0],
+                                birth[1]+distance*momentum[1])
+            if not math.isfinite(radius):
+                raise ValueError('Nonfinite straight-ray projection')
+            leg.append(radius)
+        radii.append(leg)
+        if None in leg:
+            score = 0.
+        else:
+            ratio = max(leg)/config['radial_scale_cm']
+            # Invert first for large offsets to avoid overflowing the quartic.
+            score *= ((1./ratio)**4/(1.+(1./ratio)**4) if ratio > 1.
+                      else 1./(1.+ratio**4))
+    return dict(priority=None if unknown else score, unknown=unknown,
+                both_planes_forward=None if unknown else forward, projected_radii_cm=radii)
+
+
+def validate_muon_column(config):
+    if config['schema'] != 'shift-muon-column-priority-v1':
+        raise ValueError('Unsupported muon column priority')
+    loss = config['mass_stopping_power_GeV_cm2_g']
+    if isinstance(loss, bool) or not math.isfinite(loss) or loss <= 0:
+        raise ValueError('Muon column priority needs a finite positive mass stopping-power scale')
+    if not isinstance(config['reference'], str) or not config['reference']:
+        raise ValueError('Muon column priority needs a declared scale reference')
+
+
+def muon_column_priority(muons, config):
+    """Compare a rough ionization scale times column with total momentum.
+
+    This smooth ranking is not a range calculation or a survival probability.
+    Material composition, radiative losses, straggling and central CMS are not
+    modelled here. Unknown columns keep their existing protected probability.
+    """
+    validate_muon_column(config)
+    score, ratios, unknown = 1., [], False
+    for muon in muons:
+        material = muon['material_to_CMS_entry']
+        column = material.get('column_density_g_cm2')
+        if not material.get('complete') or column is None:
+            unknown = True
+            ratios.append(None)
+            continue
+        p = muon['p_GeV']
+        if (isinstance(column, bool) or not math.isfinite(column) or column < 0
+                or isinstance(p, bool) or not math.isfinite(p) or p < 0):
+            raise ValueError('Muon column priority needs finite nonnegative column and total momentum')
+        if p == 0:
+            score = 0.
+            ratios.append(None)
+            continue
+        ratio = config['mass_stopping_power_GeV_cm2_g']*column/p
+        if not math.isfinite(ratio):
+            raise ValueError('Nonfinite muon column-to-momentum ratio')
+        ratios.append(ratio)
+        score *= ((1./ratio)**4/(1.+(1./ratio)**4) if ratio > 1.
+                  else 1./(1.+ratio**4))
+    return dict(priority=None if unknown else score, unknown=unknown,
+                column_to_momentum_ratios=ratios)
 
 
 def uniform(key):
@@ -74,7 +181,8 @@ def grid_probability(value):
     return math.ceil(probability(value, 'admission probability')*(1 << 53))/float(1 << 53)
 
 
-def pair_priority(event, momentum_scale, require_opposite_sign=False, rank_partial_parent_paths=False):
+def pair_priority(event, momentum_scale, require_opposite_sign=False,
+                  rank_partial_parent_paths=False, pointing=None, muon_column=None):
     """Rank incoming pairs by total momentum and shared parent material paths.
 
     Opposite-sign priority is opt-in for new cohorts. Other events still keep
@@ -94,6 +202,7 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False, rank_parti
         if muon['straight_line_towards_CMS_entry'] or unknown_direction:
             candidates.append(muon)
     best, best_pair, unknown_pair, best_incomplete = 0., None, False, False
+    best_pointing, best_column = None, None
     for left, right in itertools.combinations(candidates, 2):
         if require_opposite_sign:
             if abs(left['pdg']) != 13 or abs(right['pdg']) != 13:
@@ -122,12 +231,31 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False, rank_parti
         energy = math.prod((x['p_GeV']/math.hypot(x['p_GeV'], momentum_scale))**2
                            for x in (left, right))
         score = math.exp(-math.fsum(depths))*energy
+        ray = two_endcap_pointing((left, right), pointing) if pointing is not None else None
+        if ray is not None:
+            if ray['unknown']:
+                unknown_pair = True
+            else:
+                score *= ray['priority']
+        column = muon_column_priority((left, right), muon_column) if muon_column is not None else None
+        if column is not None:
+            if column['unknown']:
+                unknown_pair = True
+            else:
+                score *= column['priority']
         if score > best:
             best, best_pair = score, [left['barcode'], right['barcode']]
             best_incomplete = not known
-    return dict(priority=best, preferred_pair_barcodes=best_pair,
-                unknown_potential_pair=unknown_pair, incoming_candidates=len(candidates),
-                ranked_with_incomplete_paths=best_incomplete)
+            best_pointing = ray
+            best_column = column
+    result = dict(priority=best, preferred_pair_barcodes=best_pair,
+                  unknown_potential_pair=unknown_pair, incoming_candidates=len(candidates),
+                  ranked_with_incomplete_paths=best_incomplete)
+    if pointing is not None:
+        result['two_endcap_pointing'] = best_pointing
+    if muon_column is not None:
+        result['muon_column_priority'] = best_column
+    return result
 
 
 def admission_probability(ranking, weight, mean_abs_weight, policy):
@@ -228,7 +356,9 @@ def prepare_selection(features, authority, policy):
             raise ValueError('Nonfinite pre-admission event weight')
         ranking = pair_priority(event, policy['momentum_scale_GeV'],
                                 policy.get('require_opposite_sign', False),
-                                policy.get('rank_partial_parent_paths', False))
+                                policy.get('rank_partial_parent_paths', False),
+                                policy.get('two_endcap_pointing'),
+                                policy.get('muon_column_priority'))
         records.append(dict(row, ranking=ranking, pre_admission_weight=before))
     if authorities:
         raise ValueError('Authority includes events absent from this complete feature census')

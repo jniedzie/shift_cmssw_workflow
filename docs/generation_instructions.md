@@ -163,6 +163,37 @@ and `control_probability` remain in the exact event weight. An offline test
 used 0.1 for both, with a fresh selection domain. These settings are a candidate
 for an independent detector test, not qualified production efficiencies.
 
+An optional `two_endcap_pointing` policy ranks the straight paths on **both**
+endcaps, rather than testing only their z direction. Its schema is
+`shift-two-endcap-pointing-v1`; freeze `z_planes_cm` (one positive, one negative),
+`radial_scale_cm`, and a `geometry_reference` with its `geometry_sha256`.
+For each muon the factor is `1 / (1 + (max_projected_radius / radial_scale)^4)`;
+multiply the two muon factors into the existing parent-material/total-momentum
+priority. This is a broad outer-envelope ranking, not acceptance: it omits the
+beam hole, gaps, fields and scattering. Missing vectors remain unknown and keep
+their protected probability. A backwards ray has zero pointing priority but
+retains the positive reconstruction control. Old policies without this option
+are unchanged. It adds no pT cut, material correction or event-weight factor.
+Only the recorded admission probability enters W/p. The initial offline check
+preserves the known Both-Both control; it does not establish a tail gain and is
+not installed in the running frozen detector tests.
+
+The optional `muon_column_priority` policy compares total muon momentum with
+an ionization scale times the actual straight-path mass column, measured from
+that muon's birth to the external/CMS boundary. Its schema is
+`shift-muon-column-priority-v1`; declare `mass_stopping_power_GeV_cm2_g` and its
+`reference`. The smooth pair factor is the product of
+`1 / (1 + (scale * column / total_momentum)^4)` for the two muons. No pT enters.
+This distinguishes a soft muon born beside CMS from one crossing much rock.
+It is a ranking proxy, not a calibrated range or survival calculation; it
+omits composition changes, radiative losses, straggling and central CMS.
+Incomplete columns remain unknown. Both this and the pointing factor change
+only admission probability, whose exact inverse remains in W/p. Geant4 still
+decides transport. For reference, the PDG standard-rock minimum-ionization
+scale is 0.001688 GeV cm2/g:
+https://pdg.lbl.gov/2024/AtomicNuclearProperties/HTML/standard_rock.html.
+That reference scale is not a universal material model or an efficiency.
+
 `shift_material_path_score.py` also accepts angular-map inputs and reports
 nuclear interaction lengths, radiation lengths and mass column separately.
 Straight-ray maps and the material score only guide sampling. They do not
