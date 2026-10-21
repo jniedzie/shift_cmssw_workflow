@@ -34,6 +34,36 @@ def cpu():
     return sum(x.ru_utime+x.ru_stime for x in values)
 
 
+def diagnostic_edm_outputs(request):
+    """Validate optional retained tiers before any GEN download or detector work."""
+    tiers = request.get('diagnostic_edm_tiers', [])
+    files = {'SIM': ('step1.root', 'sim.root'), 'DIGIHLT': ('step2.root', 'digi.root'),
+             'RECO': ('step3.root', 'reco.root')}
+    if (not isinstance(tiers, list) or any(not isinstance(tier, str) or tier not in files for tier in tiers)
+            or len(set(tiers)) != len(tiers)):
+        raise ValueError('diagnostic_edm_tiers must be a list of distinct SIM/DIGIHLT/RECO tiers')
+    return [dict(tier=tier, local_filename=files[tier][0], published_filename=files[tier][1])
+            for tier in tiers]
+
+
+def publish_outputs(publication, request):
+    """Apply one registered bound and SHA readback to every retained output."""
+    if sum(Path(local).stat().st_size for local, _ in publication)+65536 > request['publication_bound_bytes']:
+        raise ValueError('Publication exceeds registered storage allocation')
+    base = request['publication_directory']
+    command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', base])
+    published = []
+    for local, remote in publication:
+        url = 'root://eosuser.cern.ch/'+base+'/'+remote
+        command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', local, url])
+        command(['xrdcp', '--silent', '--cksum', 'adler32', url, 'readback.bin'])
+        if digest('readback.bin') != digest(local):
+            raise ValueError('Publication readback differs')
+        Path('readback.bin').unlink()
+        published.append(dict(url=url, bytes=Path(local).stat().st_size, sha256=digest(local)))
+    return published
+
+
 def response(path):
     import ROOT
     f = ROOT.TFile.Open(str(path))
@@ -56,6 +86,7 @@ def response(path):
 def main():
     request_path = Path(sys.argv[1])
     request = json.loads(request_path.read_text())
+    diagnostic_outputs = diagnostic_edm_outputs(request)
     source, sample = request['source'], request['sample']
     inclusion = sampling_probabilities(sample)
     tools = Path(__file__).resolve().parent.parent
@@ -66,6 +97,7 @@ def main():
                   saved_decays_unchanged=True, material_survival_weight_applied=False,
                   physics_normalization_ready=False, started_epoch=time.time())
     report['sampling_design'] = request.get('sampling_design', 'uniform within saved source')
+    report['diagnostic_edm_outputs'] = diagnostic_outputs
 
     def save():
         dump('report.json', report)
@@ -227,24 +259,17 @@ open('sim_cfg.py','w').write(p.dumpPython())
              candidate_gate_applied_to_detector_sample=False))
         report.update(events=len(answers), tail_counts={key:sum(a['tail_counts'][key] for a in answers)
                       for key in answers[0]['tail_counts']})
+        for item in diagnostic_outputs:
+            path = Path(item['local_filename'])
+            item.update(bytes=path.stat().st_size, sha256=digest(path))
         save()
         with tarfile.open('evidence.tar.gz', 'w:gz') as archive:
             for name in ('response.json', 'features.json.gz', 'material_audit.json.gz', 'report.json'):
                 archive.add(name, arcname=name)
         publication = [('step4.root', 'nano.root'), ('evidence.tar.gz', 'evidence.tar.gz')]
-        if sum(Path(p).stat().st_size for p, _ in publication)+65536 > request['publication_bound_bytes']:
-            raise ValueError('Publication exceeds registered storage allocation')
+        publication.extend((item['local_filename'], item['published_filename']) for item in diagnostic_outputs)
+        published = publish_outputs(publication, request)
         base = request['publication_directory']
-        command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', base])
-        published = []
-        for local, remote in publication:
-            url = 'root://eosuser.cern.ch/'+base+'/'+remote
-            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', local, url])
-            command(['xrdcp', '--silent', '--cksum', 'adler32', url, 'readback.bin'])
-            if digest('readback.bin') != digest(local):
-                raise ValueError('Publication readback differs')
-            Path('readback.bin').unlink()
-            published.append(dict(url=url, bytes=Path(local).stat().st_size, sha256=digest(local)))
         report.update(complete=True, published=published, finished_epoch=time.time(),
                       wall_seconds=time.time()-report['started_epoch'])
         save()

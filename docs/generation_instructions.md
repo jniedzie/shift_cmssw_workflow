@@ -39,6 +39,16 @@ and the request correctly used per-original `sample.probabilities`. A successful
 uniform-sampling benchmark does not qualify that mixed-probability interface.
 Freeze the worker and its imported helpers together; keep the original failure.
 
+For a bounded reconstruction diagnosis, a new worker request may declare
+`diagnostic_edm_tiers: ["SIM", "DIGIHLT", "RECO"]` (or a subset). The worker
+retains the unchanged `step1.root`, `step2.root` and `step3.root` as `sim.root`,
+`digi.root` and `reco.root`. It validates tier names before downloading GEN,
+includes all retained files in the existing total publication bound, records
+their sizes and hashes in the evidence, and verifies remote SHA readback
+before deleting scratch inputs. Omitting the option keeps ordinary Nano and
+evidence publication. Replay each complete original batch with its original
+seed; changing the batch changes the detector random-number sequence.
+
 The detector test uses the same frozen V10 reconstruction and incoming-parent
 overlay as the reference. It leaves the shared release, electronics and trigger
 settings untouched. A mixed tail/control canary and worker-runtime downstream
