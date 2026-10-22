@@ -1,0 +1,66 @@
+{
+  "code_style": "AI-code. AI-generated attributed weak-current fit authority; no production source is configured.",
+  "schema": "shift-kpi-em-vector-fit-reference-v1",
+  "publication": {
+    "collaboration": "NA62",
+    "title": "A measurement of the K+ to pi+ mu+ mu- decay",
+    "arxiv": "2209.05076v3",
+    "doi": "10.1007/JHEP11(2022)011",
+    "url": "https://arxiv.org/html/2209.05076v3#S4",
+    "license": "https://creativecommons.org/licenses/by/4.0/",
+    "data": "https://www.hepdata.net/record/135498"
+  },
+  "scope": "The preferred negative ChPT p^6 vector-current fit, used at leading electromagnetic mixing order. This is not the photon-inclusive dilepton spectrum, a neutral-kaon fit, or a source/material prediction.",
+  "form_factor_model": {
+    "kind": "chpt-p6-kaon-em-vector",
+    "parent_pdg_id": 321,
+    "a": -0.575,
+    "b": -0.722,
+    "alpha_pipi": -2.040e-7,
+    "beta_pipi": -2.05e-8,
+    "fermi_constant_gev_minus2": 1.1663787e-5,
+    "loop_pion_mass_gev": 0.13957039,
+    "pion_vector_rv_squared": 2.5,
+    "valid_mass_range_gev": [0.211316751, 0.35410661],
+    "reference": "https://arxiv.org/html/2209.05076v3#S4",
+    "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5"
+  },
+  "fit_uncertainties": {
+    "a_statistical": 0.012,
+    "a_systematic": 0.003,
+    "a_external": 0.003,
+    "a_total_rounded": 0.013,
+    "b_statistical": 0.040,
+    "b_systematic": 0.013,
+    "b_external": 0.011,
+    "b_total_rounded": 0.043,
+    "statistical_a_b_correlation": -0.972,
+    "total_a_b_covariance": null,
+    "alpha_pipi_uncertainty": 1.8e-9,
+    "beta_pipi_uncertainty": 6.0e-10,
+    "note": "Do not apply the fitted statistical correlation to the total rounded errors. The systematic/external covariance is not provided here."
+  },
+  "explicit_conventions": {
+    "parent_mass_gev": 0.493677,
+    "charged_pion_mass_gev": 0.13957039,
+    "muon_mass_gev": 0.1056583755,
+    "alpha_em": 0.0072973525692838015,
+    "hbar_gev_seconds": 6.582119569e-25,
+    "charged_kaon_lifetime_seconds": 1.238e-8,
+    "charged_kaon_lifetime_uncertainty_seconds": 2.0e-11,
+    "pion_em_factor": "1 + z/rV^2, with the approximate rV^2=2.5 prescription in hep-ph/9808289. No measured uncertainty for this truncation is invented.",
+    "radiative_order": "Born two-body mixing width from the radiatively unfolded W fit; no photon-inclusive rescaling."
+  },
+  "photon_inclusive_measurement": {
+    "branching_fraction": 9.15e-8,
+    "total_uncertainty": 0.08e-8,
+    "use": "Comparison only. Includes QED corrections and four-body radiation; never a Born normalization multiplier."
+  },
+  "unqualified_terms": [
+    "Non-electromagnetic scalar, axial and weak-Z amplitudes are not extracted by this component model.",
+    "No charge-asymmetry fit is supplied for K-; charge conjugation is an explicit approximation.",
+    "Parent flight, material attenuation, regeneration and secondary sources are separate.",
+    "The full HEPData tables were not numerically refitted in this qualification."
+  ],
+  "physical_production_ready": false
+}
