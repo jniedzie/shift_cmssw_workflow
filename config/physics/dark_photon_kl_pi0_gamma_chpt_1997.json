@@ -1,0 +1,41 @@
+{
+  "code_style": "AI-code. AI-generated attributed leading weak radiative-kaon benchmark; no source is configured.",
+  "schema": "shift-kl-pi0-gamma-em-vector-reference-v1",
+  "form_factor_model": {
+    "kind": "chpt-p4-kl-pi0-photon-vector",
+    "parent_pdg_id": 130,
+    "parent_mass_gev": 0.497611,
+    "recoil_pion_mass_gev": 0.1349768,
+    "charged_loop_pion_mass_gev": 0.13957039,
+    "charged_loop_kaon_mass_gev": 0.493677,
+    "g8_gev_minus2": 9.1e-6,
+    "alpha_em": 0.0072973525692838015,
+    "valid_vector_mass_range_gev": [0.0, 0.3626342],
+    "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=4"
+  },
+  "g8_convention_reference": "https://cds.cern.ch/record/217766/files/PhysRevD.44.3555.pdf",
+  "explicit_conventions": {
+    "hbar_gev_seconds": 6.582119569e-25,
+    "kaon_lifetime_seconds": 5.116e-8,
+    "electron_mass_gev": 0.00051099895,
+    "muon_mass_gev": 0.1056583755,
+    "loop_normalization": "The independently stated G8=9.1e-6 GeV^-2 convention is retained without tuning to the rounded published virtual rates.",
+    "photon_symmetry": "One real photon plus A-prime is distinguishable. Gamma(gamma gamma) is the zero-vector-mass rate divided by 2 epsilon^2."
+  },
+  "primary_controls": {
+    "leading_ee_gamma_branching_rounded": 1.0e-8,
+    "leading_mumu_gamma_branching_rounded": 4.5e-11,
+    "muon_prediction_reference": "https://arxiv.org/pdf/hep-ph/9803331",
+    "measured_gamma_gamma_branching": 1.29e-6,
+    "measured_gamma_gamma_reference": "https://arxiv.org/pdf/0805.0031",
+    "measured_ee_gamma_branching": 1.62e-8,
+    "measured_ee_gamma_reference": "https://doi.org/10.1103/PhysRevD.76.052001"
+  },
+  "unqualified_terms": [
+    "The leading A tensor omits O(p6) A/B/D and VMD structures. The leading calculation underpredicts measured real/virtual photon rates, so it is not a full off-shell rate envelope.",
+    "No model or experimental uncertainty band is inferred by multiplying the leading rate by a measured total branching ratio.",
+    "The single-virtual-photon loop is distinct from the CP-conserving two-photon dilepton amplitude and from the direct CP-violating K to pi0 single-vector current.",
+    "Parent transport, material, source exposure, dimuon branching and an event sampler are separate."
+  ],
+  "physical_production_ready": false
+}
