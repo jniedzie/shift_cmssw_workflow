@@ -35,6 +35,21 @@ SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
 
 
+def remaining_timeout(started, timeout):
+    """Keep import and the complete source audit inside the requested GEN budget."""
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        raise TimeoutError('Fixed source generation exceeded its operational deadline')
+    return remaining
+
+
+def audit_generated_source(output, timeout):
+    """Audit every source collision; a timeout or failed check remains a failure."""
+    with (output/'audit.log').open('w') as log:
+        subprocess.run([sys.executable, str(output/'audit_dark_photon_gen.py'), str(output)],
+            cwd=output, stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=True)
+
+
 def run(args):
     if not 2*MUON_MASS_GEV < args.mass < .958 or not 0 < args.epsilon <= .01:
         raise ValueError('Require an open visible dimuon channel below the eta-prime endpoint')
@@ -318,13 +333,15 @@ def run(args):
                         source_collisions=collisions, model_card_sha256=contract['meson_model_card_sha256'])
         with (out/'cmsRun.log').open('w') as log:
             result = subprocess.run(['cmsRun', str(out/'dark_photon_meson_gen_cfg.py'), 'pilotDirectory='+str(out)],
-                cwd=out, stdout=log, stderr=subprocess.STDOUT, timeout=args.timeout, check=False)
+                cwd=out, stdout=log, stderr=subprocess.STDOUT,
+                timeout=remaining_timeout(started, args.timeout), check=False)
             log.write('\nOriginal native parent-source terminal statistics follow:\n')
             log.write(statistics)
         result.check_returncode()
-        with (out/'audit.log').open('w') as log:
-            subprocess.run([sys.executable, str(out/'audit_dark_photon_gen.py'), str(out)],
-                cwd=out, stdout=log, stderr=subprocess.STDOUT, timeout=600, check=True)
+        # Large fixed exposures need more than the old ten-minute audit cap.
+        # Use the remaining declared budget, without skipping any ledger rows.
+        manifest['audit_timeout_seconds'] = remaining_timeout(started, args.timeout)
+        audit_generated_source(out, manifest['audit_timeout_seconds'])
         manifest.update(status='GEN runtime audit passed; meson production physics provisional',
                         output_sha256=digest(out/'gen.root'), validation=json.loads((out/'validation.json').read_text()))
     except Exception as error:
