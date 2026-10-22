@@ -98,6 +98,37 @@ public:
     }
     o<<"]}";return o.str();
   }
+  std::string inventory_snapshot() const {
+    // This diagnostic sees every meson, including undecayed long-lived ones.
+    // Copies and K0 -> KS/KL bookkeeping remain explicit for the audit to own.
+    std::ostringstream o;o<<std::setprecision(17)<<"{\"native_weight\":"<<pythia.info.weight()
+      <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"incoming_beams\":[";
+    for(int i=1;i<=2;++i) {
+      auto const& p=pythia.event[i];if(i==2)o<<',';
+      o<<"{\"pdg_id\":"<<p.id()<<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]}";
+    }
+    double final_energy=0.;
+    for(int i=1;i<pythia.event.size();++i)if(pythia.event[i].isFinal())final_energy+=pythia.event[i].e();
+    o<<"],\"final_event_energy_gev\":"<<final_energy<<",\"mesons\":[";
+    bool first=true;
+    for(int i=1;i<pythia.event.size();++i) {
+      auto const& p=pythia.event[i];
+      if(!pythia.particleData.isMeson(p.id()))continue;
+      if(!first)o<<',';first=false;
+      o<<"{\"index\":"<<i<<",\"pdg_id\":"<<p.id()<<",\"status\":"<<p.status()
+       <<",\"final\":"<<(p.isFinal()?"true":"false")<<",\"native_mass_gev\":"<<p.m()
+       <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]"
+       <<",\"production_position_mm\":["<<p.xProd()<<','<<p.yProd()<<','<<p.zProd()<<','<<p.tProd()<<"]"
+       <<",\"stored_decay_position_mm\":["<<p.xDec()<<','<<p.yDec()<<','<<p.zDec()<<','<<p.tDec()<<"]"
+       <<",\"selected_proper_lifetime_mm\":"<<p.tau()<<",\"mean_proper_lifetime_mm\":"<<p.tau0()
+       <<",\"mother_indices\":[";
+      bool next=false;for(auto index:p.motherList()){if(next)o<<',';next=true;o<<index;}
+      o<<"],\"daughter_indices\":[";next=false;
+      for(auto index:p.daughterList()){if(next)o<<',';next=true;o<<index;}
+      o<<"]}";
+    }
+    o<<"]}";return o.str();
+  }
   HepMC::GenEvent* convert(int number) {
     current=std::make_unique<HepMC::GenEvent>(HepMC::Units::GEV,HepMC::Units::MM);
     if(!converter.fill_next_event(pythia,current.get(),number))

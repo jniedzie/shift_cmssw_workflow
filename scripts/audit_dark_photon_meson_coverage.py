@@ -12,8 +12,12 @@ import argparse
 import hashlib
 import json
 import math
+from collections import Counter, defaultdict
+import os
 from pathlib import Path
 import re
+import random
+import time
 import xml.etree.ElementTree as ET
 
 
@@ -345,6 +349,320 @@ def valid_domain(domain, mass):
             and domain[0] <= mass <= domain[1])
 
 
+def physical_mesons(snapshot):
+    """Own one meson after generator copies and neutral-kaon bookkeeping.
+
+    Different species in a natural decay chain remain separate physical parents;
+    their production and possible signal amplitudes must not be summed blindly.
+    A flavor K0 converted into KS/KL is bookkeeping for the same physical kaon.
+    """
+    records = {row['index']: row for row in snapshot['mesons']}
+    if len(records) != len(snapshot['mesons']):
+        raise ValueError('The native meson inventory repeats an event index')
+    result, excluded = [], Counter()
+    for row in records.values():
+        daughters = [records[index] for index in row['daughter_indices'] if index in records]
+        if any(child['pdg_id'] == row['pdg_id'] for child in daughters):
+            excluded['same_species_generator_copy'] += 1
+        elif abs(row['pdg_id']) == 311 and any(abs(child['pdg_id']) in (130, 310) for child in daughters):
+            excluded['neutral_kaon_flavor_to_mass_eigenstate'] += 1
+        else:
+            result.append(row)
+    return result, dict(excluded)
+
+
+def feature_summary(values):
+    if not values:
+        return None
+    ordered = sorted(values)
+    return dict(count=len(values), minimum=ordered[0], maximum=ordered[-1],
+                mean=math.fsum(values)/len(values),
+                quantiles={str(q): ordered[round(q*(len(values)-1))] for q in (0., .1, .5, .9, 1.)})
+
+
+class FeatureMoments:
+    """Exact streaming extrema/mean and a bounded diagnostic quantile sample."""
+    def __init__(self, maximum_sample=512):
+        self.count, self.mean, self.m2 = 0, 0., 0.
+        self.minimum, self.maximum = math.inf, -math.inf
+        self.sample, self.maximum_sample = [], maximum_sample
+
+    def add(self, value, rng):
+        if not math.isfinite(value):
+            raise ValueError('Nonfinite native source feature')
+        self.count += 1
+        difference = value-self.mean
+        self.mean += difference/self.count
+        self.m2 += difference*(value-self.mean)
+        self.minimum, self.maximum = min(self.minimum,value), max(self.maximum,value)
+        if len(self.sample) < self.maximum_sample:
+            self.sample.append(value)
+        else:
+            index = rng.randrange(self.count)
+            if index < self.maximum_sample:
+                self.sample[index] = value
+
+    def summary(self):
+        if not self.count:
+            return None
+        quantiles = feature_summary(self.sample)['quantiles']
+        return dict(count=self.count,minimum=self.minimum,maximum=self.maximum,mean=self.mean,
+            sample_variance=self.m2/(self.count-1) if self.count>1 else 0.,
+            quantiles=quantiles,quantile_method='deterministic independent-RNG reservoir',
+            quantile_sample_size=len(self.sample),maximum_quantile_sample_size=self.maximum_sample)
+
+
+def collision_mean_upper_bound(mean, sum_count_squared, collisions, maximum_count,
+                               confidence=.95, method='hoeffding'):
+    """One preselected bound for independent, bounded whole-collision counts.
+
+    Empirical Bernstein is Maurer and Pontil (2009), Theorem 4, rescaled from
+    [0,1] to [0,maximum_count]: https://arxiv.org/pdf/0907.3740 . Its variance
+    is the unbiased sample variance. Keep its finite-range remainder even for
+    zero observations. Choosing the smaller of two bounds needs union accounting.
+    """
+    if (type(collisions) is not int or collisions<2 or not 0<confidence<1
+            or not math.isfinite(mean) or not math.isfinite(maximum_count)
+            or not 0<=mean<=maximum_count):
+        raise ValueError('Invalid bounded whole-collision mean inputs')
+    delta = 1.-confidence
+    variance = None
+    if method == 'hoeffding':
+        margin = maximum_count*math.sqrt(math.log(1./delta)/(2.*collisions))
+        reference = 'https://arxiv.org/pdf/0907.3740, Theorem 1'
+    elif method == 'empirical_bernstein':
+        mean_square_sum = collisions*mean*mean
+        if (sum_count_squared is None or not math.isfinite(sum_count_squared)
+                or sum_count_squared < mean_square_sum-8.*math.ulp(mean_square_sum)
+                or sum_count_squared > collisions*maximum_count*maximum_count):
+            raise ValueError('Whole-collision second moment violates its finite range')
+        variance = max(0.,(sum_count_squared-mean_square_sum)/(collisions-1))
+        logarithm = math.log(2./delta)
+        margin = (math.sqrt(2.*variance*logarithm/collisions)
+                  +7.*maximum_count*logarithm/(3.*(collisions-1)))
+        reference = 'https://arxiv.org/pdf/0907.3740, Theorem 4'
+    else:
+        raise ValueError('Unknown preselected collision mean bound')
+    return dict(method=method,confidence=confidence,delta=delta,collisions=collisions,
+        mean=mean,sum_collision_count_squared=sum_count_squared,sample_variance=variance,
+        maximum_count=maximum_count,mean_upper=min(maximum_count,mean+margin),
+        reference=reference,preselected_method=True,
+        scope='Independent complete collisions; correlations among parents within each collision allowed. This is not a simultaneous bound across species or adaptively selected methods.')
+
+
+def final_parent_yield_bound(parent, lifetime_settings, source_configuration, beams, collisions,
+                             observed_mean, sigma_source_pb, confidence=.95, *, method='hoeffding',
+                             sum_count_squared=None):
+    """A deliberately loose bound for disjoint final-state parents only.
+
+    Energy conservation bounds each whole collision count. Hoeffding's bound
+    then needs independent collisions, never independent parents within one.
+    The source event check permits a known relative final-energy deviation.
+    This is conditional on this generator model, not an uncertainty on nature.
+    """
+    stable = (not parent['may_decay'] or (lifetime_settings['limitTau0']
+              and parent['mean_proper_lifetime_mm'] >= lifetime_settings['tau0Max']))
+    minimum = parent['mass_min_gev']
+    if not stable or minimum <= 0 or not source_configuration['check_event']:
+        return None
+    # Pythia checks |m(p4)-m_native| <= mTolErr * max(E,1 GeV).
+    # Solve E + mTolErr*max(E,1) >= m_min rather than assuming exact mass shell.
+    mass_tolerance = source_configuration['mass_tolerance']
+    minimum_energy = (minimum-mass_tolerance if minimum <= 1.+mass_tolerance
+                      else minimum/(1.+mass_tolerance))
+    if minimum_energy <= 0:
+        return None
+    energy = beams['eA_gev']+beams['eB_gev']
+    ceiling = math.floor((1.+source_configuration['energy_tolerance'])*energy/minimum_energy)
+    if not 0 <= observed_mean <= ceiling or not 0 < confidence < 1:
+        raise ValueError('Invalid bounded final-parent source estimate')
+    statistical = collision_mean_upper_bound(observed_mean,sum_count_squared,collisions,ceiling,confidence,method)
+    upper = statistical['mean_upper']
+    return dict(confidence=confidence, bound='one-sided '+method+' over complete independent collisions',
+        statistical_bound=statistical,
+        maximum_parents_per_collision=ceiling, minimum_native_mass_gev=minimum,
+        minimum_final_particle_energy_gev=minimum_energy,
+        allowed_native_mass_deviation_fraction=mass_tolerance,
+        incoming_lab_energy_gev=energy, allowed_fractional_final_energy_deviation=source_configuration['energy_tolerance'],
+        mean_parents_per_collision_upper=upper,
+        assumption='Only final native parents with positive declared minimum mass; not a sum over different ancestor species.',
+        maximum_accepted_events_if_branching_and_efficiency_are_one={str(lumi):upper*sigma_source_pb*lumi*1000.
+            for lumi in (.03,.3,3.)},
+        interpretation='Loose BR<=1 and efficiency<=1 ceiling conditional on the ND source model. No epsilon scaling, measured-source uncertainty, material correction or timelike-rate bound is implied.')
+
+
+def resolved_source_inventory(model, particle_data, collisions, seed, timeout, *, examples_per_species=4,
+                              heartbeat_path=None):
+    """Fixed-exposure, unfiltered source census; no signal-decay selection."""
+    if (type(collisions) is not int or not 2 <= collisions <= 100000
+            or type(seed) is not int or not 1 <= seed <= 899999800 or timeout <= 0):
+        raise ValueError('Require a bounded collision exposure, explicit seed and positive timeout')
+    if model['source']['source_class'] != 'SoftQCD:nonDiffractive':
+        raise ValueError('The census requires the declared primary non-diffractive pp source')
+    from dark_photon_meson_native import native_source, cmssw_native_libraries
+    from run_dark_photon_meson_gen import source_settings
+    settings = source_settings(model)
+    source = native_source(settings['source_settings'], seed,
+                           list(dict.fromkeys(row['pdg_id'] for row in model['parents'])))
+    table = particle_data_inventory(particle_data)
+    # Read back the initialized table, including every mass/lifetime override.
+    conjugates = []
+    for row in table['particle_data']:
+        pdg = row['pdg_id']
+        data = source.pythia.particleData.particleDataEntryPtr(pdg)
+        row.update(mass_gev=float(data.m0()), mass_width_gev=float(data.mWidth()),
+                   mass_min_gev=float(data.m0Min()), mass_max_gev=float(data.m0Max()),
+                   mean_proper_lifetime_mm=float(data.tau0()), may_decay=bool(data.mayDecay()),
+                   calculate_lifetime=bool(data.tauCalc()))
+        row['channels'] = [dict(br=float(data.channel(index).bRatio()),
+            on_mode=int(data.channel(index).onMode()), products=[int(data.channel(index).product(j))
+            for j in range(data.channel(index).multiplicity())]) for index in range(data.sizeChannels())]
+        if data.hasAnti():
+            conjugates.append(dict(row, pdg_id=-pdg,
+                name=str(source.pythia.particleData.name(-pdg)),
+                channels=[dict(channel, products=[-child if source.pythia.particleData.hasAnti(child)
+                    else child for child in channel['products']]) for channel in row['channels']]))
+    table['particle_data'].extend(conjugates)
+    lifetime_settings = {key:bool(source.pythia.settings.flag('ParticleDecays:'+key))
+                         for key in ('limitTau0','limitTau','limitRadius','limitCylinder')}
+    lifetime_settings.update({key:float(source.pythia.settings.parm('ParticleDecays:'+key))
+                              for key in ('tau0Max','tauMax','rMax','xyMax','zMax')})
+    process_flags = {key:bool(source.pythia.settings.flag(key)) for key in
+        ('SoftQCD:nonDiffractive','SoftQCD:elastic','SoftQCD:singleDiffractive',
+         'SoftQCD:doubleDiffractive','SoftQCD:centralDiffractive','Charmonium:all',
+         'Bottomonium:all','HardQCD:hardccbar','HardQCD:hardbbbar')}
+    com_beams = dict(eA_gev=float(source.pythia.info.eA()),eB_gev=float(source.pythia.info.eB()),
+                    pzA_gev=float(source.pythia.info.pzA()),pzB_gev=float(source.pythia.info.pzB()),
+                    massA_gev=float(source.pythia.info.mA()),massB_gev=float(source.pythia.info.mB()))
+    beam = None
+    counts, second, occupied, cross, exclusions = Counter(), Counter(), Counter(), Counter(), Counter()
+    features = defaultdict(lambda: defaultdict(FeatureMoments))
+    mothers, examples, final_counts = defaultdict(Counter), defaultdict(list), Counter()
+    quantile_rng = random.Random(seed ^ 0x5a17c3d9)
+    stream_hash, started, accepted, calls = hashlib.sha256(), time.monotonic(), 0, 0
+    last_heartbeat = started
+    while accepted < collisions:
+        if time.monotonic()-started > timeout or calls >= 10*collisions:
+            raise TimeoutError('The fixed source census did not finish its declared exposure')
+        calls += 1
+        if not source.next():
+            stream_hash.update(json.dumps(dict(trial=calls, generator_success=False), sort_keys=True).encode())
+            continue
+        accepted += 1
+        if heartbeat_path is not None and time.monotonic()-last_heartbeat >= 30.:
+            heartbeat = Path(heartbeat_path)
+            temporary = heartbeat.with_suffix('.tmp')
+            temporary.write_text(json.dumps(dict(source_collisions=accepted,source_calls=calls,
+                requested_collisions=collisions,seed=seed,checked_epoch=time.time()))+'\n')
+            temporary.replace(heartbeat)
+            last_heartbeat = time.monotonic()
+        snapshot = json.loads(str(source.inventory_snapshot()))
+        if snapshot['native_weight'] != 1.:
+            raise ValueError('The source census requires unchanged unit native weights')
+        incoming = snapshot['incoming_beams']
+        event_beam = dict(eA_gev=incoming[0]['p4'][0],eB_gev=incoming[1]['p4'][0],
+            pzA_gev=incoming[0]['p4'][3],pzB_gev=incoming[1]['p4'][3],
+            frame='actual native event record, after the fixed-target laboratory boost')
+        if beam is None:
+            beam = event_beam
+        elif beam != event_beam:
+            raise ValueError('The fixed source beam record changed across collisions')
+        if snapshot['final_event_energy_gev'] > (beam['eA_gev']+beam['eB_gev'])*(1.+float(source.pythia.settings.parm('Check:epTolErr'))):
+            raise ValueError('The final-event energy exceeds its declared native bound')
+        raw = dict(trial=calls, collision=accepted, **snapshot)
+        stream_hash.update(json.dumps(raw, sort_keys=True, separators=(',', ':')).encode())
+        physical, excluded = physical_mesons(snapshot)
+        exclusions.update(excluded)
+        event_counts = Counter(row['pdg_id'] for row in physical)
+        by_index = {row['index']: row for row in snapshot['mesons']}
+        counts.update(event_counts)
+        for pdg, count in event_counts.items():
+            occupied[pdg] += 1
+            second[pdg] += count*count
+        for pdg, count in event_counts.items():
+            for other, other_count in event_counts.items():
+                if pdg <= other:
+                    cross[pdg, other] += count*other_count
+        for row in physical:
+            pdg = row['pdg_id']
+            momentum = math.sqrt(math.fsum(value*value for value in row['p4'][1:]))
+            values = dict(momentum_gev=momentum, pt_gev=math.hypot(*row['p4'][1:3]),
+                pz_gev=row['p4'][3], beta_gamma=momentum/row['native_mass_gev'],
+                source_com_energy_gev=((beam['eA_gev']+beam['eB_gev'])*row['p4'][0]
+                    -(beam['pzA_gev']+beam['pzB_gev'])*row['p4'][3])/snapshot['ecm_gev'],
+                production_z_mm=row['production_position_mm'][2],
+                stored_decay_z_mm=row['stored_decay_position_mm'][2],
+                selected_proper_lifetime_mm=row['selected_proper_lifetime_mm'])
+            if row['mean_proper_lifetime_mm'] > 0:
+                values['proper_lifetime_over_mean'] = row['selected_proper_lifetime_mm']/row['mean_proper_lifetime_mm']
+            for name, value in values.items():
+                features[pdg][name].add(value,quantile_rng)
+            final_counts[pdg] += int(row['final'])
+            mother_pdgs = [by_index[index]['pdg_id'] for index in row['mother_indices'] if index in by_index]
+            mothers[pdg].update(mother_pdgs)
+            if len(examples[pdg]) < examples_per_species:
+                examples[pdg].append(dict(trial=calls, collision=accepted, **row,
+                    meson_mothers=[by_index[index] for index in row['mother_indices'] if index in by_index]))
+    native = json.loads(str(source.summary()))
+    if native['source_collisions'] != collisions or native['source_calls'] != calls:
+        raise ValueError('Native and census source exposures disagree')
+    table_by_id = {row['pdg_id']:row for row in table['particle_data']}
+    table_ids = set(table_by_id)
+    modeled = {row['pdg_id'] for row in model['parents']}
+    species = []
+    for pdg in sorted(table_ids | set(counts)):
+        count, mean = counts[pdg], counts[pdg]/collisions
+        variance = max(0., (second[pdg]-collisions*mean*mean)/(collisions-1))
+        bound = (final_parent_yield_bound(table_by_id[pdg], lifetime_settings,
+            json.loads(str(source.configuration())), beam, collisions, mean, native['sigma_source_mb']*1.e9)
+            if pdg in table_by_id else None)
+        if bound and final_counts[pdg] != count:
+            raise ValueError('A source-table final-parent bound conflicts with native particle status')
+        species.append(dict(pdg_id=pdg, physical_parents=count,
+            collisions_with_parent=occupied[pdg], mean_parents_per_collision=mean,
+            sum_collision_count_squared=second[pdg],
+            standard_error_from_independent_collisions=math.sqrt(variance/collisions),
+            inclusive_parent_multiplicity_cross_section_pb=mean*native['sigma_source_mb']*1.e9,
+            final_parent_source_yield_upper=bound,
+            zero_observed_any_parent_probability_upper_95=(1.-.05**(1./collisions) if not count else None),
+            zero_observed_is_zero_physical_rate=False, modeled_parent_species=pdg in modeled,
+            final_native_records=final_counts[pdg],
+            meson_mother_counts={str(k):v for k,v in sorted(mothers[pdg].items())},
+            features={key:value.summary() for key,value in features[pdg].items()},
+            exact_native_examples=examples[pdg]))
+    return dict(table, schema='shift-resolved-unfiltered-meson-source-inventory-v1',
+        source_sampling_verified=True, resolved_source_configuration=True,
+        source_class='SoftQCD:nonDiffractive', seed=seed,
+        collision_exposure=collisions, generator_calls=calls, native=native,
+        resolved_settings=settings, source_configuration=json.loads(str(source.configuration())),
+        resolved_beams=beam, native_info_beams_com_frame=com_beams,
+        native_event_check_reference='https://gitlab.com/Pythia8/releases/-/raw/pythia8317/src/Pythia.cc',
+        resolved_lifetime_settings=lifetime_settings, resolved_process_flags=process_flags,
+        lifetime_documentation=dict(path=str(Path(particle_data).with_name('ParticleDecays.xml').resolve()),
+            sha256=sha256(Path(particle_data).with_name('ParticleDecays.xml')),
+            native_rule='A tau is selected and stored for each particle whether it decays or not; a mean-tau0 cutoff is distinct from an actual-tau cutoff.'),
+        runtime=dict(cmssw_base=os.environ.get('CMSSW_BASE'),cmssw_version=os.environ.get('CMSSW_VERSION'),
+                     scram_arch=os.environ.get('SCRAM_ARCH')),
+        native_libraries=[dict(path=path,sha256=sha256(path)) for path in cmssw_native_libraries()],
+        source_tool_sha256={str(Path(path).resolve()):sha256(path) for path in
+            (__file__, native_source.__code__.co_filename, source_settings.__code__.co_filename,
+             source_settings.__globals__['beam_settings'].__code__.co_filename,
+             source_settings.__globals__['dipion_channel'].__code__.co_filename)},
+        particle_data_path=str(Path(particle_data).resolve()), particle_data_sha256=sha256(particle_data),
+        source_record_stream_sha256=stream_hash.hexdigest(),
+        source_record_stream_definition='Canonical JSON per attempted trial; failed calls retained; successful snapshots include every meson before signal selection.',
+        quantile_sampling=dict(seed=seed ^ 0x5a17c3d9,maximum_values_per_species_feature=512,
+            independent_of_native_generator=True,changes_source_sampling=False),
+        excluded_bookkeeping=dict(exclusions), species=species,
+        collision_count_cross_moments=[dict(pdg_ids=[a,b],sum_count_product=value) for (a,b),value in sorted(cross.items())],
+        interpretation='A primary ND Pythia source census, not measured inclusive hadron production or a meson-amplitude completeness proof. Different species in feed-down chains are correlated; all moments use whole collisions.',
+        lifetime_interpretation='Stored native vDec/tau do not prove an actual decay or HepMC endvertex. Final long-lived particles need a separately reviewed flight/decay treatment.',
+        omitted_yield_bounds='No epsilon-scaled bound without a reviewed timelike branching/form-factor ceiling and a finite parent-multiplicity confidence bound. Zero counts bound only the probability of at least one parent in this exact source model.',
+        quarkonium_source_caveat='Zero eta_c/Jpsi/excited-quarkonium counts in this SoftQCD ND sample do not bound physical prompt quarkonium production: dedicated charmonium/bottomonium hard processes are not enabled.',
+        com_energy_bound_caveat='Parent COM energies use Lorentz dot(P_beams,p)/sqrt(s). A tighter sqrt(s)/m multiplicity ceiling is not asserted: the native check allows laboratory-frame energy and energy-dependent mass-shell deviations. Final-state per-species parents are an antichain; different ancestor species are never summed for a ceiling.',
+        elapsed_seconds=time.monotonic()-started)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--particle-data', required=True)
@@ -352,10 +670,32 @@ def main():
     parser.add_argument('--model', required=True)
     parser.add_argument('--masses', nargs='+', type=float, required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--source-collisions', type=int,
+                        help='Also sample this fixed unfiltered source exposure in the current CMSSW runtime.')
+    parser.add_argument('--seed', type=int)
+    parser.add_argument('--timeout', type=float, default=600.)
+    parser.add_argument('--sampled-inventory-output')
+    parser.add_argument('--examples-per-species', type=int, default=4)
+    parser.add_argument('--heartbeat')
     args = parser.parse_args()
     defaults = particle_data_inventory(args.particle_data)
-    source = json.loads(Path(args.source_inventory).read_text()) if args.source_inventory else defaults
     model = json.loads(Path(args.model).read_text())
+    if args.source_collisions is not None:
+        if args.source_inventory or not args.sampled_inventory_output or args.seed is None:
+            parser.error('Source sampling needs --seed and --sampled-inventory-output, without --source-inventory')
+        if not 0 <= args.examples_per_species <= 4:
+            parser.error('--examples-per-species must be between zero and four')
+        source = resolved_source_inventory(model, args.particle_data, args.source_collisions, args.seed, args.timeout,
+            examples_per_species=args.examples_per_species,heartbeat_path=args.heartbeat)
+        source.update(model_path=str(Path(args.model).resolve()),model_sha256=sha256(args.model),
+                      code_sha256=sha256(__file__))
+        inventory_path = Path(args.sampled_inventory_output)
+        if inventory_path.exists():
+            raise FileExistsError('Sampled source evidence is immutable; choose a fresh output path')
+        inventory_path.write_text(json.dumps(source, indent=2, sort_keys=True)+'\n')
+        args.source_inventory = str(inventory_path)
+    else:
+        source = json.loads(Path(args.source_inventory).read_text()) if args.source_inventory else defaults
     report = audit_coverage(model, args.masses, source)
     report.update(model_sha256=sha256(args.model), particle_data_sha256=sha256(args.particle_data),
                   source_inventory_sha256=sha256(args.source_inventory) if args.source_inventory else None,

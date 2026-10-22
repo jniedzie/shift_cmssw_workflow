@@ -51,6 +51,41 @@ def audit_generated_source(output, timeout):
             cwd=output, stdout=log, stderr=subprocess.STDOUT, timeout=timeout, check=True)
 
 
+def source_settings(card):
+    """Resolve the unchanged common, CP5 and model-specific source commands."""
+    from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
+    from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
+    common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
+    tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
+    beam = beam_settings(card['source']['beam_energy_gev'])
+    settings = common+tune+beam+['SoftQCD:nonDiffractive=on',
+        f'13:m0={MUON_MASS_GEV:.17g}', '13:mayDecay=off']
+    masses = {}
+    for parent in card['parents']:
+        species = abs(parent['pdg_id'])
+        if species in masses and masses[species] != parent['mass_gev']:
+            raise ValueError('Channels and charge conjugates must share one physical parent mass')
+        masses[species] = parent['mass_gev']
+    settings.extend(f'{pdg}:m0={mass:.17g}' for pdg,mass in masses.items())
+    settings.extend(card['source'].get('additional_pythia_settings', []))
+    for parent in card['parents']:
+        if vector_parent(parent):
+            if parent.get('parent_mass_model') != 'zero-width-pole':
+                raise ValueError('No reviewed off-shell vector branching prescription is available')
+            pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
+            settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
+            settings.append(f"{abs(parent['recoil_pdg_id'])}:m0={parent['recoil_mass_gev']:.17g}")
+        elif dipion_channel(parent):
+            pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
+            settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
+            if parent['decay_type'] == 'charged-vector-dipion':
+                settings.extend([f"211:m0={parent['charged_pion_mass_gev']:.17g}",
+                                 f"111:m0={parent['neutral_pion_mass_gev']:.17g}"])
+            else:
+                settings.append(f"211:m0={parent['pion_mass_gev']:.17g}")
+    return dict(common=common, cp5=tune, beam_settings=beam, source_settings=settings)
+
+
 def run(args):
     if not 2*MUON_MASS_GEV < args.mass < .958 or not 0 < args.epsilon <= .01:
         raise ValueError('Require an open visible dimuon channel below the eta-prime endpoint')
@@ -110,36 +145,9 @@ def run(args):
         sys.path.insert(0, str(out/'width_inputs'))
         import darkcast
         width = physical_width_table(darkcast.Model('dark_photon'), args.mass, args.epsilon, authority)
-        from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
-        from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
-        common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
-        tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
-        beam = beam_settings(card['source']['beam_energy_gev'])
-        settings = common+tune+beam+['SoftQCD:nonDiffractive=on',
-            f'13:m0={MUON_MASS_GEV:.17g}', '13:mayDecay=off']
-        masses = {}
-        for parent in card['parents']:
-            species = abs(parent['pdg_id'])
-            if species in masses and masses[species] != parent['mass_gev']:
-                raise ValueError('Channels and charge conjugates must share one physical parent mass')
-            masses[species] = parent['mass_gev']
-        settings.extend(f'{pdg}:m0={mass:.17g}' for pdg,mass in masses.items())
-        settings.extend(card['source'].get('additional_pythia_settings', []))
-        for parent in card['parents']:
-            if vector_parent(parent):
-                if parent.get('parent_mass_model') != 'zero-width-pole':
-                    raise ValueError('No reviewed off-shell vector branching prescription is available')
-                pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
-                settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
-                settings.append(f"{abs(parent['recoil_pdg_id'])}:m0={parent['recoil_mass_gev']:.17g}")
-            elif dipion_channel(parent):
-                pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
-                settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
-                if parent['decay_type'] == 'charged-vector-dipion':
-                    settings.extend([f"211:m0={parent['charged_pion_mass_gev']:.17g}",
-                                     f"111:m0={parent['neutral_pion_mass_gev']:.17g}"])
-                else:
-                    settings.append(f"211:m0={parent['pion_mass_gev']:.17g}")
+        resolved_settings = source_settings(card)
+        common, tune, beam, settings = (resolved_settings[key] for key in
+            ('common', 'cp5', 'beam_settings', 'source_settings'))
         source = native_source(settings, args.seed, list(dict.fromkeys(parent['pdg_id'] for parent in card['parents'])))
         native_libraries = [dict(path=library, sha256=digest(Path(library)))
                             for library in cmssw_native_libraries()]

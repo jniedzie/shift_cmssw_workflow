@@ -1,13 +1,16 @@
 # Code style: AI-code. AI-generated independent source-coverage checks.
 from pathlib import Path
 import json
+import math
+import random
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from audit_dark_photon_meson_coverage import (audit_coverage, particle_data_inventory,
-    transition_candidates, model_owned_channels, catalogue_ownership, CATALOGUE)
+    transition_candidates, model_owned_channels, catalogue_ownership, CATALOGUE,
+    physical_mesons, final_parent_yield_bound, FeatureMoments, collision_mean_upper_bound)
 from dark_photon_meson_source import resolved_parent_models
 
 
@@ -26,6 +29,100 @@ def source():
 
 
 class CoverageTest(unittest.TestCase):
+    def test_physical_inventory_owns_neutral_kaon_once_after_flavor_conversion(self):
+        records = [dict(index=1,pdg_id=311,daughter_indices=[2]),
+                   dict(index=2,pdg_id=130,daughter_indices=[])]
+        physical, excluded = physical_mesons(dict(mesons=records))
+        self.assertEqual([row['pdg_id'] for row in physical], [130])
+        self.assertEqual(excluded, {'neutral_kaon_flavor_to_mass_eigenstate':1})
+
+    def test_physical_inventory_keeps_feeddown_species_and_final_long_lived_parents(self):
+        records = [dict(index=1,pdg_id=331,daughter_indices=[2]),
+                   dict(index=2,pdg_id=221,daughter_indices=[]),
+                   dict(index=3,pdg_id=310,daughter_indices=[],final=True)]
+        physical, excluded = physical_mesons(dict(mesons=records))
+        self.assertEqual([row['pdg_id'] for row in physical], [331,221,310])
+        self.assertEqual(excluded, {})
+
+    def test_physical_inventory_skips_copies_but_keeps_charge_conjugates(self):
+        records = [dict(index=1,pdg_id=213,daughter_indices=[2]),
+                   dict(index=2,pdg_id=213,daughter_indices=[]),
+                   dict(index=3,pdg_id=-213,daughter_indices=[])]
+        physical, excluded = physical_mesons(dict(mesons=records))
+        self.assertEqual([row['index'] for row in physical], [2,3])
+        self.assertEqual(excluded, {'same_species_generator_copy':1})
+
+    def test_physical_inventory_rejects_duplicate_native_event_indices(self):
+        with self.assertRaisesRegex(ValueError,'repeats'):
+            physical_mesons(dict(mesons=[dict(index=1),dict(index=1)]))
+
+    def test_final_parent_bound_cannot_be_used_for_decaying_ancestor_multiplicities(self):
+        parent = dict(may_decay=True,mean_proper_lifetime_mm=0.,mass_min_gev=.5)
+        result = final_parent_yield_bound(parent,dict(limitTau0=True,tau0Max=10),
+            dict(check_event=True,energy_tolerance=.01,mass_tolerance=.001),dict(eA_gev=1.,eB_gev=10.),
+            2000,.8,1.e9)
+        self.assertIsNone(result)
+
+    def test_final_parent_bound_uses_whole_collision_ceiling_and_never_sets_zero_from_mc(self):
+        parent = dict(may_decay=False,mean_proper_lifetime_mm=100.,mass_min_gev=.5)
+        result = final_parent_yield_bound(parent,dict(limitTau0=True,tau0Max=10),
+            dict(check_event=True,energy_tolerance=.01,mass_tolerance=.001),dict(eA_gev=1.,eB_gev=10.),
+            2000,0.,1.e9)
+        self.assertEqual(result['maximum_parents_per_collision'],22)
+        self.assertGreater(result['mean_parents_per_collision_upper'],0.)
+        yields = result['maximum_accepted_events_if_branching_and_efficiency_are_one']
+        self.assertAlmostEqual(yields['0.3']/yields['0.03'],10.)
+        self.assertIn('No epsilon scaling',result['interpretation'])
+
+    def test_mean_lifetime_cut_is_distinct_from_a_cut_on_the_selected_flight(self):
+        parent = dict(may_decay=True,mean_proper_lifetime_mm=26.8,mass_min_gev=.5)
+        shared = (dict(check_event=True,energy_tolerance=.01,mass_tolerance=.001),dict(eA_gev=1.,eB_gev=10.),2000,.8,1.e9)
+        self.assertIsNotNone(final_parent_yield_bound(parent,dict(limitTau0=True,tau0Max=10),*shared))
+        self.assertIsNone(final_parent_yield_bound(parent,dict(limitTau0=False,tau0Max=10),*shared))
+
+    def test_streaming_features_keep_full_moments_without_unbounded_arrays(self):
+        features = FeatureMoments(maximum_sample=32)
+        rng = random.Random(123)
+        for value in range(10000):
+            features.add(float(value),rng)
+        report = features.summary()
+        self.assertEqual(report['count'],10000)
+        self.assertEqual(report['minimum'],0.)
+        self.assertEqual(report['maximum'],9999.)
+        self.assertEqual(report['mean'],4999.5)
+        self.assertEqual(report['quantile_sample_size'],32)
+        self.assertGreater(report['sample_variance'],0.)
+
+    def test_final_parent_bound_includes_the_actual_native_mass_check_tolerance(self):
+        parent = dict(may_decay=False,mean_proper_lifetime_mm=100.,mass_min_gev=.5)
+        result = final_parent_yield_bound(parent,dict(limitTau0=True,tau0Max=10),
+            dict(check_event=True,energy_tolerance=.01,mass_tolerance=.001),
+            dict(eA_gev=1.,eB_gev=10.),2000,0.,1.e9)
+        self.assertAlmostEqual(result['minimum_final_particle_energy_gev'],.499)
+        parent['mass_min_gev'] = .0001
+        self.assertIsNone(final_parent_yield_bound(parent,dict(limitTau0=True,tau0Max=10),
+            dict(check_event=True,energy_tolerance=.01,mass_tolerance=.001),
+            dict(eA_gev=1.,eB_gev=10.),2000,0.,1.e9))
+
+    def test_empirical_bernstein_keeps_range_remainder_when_no_parent_was_seen(self):
+        bound = collision_mean_upper_bound(0.,0,10000,14000,.975,'empirical_bernstein')
+        self.assertGreater(bound['mean_upper'],0.)
+        self.assertAlmostEqual(bound['mean_upper'],7.*14000*math.log(80)/(3.*9999))
+        self.assertEqual(bound['sample_variance'],0.)
+        self.assertIn('Theorem 4',bound['reference'])
+
+    def test_empirical_bernstein_uses_collision_variance_for_clustered_parents(self):
+        # Fifty collisions with four parents and fifty with none: variance is
+        # four per collision, not the variance of 200 independent parents.
+        bound = collision_mean_upper_bound(2.,800,100,4,.975,'empirical_bernstein')
+        self.assertAlmostEqual(bound['sample_variance'],400./99.)
+        self.assertIn('correlations among parents',bound['scope'])
+
+    def test_empirical_bernstein_rejects_missing_or_inconsistent_raw_moments(self):
+        for second in (None,1,10000000):
+            with self.subTest(second=second),self.assertRaisesRegex(ValueError,'second moment'):
+                collision_mean_upper_bound(2.,second,100,4,.975,'empirical_bernstein')
+
     def test_broad_parent_native_tail_is_not_closed_at_pole_endpoint(self):
         omega, = [row for row in transition_candidates(source()) if row['parent_pdg_id'] == 223]
         self.assertAlmostEqual(omega['native_support_endpoint_gev'], .85 - .1349768)
