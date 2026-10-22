@@ -6,6 +6,7 @@ The fixture tests attachment/charge/recoil/ancestry behavior separately from
 the later real-source/full-GEN acceptance and transport qualification.
 """
 import importlib.util
+from decimal import Decimal, localcontext
 import json
 import os
 from pathlib import Path
@@ -51,6 +52,20 @@ int append_natural_eta_with_copy(ShiftMesonNative::Source& source) {
   event[physical].daughters(first,second);
   event[first].mothers(physical,physical);event[second].mothers(physical,physical);
   return physical;
+}
+int make_production_inventory(ShiftMesonNative::Source& source,int pdg) {
+  auto& event=source.pythia.event;event.reset();
+  double proton=source.pythia.particleData.m0(2212),energy=5.;
+  double beam=std::sqrt((energy-proton)*(energy+proton));
+  event.append(2212,-12,0,0,0.,0.,beam,energy,proton);
+  event.append(2212,-12,0,0,0.,0.,-beam,energy,proton);
+  double mass=source.pythia.particleData.m0(pdg),pz=.3;
+  int index=event.append(pdg,91,0,0,0.,0.,pz,std::hypot(mass,pz),mass);
+  event[index].mothers(1,2);event[index].vProd(1.,2.,3.,4.);event[index].tau(123.456);
+  return index;
+}
+void boost_production_inventory(ShiftMesonNative::Source& source,double beta) {
+  for(int i=1;i<source.pythia.event.size();++i)source.pythia.event[i].bst(0.,0.,beta);
 }
 std::string state(ShiftMesonNative::Source const& source,int index) {
   auto const* parent=source.current->barcode_to_particle(index);
@@ -154,30 +169,59 @@ class NativeKaonGraphTest(unittest.TestCase):
 
     def test_production_snapshot_mixes_natural_mesons_and_pinned_final_kaons(self):
         for pdg in (130,310,321,-321):
-            index,_=self.new_fixture(pdg)
-            record=json.loads(str(self.source.undecayed_kaon_record(index)))
-            self.source.parent_ids.push_back(221)
-            try:
-                eta_index=int(self.ROOT.ShiftKaonBridgeTest.append_natural_eta_with_copy(self.source))
-                summary_before=str(self.source.summary())
-                mixed=json.loads(str(self.source.production_snapshot()))
-                self.assertEqual(mixed['native_weight'],1.)
-                self.assertEqual(mixed['ecm_gev'],10.)
-                self.assertEqual(len(mixed['parents']),2)
-                self.assertEqual(mixed['parents'][0],record)
-                eta=mixed['parents'][1]
-                self.assertEqual(eta['index'],eta_index)
-                self.assertEqual(eta['pdg_id'],221)
-                mass=self.source.pythia.particleData.m0(221)
-                self.assertEqual(eta['native_mass_gev'],mass)
-                self.assertEqual(eta['p4'],[mass,0.,0.,0.])
-                self.assertEqual(str(self.source.summary()),summary_before)
-                with self.assertRaises(Exception):self.source.snapshot()
-                self.source.pythia.event[index].status(-91)
-                self.source.pythia.event[index].daughters(3,3)
-                with self.assertRaises(Exception):self.source.production_snapshot()
-            finally:
-                self.source.parent_ids.pop_back()
+            for beta in (0.,.9,-.9999):
+                index=int(self.ROOT.ShiftKaonBridgeTest.make_production_inventory(self.source,pdg))
+                self.source.parent_ids.push_back(221)
+                try:
+                    eta_index=int(self.ROOT.ShiftKaonBridgeTest.append_natural_eta_with_copy(self.source))
+                    self.ROOT.ShiftKaonBridgeTest.boost_production_inventory(self.source,beta)
+                    record=json.loads(str(self.source.undecayed_kaon_record(index,False)))
+                    summary_before=str(self.source.summary())
+                    mixed=json.loads(str(self.source.production_snapshot()))
+                    self.assertEqual(mixed['native_weight'],1.)
+                    self.assertEqual(mixed['ecm_gev'],10.)
+                    self.assertEqual(mixed['source_beam_pdg_ids'],[2212,2212])
+                    self.assertEqual(len(mixed['parents']),2)
+                    self.assertEqual(mixed['parents'][0],record)
+                    self.assertTrue(record['native_final'])
+                    self.assertEqual(record['native_status'],91)
+                    self.assertEqual(record['mother_indices'],[1,2])
+                    self.assertEqual(record['daughter_indices'],[])
+                    self.assertEqual(record['source_total_p4'],mixed['source_total_p4'])
+                    self.assertGreaterEqual(record['source_com_energy_mantissa_bits'],64)
+                    # Independent high-precision audit of the stored p.Q/sqrt(Q²).
+                    # A 32-operation double envelope includes JSON rounding of Q
+                    # and the native extended-precision arithmetic. Cancellation
+                    # enters through the actual |products|/Q², not a fixed epsilon.
+                    with localcontext() as context:
+                        context.prec=70
+                        p=[Decimal.from_float(x) for x in record['p4']]
+                        q=[Decimal.from_float(x) for x in record['source_total_p4']]
+                        metric=[1,-1,-1,-1]
+                        squared=sum(sign*x*x for sign,x in zip(metric,q))
+                        product=sum(sign*x*y for sign,x,y in zip(metric,p,q))
+                        expected=product/squared.sqrt()
+                        gamma=Decimal(32)*Decimal(2)**-53/(1-Decimal(32)*Decimal(2)**-53)
+                        squared_error=gamma*sum(x*x for x in q)
+                        lower=(squared-squared_error).sqrt()
+                        bound=(gamma*sum(abs(x*y) for x,y in zip(p,q))/lower+
+                            abs(product)*squared_error/(lower*squared.sqrt()*(lower+squared.sqrt()))+
+                            gamma*abs(expected))
+                        self.assertLess(abs(Decimal.from_float(record['source_com_energy_gev'])-expected),bound)
+                    self.assertGreaterEqual(record['source_com_energy_gev'],record['native_mass_gev'])
+                    eta=mixed['parents'][1]
+                    self.assertEqual(eta['index'],eta_index)
+                    self.assertEqual(eta['pdg_id'],221)
+                    native_eta=self.source.pythia.event[eta_index]
+                    self.assertEqual(eta['native_mass_gev'],native_eta.m())
+                    self.assertEqual(eta['p4'],[native_eta.e(),native_eta.px(),native_eta.py(),native_eta.pz()])
+                    self.assertEqual(str(self.source.summary()),summary_before)
+                    with self.assertRaises(Exception):self.source.snapshot()
+                    self.source.pythia.event[index].status(-91)
+                    self.source.pythia.event[index].daughters(eta_index,eta_index)
+                    with self.assertRaises(Exception):self.source.production_snapshot()
+                finally:
+                    self.source.parent_ids.pop_back()
 
     def test_existing_native_lifetime_point_and_ancestors_survive_every_qualified_chain(self):
         for pdg,recoil_mass in ((130,0.),(310,0.),(321,.13957039),(-321,.13957039),(310,.1349768)):

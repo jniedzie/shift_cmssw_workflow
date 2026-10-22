@@ -16,9 +16,11 @@ CPP = r'''
 #include "Pythia8Plugins/HepMC2.h"
 #include "HepMC/IO_GenEvent.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iomanip>
 #include <memory>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -153,6 +155,15 @@ public:
     }
     o<<'}';return o.str();
   }
+  std::array<long double,4> source_total_p4() const {
+    if(pythia.event.size()<3)throw std::runtime_error("Native incoming beam records are absent");
+    auto const& a=pythia.event[1];auto const& b=pythia.event[2];
+    std::array<long double,4> q{{static_cast<long double>(a.e())+b.e(),
+      static_cast<long double>(a.px())+b.px(),static_cast<long double>(a.py())+b.py(),
+      static_cast<long double>(a.pz())+b.pz()}};
+    for(auto value:q)if(!std::isfinite(value))throw std::runtime_error("Nonfinite native beam sum");
+    return q;
+  }
   std::string undecayed_kaon_record(int index,bool converted=true) const {
     if(index<=0||index>=pythia.event.size())throw std::runtime_error("Missing native kaon index");
     auto const& p=pythia.event[index];
@@ -178,6 +189,16 @@ public:
          position.z()!=p.zProd()||position.t()!=p.tProd())
         throw std::runtime_error("Native kaon production vertex changed during conversion");
     }
+    auto q=source_total_p4();
+    long double q2=q[0]*q[0];
+    for(int i=1;i<4;++i)q2=std::fma(-q[i],q[i],q2);
+    if(q[0]<=0.||q2<=0.)throw std::runtime_error("Future timelike native beam sum required");
+    long double product=static_cast<long double>(p.e())*q[0];
+    product=std::fma(-static_cast<long double>(p.px()),q[1],product);
+    product=std::fma(-static_cast<long double>(p.py()),q[2],product);
+    product=std::fma(-static_cast<long double>(p.pz()),q[3],product);
+    auto com_energy=product/std::sqrt(q2);
+    if(!std::isfinite(com_energy))throw std::runtime_error("Nonfinite native COM kaon energy");
     std::ostringstream o;o<<std::setprecision(17)<<"{\"index\":"<<index
       <<",\"pdg_id\":"<<p.id()<<",\"native_mass_gev\":"<<p.m()
       <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]"
@@ -185,7 +206,14 @@ public:
       <<",\"stored_decay_position_mm\":["<<p.xDec()<<','<<p.yDec()<<','<<p.zDec()<<','<<p.tDec()<<"]"
       <<",\"selected_proper_lifetime_mm\":"<<p.tau()
       <<",\"mean_proper_lifetime_mm\":"<<p.tau0()
-      <<",\"native_end_vertex_present\":false}";
+      <<",\"native_end_vertex_present\":false,\"native_final\":true,\"native_status\":"<<p.status()
+      <<",\"mother_indices\":[";
+    bool next=false;for(auto mother:p.motherList()){if(next)o<<',';next=true;o<<mother;}
+    o<<"],\"daughter_indices\":[],\"source_total_p4\":["
+      <<std::setprecision(std::numeric_limits<long double>::max_digits10)
+      <<q[0]<<','<<q[1]<<','<<q[2]<<','<<q[3]<<"]"
+      <<",\"source_com_energy_gev\":"<<com_energy
+      <<",\"source_com_energy_mantissa_bits\":"<<std::numeric_limits<long double>::digits<<'}';
     return o.str();
   }
   std::string undecayed_kaon_snapshot() const {
@@ -207,8 +235,13 @@ public:
     // Opt-in combined inventory. Keep snapshot()'s naturally decayed-meson
     // contract unchanged; physical kaons require their separate pinned final
     // record and are counted after removing same-species generator copies.
+    auto q=source_total_p4();
     std::ostringstream o;o<<std::setprecision(17)<<"{\"native_weight\":"<<pythia.info.weight()
-      <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"parents\":[";
+      <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"source_total_p4\":["
+      <<std::setprecision(std::numeric_limits<long double>::max_digits10)
+      <<q[0]<<','<<q[1]<<','<<q[2]<<','<<q[3]<<"]"
+      <<",\"source_beam_pdg_ids\":["<<pythia.event[1].id()<<','<<pythia.event[2].id()<<"]"
+      <<std::setprecision(17)<<",\"parents\":[";
     bool first=true;
     for(int i=1;i<pythia.event.size();++i) {
       auto const& p=pythia.event[i];
