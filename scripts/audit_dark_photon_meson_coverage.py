@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import random
+import copy
 import time
 import xml.etree.ElementTree as ET
 
@@ -661,6 +662,156 @@ def resolved_source_inventory(model, particle_data, collisions, seed, timeout, *
         quarkonium_source_caveat='Zero eta_c/Jpsi/excited-quarkonium counts in this SoftQCD ND sample do not bound physical prompt quarkonium production: dedicated charmonium/bottomonium hard processes are not enabled.',
         com_energy_bound_caveat='Parent COM energies use Lorentz dot(P_beams,p)/sqrt(s). A tighter sqrt(s)/m multiplicity ceiling is not asserted: the native check allows laboratory-frame energy and energy-dependent mass-shell deviations. Final-state per-species parents are an antichain; different ancestor species are never summed for a ceiling.',
         elapsed_seconds=time.monotonic()-started)
+
+
+def combine_source_inventories(inventories):
+    """Pool compatible independent sources once, using raw collision moments.
+
+    The caller should pin each input file and require completed worker receipts.
+    This function performs no scheduler queries and cannot clear failed workers.
+    """
+    if not inventories:
+        raise ValueError('No completed source inventories to combine')
+    identity_keys = ('schema','source_class','model_sha256','resolved_settings','source_configuration',
+        'resolved_beams','native_info_beams_com_frame','resolved_lifetime_settings','resolved_process_flags',
+        'particle_data','native_libraries')
+    reference, accepted, by_seed, excluded = None, [], {}, []
+    for inventory in inventories:
+        if (inventory.get('schema') != 'shift-resolved-unfiltered-meson-source-inventory-v1'
+                or inventory.get('source_sampling_verified') is not True
+                or inventory.get('resolved_source_configuration') is not True):
+            raise ValueError('Only verified, unpooled fixed-source inventories can be combined')
+        count, seed = inventory['collision_exposure'], inventory['seed']
+        native = inventory['native']
+        if (type(count) is not int or count<2 or type(seed) is not int
+                or native['source_collisions'] != count or native['source_calls'] != inventory['generator_calls']
+                or native['generator_failures']+count != native['source_calls']
+                or not math.isfinite(native['sigma_source_mb']) or native['sigma_source_mb']<=0):
+            raise ValueError('Incomplete or inconsistent source exposure')
+        identity = {key:inventory[key] for key in identity_keys}
+        identity['source_tools_by_name'] = {Path(path).name:digest
+            for path,digest in inventory['source_tool_sha256'].items()}
+        identity['runtime'] = {key:inventory['runtime'][key] for key in ('cmssw_version','scram_arch')}
+        if reference is not None:
+            differences = [key for key in reference if reference[key] != identity[key]]
+            if differences:
+                raise ValueError('Source physics or producer authority differs: '+', '.join(differences))
+        if seed in by_seed:
+            previous = by_seed[seed]
+            if (count != previous['collision_exposure']
+                    or inventory['source_record_stream_sha256'] != previous['source_record_stream_sha256']
+                    or inventory['species'] != previous['species']
+                    or inventory['collision_count_cross_moments'] != previous['collision_count_cross_moments']):
+                raise ValueError('Conflicting reuse of a source seed needs explicit review: '+str(seed))
+            excluded.append(dict(seed=seed,source_collisions=count,
+                source_record_stream_sha256=inventory['source_record_stream_sha256'],
+                reason='Repeated source revision; exposure counted once'))
+            continue
+        if reference is None:
+            reference = identity
+        by_seed[seed] = inventory
+        accepted.append(inventory)
+    seeds = {item['seed'] for item in accepted}
+    if len(seeds) != len(accepted):
+        raise ValueError('Independent source seeds were not unique')
+    total = sum(item['collision_exposure'] for item in accepted)
+    species_ids = sorted({row['pdg_id'] for item in accepted for row in item['species']})
+    counts, squares, occupied, final_counts, cross = Counter(), Counter(), Counter(), Counter(), Counter()
+    rows_by_species, mothers = defaultdict(list), defaultdict(Counter)
+    for inventory in accepted:
+        n = inventory['collision_exposure']
+        rows = {row['pdg_id']:row for row in inventory['species']}
+        if len(rows)!=len(inventory['species']):
+            raise ValueError('A source repeats its parent species')
+        if not {row['pdg_id'] for row in inventory['particle_data']} <= set(rows):
+            raise ValueError('A source omits explicit particle-table zero-count species')
+        for pdg,row in rows.items():
+            count, second, nonzero = (row[key] for key in
+                ('physical_parents','sum_collision_count_squared','collisions_with_parent'))
+            if (any(type(value) is not int or value<0 for value in (count,second,nonzero))
+                    or not 0<=nonzero<=min(n,count) or (count>0 and nonzero==0)
+                    or second<count or second*n<count*count
+                    or not 0<=row['final_native_records']<=count):
+                raise ValueError('Invalid raw whole-collision parent moments')
+            counts[pdg] += count
+            squares[pdg] += second
+            occupied[pdg] += nonzero
+            final_counts[pdg] += row['final_native_records']
+            mothers[pdg].update(row['meson_mother_counts'])
+            rows_by_species[pdg].append((inventory,row))
+        seen = set()
+        for moment in inventory['collision_count_cross_moments']:
+            a,b = moment['pdg_ids']
+            value = moment['sum_count_product']
+            if (a>b or (a,b) in seen or a not in rows or b not in rows
+                    or type(value) is not int or value<0
+                    or value*value>rows[a]['sum_collision_count_squared']*rows[b]['sum_collision_count_squared']):
+                raise ValueError('Invalid raw collision-count cross product')
+            seen.add((a,b))
+            cross[a,b] += value
+            if a==b and value != rows[a]['sum_collision_count_squared']:
+                raise ValueError('A diagonal cross moment differs from its second moment')
+        if any(row['sum_collision_count_squared'] and (pdg,pdg) not in seen for pdg,row in rows.items()):
+            raise ValueError('A nonzero parent lacks its raw diagonal cross moment')
+    result = copy.deepcopy(accepted[0])
+    sigma_values = [item['native']['sigma_source_mb'] for item in accepted]
+    # Repeated sources share one production model. Keep every returned sigma;
+    # the largest numerical reference is conservative, not a physical sigma CI.
+    sigma = max(sigma_values)
+    result['species'] = []
+    table = {row['pdg_id']:row for row in result['particle_data']}
+    for pdg in species_ids:
+        mean = counts[pdg]/total
+        variance = max(0.,(squares[pdg]-total*mean*mean)/(total-1))
+        features, examples = {}, []
+        feature_names = sorted({key for _,row in rows_by_species[pdg] for key in row['features']})
+        for name in feature_names:
+            pieces = [row['features'][name] for _,row in rows_by_species[pdg] if name in row['features']]
+            size = sum(piece['count'] for piece in pieces)
+            center = math.fsum(piece['count']*piece['mean'] for piece in pieces)/size
+            complete_variances = all(piece.get('sample_variance') is not None for piece in pieces)
+            m2 = math.fsum((piece['count']-1)*piece['sample_variance']+piece['count']*(piece['mean']-center)**2
+                          for piece in pieces) if complete_variances else None
+            features[name] = dict(count=size,minimum=min(piece['minimum'] for piece in pieces),
+                maximum=max(piece['maximum'] for piece in pieces),mean=center,
+                sample_variance=(m2/(size-1) if m2 is not None and size>1 else None),
+                quantiles=None,quantile_method='Not pooled: per-worker quantile summaries do not define a pooled quantile.')
+        for inventory,row in rows_by_species[pdg]:
+            for example in row['exact_native_examples']:
+                if len(examples)<4:
+                    examples.append(dict(example,source_seed=inventory['seed']))
+        bound = (final_parent_yield_bound(table[pdg],result['resolved_lifetime_settings'],
+            result['source_configuration'],result['resolved_beams'],total,mean,sigma*1.e9,
+            sum_count_squared=squares[pdg]) if pdg in table else None)
+        if bound and final_counts[pdg] != counts[pdg]:
+            raise ValueError('A final-parent ceiling conflicts with pooled native statuses')
+        result['species'].append(dict(pdg_id=pdg,physical_parents=counts[pdg],
+            collisions_with_parent=occupied[pdg],mean_parents_per_collision=mean,
+            sum_collision_count_squared=squares[pdg],standard_error_from_independent_collisions=math.sqrt(variance/total),
+            inclusive_parent_multiplicity_cross_section_pb=mean*sigma*1.e9,
+            zero_observed_any_parent_probability_upper_95=(1.-.05**(1./total) if not counts[pdg] else None),
+            zero_observed_is_zero_physical_rate=False,modeled_parent_species=rows_by_species[pdg][0][1]['modeled_parent_species'],
+            final_native_records=final_counts[pdg],final_parent_source_yield_upper=bound,
+            meson_mother_counts=dict(mothers[pdg]),features=features,exact_native_examples=examples))
+    result.update(schema='shift-pooled-unfiltered-meson-source-inventory-v1',collision_exposure=total,
+        generator_calls=sum(item['generator_calls'] for item in accepted),
+        seeds=sorted(seeds),seed=None,excluded_duplicate_revisions=excluded,
+        collision_count_cross_moments=[dict(pdg_ids=[a,b],sum_count_product=value) for (a,b),value in sorted(cross.items())],
+        input_sources=[dict(seed=item['seed'],source_collisions=item['collision_exposure'],
+            source_record_stream_sha256=item['source_record_stream_sha256'],native=item['native']) for item in accepted],
+        sigma_source_pooling='Conservative maximum of observed repeated-generator references; not a confidence bound on physical production cross section. Every source sigma is retained.',
+        pooled_quantiles_supported=False,
+        aggregation_code_sha256=sha256(__file__),
+        elapsed_seconds=sum(item.get('elapsed_seconds',0.) for item in accepted))
+    result['native'] = {key:sum(item['native'].get(key,0) for item in accepted) for key in
+        ('source_calls','generator_failures','source_collisions','native_n_tried','native_n_accepted')}
+    result['native'].update(sigma_source_mb=sigma,
+        sigma_source_error_mb=max(item['native']['sigma_source_error_mb'] for item in accepted))
+    result['excluded_bookkeeping'] = dict(sum((Counter(item['excluded_bookkeeping']) for item in accepted),Counter()))
+    result.pop('source_record_stream_sha256',None)
+    result.pop('source_record_stream_definition',None)
+    result.pop('quantile_sampling',None)
+    return result
 
 
 def main():
