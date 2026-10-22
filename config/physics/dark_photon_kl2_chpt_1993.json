@@ -1,0 +1,59 @@
+{
+  "code_style": "AI-code. AI-generated attributed leading chiral leptonic-kaon benchmark; no source is configured.",
+  "schema": "shift-kl2-em-vector-reference-v1",
+  "publication": {
+    "title": "Radiative semileptonic kaon decays",
+    "authors": "J. Bijnens, G. Ecker and J. Gasser",
+    "arxiv": "hep-ph/9209261",
+    "journal": "Nuclear Physics B396 (1993) 81-118",
+    "url": "https://arxiv.org/pdf/hep-ph/9209261",
+    "equations": "4.8-4.22; equal-mass loops from Appendix A.9-A.11; real-photon controls from 3.14-3.17"
+  },
+  "scope": "A standalone historical O(p4) chiral benchmark for K+ to lepton+ neutrino A-prime, retaining both external-leg IB terms, complex pion/kaon loops, virtual-only form factors and all three vector polarizations. Charge-conjugate total rates assume CP symmetry. A K- polarization/event sampler requires its own conjugated amplitude.",
+  "form_factor_model": {
+    "kind": "chpt-p4-charged-kaon-leptonic-vector",
+    "parent_pdg_id": 321,
+    "order": "p4-one-loop",
+    "parent_mass_gev": 0.493677,
+    "lepton_mass_gev": 0.1056583755,
+    "charged_pion_mass_gev": 0.13957039,
+    "fpi_gev": 0.0932,
+    "fk_gev": 0.1136,
+    "l9": 0.0069,
+    "l10": -0.0055,
+    "lec_scale_gev": 0.77,
+    "alpha_em": 0.0072973525692838015,
+    "fermi_constant_gev_minus2": 1.1663787e-5,
+    "v_us": 0.220,
+    "valid_q2_range_gev2": [0.0, 0.244],
+    "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+  },
+  "input_uncertainties": {
+    "l9": 0.0007,
+    "l10": 0.0007,
+    "l9_l10_covariance": null,
+    "meaning": "The primary Table 1 gives these historical marginal errors at M_rho. Varying the LECs separately or over a rectangular box is a model diagnostic, not a measured confidence interval or a bound on all higher chiral orders."
+  },
+  "explicit_conventions": {
+    "electron_mass_gev": 0.00051099895,
+    "muon_mass_gev": 0.1056583755,
+    "hbar_gev_seconds": 6.582119569e-25,
+    "charged_kaon_lifetime_seconds": 1.238e-8,
+    "decay_constant_normalization": "Fpi=93.2 MeV, FK=113.6 MeV as Appendix A.6. Do not substitute the sqrt(2)*F convention without changing the weak-current normalization.",
+    "em_form_factor": "F_K^V(q2)=1+H_pi_pi(q2)+2 H_K_K(q2), including the complex pion cut, with L9 running at the same subtraction scale as the loops.",
+    "spectral_conversion": "Continuum pair conversion only for distinguishable charged leptons, before QED corrections. Identical positive leptons require exchange and a symmetry factor."
+  },
+  "independent_controls": {
+    "real_photon_density": "Primary Eqs3.14-3.17, for IB, SD and interference separately.",
+    "old_nonidentical_virtual_prediction": {"channel": "K+ to mu+ nu e+ e-", "minimum_pair_mass_gev": 0.140, "born_branching_IB": 4.98e-8, "born_branching_full": 8.51e-8, "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=22"},
+    "E865_mu_nu_ee": {"minimum_pair_mass_gev": 0.145, "branching_fraction": 7.06e-8, "statistical_uncertainty": 0.16e-8, "systematic_uncertainty": 0.26e-8, "reference": "https://arxiv.org/pdf/hep-ex/0204006"},
+    "E865_e_nu_mumu": {"branching_fraction": 1.72e-8, "statistical_uncertainty": 0.37e-8, "systematic_uncertainty": 0.17e-8, "extrapolation_model_uncertainty": 0.19e-8, "reference": "https://www.phy.bnl.gov/~hma/e865/enmm_prd.pdf"}
+  },
+  "unqualified_terms": [
+    "The historical LEC/normalization card is not a current precision fit. Higher chiral orders and measured form-factor alternatives are separate model uncertainties.",
+    "An event sampler must retain the polarization density and lepton-vector correlations; none is supplied here.",
+    "Parent flight, charged bending, material interactions, secondary sources and detector acceptance are not supplied.",
+    "The measured identical-muon NA62 branching fraction is not a normalization for the distinguishable single-current continuum conversion."
+  ],
+  "physical_production_ready": false
+}
