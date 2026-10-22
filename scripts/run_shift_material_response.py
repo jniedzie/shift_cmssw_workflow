@@ -59,7 +59,66 @@ def install_prepared_hepmc2_copy(request, tools):
     return dict(type='ShiftHepMC2CopyProducer', sha256=expected, input='shiftEventTime::SHIFTTIMING')
 
 
-def material_sim_config_script(prepared):
+TRANSPORT_LIBRARIES = ('libSimG4CoreGenerators.so', 'libSimG4CoreApplication.so',
+                       'pluginSimG4CoreApplicationPlugins.so')
+
+
+def install_hadron_transport(request, tools):
+    """Install a complete, receipt-bound private build for an explicit canary."""
+    transport = request.get('hadron_transport')
+    if transport is None:
+        return None
+    if not isinstance(transport, dict) or transport.get('track_all_hadron_decays') is not True:
+        raise ValueError('Hadron transport requires an explicit TrackAllHadronDecays opt-in')
+    reference = transport.get('build_receipt', {})
+    expected = checked_sha256(reference.get('sha256'), 'hadron transport build receipt')
+    relative = Path(reference.get('path', ''))
+    tools = tools.resolve()
+    receipt = (tools/relative).resolve()
+    if relative.is_absolute() or not receipt.is_relative_to(tools) or not receipt.is_file():
+        raise ValueError('Hadron transport build receipt is outside frozen tools')
+    if digest(receipt) != expected:
+        raise ValueError('Hadron transport build receipt SHA differs')
+    inventory = json.loads(receipt.read_text()).get('libraries', {})
+    if not isinstance(inventory, dict) or set(inventory) != set(TRANSPORT_LIBRARIES):
+        raise ValueError('Hadron transport requires the complete three-library build')
+    if not all(os.environ.get(key) for key in ('_CONDOR_SCRATCH_DIR', 'CMSSW_BASE', 'SCRAM_ARCH')):
+        raise ValueError('Hadron transport requires an explicit worker-local Condor runtime')
+    scratch = Path(os.environ['_CONDOR_SCRATCH_DIR']).resolve()
+    library = (Path(os.environ['CMSSW_BASE'])/'lib'/os.environ['SCRAM_ARCH']).resolve()
+    if not library.is_relative_to(scratch):
+        raise ValueError('Hadron transport target is outside worker-local Condor scratch')
+    checked = []
+    for name in TRANSPORT_LIBRARIES:
+        item = inventory[name]
+        if not isinstance(item, dict):
+            raise ValueError('Hadron transport library entry must bind its SHA and size')
+        expected_sha = checked_sha256(item.get('sha256'), 'hadron transport library')
+        source, target = (receipt.parent/name).resolve(), (library/name).resolve()
+        if (not source.is_relative_to(receipt.parent) or target.parent != library
+                or target.name != name):
+            raise ValueError('Hadron transport library escapes its frozen or worker-local directory')
+        size = item.get('bytes')
+        if (type(size) is not int or size <= 0 or not source.is_file()
+                or source.stat().st_size != size or digest(source) != expected_sha):
+            raise ValueError('Hadron transport library differs from its bound build receipt')
+        checked.append((source, target, item))
+    # Validate the complete inventory before replacing any worker-local library.
+    library.mkdir(parents=True, exist_ok=True)
+    for source, target, item in checked:
+        shutil.copyfile(source, target)
+        if digest(target) != item['sha256']:
+            raise ValueError('Installed hadron transport library SHA differs')
+    os.environ.pop('LD_PRELOAD', None)
+    paths = [p for p in os.environ.get('LD_LIBRARY_PATH', '').split(':')
+             if p and '/biglib/' not in p and p != str(library)]
+    os.environ['LD_LIBRARY_PATH'] = ':'.join([str(library)]+paths)
+    command(['edmPluginRefresh', str(library)], timeout=120)
+    return dict(track_all_hadron_decays=True, build_receipt_sha256=expected,
+                libraries=inventory, installed_directory=str(library), baseline_preload=False)
+
+
+def material_sim_config_script(prepared, track_all_hadron_decays=False):
     """Use the fixed HepMC2 copy only after the prepared-source proof passes."""
     script = '''import json,runpy,sys
 import FWCore.ParameterSet.Config as cms
@@ -72,6 +131,8 @@ p.FEVTDEBUGoutput.fileName=cms.untracked.string('file:'+sys.argv[3])
 '''
     if prepared:
         script += "p.generatorSmeared=cms.EDProducer('ShiftHepMC2CopyProducer',src=cms.InputTag('shiftEventTime','','SHIFTTIMING'))\n"
+    if track_all_hadron_decays:
+        script += 'p.g4SimHits.Generator.TrackAllHadronDecays=cms.untracked.bool(True)\n'
     return script+"open('sim_cfg.py','w').write(p.dumpPython())\n"
 
 
@@ -199,6 +260,10 @@ def main():
 
     save()
     try:
+        transport = install_hadron_transport(request, tools)
+        if transport:
+            report['hadron_transport'] = transport
+            save()
         if prepared:
             report['prepared_hepmc2_copy_plugin'] = install_prepared_hepmc2_copy(request, tools)
             save()
@@ -286,11 +351,15 @@ open('timing_cfg.py','w').write(p.dumpPython())
         dump('event_ids.json', [x['id'] for x in original_rows])
         # Generate every stage in a fresh interpreter; CMSSW era modifiers are global.
         # The SIM template already schedules the saved, complete HepMC directly.
-        script = material_sim_config_script(prepared)
+        script = material_sim_config_script(prepared, bool(transport))
         command([sys.executable, '-c', script, str(tools/'templates/material_sim.py'),
                  str(Path('timed_gen.root').resolve()), str(Path('step1.root').resolve()),
                  str(len(original_rows)), str(sample['seed'])], timeout=600)
-        env = dict(os.environ, LD_PRELOAD=str(tools/'plugin/libShiftCompleteIncomingBaseline.so'))
+        env = dict(os.environ)
+        if transport:
+            env.pop('LD_PRELOAD', None)
+        else:
+            env['LD_PRELOAD'] = str(tools/'plugin/libShiftCompleteIncomingBaseline.so')
         run_stage('SIM', ['cmsRun', 'sim_cfg.py'], request['stage_timeout_seconds'], env)
         audit_edm('step1.root', original_rows)
         measured = audit(Path('timed_gen.root'), Path('step1.root'), minimum_stations=1,

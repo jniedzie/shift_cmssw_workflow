@@ -36,6 +36,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.corrupt_readback = None
         self.timing_signature_mismatch = False
         self.fail_nano = False
+        self.sim_environment = None
         self.source_bytes = b'original GEN'
         self.exposure = {'full_source_trials': 100}
         self.original = dict(id=[1, 2, 3], weight=2.)
@@ -62,6 +63,8 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                     raise FileExistsError('Synthetic EOS output already exists')
                 self.remote[target] = Path(source).read_bytes()
         elif argv[0] == 'cmsRun':
+            if argv[1] == 'sim_cfg.py':
+                self.sim_environment = kwargs.get('env')
             if argv[1] == 'step4_cfg.py' and self.fail_nano:
                 raise RuntimeError('Synthetic Nano end-lumi failure')
             output = {'timing_cfg.py': 'timed_gen.root', 'sim_cfg.py': 'step1.root',
@@ -117,7 +120,106 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.assertFalse(any(args[0] == 'edmPluginRefresh' for args in self.commands))
         sim = next(args[2] for args in self.commands if len(args) > 3 and args[1] == '-c' and 'sim_cfg.py' in args[2])
         self.assertNotIn('ShiftHepMC2CopyProducer', sim)
+        self.assertNotIn('TrackAllHadronDecays', sim)
+        self.assertEqual(self.sim_environment['LD_PRELOAD'],
+                         str(self.tools/'plugin/libShiftCompleteIncomingBaseline.so'))
         self.check_downstream(report)
+
+    def prepare_hadron_transport(self):
+        folder = self.tools/'transport'
+        folder.mkdir(parents=True)
+        inventory = {}
+        for name in worker.TRANSPORT_LIBRARIES:
+            path = folder/name
+            path.write_bytes(('coherent private build '+name).encode())
+            inventory[name] = dict(bytes=path.stat().st_size,
+                                   sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        receipt = folder/'build_receipt.json'
+        receipt.write_text(json.dumps(dict(libraries=inventory, qualified_scope='synthetic test')))
+        self.request['hadron_transport'] = dict(track_all_hadron_decays=True,
+            build_receipt=dict(path='transport/build_receipt.json',
+                               sha256=hashlib.sha256(receipt.read_bytes()).hexdigest()))
+        return receipt, inventory
+
+    def test_complete_hadron_transport_build_opts_in_without_baseline_preload(self):
+        _, inventory = self.prepare_hadron_transport()
+        with mock.patch.dict(os.environ, {'LD_PRELOAD': '/old/baseline.so',
+                                         'LD_LIBRARY_PATH': '/old/biglib/arch:/native/lib'}):
+            report = self.run_worker()
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['hadron_transport']['libraries'], inventory)
+        self.assertFalse(report['hadron_transport']['baseline_preload'])
+        self.assertNotIn('LD_PRELOAD', self.sim_environment)
+        library = self.runtime/'lib/test_arch'
+        self.assertEqual(self.sim_environment['LD_LIBRARY_PATH'], str(library)+':/native/lib')
+        for name, item in inventory.items():
+            self.assertEqual(hashlib.sha256((library/name).read_bytes()).hexdigest(), item['sha256'])
+        script = next(args[2] for args in self.commands if len(args) > 3
+                      and args[1] == '-c' and 'sim_cfg.py' in args[2])
+        self.assertIn('p.g4SimHits.Generator.TrackAllHadronDecays=cms.untracked.bool(True)', script)
+        self.assertEqual(report['full_source_exposure'], self.exposure)
+        self.assertEqual(self.annotations[0][0][1][0]['sampling_gen_weight'], 4.)
+        self.check_downstream(report)
+
+    def test_hadron_transport_requires_explicit_optin_and_complete_bound_inventory(self):
+        receipt, inventory = self.prepare_hadron_transport()
+        self.request['hadron_transport']['track_all_hadron_decays'] = False
+        with self.assertRaisesRegex(ValueError, 'explicit TrackAllHadronDecays'):
+            self.run_worker()
+        self.request['hadron_transport']['track_all_hadron_decays'] = True
+        receipt.write_text(json.dumps(dict(libraries=dict(list(inventory.items())[:2]))))
+        with self.assertRaisesRegex(ValueError, 'receipt SHA differs'):
+            self.run_worker()
+        self.request['hadron_transport']['build_receipt']['sha256'] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        with self.assertRaisesRegex(ValueError, 'complete three-library'):
+            self.run_worker()
+        self.assertFalse(self.commands)
+        self.assertFalse(self.runtime.exists())
+
+    def test_corrupt_transport_library_fails_before_writing_any_runtime_or_downloading_GEN(self):
+        self.prepare_hadron_transport()
+        (self.tools/'transport'/worker.TRANSPORT_LIBRARIES[-1]).write_bytes(b'corrupt')
+        with self.assertRaisesRegex(ValueError, 'differs from its bound build receipt'):
+            self.run_worker()
+        self.assertFalse(self.commands)
+        self.assertFalse(self.runtime.exists())
+
+    def test_prepared_input_installs_copy_plugin_with_the_coherent_transport_build(self):
+        raw, prepared = self.prepare_completed_input()
+        self.prepare_hadron_transport()
+        report = self.run_worker()
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['original_source_sha256'], raw['gen_sha256'])
+        self.assertEqual(report['prepared_input_GEN_sha256'], prepared['gen_sha256'])
+        library = self.runtime/'lib/test_arch'
+        self.assertTrue((library/'pluginShiftHepMC2CopyProducer.so').is_file())
+        self.assertEqual(len([args for args in self.commands if args[0] == 'edmPluginRefresh']), 2)
+        script = next(args[2] for args in self.commands if len(args) > 3
+                      and args[1] == '-c' and 'sim_cfg.py' in args[2])
+        self.assertIn('ShiftHepMC2CopyProducer', script)
+        self.assertIn('TrackAllHadronDecays=cms.untracked.bool(True)', script)
+        self.assertNotIn('LD_PRELOAD', self.sim_environment)
+
+    def test_transport_rejects_receipt_and_runtime_escape(self):
+        self.prepare_hadron_transport()
+        with tempfile.TemporaryDirectory() as outside:
+            shared = Path(outside)/'shared/CMSSW'
+            with mock.patch.dict(os.environ, {'_CONDOR_SCRATCH_DIR': str(Path.cwd()),
+                    'CMSSW_BASE': str(shared), 'SCRAM_ARCH': 'test_arch'}):
+                with self.assertRaisesRegex(ValueError, 'outside worker-local'):
+                    worker.install_hadron_transport(self.request, self.tools)
+            self.assertFalse(shared.exists())
+            library = self.runtime/'lib/test_arch'
+            library.mkdir(parents=True)
+            (library/worker.TRANSPORT_LIBRARIES[0]).symlink_to(Path(outside)/'outside.so')
+            with mock.patch.dict(os.environ, {'_CONDOR_SCRATCH_DIR': str(Path.cwd()),
+                    'CMSSW_BASE': str(self.runtime), 'SCRAM_ARCH': 'test_arch'}):
+                with self.assertRaisesRegex(ValueError, 'escapes'):
+                    worker.install_hadron_transport(self.request, self.tools)
+            self.assertFalse((Path(outside)/'outside.so').exists())
+        self.request['hadron_transport']['build_receipt']['path'] = '../outside.json'
+        with self.assertRaisesRegex(ValueError, 'outside frozen tools'):
+            worker.install_hadron_transport(self.request, self.tools)
 
     def test_shared_frozen_source_keeps_worker_identity_weights_and_full_exposure(self):
         path=self.tools/'sources/prepared_source.json';path.parent.mkdir(parents=True)
