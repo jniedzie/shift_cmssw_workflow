@@ -1,6 +1,7 @@
 # Code style: AI-code. AI-generated optional EDM publication integration tests.
 """Exercise the real worker orchestration with synthetic detector and storage I/O."""
 import hashlib
+import copy
 import io
 import json
 import os
@@ -117,11 +118,16 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         source = self.request['source']
         del source['sigma_nd_pb'], source['full_source_trials']
         source.update(source_family='dy', denominator_kind='accepted_gen_events', full_source_events=100,
-                      native_cross_section_pb=10., mean_abs_native_weight=1., timing_input_label='VtxSmeared')
+                      native_cross_section_pb=10., mean_abs_native_weight=1., timing_input_label='VtxSmeared',
+                      generator_algorithm='native-unfiltered-unit-weight-LO-DY', decay_dependent_filter=False)
         self.original['weight'] = 1.
         self.request['sample']['native_weights'] = [1.]
-        self.exposure = {'native_RUN_LO_events': 100}
+        self.exposure = dict(runs=[dict(run=1)], lumis=[dict(run=1, lumi=2,
+            original_GenLumiInfoProduct_present=True, GenLumiInfoProduct={'native_RUN_LO_events': 100})])
         report = self.run_worker()
+        self.assertTrue(report['nano_optional_filter_table_omitted'])
+        configs = [args for args in self.commands if 'make-config' in args]
+        self.assertEqual([args[-2] for args in configs], ['1', '1', '1'])
         timing = next(args for args in self.commands if len(args) > 3 and args[1] == '-c'
                       and 'timing_cfg.py' in args[2])
         self.assertEqual(timing[-2:], ['VtxSmeared', ''])
@@ -134,6 +140,31 @@ class MaterialResponsePublicationTest(unittest.TestCase):
             response = json.load(archive.extractfile('response.json'))
         self.assertEqual(response['events'][0]['rate_weight'], .1)
         self.check_downstream(report)
+
+    def test_optional_filter_table_requires_unfiltered_DY_and_exact_native_accounting(self):
+        source = dict(source_family='dy', denominator_kind='accepted_gen_events', full_source_events=100,
+            native_cross_section_pb=10., generator_algorithm='native-unfiltered-unit-weight-LO-DY',
+            decay_dependent_filter=False)
+        exposure = dict(runs=[dict(run=1)], lumis=[dict(run=1, lumi=1,
+            original_GenLumiInfoProduct_present=True, GenLumiInfoProduct={'native':100})])
+        source['original_full_Run_Lumi_metadata'] = copy.deepcopy(exposure)
+        self.assertTrue(worker.nano_missing_filter_lumi(source, exposure))
+        for key, value in (('decay_dependent_filter', True), ('generator_algorithm', 'filtered-DY')):
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, 'unqualified DY'):
+                worker.nano_missing_filter_lumi(dict(source, **{key:value}), exposure)
+        with self.assertRaisesRegex(ValueError, 'bound source'):
+            worker.nano_missing_filter_lumi(source, dict(exposure, runs=[]))
+        del source['original_full_Run_Lumi_metadata']
+        with self.assertRaisesRegex(ValueError, 'native DY luminosity'):
+            worker.nano_missing_filter_lumi(source, dict(runs=[], lumis=[]))
+        with_filter = copy.deepcopy(exposure)
+        with_filter['lumis'][0]['GenFilterInfo'] = {'native':100}
+        self.assertFalse(worker.nano_missing_filter_lumi(source, with_filter))
+        with_filter['lumis'].append(exposure['lumis'][0])
+        with self.assertRaisesRegex(ValueError, 'mixed GenFilterInfo'):
+            worker.nano_missing_filter_lumi(source, with_filter)
+        # Weighted or filtered populations keep the table and its strict missing-input failure.
+        self.assertFalse(worker.nano_missing_filter_lumi(self.request['source'], exposure))
 
     def prepare_completed_input(self):
         native_path, native = jpsi_receipt_fixture(Path.cwd(), family='qcd_ordinary')

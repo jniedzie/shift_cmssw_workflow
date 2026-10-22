@@ -87,6 +87,26 @@ def diagnostic_edm_outputs(request):
             for tier in tiers]
 
 
+def nano_missing_filter_lumi(source, exposure):
+    """Unfiltered accepted-event DY has no optional GenFilterInfo table."""
+    kind, _, _ = source_normalization(source)
+    if kind != 'accepted_gen_events' or source.get('source_family') != 'dy':
+        return False
+    if (source.get('generator_algorithm') != 'native-unfiltered-unit-weight-LO-DY'
+            or source.get('decay_dependent_filter') is not False):
+        raise ValueError('Cannot omit the Nano filter table for an unqualified DY source')
+    if ('original_full_Run_Lumi_metadata' in source
+            and exposure != source['original_full_Run_Lumi_metadata']):
+        raise ValueError('Nano filter-table decision changed bound source Run/Lumi accounting')
+    lumis = exposure.get('lumis', [])
+    if not lumis or any(row.get('original_GenLumiInfoProduct_present') is not True for row in lumis):
+        raise ValueError('Nano filter-table decision requires native DY luminosity accounting')
+    present = ['GenFilterInfo' in row for row in lumis]
+    if any(present) and not all(present):
+        raise ValueError('Cannot omit the Nano filter table with mixed GenFilterInfo presence')
+    return not any(present)
+
+
 def publish_outputs(publication, request):
     """Apply one registered bound and SHA readback to every retained output."""
     if sum(Path(local).stat().st_size for local, _ in publication)+65536 > request['publication_bound_bytes']:
@@ -184,6 +204,8 @@ def main():
                 and exposure != source['original_full_Run_Lumi_metadata']):
             raise ValueError('Prepared input changed full original source Run/Lumi accounting')
         report['full_source_exposure'] = exposure
+        missing_filter_lumi = nano_missing_filter_lumi(source, exposure)
+        report['nano_optional_filter_table_omitted'] = missing_filter_lumi
         # Reproduce the nominal source time once from its native unshifted
         # graph. Ordinary DY already timed generatorSmeared, so its adapter
         # explicitly selects the preserved original VtxSmeared product.
@@ -273,7 +295,8 @@ open('timing_cfg.py','w').write(p.dumpPython())
             output = Path(f'step{stage}.root').resolve()
             command([sys.executable, str(tools/'scripts/run_shift_gen_to_nano.py'), 'make-config',
                      str(tools/f'templates/step{stage}.py'), str(stage), str(previous), str(output),
-                     '0', str(len(original_rows)), str(sample['seed']+stage), '1', '0', f'step{stage}_cfg.py'], timeout=600)
+                     '0', str(len(original_rows)), str(sample['seed']+stage), '1',
+                     str(int(missing_filter_lumi)), f'step{stage}_cfg.py'], timeout=600)
             run_stage(f'step{stage}', ['cmsRun', f'step{stage}_cfg.py'], request['stage_timeout_seconds'])
             check = audit_nano(output, original_rows) if stage == 4 else audit_edm(output, original_rows)
             report['stages'][-1]['audit'] = check
