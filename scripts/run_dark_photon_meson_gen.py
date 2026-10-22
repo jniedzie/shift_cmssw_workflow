@@ -35,7 +35,7 @@ SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_
            'dark_photon_charged_rho_radiative.py','dark_photon_neutral_vector_dipion.py',
            'dark_photon_double_radiative.py',
            'dark_photon_kaon.py', 'dark_photon_weak_meson.py', 'dark_photon_kaon_leptonic.py',
-           'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'fixed_target_generation.py',
+           'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'dark_photon_detector_runtime.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
 
