@@ -38,6 +38,20 @@ lifetimes; it adds no proposal correction, survival factor or GEN exposure.
 A prepared-input file hash differs from the original source hash. Retain both,
 with source normalization bound to the original complete source, once.
 
+For a bounded heavy-flavour source check, the existing first-MPI proposal now
+also accepts the unfiltered `ordinary` QCD profile (workflow0b7faaf and2dd556f).
+Its audit requires every native accepted original and its exact W, an unchanged
+full-trial ledger, the actual history/prefilter/source proof and a resolved GEN
+path with no muon/decay filter. Cylinder mode remains a separate conditional
+population. Each pilot chunk stays within2--2000 fixed trials; this extension
+is not a production gate. The raw `qcd_ordinary` adapter still refuses detector
+processing until audited jaw placement and full natural muon-parent completion.
+The native source-proposal correction is already in W: reconstruction uses W/p,
+with no second HF, filter or material factor. Freeze the auditor/imported helpers
+together; the new adapter imports `validate_uncensored_config`. Native ordinary
+versus disabled-proposal graph/W/exposure identity and a new mixture control
+remain required before scaling this unfiltered path.
+
 This does not qualify translating old decay-filtered GEN as a new production.
 Fresh source placement must occur before decay-dependent filtering, with full
 source exposure, lifetime support, positive reconstruction controls and exact
