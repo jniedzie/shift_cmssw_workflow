@@ -210,6 +210,11 @@ def prior_publication_ready(config, batch):
 def reviewed_meson_retirement(config, authority, expected, check_queue=True):
     """Review a stopped allocation without calling its partial output complete."""
     proof = read_pinned(authority)
+    expected_config = read_pinned(expected)
+    canonical = Path(expected_config['directory'])/'config.json'
+    if durable.sha(canonical) != expected['sha256']:
+        raise ValueError('Copied predecessor authority differs from its exact canonical science')
+    expected = dict(path=str(canonical), sha256=expected['sha256'])
     replacement = read_pinned(proof['replacement_configuration'])
     if (proof.get('schema') != 'shift-reviewed-meson-retirement-v1'
             or proof.get('allocation_canceled') is not True

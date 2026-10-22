@@ -108,6 +108,17 @@ class MesonRetirement(unittest.TestCase):
         self.assertTrue((self.old/'batches/failed/source_status.json').is_file())
         self.assertTrue((self.old/'batches/gen_only/source_status.json').is_file())
 
+    def test_copied_predecessor_pin_keeps_the_exact_canonical_science_identity(self):
+        copied=self.pin(self.new/'prior_meson_publication.json',self.old_config)
+        self.assertEqual(copied['sha256'],self.old_pin['sha256'])
+        with patch.object(durable,'jobs',return_value=[]):
+            result=meson.reviewed_meson_retirement(self.config,self.authority,copied)
+        self.assertEqual(result['published_batches'][str(self.old)],['published'])
+        changed=dict(self.old_config,batches=self.rows[:-1])
+        copied=self.pin(self.new/'prior_meson_publication.json',changed)
+        with self.assertRaisesRegex(ValueError,'exact canonical science'):
+            meson.reviewed_meson_retirement(self.config,self.authority,copied)
+
     def test_live_job_or_unknown_scheduler_blocks_retirement(self):
         for response in ([dict(ClusterId=100)], [dict(ClusterId=900,DAGManJobId=11)]):
             with self.subTest(response=response),patch.object(durable,'jobs',return_value=response):
