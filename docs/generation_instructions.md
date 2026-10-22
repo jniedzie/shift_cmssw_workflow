@@ -61,6 +61,16 @@ another guessed branching fraction. This result does not close low-mass DY, dire
 jaw/material acceptance. Exact counts, per-mass limits and independent final
 native readback are in `../../SHIFT_ANALYSIS.md` and the named DY control study.
 
+The separate direct-Jpsi5--10 native forced/natural control is now complete.
+The forced source reproduces the canonical20,000-slot graphs, weights and
+Run/Lumi ledger exactly. The natural muonic yield106+/-26pb agrees with
+the forced source times native443 muonic probability0.0593:114+/-7pb.
+Unlike hard DY, the ordinary-hadron source sigma does not include that decay
+restriction. Every event in this control has one distinct direct443 parent.
+Do not apply a blanket event factor to multiple-parent, secondary or cross-parent
+pairs, or claim other bins qualified. No plot weights changed. Exact controls,
+Monte Carlo errors and remaining scope are recorded in `../../SHIFT_ANALYSIS.md`.
+
 For a bounded heavy-flavour source check, the existing first-MPI proposal now
 also accepts the unfiltered `ordinary` QCD profile (workflow0b7faaf and2dd556f).
 Its audit requires every native accepted original and its exact W, an unchanged
@@ -100,6 +110,28 @@ longer forces a zero score; only forward reference planes enter the broad
 radial score. V1/V2 and the common V2 campaign policy are unchanged. This is a
 ranking fix, with positive controls and exact W/p retained, not evidence of
 better detector efficiency or populated tails.
+
+## Opt-in complete hadron transport canary (2026-10-22)
+
+CMSSW `Generator.TrackAllHadronDecays` defaults to false. Its private canary
+mode transports finite hadron decay trees without a birth-position or direction
+restriction, including positive proper time at rest. It registers the original
+source lineage before stacking. Only the configured CPU dead-region guards
+may be bypassed for external lineage under the existing transport-corridor
+flag; time, energy, neutrino and detector/electronics settings stay unchanged.
+Unsupported finite decay subtrees fail explicitly instead of promoting daughters.
+
+The response worker accepts an explicit `hadron_transport` request binding
+`track_all_hadron_decays: true` and a SHA-bound `build_receipt`. That receipt
+must contain the complete matching Generators, Application and application-plugin
+library inventory. Install all three only in Condor worker-local runtime,
+refresh its plugin cache and omit the old incoming-overlay preload. Existing
+requests retain their previous behavior. Native graph/stacking/BSM controls
+and actual frozen-runtime config/library-loading checks pass; the common
+eight-original real-event test has not been submitted. This mode does not
+establish inclusive material response, normalization or better tail precision.
+Read `../../SHIFT_RECONSTRUCTION.md` and the current material-study handoff
+before preparing that bounded test; do not rebuild a live shared release.
 
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
