@@ -1,11 +1,13 @@
 # Code style: AI-code. AI-generated controls of conditional kaon rate bounds.
 import math
+from copy import deepcopy
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_kaon import (amplitude_rate_matrix, conditional_event_ceiling,
+from dark_photon_kaon import (KSDispersiveReference, amplitude_rate_matrix,
+    conditional_event_ceiling, conditional_grid_rate_ceiling,
     cp_diagonal_rate_ceiling, cpt_mixing_decay_lower_factor, cpt_mixing_decay_matrix,
     positive_operator_rate_ceiling)
 
@@ -135,6 +137,75 @@ class KaonCeilingTest(unittest.TestCase):
         for probability in [-.1, 1.1, math.nan]:
             with self.assertRaises(ValueError):
                 conditional_event_ceiling(2., 3., probability, .3)
+
+
+class GridRegenerationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.ks = KSDispersiveReference(Path(__file__).resolve().parents[1]/
+            'config/physics/dark_photon_ks_dispersive_2016.json',
+            '15b1330ed008b81b5af0c2b7824b33afacad4e9373838bc6761f6029af4abdd2')
+
+    def setUp(self):
+        self.inventory = dict(source_class='SoftQCD:nonDiffractive',
+            source_sampling_verified=True, resolved_source_configuration=True,
+            collision_exposure=1000, native=dict(sigma_source_mb=1.),
+            source_configuration=dict(check_event=True,mass_tolerance=.001,energy_tolerance=.01),
+            resolved_beams=dict(eA_gev=1.,eB_gev=100.),
+            resolved_lifetime_settings=dict(limitTau0=True,tau0Max=10.),
+            particle_data=[dict(pdg_id=130,mass_gev=.497611,mass_min_gev=.49761,
+                may_decay=True,mean_proper_lifetime_mm=15330.),
+                dict(pdg_id=310,mass_gev=.497611,mass_min_gev=.49761,
+                may_decay=True,mean_proper_lifetime_mm=26.842)],
+            species=[dict(pdg_id=pdg,mean_parents_per_collision=.8,
+                sum_collision_count_squared=1200) for pdg in (130,310)])
+        self.points = [dict(point='test_prompt',mass_gev=.22,epsilon=.001,
+            proper_ctau_mm=.000262181684591659,target_mean_lab_flight_m=None,prompt=True),
+            dict(point='test_lab5m',mass_gev=.22,epsilon=1.e-6,
+            proper_ctau_mm=262.181684591659,target_mean_lab_flight_m=5.,prompt=False)]
+        self.inputs = dict(authority=AUTHORITY,kl_br_gamma_gamma=.0005471,
+            kl_shape_candidates=[dict(parent_pdg_id=130,kind='kl-dip-single-virtual',
+                alpha_dip=-1.729,rho_mass_gev=.77526,valid_mass_range_gev=[0.,.497611],
+                reference='https://arxiv.org/pdf/hep-ex/0702039')])
+
+    def calculate(self, **changes):
+        return conditional_grid_rate_ceiling(changes.get('inventory',self.inventory),
+            changes.get('points',self.points),self.ks,self.inputs,
+            source_authority='Synthetic immutable source-count receipt, SHA test')
+
+    def test_updated_census_reuses_the_physical_grid_and_joint_count_budget(self):
+        result = self.calculate()
+        self.assertEqual(len(result['rows']),2)
+        for actual,original in zip(result['rows'],self.points):
+            self.assertEqual(actual['epsilon'],original['epsilon'])
+            self.assertEqual(actual['proper_ctau_mm'],original['proper_ctau_mm'])
+            counts = actual['source_count_conditional_event_ceiling']
+            self.assertAlmostEqual(counts['0.3']/counts['0.03'],10.)
+            self.assertAlmostEqual(counts['3.0']/counts['0.3'],10.)
+        for bound in result['source_count_bounds'].values():
+            self.assertEqual(bound['confidence'],.975)
+            self.assertEqual(bound['statistical_bound']['method'],'empirical_bernstein')
+        more = deepcopy(self.inventory)
+        more['collision_exposure'] *= 10
+        for row in more['species']:
+            row['sum_collision_count_squared'] *= 10
+        self.assertLess(self.calculate(inventory=more)['total_primary_kaon_mean_ceiling'],
+                        result['total_primary_kaon_mean_ceiling'])
+
+    def test_unverified_source_or_ambiguous_grid_cannot_regenerate(self):
+        unknown = dict(self.inventory,source_sampling_verified=False)
+        with self.assertRaises(ValueError):
+            self.calculate(inventory=unknown)
+        with self.assertRaises(ValueError):
+            self.calculate(points=self.points+self.points)
+
+    def test_closed_mass_and_operational_canaries_are_explicit(self):
+        closed = dict(self.points[0],point='closed',mass_gev=.5)
+        canary = dict(self.points[0],operational_canary=True)
+        result = self.calculate(points=[closed,canary])
+        self.assertEqual(len(result['rows']),1)
+        self.assertEqual(result['rows'][0]['arbitrary_mixing_probability_ceiling'],0.)
+        self.assertEqual(sum(result['rows'][0]['source_count_conditional_event_ceiling'].values()),0.)
 
 
 if __name__ == '__main__':

@@ -306,6 +306,107 @@ def conditional_event_ceiling(source_cross_section_pb, parent_mean_ceiling,
     return source_cross_section_pb*parent_mean_ceiling*signal_probability_ceiling*1000*luminosity_fb_inverse
 
 
+def conditional_grid_rate_ceiling(inventory, points, ks_reference, rate_inputs, *,
+                                  source_authority, confidence=.95,
+                                  luminosities=(.03, .3, 3.)):
+    """Regenerate a conditional leading-EM kaon worksheet from a new census.
+
+    The inventory may be a single or strictly pooled independent-collision
+    census. Its source verification, physical-parent moments and native table
+    must already be established. A preselected empirical Bernstein interval
+    gets half the total failure budget for each of KL and KS. These same two
+    intervals cover all deterministic grid/luminosity scalings simultaneously.
+
+    Rate inputs supply the fixed KL photon normalization and all qualified
+    shape-envelope candidates; KS supplies its separately hash-pinned complex
+    amplitude and published band. The result's confidence describes SOURCE
+    COUNTS only, conditional on those source and rate authorities. It does not
+    convert model bands into a confidence interval or include secondary kaons.
+    Physical epsilon/proper lifetime are copied unchanged from each point.
+    """
+    from audit_dark_photon_meson_coverage import final_parent_yield_bound
+    from dark_photon_model import fermion_couplings, mixing_parameters, HBAR_C_GEV_MM
+
+    if not isinstance(source_authority, str) or not source_authority.strip():
+        raise ValueError('A persistent census authority and exact digest are required')
+    if (inventory.get('source_class') != 'SoftQCD:nonDiffractive'
+            or inventory.get('source_sampling_verified') is not True
+            or inventory.get('resolved_source_configuration') is not True):
+        raise ValueError('Require a verified fixed-exposure non-diffractive source census')
+    if not 0 < confidence < 1 or not luminosities or len(set(luminosities)) != len(luminosities):
+        raise ValueError('A total count confidence and distinct luminosities are required')
+    for lumi in luminosities:
+        _real(lumi, 'effective luminosity', positive=True)
+    br_gamma_gamma = _real(rate_inputs.get('kl_br_gamma_gamma'), 'KL photon branching fraction')
+    if not 0 <= br_gamma_gamma <= 1 or not rate_inputs.get('kl_shape_candidates') or not rate_inputs.get('authority'):
+        raise ValueError('Explicit KL shape candidates and rate-envelope authority are required')
+    selected = [row for row in points if not row.get('operational_canary')]
+    if not selected or len({row['point'] for row in selected}) != len(selected):
+        raise ValueError('A nonempty unique physical point grid is required')
+    particles = {row['pdg_id']: row for row in inventory['particle_data']}
+    species = {row['pdg_id']: row for row in inventory['species']}
+    sigma = _real(inventory['native']['sigma_source_mb'], 'source cross section', positive=True)*1.e9
+    bounds = {}
+    widths = {}
+    for pdg in (130, 310):
+        record = species[pdg]
+        bounds[str(pdg)] = final_parent_yield_bound(particles[pdg],
+            inventory['resolved_lifetime_settings'], inventory['source_configuration'],
+            inventory['resolved_beams'], inventory['collision_exposure'],
+            record['mean_parents_per_collision'], sigma, confidence=1-(1-confidence)/2,
+            method='empirical_bernstein', sum_count_squared=record['sum_collision_count_squared'])
+        if bounds[str(pdg)] is None:
+            raise ValueError('Native final-parent source does not support a finite count ceiling')
+        widths[pdg] = HBAR_C_GEV_MM/_real(particles[pdg]['mean_proper_lifetime_mm'],
+                                        'native proper mean flight', positive=True)
+    parent_mean_upper = sum(row['mean_parents_per_collision_upper'] for row in bounds.values())
+    total_decay = ((widths[310], 0.), (0., widths[130]))
+    rows = []
+    for point in selected:
+        mass = _real(point['mass_gev'], 'dark-photon mass', positive=True)
+        epsilon = _real(point['epsilon'], 'physical epsilon', positive=True)
+        _real(point['proper_ctau_mm'], 'physical proper lifetime', positive=True)
+        mix = mixing_parameters(mass, epsilon)
+        br_long = br_short = 0.
+        form_factor_max = None
+        if mass < particles[130]['mass_gev']:
+            form_factor_max = max(abs(transition_form_factor(mass, candidate))**2
+                                  for candidate in rate_inputs['kl_shape_candidates'])
+            br_long = radiative_branching(130, particles[130]['mass_gev'], mass,
+                mix.em_coefficient, br_gamma_gamma, math.sqrt(form_factor_max))
+        if mass < particles[310]['mass_gev']:
+            br_short = ks_reference.radiative_width(particles[310]['mass_gev'], mass,
+                mix.em_coefficient, band=True)[1]/widths[310]
+        ceiling = positive_operator_rate_ceiling(
+            ((br_short*widths[310], 0.), (0., br_long*widths[130])), total_decay,
+            authority=rate_inputs['authority'])
+        muon = fermion_couplings(mass, epsilon, -1., -.5)
+        ratio = abs(muon.axial/muon.vector)
+        r_muon = (.1056583755/mass)**2
+        beta = math.sqrt(max(0., 1-4*r_muon))
+        rows.append(dict(point=point['point'], mass_gev=mass, epsilon=epsilon,
+            proper_ctau_mm=point['proper_ctau_mm'],
+            reference_mean_lab_m=point['target_mean_lab_flight_m'], prompt=point['prompt'],
+            kl_form_factor_abs2_envelope=form_factor_max,
+            kl_branching_envelope=br_long, ks_branching_envelope=br_short,
+            arbitrary_mixing_probability_ceiling=ceiling,
+            source_count_conditional_event_ceiling={str(lumi):conditional_event_ceiling(
+                sigma, parent_mean_upper, min(1., ceiling), lumi) for lumi in luminosities},
+            exact_hypercharge_muon_budget=dict(abs_axial_over_vector=ratio,
+                axial_over_vector_partial_width=ratio**2*beta**2/(1+2*r_muon),
+                maximum_transverse_parity_odd_relative_term=2*ratio*beta,
+                em_coefficient_over_epsilon=mix.em_coefficient/epsilon)))
+    return dict(schema='conditional-neutral-kaon-grid-calculation-v1',
+        source_authority=source_authority, source_count_confidence=confidence,
+        source_count_bounds=bounds, source_cross_section_pb=sigma,
+        total_primary_kaon_mean_ceiling=parent_mean_upper,
+        total_decay_widths_gev={str(key):value for key,value in widths.items()},
+        rate_authority=rate_inputs['authority'], ks_reference_sha256=ks_reference.sha256,
+        scope='Leading electromagnetic CP tensors; fixed source/model/rate envelopes. Primary-parent regeneration and absorption covered; new secondary kaons excluded. BRmumu<=1, acceptance<=1.',
+        confidence_scope='Two preselected whole-collision Bernstein bounds, Bonferroni across physical KL/KS. All point and luminosity scalings share those same two bounds. No statistical CL assigned to rate/model envelopes.',
+        rows=rows)
+
+
 def amplitude(parent_pdg_id, photon, dark_photon, photon_polarization,
               dark_polarization, form_factor=1.):
     """Dominant CP tensor contracted with the supplied polarization vectors.
