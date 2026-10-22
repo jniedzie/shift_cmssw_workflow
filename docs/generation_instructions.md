@@ -25,9 +25,11 @@ nominal time shift has already been applied. Compile canary plugins privately;
 do not rebuild a shared release used by live jobs.
 
 `configure_complete_source` prepares uncensored ordinary GEN in this order:
-retain the original graph through an explicit `@skipCurrentProcess` proxy,
-place it, complete natural muon-producing hadron decays, apply nominal source
-time, rebuild `generatorSmeared`, then rebuild `genParticles`. Keep the
+read the original input with `@skipCurrentProcess`, retain its exact graph as
+`shiftSourcePlacement:original`, place it, complete natural muon-producing
+hadron decays, apply nominal source time, rebuild the single `generatorSmeared`
+proxy, then rebuild `genParticles`. A second smeared-producer proxy causes a
+framework registration cycle and must not be added. Keep the
 unshifted completed graph as `shiftFullMuonDecays`. Drop old persisted timing
 and derived truth collections when saving the prepared input. The first
 placement-only canary deliberately does not satisfy this full-input contract.
