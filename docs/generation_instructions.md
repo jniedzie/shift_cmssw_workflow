@@ -47,10 +47,17 @@ use an operation-count bound with explicit Float32 mass storage. Keep truthful
 nonzero residuals and freeze the worker and consumer together; the older exact
 receipt mode remains strict. This changes validation, not generated physics.
 
-The native5000+5000 DY20+ forced/natural control agrees on the primary muonic
-rate within about1.76approximate standard errors. Its forced cross section
-already includes the muonic channel factor; do not multiply by another guessed
-branching fraction. This result does not close low-mass DY, direct Jpsi or
+The independent 295-original QCD jaw census now passes this preparation audit,
+with all 500 source trials retained. Its broad chamber-envelope check finds
+one GEN mass-above-20-GeV candidate; this does not establish detector survival
+or useful weighted tail statistics. The next all-original p=1 detector benchmark
+keeps the ranking fixed and includes low-score/unknown controls. Do not promote
+the GEN score or raw pair count to a measured reconstruction efficiency.
+
+The native 5,000+5,000 DY20+ forced/natural control agrees on the primary muonic
+rate within about 1.76 approximate standard errors. This supports the forced
+cross section already including the muonic channel factor; do not multiply by
+another guessed branching fraction. This result does not close low-mass DY, direct Jpsi or
 jaw/material acceptance. Exact counts, per-mass limits and independent final
 native readback are in `../../SHIFT_ANALYSIS.md` and the named DY control study.
 
