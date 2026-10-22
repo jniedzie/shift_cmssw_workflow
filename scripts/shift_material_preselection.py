@@ -70,7 +70,7 @@ def validate_policy(policy):
 
 def validate_pointing(config):
     """Bind the straight-ray ranking scale to an explicit geometry reference."""
-    if config['schema'] != 'shift-two-endcap-pointing-v1':
+    if config['schema'] not in ('shift-two-endcap-pointing-v1', 'shift-two-endcap-pointing-v2'):
         raise ValueError('Unsupported two-endcap pointing policy')
     planes = config['z_planes_cm']
     if (len(planes) != 2 or any(isinstance(z, bool) or not math.isfinite(z) for z in planes)
@@ -82,22 +82,79 @@ def validate_pointing(config):
     if not isinstance(config['geometry_reference'], str) or not config['geometry_reference']:
         raise ValueError('Pointing needs an explicit geometry reference')
     sha256(config['geometry_sha256'], 'pointing geometry reference')
+    if config['schema'] == 'shift-two-endcap-pointing-v2':
+        width = config['station_edge_scale_cm']
+        if isinstance(width, bool) or not math.isfinite(width) or width <= 0:
+            raise ValueError('Chamber edge scale must be finite and positive')
+        stations = config['station_envelopes']
+        if not isinstance(stations, list) or not stations:
+            raise ValueError('Chamber pointing needs station envelopes')
+        names = set()
+        for station in stations:
+            if (type(station['station']) is not int or not 1 <= station['station'] <= 4
+                    or station['station'] in names):
+                raise ValueError('Chamber envelopes need distinct CSC station numbers')
+            names.add(station['station'])
+            for field in ('z_abs_cm', 'radial_min_cm', 'radial_max_cm'):
+                value = station[field]
+                if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                    raise ValueError('Chamber envelope coordinates must be finite and positive')
+            if (station['radial_min_cm'] >= station['radial_max_cm']
+                    or station['z_abs_cm'] >= min(abs(z) for z in planes)):
+                raise ValueError('Chamber envelope must be ordered and inside both reference planes')
+
+
+def quartic_priority(ratio):
+    # Invert first for large offsets to avoid overflowing the quartic.
+    return ((1./ratio)**4/(1.+(1./ratio)**4) if ratio > 1.
+            else 1./(1.+ratio**4))
+
+
+def station_pointing(birth, momentum, config):
+    """Rank proximity to at least one CSC station envelope on each side.
+
+    These broad radial envelopes omit chamber gaps, bending and scattering.
+    The edge scale is a sampling choice, not an uncertainty on the geometry.
+    """
+    sides, score = [], 1.
+    for side in (-1, 1):
+        stations = []
+        for station in config['station_envelopes']:
+            z = side*station['z_abs_cm']
+            if momentum[2] == 0 or (z-birth[2])/momentum[2] < 0:
+                stations.append(None)
+                continue
+            distance = (z-birth[2])/momentum[2]
+            radius = math.hypot(birth[0]+distance*momentum[0],
+                                birth[1]+distance*momentum[1])
+            if not math.isfinite(radius):
+                raise ValueError('Nonfinite chamber projection')
+            outside = max(station['radial_min_cm']-radius,
+                          radius-station['radial_max_cm'], 0.)
+            stations.append(dict(radius_cm=radius,
+                                 priority=quartic_priority(outside/config['station_edge_scale_cm'])))
+        score *= max((row['priority'] for row in stations if row is not None), default=0.)
+        sides.append(stations)
+    return dict(priority=score, projected_stations=sides)
 
 
 def two_endcap_pointing(muons, config):
     """Softly rank rays near both endcaps; never declare detector acceptance.
 
-    The broad quartic radius scale omits the beam hole, chamber gaps, magnetic
-    bending and scattering. A ray missing this envelope is still reconstructed
-    through the positive random control. Missing vertices remain unknown.
+    V1 retains its original outer-envelope score. V2 also ranks proximity to
+    a CSC station on each side, including the central hole. Neither model
+    includes chamber gaps, magnetic bending or scattering. A ray missing the
+    envelope still has positive random control. Missing vertices stay unknown.
     """
     validate_pointing(config)
     score, radii, unknown, forward = 1., [], False, True
+    chamber_scores = []
     for muon in muons:
         birth, momentum = muon.get('birth_cm'), muon.get('momentum_GeV')
         if birth is None or momentum is None:
             unknown = True
             radii.append(None)
+            chamber_scores.append(None)
             continue
         if (len(birth) != 3 or len(momentum) != 3
                 or any(isinstance(x, bool) or not math.isfinite(x)
@@ -120,11 +177,16 @@ def two_endcap_pointing(muons, config):
             score = 0.
         else:
             ratio = max(leg)/config['radial_scale_cm']
-            # Invert first for large offsets to avoid overflowing the quartic.
-            score *= ((1./ratio)**4/(1.+(1./ratio)**4) if ratio > 1.
-                      else 1./(1.+ratio**4))
-    return dict(priority=None if unknown else score, unknown=unknown,
-                both_planes_forward=None if unknown else forward, projected_radii_cm=radii)
+            score *= quartic_priority(ratio)
+        if config['schema'] == 'shift-two-endcap-pointing-v2':
+            chambers = station_pointing(birth, momentum, config)
+            score *= chambers['priority']
+            chamber_scores.append(chambers)
+    result = dict(priority=None if unknown else score, unknown=unknown,
+                  both_planes_forward=None if unknown else forward, projected_radii_cm=radii)
+    if config['schema'] == 'shift-two-endcap-pointing-v2':
+        result['station_pointing'] = chamber_scores
+    return result
 
 
 def validate_muon_column(config):

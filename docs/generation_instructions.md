@@ -61,6 +61,15 @@ The active six-original GEN/timing canary and exact assumed profile are under
 `../../validation/sm_material_selection_20261022_v1/`; its native result and EOS
 readback, not a submission receipt or algorithm test, establish runtime closure.
 
+The common diagnostic policy is maintained in
+`config/campaigns/sm_material_admission_pilot_v1.json`. Its opt-in pointing V2
+ranks proximity to a CSC station on each side, including the beam hole. The
+rounded public-XML gas envelopes and single station planes are approximate;
+the50cm edge scale is a sampling choice, not detector acceptance or a geometry
+uncertainty. V1 policies retain their original result. No muon-pT cut or hard
+station veto is added. Keep positive random controls and exact cumulative W/p;
+validate actual Both-Both tails on independent originals before production.
+
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
 The independent 7,935-original material response test completed with only one

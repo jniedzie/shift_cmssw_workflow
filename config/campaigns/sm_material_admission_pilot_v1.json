@@ -6,7 +6,7 @@
     "schema": "shift-material-admission-policy-v1",
     "cohort_id": "sm_jaw_material_pilot_v1",
     "selection_domain": "sm_jaw_material_pilot_v1",
-    "selection_seed": "source-bound-direction-vertex-column-20261022-v1",
+    "selection_seed": "source-bound-direction-vertex-column-CSC-20261022-v1",
     "fold_seed": "independent-originals-jaw-material-20261022-v1",
     "training_folds": 10,
     "control_probability": 0.1,
@@ -15,11 +15,63 @@
     "require_opposite_sign": true,
     "rank_partial_parent_paths": true,
     "two_endcap_pointing": {
-      "schema": "shift-two-endcap-pointing-v1",
-      "z_planes_cm": [-1100.0, 1100.0],
+      "schema": "shift-two-endcap-pointing-v2",
+      "z_planes_cm": [
+        -1100.0,
+        1100.0
+      ],
       "radial_scale_cm": 702.0,
-      "geometry_reference": "/cvmfs/cms.cern.ch/el9_amd64_gcc13/cms/cmssw/CMSSW_17_0_0_pre4/src/Geometry/MuonCommonData/data/mf.xml:ME3Ring.rMax",
-      "geometry_sha256": "5a466036b72cb14137726f3555ac3ccd695b38a14e733f2ba759ef7c2aded757"
+      "geometry_reference": "CMSSW_17_0_0_pre4 nominal2023 CSC gas envelopes; Geometry/MuonCommonData/data/csc/2021/v3/csc.xml",
+      "geometry_sha256": "91eab289ebba75cc59de7daaa16d711a70c7b41c280394240561f788c670e279",
+      "station_edge_scale_cm": 50.0,
+      "geometry_sources": [
+        {
+          "path": "Geometry/MuonCommonData/data/csc/2021/v3/csc.xml",
+          "sha256": "91eab289ebba75cc59de7daaa16d711a70c7b41c280394240561f788c670e279"
+        },
+        {
+          "path": "Geometry/MuonCommonData/data/mf/2021/v3/mf.xml",
+          "sha256": "487e3681670835007a22f409a30538057eb28af1930d202ad4092b825b0dc3b1"
+        },
+        {
+          "path": "Geometry/MuonSimData/data/muonSens/2021/v4/muonSens.xml",
+          "sha256": "8a3e53da824e0486fc240b1997584818a73f53e8820d7f5b78911f327aeec3da"
+        },
+        {
+          "path": "Geometry/CMSCommonData/data/rotations.xml",
+          "sha256": "7b3fafabefc20e5f17337f04e4f9a1e4257ec3f195f1d1645a8672987941bf14"
+        },
+        {
+          "path": "Geometry/MuonCommonData/python/muonIdealGeometry2023XML_cfi.py",
+          "sha256": "a84fcd68b287b7e8951f38253fdebc947d16b206e8ade44f1a3e199cdd82e492"
+        }
+      ],
+      "station_envelopes": [
+        {
+          "station": 1,
+          "z_abs_cm": 650.0,
+          "radial_min_cm": 106.0,
+          "radial_max_cm": 678.0
+        },
+        {
+          "station": 2,
+          "z_abs_cm": 830.0,
+          "radial_min_cm": 146.0,
+          "radial_max_cm": 691.0
+        },
+        {
+          "station": 3,
+          "z_abs_cm": 940.0,
+          "radial_min_cm": 166.0,
+          "radial_max_cm": 691.0
+        },
+        {
+          "station": 4,
+          "z_abs_cm": 1030.0,
+          "radial_min_cm": 186.0,
+          "radial_max_cm": 691.0
+        }
+      ]
     },
     "muon_column_priority": {
       "schema": "shift-muon-column-priority-v1",
@@ -27,15 +79,25 @@
       "reference": "https://pdg.lbl.gov/2024/AtomicNuclearProperties/HTML/standard_rock.html"
     }
   },
-  "comparison_control_probabilities": [0.1, 0.01, 0.001],
-  "pointing_scope": "Smooth ranking near the outer muon envelope at the two external-geometry boundaries; not a hard detector-acceptance cut",
+  "comparison_control_probabilities": [
+    0.1,
+    0.01,
+    0.001
+  ],
+  "pointing_scope": "Soft proximity to at least one nominal CSC station on each side plus the broad outer envelope; rounded radial station bounds and single reference planes omit gaps, bending and scattering. The 50cm edge scale is a sampling choice, not a detector uncertainty or hard cut; nominal publicXML is not a conditions-DB geometry readback.",
   "material_scope": "Parent interaction depths and muon mass columns from each actual birth/decay path; straight-path ranking only",
   "momentum_scope": "Total momentum sets smooth priorities; no muon-pT admission cut",
   "weight_rule": "Keep native source/decay weight, divide once by exact cumulative reconstruction inclusion probability; no material-survival correction",
   "validation": {
     "reference": "Independent detector-response sample with fixed controls and original-event uncertainty estimates",
-    "primary_tails": ["mass_gt20", "pt_gt10"],
-    "additional_tails": ["mass_gt50", "pt_gt20"],
+    "primary_tails": [
+      "mass_gt20",
+      "pt_gt10"
+    ],
+    "additional_tails": [
+      "mass_gt50",
+      "pt_gt20"
+    ],
     "minimum_positive_originals": 30,
     "minimum_observed_effective_count": 25,
     "confidence": 0.9916666666666667,

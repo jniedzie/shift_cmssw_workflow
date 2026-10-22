@@ -1,6 +1,7 @@
 # Code style: AI-code. AI-generated sampling accounting and material-priority tests.
 import copy
 import importlib.util
+import json
 import math
 from pathlib import Path
 import unittest
@@ -57,7 +58,73 @@ def column_policy():
                 mass_stopping_power_GeV_cm2_g=.002,reference='synthetic mass stopping-power scale')
 
 
+def chamber_pointing():
+    config = pointing()
+    config.update(schema='shift-two-endcap-pointing-v2', station_edge_scale_cm=1.,
+                  station_envelopes=[dict(station=1, z_abs_cm=80.,
+                                          radial_min_cm=5., radial_max_cm=9.)])
+    return config
+
+
 class MaterialAdmissionTests(unittest.TestCase):
+    def test_chamber_pointing_downgrades_beam_hole_and_far_side_miss(self):
+        config = chamber_pointing()
+        covered = dict(birth_cm=[7., 0., -200.], momentum_GeV=[0., 0., 40.])
+        hole = dict(birth_cm=[0., 0., -200.], momentum_GeV=[0., 0., 40.])
+        one_side = dict(birth_cm=[0., 0., -200.], momentum_GeV=[1.6, 0., 40.])
+        good = admission.two_endcap_pointing([covered], config)
+        self.assertEqual(good['station_pointing'][0]['priority'], 1.)
+        self.assertLess(admission.two_endcap_pointing([hole], config)['priority'],
+                        good['priority']/100.)
+        miss = admission.two_endcap_pointing([one_side], config)
+        stations = miss['station_pointing'][0]['projected_stations']
+        self.assertAlmostEqual(stations[0][0]['radius_cm'], 4.8)
+        self.assertAlmostEqual(stations[1][0]['radius_cm'], 11.2)
+        self.assertLess(miss['priority'], good['priority']/10.)
+
+    def test_chamber_edge_is_soft_and_control_weights_remain_exact(self):
+        rows = [event(1), event(2)]
+        for row, radius in zip(rows, (7., 0.)):
+            row['muons'][1]['pdg'] = -13
+            for muon in row['muons']:
+                muon.update(birth_cm=[radius, 0., -200.], momentum_GeV=[0., 0., 40.])
+        features, authority = inputs(rows)
+        config = policy()
+        config.update(two_endcap_pointing=chamber_pointing(), require_opposite_sign=True)
+        good, hole = admission.prepare_selection(features, authority, config)['events']
+        self.assertGreater(good['conditional_sampling_probability'], hole['conditional_sampling_probability'])
+        self.assertGreaterEqual(hole['conditional_sampling_probability'], .1)
+        for row in (good, hole):
+            p = row['sampling_probability']
+            self.assertEqual(p*row['proposal_gen_weight'], row['native_weight'])
+        # The edge does not become an acceptance cut.
+        inside = dict(birth_cm=[4.999, 0., -200.], momentum_GeV=[0., 0., 40.])
+        edge = admission.two_endcap_pointing([inside], chamber_pointing())
+        self.assertGreater(edge['station_pointing'][0]['priority'], .99)
+
+    def test_missing_chamber_truth_is_unknown_and_direction_has_no_pt_cut(self):
+        muon = dict(birth_cm=[7., 0., -200.], momentum_GeV=[0., 0., 40.], pt_GeV=0.)
+        first = admission.two_endcap_pointing([muon], chamber_pointing())
+        muon.update(momentum_GeV=[0., 0., 400.], pt_GeV=1.e9)
+        self.assertEqual(admission.two_endcap_pointing([muon], chamber_pointing()), first)
+        muon['birth_cm'] = None
+        missing = admission.two_endcap_pointing([muon], chamber_pointing())
+        self.assertTrue(missing['unknown'])
+        self.assertIsNone(missing['priority'])
+        self.assertEqual(missing['station_pointing'], [None])
+
+    def test_chamber_geometry_must_be_ordered_inside_reference_planes(self):
+        for field, value in (('z_abs_cm', 110.), ('radial_min_cm', 9.),
+                             ('radial_max_cm', math.inf), ('station', True)):
+            config = chamber_pointing()
+            config['station_envelopes'][0][field] = value
+            with self.assertRaises(ValueError):
+                admission.validate_pointing(config)
+        config = chamber_pointing()
+        config['station_envelopes'] *= 2
+        with self.assertRaisesRegex(ValueError, 'distinct'):
+            admission.validate_pointing(config)
+
     def test_muon_column_distinguishes_nearby_soft_muon_from_long_rock_path(self):
         muon=dict(p_GeV=1.,pt_GeV=0.,material_to_CMS_entry=dict(complete=True,column_density_g_cm2=0.))
         self.assertEqual(admission.muon_column_priority([muon],column_policy())['priority'],1.)
@@ -167,6 +234,17 @@ class MaterialAdmissionTests(unittest.TestCase):
         result=admission.two_endcap_pointing(muons,config)
         self.assertGreater(result['priority'],.99)
         self.assertTrue(result['both_planes_forward'])
+        config = json.loads((Path(__file__).parents[1]/'config/campaigns/sm_material_admission_pilot_v1.json').read_text())['policy']['two_endcap_pointing']
+        self.assertGreater(admission.two_endcap_pointing(muons, config)['priority'], .99)
+        # Independent raw truth-matched traversing legs in510211002:1:273.
+        # Both have CSC hits in both endcaps; retain this old beam-pipe control.
+        energetic = [dict(birth_cm=[.010250628067725363, .04995958265231276, 14787.15972547555],
+                          momentum_GeV=[-8.259437873976298, 17.494227317442924, -702.7894097505847]),
+                     dict(birth_cm=[.34038375595791215, -.5520615883988315, 14734.048947833802],
+                          momentum_GeV=[6.375422746063677, -14.79802442959545, -1438.4355791438506])]
+        ranked = admission.two_endcap_pointing(energetic, config)
+        self.assertGreater(ranked['priority'], .8)
+        self.assertEqual([row['priority'] for row in ranked['station_pointing']], [1., 1.])
 
     def test_depth_orders_but_shared_parent_is_counted_once(self):
         zero=admission.pair_priority(event(depth=0),20.)['priority']
