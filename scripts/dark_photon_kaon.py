@@ -26,6 +26,7 @@ import math
 from pathlib import Path
 
 from dark_photon_meson import radiative_branching as spin_zero_radiative_branching
+from dark_photon_meson import sample_decay as spin_zero_radiative_sample
 
 
 REFERENCES = {
@@ -488,6 +489,43 @@ def radiative_branching(parent_pdg_id, parent_mass, mass, epsilon,
     _kaon(parent_pdg_id)
     return spin_zero_radiative_branching(parent_mass, mass, epsilon,
                                          br_gamma_gamma, form_factor_ratio)
+
+
+def sample_radiative_decay(parent_pdg_id, parent, mass, proper_ctau_mm, rng):
+    """Unconditional KL/KS -> gamma A' -> gamma mu+mu- with pure-vector A'.
+
+    Both CP tensors produce the same transverse density after the real-photon
+    polarization is unobserved. Their rates/form factors remain separate.
+    The common sampler supplies ONLY the relative A' flight. The caller must
+    preserve the parent's previously sampled native lifetime and decay point.
+    This neither implements matter evolution nor qualifies its source rate.
+    """
+    _kaon(parent_pdg_id)
+    result = spin_zero_radiative_sample(parent,mass,proper_ctau_mm,rng)
+    result.update(parent_pdg_id=parent_pdg_id,recoil_pdg_id=22,
+        parent_polarization='spin-zero',dark_photon_polarization='transverse',
+        kaon_cp_tensor='odd' if parent_pdg_id == 130 else 'even',
+        parent_flight_included=False)
+    return result
+
+
+def sample_weak_decay(parent_pdg_id, parent, recoil_mass, mass, proper_ctau_mm, rng):
+    """Unconditional K+/-/KS -> pi+/-/pi0 A' using the qualified weak sampler.
+
+    Rates and their separately qualified charged/KS weak amplitudes are caller
+    inputs. No KL CP-violating pi0 current is silently substituted. The pion
+    recoil's ordinary decay is the native bridge's responsibility.
+    """
+    if type(parent_pdg_id) is not int or parent_pdg_id not in (321,-321,310):
+        raise ValueError('Explicit charged-kaon or KS weak-current parent required')
+    # Sampler-only dependency: rate-only neutral-kaon deployments do not use
+    # this API. Any new GEN freeze must include the weak helper coherently.
+    from dark_photon_weak_meson import sample_decay
+    result = sample_decay(parent,recoil_mass,mass,proper_ctau_mm,rng)
+    result.update(parent_pdg_id=parent_pdg_id,
+        recoil_pdg_id={321:211,-321:-211,310:111}[parent_pdg_id],
+        parent_flight_included=False)
+    return result
 
 
 def normalized_dalitz_density(parent_mass, mass, lepton_mass, alpha_em,

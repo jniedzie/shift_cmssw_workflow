@@ -16,6 +16,7 @@ CPP = r'''
 #include "Pythia8Plugins/HepMC2.h"
 #include "HepMC/IO_GenEvent.h"
 #include <algorithm>
+#include <cmath>
 #include <iomanip>
 #include <memory>
 #include <map>
@@ -151,6 +152,66 @@ public:
       o<<",\""<<item.first<<"\":["<<p.x()<<','<<p.y()<<','<<p.z()<<','<<p.t()<<']';
     }
     o<<'}';return o.str();
+  }
+  std::string undecayed_kaon_record(int index,bool converted=true) const {
+    if(index<=0||index>=pythia.event.size())throw std::runtime_error("Missing native kaon index");
+    auto const& p=pythia.event[index];
+    if((p.id()!=130&&p.id()!=310&&p.id()!=321&&p.id()!=-321)||
+       std::find(parent_ids.begin(),parent_ids.end(),p.id())==parent_ids.end()||
+       !p.isFinal()||!p.daughterList().empty()||!std::isfinite(p.m())||p.m()<=0.||
+       !std::isfinite(p.tau0())||p.tau0()<=0.||
+       !std::isfinite(p.tau())||p.tau()<0.)
+      throw std::runtime_error("Require an explicit physical undecayed kaon with its sampled native lifetime");
+    for(auto value:{p.e(),p.px(),p.py(),p.pz(),p.xProd(),p.yProd(),p.zProd(),p.tProd(),
+                    p.xDec(),p.yDec(),p.zDec(),p.tDec()})
+      if(!std::isfinite(value))throw std::runtime_error("Nonfinite native kaon momentum/flight");
+    if(converted) {
+      auto const* parent=current?current->barcode_to_particle(index):nullptr;
+      if(!parent||parent->pdg_id()!=p.id()||parent->status()!=1||
+         !parent->production_vertex()||parent->end_vertex()||
+         parent->momentum().e()!=p.e()||parent->momentum().px()!=p.px()||
+         parent->momentum().py()!=p.py()||parent->momentum().pz()!=p.pz()||
+         parent->generated_mass()!=p.m())
+        throw std::runtime_error("Native kaon does not match an unchanged final HepMC parent");
+      auto const& position=parent->production_vertex()->position();
+      if(position.x()!=p.xProd()||position.y()!=p.yProd()||
+         position.z()!=p.zProd()||position.t()!=p.tProd())
+        throw std::runtime_error("Native kaon production vertex changed during conversion");
+    }
+    std::ostringstream o;o<<std::setprecision(17)<<"{\"index\":"<<index
+      <<",\"pdg_id\":"<<p.id()<<",\"native_mass_gev\":"<<p.m()
+      <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]"
+      <<",\"production_position_mm\":["<<p.xProd()<<','<<p.yProd()<<','<<p.zProd()<<','<<p.tProd()<<"]"
+      <<",\"stored_decay_position_mm\":["<<p.xDec()<<','<<p.yDec()<<','<<p.zDec()<<','<<p.tDec()<<"]"
+      <<",\"selected_proper_lifetime_mm\":"<<p.tau()
+      <<",\"mean_proper_lifetime_mm\":"<<p.tau0()
+      <<",\"native_end_vertex_present\":false}";
+    return o.str();
+  }
+  std::string undecayed_kaon_snapshot() const {
+    std::ostringstream o;o<<std::setprecision(17)<<"{\"native_weight\":"<<pythia.info.weight()
+      <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"parents\":[";
+    bool first=true;
+    for(int i=1;i<pythia.event.size();++i) {
+      auto const& p=pythia.event[i];
+      if((p.id()!=130&&p.id()!=310&&p.id()!=321&&p.id()!=-321)||
+         std::find(parent_ids.begin(),parent_ids.end(),p.id())==parent_ids.end())continue;
+      auto daughters=p.daughterList();
+      bool copy=false;for(auto j:daughters)copy=copy||pythia.event[j].id()==p.id();
+      if(copy)continue;
+      if(!first)o<<',';first=false;o<<undecayed_kaon_record(i,false);
+    }
+    o<<"]}";return o.str();
+  }
+  std::string attach_native_kaon_decay_vertex(int index) {
+    // The final native kaon already owns tau and vDec. Never draw again or
+    // alter the Pythia record, momentum, production vertex or ancestors.
+    auto record=undecayed_kaon_record(index);
+    auto const& p=pythia.event[index];
+    auto* parent=current->barcode_to_particle(index);
+    auto* vertex=new HepMC::GenVertex(HepMC::FourVector(p.xDec(),p.yDec(),p.zDec(),p.tDec()));
+    vertex->add_particle_in(parent);current->add_vertex(vertex);parent->set_status(2);
+    return record;
   }
   void decay_recoil(HepMC::GenParticle* recoil,HepMC::FourVector const& position) {
     // The new recoil uses the ordinary source particle tables and RNG. Only a
@@ -345,7 +406,8 @@ def native_source(settings, seed, parent_ids=(221, 331)):
         raise ValueError('Require an explicit valid unused Pythia seed')
     if (not parent_ids or len(set(parent_ids)) != len(parent_ids) or
             any(type(pdg) is not int or pdg not in
-                (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323) for pdg in parent_ids)):
+                (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
+                 130, 310, 321, -321) for pdg in parent_ids)):
         raise ValueError('Require distinct explicitly supported meson source parents')
     import ROOT
     libraries = cmssw_native_libraries()
@@ -437,3 +499,30 @@ def inject_decay(source, parent_index, sampled_decay):
     sampled_decay['recoil_records'] = json.loads(str(source.recoil_record(parent_index)))
     if len(recoils) == 1:
         sampled_decay['recoil_natural_decay_required'] = sampled_decay['recoil_records'][0]['natural_decay']
+
+
+def inject_undecayed_kaon_decay(source, parent_index, sampled_decay, *, native_parent_record):
+    """Attach at native kaon vDec, then reuse ordinary recoil/graph injection.
+
+    The C++ primitive rejects flavor311, an existing end vertex, second use,
+    changed p4/production coordinates, and an unsampled/nonphysical parent.
+    The pinned snapshot record must still match before attachment, including
+    tau/vDec; a second draw or changed native record is rejected. Only HepMC
+    status/endvertex are added. This is vacuum construction, not a material model.
+    """
+    if type(parent_index) is not int or parent_index <= 0:
+        raise ValueError('Explicit positive native kaon index required')
+    if (sampled_decay.get('parent_flight_included') is not False or
+            'native_parent_flight' in sampled_decay or
+            any(key in sampled_decay for key in ('parent_uniform','parent_proper_decay_length_mm',
+                                                'parent_decay_position_mm'))):
+        raise ValueError('Supply only a new relative A-prime flight, without resampling the parent')
+    record=json.loads(str(source.undecayed_kaon_record(parent_index)))
+    if (record != native_parent_record or
+            sampled_decay.get('parent_pdg_id') != record['pdg_id']):
+        raise ValueError('The selected native kaon snapshot/lifetime or sampler identity changed')
+    attached=json.loads(str(source.attach_native_kaon_decay_vertex(parent_index)))
+    if attached != record:
+        raise RuntimeError('The native kaon record changed during decay attachment')
+    sampled_decay['native_parent_flight']=record
+    inject_decay(source,parent_index,sampled_decay)
