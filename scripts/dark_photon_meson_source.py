@@ -16,13 +16,201 @@ from itertools import product
 from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_form_factor_abs2
 import dark_photon_vector_meson as vector_meson
 
-PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323)
+PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
+           130, 310, 321, -321)
 PSEUDOSCALAR_DIPION_CORRECTION_LIMIT = 1.e-3
 
 
 def exclusive_channels(model):
     """Channels share one physical parent inventory, not separate collisions."""
     return model.get('exclusive_channels', [model])
+
+
+def kaon_channel(model):
+    """K_l2 is deliberately not admitted before its source-rate envelope gate."""
+    return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion')
+
+
+def _kaon_group(model):
+    return any(kaon_channel(channel) for channel in exclusive_channels(model))
+
+
+def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
+    """Fixed on-shell current; invariant-mass calls only check numerical drift."""
+    if signal_mass != model['signal_mass_gev']:
+        raise ValueError('Resolved kaon current belongs to another fixed signal mass')
+    if (not math.isfinite(parent_mass) or parent_mass<=0 or not math.isfinite(br_mumu)
+            or not 0<=br_mumu<=1):
+        raise ValueError('Physical kaon mass and separately supplied dimuon branching required')
+    if signal_mass+recoil_threshold(model) >= parent_mass:
+        return 0.
+    if model['decay_type']=='neutral-kaon-photon':
+        width = (parent_mass**3/(32*math.pi)*(1-(signal_mass/parent_mass)**2)**3
+                 *model['radiative_amplitude_abs2_gev_minus2'])
+    else:
+        from dark_photon_weak_meson import decay_width
+        width=decay_width(parent_mass,model['recoil_mass_gev'],signal_mass,.001,
+            model['alpha_em'],complex(*model['weak_form_factor']))/1.e-6
+    return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
+
+
+def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm):
+    """Resolve a constant current on exact stable-kaon native mass support.
+
+    All reference inputs are explicit; no photon normalization is inferred
+    for the forbidden K->pi gamma transition. The independent weak/KS inputs
+    are preserved rather than replaced by a KL or charged-kaon model.
+    """
+    from dark_photon_kaon import KSDispersiveReference,transition_form_factor
+    from dark_photon_model import HBAR_C_GEV_MM,mixing_parameters
+    pdg=parent['pdg_id'];mass=parent['mass_gev']
+    if (type(mass) not in (int,float) or not math.isfinite(mass) or mass<=0
+            or pdg not in (130,310,321,-321) or parent.get('parent_mass_model')!='native-stable-kaon'
+            or native.get('mass_width_gev')!=0. or native['mass_min_gev']!=mass
+            or native['mass_max_gev']!=mass):
+        raise ValueError('Kaon source rates require exact zero-width native mass support')
+    if (type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01):
+        raise ValueError('Resolve kaon currents at the explicit physical epsilon')
+    mean=parent.get('mean_proper_ctau_mm');budget=parent.get('relative_numerical_mass_precision_budget')
+    if (type(mean) not in (int,float) or not math.isfinite(mean) or mean<=0
+            or not parent.get('lifetime_reference') or not parent.get('pdg_reference')
+            or type(budget) not in (int,float) or not math.isfinite(budget) or not 0<budget<1
+            or not math.isfinite(ecm) or ecm<=mass):
+        raise ValueError('Pin kaon lifetime, native mass authority and numerical precision budget')
+    width=HBAR_C_GEV_MM/mean
+    model=dict(decay_type=parent['decay_type'],mass_min_gev=mass,mass_max_gev=mass,
+        parent_mass_model='native-stable-kaon',signal_mass_gev=signal_mass,
+        mean_proper_ctau_mm=mean,total_parent_width_gev=width,
+        relative_numerical_mass_precision_budget=budget,source_ecm_gev=ecm,
+        native_parent_count_bound=math.floor(ecm/mass),
+        em_mixing_over_epsilon_abs2=(mixing_parameters(signal_mass,epsilon).em_coefficient/epsilon)**2,
+        physical_epsilon=epsilon,channel=parent['channel'],provenance=dict(
+            pdg=parent['pdg_reference'],lifetime=parent['lifetime_reference']))
+    if parent['decay_type']=='neutral-kaon-photon':
+        if pdg not in (130,310):raise ValueError('Only physical KL/KS have the qualified gamma current')
+        opened=signal_mass<mass
+        if pdg==130:
+            branching=parent.get('br_gamma_gamma')
+            if (type(branching) not in (int,float) or not math.isfinite(branching)
+                    or not 0<branching<=1 or not parent.get('br_gamma_gamma_reference')):
+                raise ValueError('KL requires its explicit gamma-gamma branching calibration')
+            transition=parent['transition_form_factor']
+            transition_form_factor(0.,transition)
+            form=transition_form_factor(signal_mass,transition) if opened else 0.
+            absolute=64*math.pi*width*branching/mass**3*abs(form)**2
+            model['provenance'].update(transition=transition,normalization=parent['br_gamma_gamma_reference'])
+        else:
+            authority=parent['ks_dispersive_reference']
+            reference=KSDispersiveReference(authority['path'],authority['sha256'])
+            absolute=abs(reference.amplitude(signal_mass))**2 if opened else 0.
+            model['provenance']['transition']=dict(authority,publication=reference.publication)
+        model.update(recoil_pdg_id=22,recoil_mass_gev=0.,radiative_amplitude_abs2_gev_minus2=absolute)
+    else:
+        expected={321:211,-321:-211,310:111}
+        if (pdg not in expected or parent.get('recoil_pdg_id')!=expected[pdg]
+                or type(parent.get('recoil_mass_gev')) not in (int,float)
+                or not 0<parent['recoil_mass_gev']<mass):
+            raise ValueError('Qualified Kpi current requires its explicit charge and recoil mass')
+        weak=parent['weak_form_factor_model'];alpha=parent.get('alpha_em')
+        if (weak.get('kind')!='chpt-p6-kaon-em-vector' or not weak.get('reference')
+                or not weak.get('loop_reference') or weak.get('parent_pdg_id')!=pdg
+                or type(alpha) not in (int,float) or not math.isfinite(alpha) or alpha<=0):
+            raise ValueError('Require the matching charged/KS weak-current model and EM convention')
+        from dark_photon_weak_meson import chiral_form_factor
+        opened=signal_mass<mass-parent['recoil_mass_gev']
+        form=chiral_form_factor(mass,parent['recoil_mass_gev'],signal_mass,weak) if opened else 0j
+        model.update(recoil_pdg_id=expected[pdg],recoil_mass_gev=parent['recoil_mass_gev'],
+            weak_form_factor=[form.real,form.imag],alpha_em=alpha)
+        model['provenance']['transition']=weak
+    model['kinematically_open']=opened
+    return model
+
+
+def _validate_kaon_model(pdg,model):
+    from dark_photon_model import HBAR_C_GEV_MM,mixing_parameters
+    kind=model['decay_type'];mass=model.get('mass_min_gev')
+    positive=('mass_min_gev','source_ecm_gev','mean_proper_ctau_mm','total_parent_width_gev',
+              'signal_mass_gev','em_mixing_over_epsilon_abs2','physical_epsilon',
+              'relative_numerical_mass_precision_budget')
+    if (pdg not in (130,310,321,-321) or model.get('parent_mass_model')!='native-stable-kaon'
+            or any(type(model.get(k)) not in (int,float) or not math.isfinite(model[k])
+                   or model[k]<=0 for k in positive)
+            or model.get('mass_max_gev')!=mass or not model.get('provenance')
+            or model.get('native_parent_count_bound')!=math.floor(model['source_ecm_gev']/mass)):
+        raise ValueError('Require a finite fixed-mass kaon current and native count authority')
+    if (model['physical_epsilon']>.01 or model['signal_mass_gev']<=2*MUON_MASS_GEV
+            or model['relative_numerical_mass_precision_budget']>=1
+            or model['total_parent_width_gev']!=HBAR_C_GEV_MM/model['mean_proper_ctau_mm']
+            or model['em_mixing_over_epsilon_abs2']!=(mixing_parameters(
+                model['signal_mass_gev'],model['physical_epsilon']).em_coefficient/model['physical_epsilon'])**2):
+        raise ValueError('Resolved kaon width/coupling differs from its physical lifetime/epsilon')
+    if kind=='neutral-kaon-photon':
+        value=model.get('radiative_amplitude_abs2_gev_minus2')
+        if (pdg not in (130,310) or model.get('recoil_pdg_id')!=22
+                or type(value) not in (int,float) or not math.isfinite(value) or value<0):
+            raise ValueError('Require the separately qualified neutral-kaon gamma amplitude')
+    else:
+        form=model.get('weak_form_factor')
+        if (model.get('recoil_pdg_id')!={321:211,-321:-211,310:111}.get(pdg)
+                or type(model.get('recoil_mass_gev')) not in (int,float)
+                or not 0<model['recoil_mass_gev']<mass
+                or type(model.get('alpha_em')) not in (int,float)
+                or not math.isfinite(model['alpha_em']) or model['alpha_em']<=0
+                or not isinstance(form,list) or len(form)!=2
+                or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)):
+            raise ValueError('Require a matching charged/KS weak current and pion recoil')
+
+
+def _kaon_snapshot_authority(parent,model,kinematic_mass):
+    """Check the native final-parent antichain and physical COM mass floor.
+
+    The independent double-precision interval encloses products/dot/sqrt with
+    gamma_32=32u/(1-32u), u=2^-53. Native COM values use long double; this
+    interval deliberately also covers their JSON conversion. Native-vs-p4
+    mass drift is recorded separately and must pass the existing rate gate.
+    The integer count limit must stay unchanged after those allowances.
+    """
+    channel=next(c for c in exclusive_channels(model) if kaon_channel(c))
+    total=parent.get('source_total_p4');momentum=parent['p4']
+    mothers=parent.get('mother_indices');daughters=parent.get('daughter_indices')
+    if (parent.get('native_final') is not True or type(parent.get('native_status')) is not int
+            or parent['native_status']<=0 or daughters!=[] or not isinstance(mothers,list)
+            or any(type(x) is not int or x<=0 for x in mothers) or parent['index'] in mothers
+            or not isinstance(total,(tuple,list)) or len(total)!=4
+            or any(type(x) not in (int,float) or not math.isfinite(x) for x in total)
+            or parent.get('mean_proper_lifetime_mm')!=channel['mean_proper_ctau_mm']):
+        raise ValueError('Require the pinned native final-kaon graph, lifetime and actual beam vector')
+    gamma=32*2.**-53/(1-32*2.**-53)
+    qterms=[x*x for x in total];q2=math.fsum([qterms[0]]+[-x for x in qterms[1:]])
+    dq=gamma*math.fsum(qterms)
+    products=[a*b for a,b in zip(momentum,total)]
+    numerator=math.fsum([products[0]]+[-x for x in products[1:]])
+    dn=gamma*math.fsum(abs(x) for x in products)
+    if total[0]<=0 or q2<=dq or numerator<=dn:
+        raise ValueError('Actual incoming beam vector is not a physical COM authority')
+    ecm_low,ecm_high=math.sqrt(q2-dq),math.sqrt(q2+dq)
+    low,high=(numerator-dn)/ecm_high,(numerator+dn)/ecm_low
+    energy=parent.get('source_com_energy_gev')
+    if (type(energy) not in (int,float) or not math.isfinite(energy)
+            or not low<=energy<=high or not ecm_low<=channel['source_ecm_gev']<=ecm_high):
+        raise ValueError('Native kaon COM energy disagrees with its raw beam/momentum inputs')
+    arithmetic=max(energy-low,high-energy)
+    native_delta=abs(kinematic_mass-parent['native_mass_gev'])
+    if energy+arithmetic+native_delta<parent['native_mass_gev']:
+        raise ValueError('Physical native kaon COM energy violates its qualified mass floor')
+    mass_floor=parent['native_mass_gev']-native_delta-2*arithmetic
+    if (mass_floor<=0 or low<mass_floor
+            or math.floor(ecm_high/mass_floor)!=channel['native_parent_count_bound']):
+        raise ValueError('Kaon arithmetic allowance changes the fixed integer source-count envelope')
+    return dict(source_total_p4=list(total),source_com_energy_gev=energy,
+        independent_com_energy_interval_gev=[low,high],
+        independent_source_ecm_interval_gev=[ecm_low,ecm_high],
+        com_energy_arithmetic_allowance_gev=arithmetic,
+        native_invariant_mass_difference_gev=native_delta,
+        stable_native_mass_floor_gev=parent['native_mass_gev'],
+        roundoff_mass_floor_gev=mass_floor,
+        native_parent_count_bound=channel['native_parent_count_bound'],
+        authority='Final native parent with no daughters; independent physical COM and unchanged integer-count checks')
 
 
 def charged_rho_parent_rate_model(pdg, model):
@@ -54,6 +242,8 @@ def dipion_kernel(model):
 
 
 def recoil_threshold(model):
+    if model.get('decay_type')=='weak-kaon-pion':
+        return model['recoil_mass_gev']
     if model.get('decay_type') == 'charged-vector-dipion':
         return model['charged_pion_mass_gev']+model['neutral_pion_mass_gev']
     if dipion_channel(model):
@@ -72,7 +262,7 @@ def production_mechanism(card):
     if mechanism == 'meson-radiative' and not card.get('channels'):
         raise ValueError('Unified radiative production requires an explicit exclusive channel inventory')
     if mechanism == 'eta-etaprime-radiative' and any(
-            vector_parent(channel) or dipion_channel(channel)
+            vector_parent(channel) or dipion_channel(channel) or kaon_channel(channel)
             for parent in card['parents'] for channel in exclusive_channels(parent)):
         raise ValueError('Vector and dipion channels require the explicitly named meson-radiative mechanism')
     return mechanism
@@ -84,6 +274,8 @@ def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, na
         return math.fsum(parent_branching_coefficient(parent_mass, signal_mass, channel, br_mumu,
                          native_precision=native_precision)
                          for channel in exclusive_channels(model))
+    if kaon_channel(model):
+        return _kaon_coefficient(parent_mass,signal_mass,model,br_mumu)
     if dipion_channel(model):
         context = native_precision if vector_dipion_channel(model) else None
         return dipion_kernel(model).branching_coefficient(parent_mass, signal_mass, model,
@@ -103,7 +295,7 @@ def parent_form_factor_abs2(signal_mass, parent):
     return function(signal_mass, parent['transition_form_factor'])
 
 
-def resolved_parent_models(card, configuration, mass):
+def resolved_parent_models(card, configuration, mass, *, epsilon=None):
     """Resolve only explicitly declared exclusive channels at native support."""
     if card.get('mechanism') == 'meson-radiative':
         expected = [parent.get('channel') for parent in card['parents']]
@@ -116,11 +308,28 @@ def resolved_parent_models(card, configuration, mass):
         raise ValueError('Native parent species are repeated')
     for parent in card['parents']:
         pdg = parent['pdg_id']
+        if parent.get('decay_type')=='weak-kaon-leptonic':
+            raise ValueError('K_l2 source current/envelope dispatch awaits its separate qualification')
+        if pdg in (130,310,321,-321) and not kaon_channel(parent):
+            raise ValueError('Physical kaons require an explicitly qualified kaon current')
         if pdg not in native:
             raise ValueError('Each declared parent requires unique native mass support')
         minimum, maximum = native[pdg]['mass_min_gev'], native[pdg]['mass_max_gev']
         if not 0 < minimum <= maximum:
             raise ValueError('Generator parent mass support is not finite and bounded')
+        if kaon_channel(parent):
+            if configuration.get('check_event') is not True:
+                raise ValueError('Kaon count authority requires the unchanged native event check')
+            model=_resolved_kaon_model(parent,native[pdg],mass,epsilon,configuration['ecm_gev'])
+            if pdg not in models:
+                models[pdg]=model
+            else:
+                previous=models[pdg];channels=exclusive_channels(previous)
+                if any(channel['decay_type']==model['decay_type'] for channel in channels):
+                    raise ValueError('Duplicate exclusive kaon current for one physical parent')
+                models[pdg]=dict(mass_min_gev=minimum,mass_max_gev=maximum,
+                    exclusive_channels=channels+[model])
+            continue
         recoil = recoil_threshold(parent)
         opened = maximum > mass + recoil
         form_factor = parent_form_factor_abs2(mass, parent) if opened and not dipion_channel(parent) else 1.
@@ -281,6 +490,16 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
     if not math.isfinite(mass_tolerance) or mass_tolerance <= 0:
         raise ValueError('An explicit native Pythia mass tolerance is required')
     result = []
+    kaons=[parent for parent in parents if parent['pdg_id'] in (130,310,321,-321)]
+    if kaons:
+        indexed={parent['index']:parent for parent in parents}
+        if len(indexed)!=len(parents):raise ValueError('A physical source parent is repeated')
+        if any(parent.get('source_total_p4')!=kaons[0].get('source_total_p4') for parent in kaons):
+            raise ValueError('Physical kaon candidates do not belong to one native beam/collision')
+        for parent in kaons:
+            for mother in parent.get('mother_indices',[]):
+                if mother in indexed and indexed[mother]['pdg_id']==parent['pdg_id']:
+                    raise ValueError('Same-species kaon ancestor duplicates a physical final parent')
     for original in parents:
         parent = dict(original)
         parent.pop('native_parent_precision_report', None)
@@ -296,6 +515,10 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
         if deviation > mass_tolerance:
             raise ValueError('Native parent violates the unchanged Pythia mass tolerance')
         model = models[parent['pdg_id']]
+        if _kaon_group(model):
+            parent['kaon_source_count_authority']=_kaon_snapshot_authority(parent,model,mass)
+            if native!=model['mass_min_gev'] or native!=model['mass_max_gev']:
+                raise ValueError('Native kaon mass differs from its exact stable support')
         native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
                                 native_mass_tolerance=mass_tolerance)
         owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
@@ -332,6 +555,16 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
                       coefficient_relative_precision_shift=relative,
                       coefficient_difference_from_kinematic_mass=kinematic-coefficient)
         result.append(parent)
+    kaon_proofs=[parent['kaon_source_count_authority'] for parent in result
+                 if 'kaon_source_count_authority' in parent]
+    if kaon_proofs:
+        # These final candidates form an antichain. Their independent energy
+        # lower bounds must fit inside this same collision's COM energy. A
+        # violation stops the source; never clip a probability or drop a row.
+        lower=math.fsum(proof['independent_com_energy_interval_gev'][0] for proof in kaon_proofs)
+        upper=min(proof['independent_source_ecm_interval_gev'][1] for proof in kaon_proofs)
+        if lower>upper:
+            raise ValueError('Final-kaon COM energies exceed the same physical collision energy')
     return result
 
 
@@ -339,6 +572,8 @@ def validate_models(models):
     if not models or set(models) - set(PARENTS):
         raise ValueError('Supply explicit supported exclusive meson parent model cards')
     for pdg, model in models.items():
+        if pdg in (130,310,321,-321) and not all(kaon_channel(c) for c in exclusive_channels(model)):
+            raise ValueError('Physical kaons require an explicitly qualified kaon current')
         if 'exclusive_channels' in model:
             channels = model['exclusive_channels']
             if not isinstance(channels, list) or len(channels) < 2:
@@ -346,6 +581,13 @@ def validate_models(models):
             names = [row.get('channel') for row in channels]
             if any(not name for name in names) or len(set(names)) != len(names):
                 raise ValueError('Exclusive channel names must be unique for a physical parent')
+            if any(kaon_channel(channel) for channel in channels):
+                shared=('mean_proper_ctau_mm','total_parent_width_gev','source_ecm_gev',
+                        'physical_epsilon','em_mixing_over_epsilon_abs2','native_parent_count_bound')
+                if (not all(kaon_channel(channel) for channel in channels)
+                        or any(channel.get(key)!=channels[0].get(key)
+                               for channel in channels for key in shared)):
+                    raise ValueError('Kaon siblings require one lifetime, coupling and source-count authority')
             for channel in channels:
                 if any(channel[key] != model[key] for key in ('mass_min_gev', 'mass_max_gev')):
                     raise ValueError('Channels of one physical parent must share its native support')
@@ -353,6 +595,9 @@ def validate_models(models):
             continue
         if not model.get('provenance'):
             raise ValueError('Parent branching/form-factor provenance is required')
+        if kaon_channel(model):
+            _validate_kaon_model(pdg,model)
+            continue
         if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion'):
             raise ValueError('Unsupported exclusive radiative decay type')
         branching_key = ('br_pipi' if vector_dipion_channel(model) else
@@ -423,6 +668,13 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
         raise ValueError('An open physical dimuon mass is required')
     terms = []
     for model in (channel for group in models.values() for channel in exclusive_channels(group)):
+        if kaon_channel(model):
+            if mass_gev is None:raise ValueError('A fixed signal mass is required for kaon proposal bounds')
+            if ecm_gev!=model['source_ecm_gev']:
+                raise ValueError('Kaon count envelope belongs to another native source energy')
+            terms.append(model['native_parent_count_bound']*parent_branching_coefficient(
+                model['mass_min_gev'],mass_gev,model,br_mumu))
+            continue
         if dipion_channel(model):
             if mass_gev is None:
                 raise ValueError('Dipion proposal bounds require a fixed signal mass')
@@ -463,6 +715,7 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
     if not math.isfinite(bound) or bound <= 0 or not math.isfinite(br_mumu) or not 0 < br_mumu <= 1:
         raise ValueError('Invalid analytic unweighting bound or dimuon BR')
     identifiers = set()
+    kaon_counts = {}
     weights = []
     for parent in parents:
         identity, pdg = parent['index'], parent['pdg_id']
@@ -472,6 +725,15 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
         if pdg not in models:
             raise ValueError('Parent species has no explicit model card')
         model = models[pdg]
+        if _kaon_group(model):
+            squared=math.fsum([parent['p4'][0]**2]+[-x*x for x in parent['p4'][1:]])
+            if (squared<=0 or parent.get('kaon_source_count_authority')!=
+                    _kaon_snapshot_authority(parent,model,math.sqrt(squared))):
+                raise ValueError('A kaon candidate lacks its native final-parent count proof')
+            kaon_counts[pdg]=kaon_counts.get(pdg,0)+1
+            limit=next(c['native_parent_count_bound'] for c in exclusive_channels(model) if kaon_channel(c))
+            if kaon_counts[pdg]>limit:
+                raise ValueError('Native physical-kaon count violates the deterministic source envelope')
         parent_mass = parent['mass_gev']
         if not math.isfinite(parent_mass) or parent_mass < model['mass_min_gev']:
             raise ValueError('Generated parent mass violates the analytic source bound')
