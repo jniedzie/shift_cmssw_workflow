@@ -147,6 +147,165 @@ def _minkowski_dot(first, second):
     return first[0]*second[0]-sum(a*b for a, b in zip(first[1:], second[1:]))
 
 
+def _hermitian_rate_matrix(matrix, name, *, positive_definite=False):
+    if len(matrix) != 2 or any(len(row) != 2 for row in matrix):
+        raise ValueError(name+' must be a two-state Hermitian rate matrix')
+    if any(not cmath.isfinite(value) for row in matrix for value in row):
+        raise ValueError(name+' must contain finite rates')
+    a, z, other, d = map(complex, [matrix[0][0], matrix[0][1], matrix[1][0], matrix[1][1]])
+    if a.imag != 0. or d.imag != 0. or z != other.conjugate():
+        raise ValueError(name+' must be exactly Hermitian')
+    a, d = a.real, d.real
+    determinant = a*d-abs(z)**2
+    if a < 0 or d < 0 or determinant < 0:
+        raise ValueError(name+' must be positive semidefinite')
+    if positive_definite and (a <= 0 or determinant <= 0):
+        raise ValueError(name+' must be positive definite')
+    return a, z, d
+
+
+def amplitude_rate_matrix(amplitudes, *, authority):
+    """Sum a_i* a_j over explicitly orthogonal final-state amplitudes.
+
+    Each supplied row is (A_CP_even,A_CP_odd), including its common phase
+    space and units so |A|^2 is a partial rate. Do not add interfering final
+    states as separate rows or substitute branching fractions for rates.
+    Authority is an explicit reference to the caller's amplitude/rate inputs;
+    this algebra does not establish that they enclose the physical model.
+    """
+    if not isinstance(authority, str) or not authority.strip() or not amplitudes:
+        raise ValueError('Explicit nonempty amplitude rows and rate authority are required')
+    if any(len(row) != 2 or any(not cmath.isfinite(value) for value in row) for row in amplitudes):
+        raise ValueError('Finite amplitudes for both orthonormal kaon states are required')
+    first = math.fsum(abs(row[0])**2 for row in amplitudes)
+    second = math.fsum(abs(row[1])**2 for row in amplitudes)
+    off_diagonal = sum(complex(row[0]).conjugate()*row[1] for row in amplitudes)
+    return ((first, off_diagonal), (off_diagonal.conjugate(), second))
+
+
+def positive_operator_rate_ceiling(signal, total_decay, *, authority):
+    """Smallest B with Gamma_signal <= B Gamma_decay, for two states.
+
+    Both matrices use the same orthonormal basis, proper-time units, and
+    physical normalization. Gamma_decay must be strictly positive. A Cholesky
+    congruence reduces the inequality to the analytic largest eigenvalue of
+    a 2x2 Hermitian matrix; no numerical eigensolver is required.
+
+    For any positive density matrix evolving under arbitrary coherent mixing
+    and additional trace-decreasing absorption, dTr(rho)/dt <=
+    -Tr(Gamma_decay rho). Thus its integrated signal probability is <=
+    min(1,B)*Tr(rho_initial), independently of the material mixing history.
+    NEW SECONDARY KAONS ARE EXCLUDED: an injected parent adds new trace and
+    needs its own source bound. A regenerated component of the same surviving
+    parent is covered. Signal/total-rate authority and its uncertainties are
+    caller inputs, not conclusions of this algebraic bound.
+    """
+    if not isinstance(authority, str) or not authority.strip():
+        raise ValueError('An explicit signal and total-decay rate authority is required')
+    s, z, t = _hermitian_rate_matrix(signal, 'Signal')
+    a, w, d = _hermitian_rate_matrix(total_decay, 'Total decay', positive_definite=True)
+    if s == 0. and t == 0.:
+        return 0.
+    # H = L^-1 Gamma_signal L^-dagger, Gamma_decay=L L^dagger.
+    remainder = d-abs(w)**2/a
+    h00 = s/a
+    h01 = (z-s*w/a)/(math.sqrt(a)*math.sqrt(remainder))
+    h11 = (t-2*(w.conjugate()*z).real/a+s*abs(w)**2/a**2)/remainder
+    ceiling = .5*(h00+h11+math.hypot(h00-h11, 2*abs(h01)))
+    if not math.isfinite(ceiling) or ceiling < 0:
+        raise ValueError('Rate matrices are too ill-conditioned for a finite ceiling')
+    # Round upward until the original matrix inequality also passes, instead
+    # of accepting a slightly low eigenvalue from floating-point arithmetic.
+    for _ in range(128):
+        first, last = ceiling*a-s, ceiling*d-t
+        cross = ceiling*w-z
+        if first >= 0 and last >= 0 and first*last >= abs(cross)**2:
+            return ceiling
+        ceiling = math.nextafter(ceiling, math.inf)
+    raise ValueError('Could not verify the rounded positive-operator inequality')
+
+
+def cp_diagonal_rate_ceiling(br_short, br_long):
+    """CP-conserving shortcut: max of the two physical branching ceilings."""
+    for value in (br_short, br_long):
+        _real(value, 'branching ceiling')
+        if not 0 <= value <= 1:
+            raise ValueError('A branching ceiling must lie between zero and one')
+    return max(br_short, br_long)
+
+
+def cpt_mixing_decay_matrix(width_short, width_long, delta_mass, epsilon_mixing):
+    """Total decay operator in the orthonormal (CP-even, CP-odd) basis.
+
+    This CPT-conserving mixing model uses eigenvectors (1,epsilon) and
+    (epsilon,1) and physical eigenvalues -i*GammaS/2, DeltaM-i*GammaL/2.
+    Gamma=i*(H-H^dagger). All widths and DeltaM must use the same units.
+    No measured pion-decay epsilon is silently promoted to epsilon_mixing:
+    that identification and any direct CP violation are caller authorities.
+    """
+    for value in (width_short, width_long):
+        _real(value, 'physical kaon width', positive=True)
+    _real(delta_mass, 'kaon mass difference')
+    if not cmath.isfinite(epsilon_mixing) or abs(epsilon_mixing) >= 1:
+        raise ValueError('Finite CPT mixing epsilon with magnitude below one is required')
+    eigen_short = -.5j*width_short
+    eigen_long = delta_mass-.5j*width_long
+    denominator = 1-epsilon_mixing**2
+    h00 = (eigen_short-epsilon_mixing**2*eigen_long)/denominator
+    h11 = (eigen_long-epsilon_mixing**2*eigen_short)/denominator
+    h01 = epsilon_mixing*(eigen_long-eigen_short)/denominator
+    cross = 2j*h01.real
+    result = ((-2*h00.imag, cross), (cross.conjugate(), -2*h11.imag))
+    _hermitian_rate_matrix(result, 'CPT-mixing total decay', positive_definite=True)
+    return result
+
+
+def cpt_mixing_decay_lower_factor(width_short, width_long, delta_mass, epsilon_abs_ceiling):
+    """Uniform Gamma_decay >= c*diag(GammaS,GammaL), all mixing phases.
+
+    The supplied radius |epsilon_mixing|<=r is an explicit conditional input,
+    not a confidence limit inferred by this function. Bound diagonal H shifts
+    by r^2*|lambdaL-lambdaS|/(1-r^2), and the decay off-diagonal by
+    2*r*|lambdaL-lambdaS|/(1-r^2). A Hermitian operator-norm bound after
+    diagonal whitening supplies c. Direct CP-violating SIGNAL amplitudes,
+    CPT violation, new production, and uncertain form factors are not covered.
+    """
+    for value in (width_short, width_long):
+        _real(value, 'physical kaon width', positive=True)
+    _real(delta_mass, 'kaon mass difference')
+    _real(epsilon_abs_ceiling, 'mixing-epsilon magnitude ceiling')
+    if not 0 <= epsilon_abs_ceiling < 1:
+        raise ValueError('Mixing-epsilon magnitude ceiling must lie in [0,1)')
+    r = epsilon_abs_ceiling
+    delta_eigenvalue = math.hypot(delta_mass, .5*(width_short-width_long))
+    diagonal = 2*r*r*delta_eigenvalue/(1-r*r)
+    off_diagonal = 2*r*delta_eigenvalue/(1-r*r)
+    change = diagonal/min(width_short,width_long)+off_diagonal/math.sqrt(width_short*width_long)
+    if change >= 1:
+        raise ValueError('Supplied mixing domain gives no strictly positive lower decay operator')
+    return 1-change
+
+
+def conditional_event_ceiling(source_cross_section_pb, parent_mean_ceiling,
+                              signal_probability_ceiling, luminosity_fb_inverse):
+    """Primary-source count ceiling; no secondary kaons or detector claim.
+
+    A source confidence interval and the rate authority remain separate
+    conditions. BR(A'->mumu)<=1 and acceptance<=1 require no favorable decay
+    or detector assumption. fb^-1 is converted to pb^-1 explicitly.
+    """
+    for value, name in ((source_cross_section_pb, 'source cross section'),
+                        (parent_mean_ceiling, 'parent yield ceiling'),
+                        (signal_probability_ceiling, 'signal probability ceiling'),
+                        (luminosity_fb_inverse, 'effective luminosity')):
+        _real(value, name)
+        if value < 0:
+            raise ValueError('Nonnegative '+name+' is required')
+    if signal_probability_ceiling > 1:
+        raise ValueError('A signal probability ceiling cannot exceed one')
+    return source_cross_section_pb*parent_mean_ceiling*signal_probability_ceiling*1000*luminosity_fb_inverse
+
+
 def amplitude(parent_pdg_id, photon, dark_photon, photon_polarization,
               dark_polarization, form_factor=1.):
     """Dominant CP tensor contracted with the supplied polarization vectors.
