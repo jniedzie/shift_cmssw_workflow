@@ -27,7 +27,12 @@
           0.49761
         ],
         "reference": "https://arxiv.org/pdf/hep-ex/0702039"
-      }
+      },
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
     },
     {
       "pdg_id": 310,
@@ -42,7 +47,12 @@
       "ks_dispersive_reference": {
         "path": "dark_photon_ks_dispersive_2016.json",
         "sha256": "15b1330ed008b81b5af0c2b7824b33afacad4e9373838bc6761f6029af4abdd2"
-      }
+      },
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
     },
     {
       "pdg_id": 321,
@@ -138,7 +148,12 @@
         "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5",
         "domain_restriction_note": "Restrict the published benchmark domain to the unchanged native parent endpoint; no fit parameter changes."
       },
-      "alpha_em": 0.0072973525692838015
+      "alpha_em": 0.0072973525692838015,
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
     }
   ],
   "channels": [
