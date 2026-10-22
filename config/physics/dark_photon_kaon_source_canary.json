@@ -3,7 +3,7 @@
   "schema": "shift-dark-photon-meson-model-v1",
   "model": "visible-photon-like-dark-photon",
   "mechanism": "meson-radiative",
-  "physics_scope": "GEN-only fixed-10000-collision kaon unweighting diagnostic. Not an inclusive meson model, material simulation, production campaign or publication authority.",
+  "physics_scope": "GEN-only fixed-exposure nine-channel kaon unweighting diagnostic, including correlated electron/muon-neutrino currents for both charges. Not an inclusive meson model, material simulation, production campaign or publication authority.",
   "parents": [
     {
       "pdg_id": 130,
@@ -154,6 +154,178 @@
         0.497611
       ],
       "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
+    },
+    {
+      "pdg_id": 321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K+->e+_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": -11,
+      "neutrino_pdg_id": 12,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.00051099895,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": 321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K+->mu+_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": -13,
+      "neutrino_pdg_id": 14,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.1056583755,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": -321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K-->e-_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": 11,
+      "neutrino_pdg_id": -12,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.00051099895,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": -321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K-->mu-_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": 13,
+      "neutrino_pdg_id": -14,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.1056583755,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
     }
   ],
   "channels": [
@@ -161,7 +333,11 @@
     "KS->gamma_Aprime",
     "K+->pi+_Aprime",
     "K-->pi-_Aprime",
-    "KS->pi0_Aprime"
+    "KS->pi0_Aprime",
+    "K+->e+_nu_Aprime",
+    "K+->mu+_nu_Aprime",
+    "K-->e-_nu_Aprime",
+    "K-->mu-_nu_Aprime"
   ],
   "source": {
     "beam_energy_gev": 6800.0,
