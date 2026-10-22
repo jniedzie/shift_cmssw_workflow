@@ -12,7 +12,7 @@ import shutil
 
 from dark_photon_sample_names import physical_point_name
 from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES
-from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
+from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES, freeze_meson_model
 from run_dark_photon_statistics import sha, new
 from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
     additional_reservations, gen_runtime, coverage_request, prior_meson_configuration)
@@ -160,7 +160,10 @@ def prepare(configuration, output, scripts=None):
     for key in ('model_card', 'runtime_fingerprint', 'storage_budget_template', 'publication_canary'):
         source = Path(config[key]).resolve()
         target = output / source.name
-        shutil.copy2(source, target)
+        if key=='model_card':
+            _,inputs=freeze_meson_model(source,target)
+            for relative,expected in inputs.items():files[str(output/relative)]=expected
+        else:shutil.copy2(source, target)
         config[key] = str(target)
         files[str(target)] = sha(target)
     calibration = config.get('calibration_authority')

@@ -250,6 +250,16 @@ def meson_source_exposure(contract, directory):
     exposure, card = read(exposure_path), read(model_path)
     if exposure != contract.get("source_exposure") or card != contract.get("meson_model_card"):
         raise ValueError("Frozen meson source/model differs from its contract")
+    physics_inputs={parent['ks_dispersive_reference']['path']:parent['ks_dispersive_reference']['sha256']
+                    for parent in card['parents'] if 'ks_dispersive_reference' in parent}
+    if physics_inputs!=contract.get('meson_physics_inputs_sha256',{}):
+        raise ValueError('Declared meson rate inputs differ from their contract manifest')
+    for relative,expected in physics_inputs.items():
+        path=Path(relative)
+        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='physics_inputs':
+            raise ValueError('Meson rate inputs require explicit frozen relative paths')
+        if sha256(directory/path)!=expected:
+            raise ValueError('Pinned meson rate input changed: '+relative)
     if exposure.get("schema") != "shift-meson-source-exposure-v1":
         raise ValueError("Unknown meson source exposure schema")
     if card.get("schema") != "shift-dark-photon-meson-model-v1":
@@ -302,7 +312,8 @@ def meson_source_exposure(contract, directory):
             raise ValueError("Native parent precision prescription changed")
         if unified:
             from dark_photon_meson_source import resolved_parent_models
-            precision_models = resolved_parent_models(card, precision, contract["mass_gev"])
+            precision_models = resolved_parent_models(card, precision, contract["mass_gev"],
+                epsilon=epsilon,model_directory=directory)
             for pdg, model in precision_models.items():
                 same_resolved_meson_model(contract["resolved_parent_models"].get(str(pdg)), model)
         for support in (() if unified else precision["parents"]):

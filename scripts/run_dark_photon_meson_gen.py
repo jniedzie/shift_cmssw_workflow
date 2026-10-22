@@ -22,18 +22,60 @@ from dark_photon_meson_source import (coefficient_bound, choose_collision, sourc
     model_precision_budget, resolve_parent_kinematics, resolved_parent_models,
     parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
     dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
-    PSEUDOSCALAR_DIPION_CORRECTION_LIMIT)
+    kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT)
 import dark_photon_vector_meson as vector_meson
-from dark_photon_meson_native import native_source, inject_decay, cmssw_native_libraries
+from dark_photon_meson_native import (native_source, inject_decay, cmssw_native_libraries,
+    inject_undecayed_kaon_decay)
 from fixed_target_generation import beam_settings
 from run_dark_photon_spectral_gen import digest, freeze_spectral_inputs, physical_width_table
 
 SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_meson_source.py',
            'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py', 'dark_photon_rho_radiative.py',
            'dark_photon_charged_rho_radiative.py',
+           'dark_photon_kaon.py', 'dark_photon_weak_meson.py', 'dark_photon_kaon_leptonic.py',
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
+
+
+def freeze_meson_model(source, target):
+    """Copy declared rate inputs beside a portable, hash-pinned model card.
+
+    The existing flat cards remain byte-identical. A prepared card uses the
+    same relative input names in GEN and every downstream metadata archive.
+    """
+    source,target=Path(source).resolve(),Path(target).resolve()
+    card=json.loads(source.read_text());inputs={}
+    for parent in card['parents']:
+        reference=parent.get('ks_dispersive_reference')
+        if reference is None:continue
+        original=Path(reference['path'])
+        original=original if original.is_absolute() else source.parent/original
+        expected=reference['sha256']
+        if digest(original)!=expected:
+            raise ValueError('Pinned KS dispersive input changed before freezing')
+        relative=Path('physics_inputs')/(expected[:12]+'_'+original.name.removeprefix(expected[:12]+'_'))
+        destination=target.parent/relative
+        destination.parent.mkdir(parents=True,exist_ok=True)
+        if destination.exists():
+            if digest(destination)!=expected:raise ValueError('Frozen rate input name has conflicting content')
+        else:shutil.copy2(original,destination)
+        if digest(destination)!=expected:raise ValueError('Frozen KS input readback changed')
+        reference['path']=str(relative);inputs[str(relative)]=expected
+    if inputs:target.write_text(json.dumps(card,indent=2)+'\n')
+    else:shutil.copy2(source,target)
+    return card,inputs
+
+
+def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
+    """Sample only the relative A' flight; native kaon flight is attached later."""
+    from dark_photon_kaon import sample_radiative_decay,sample_weak_decay
+    kind=model.get('decay_type')
+    if kind=='neutral-kaon-photon':
+        return sample_radiative_decay(parent['pdg_id'],parent['p4'],mass,proper_ctau_mm,rng)
+    if kind=='weak-kaon-pion':
+        return sample_weak_decay(parent['pdg_id'],parent['p4'],model['recoil_mass_gev'],mass,proper_ctau_mm,rng)
+    raise ValueError('Kaon sampler has no qualified source current for this decay type')
 
 
 def remaining_timeout(started, timeout):
@@ -135,12 +177,11 @@ def run(args):
                 ['git', '-C', str(release / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
             manifest['cmssw_git_status'] = subprocess.check_output(
                 ['git', '-C', str(release / 'src'), 'status', '--short'], text=True).splitlines()
-        card = json.loads(args.model_card.read_text())
+        card,physics_inputs = freeze_meson_model(args.model_card,out/'meson_model.json')
         if card['schema'] != 'shift-dark-photon-meson-model-v1' or card['source']['source_class'] != 'SoftQCD:nonDiffractive':
             raise ValueError('Require the explicit ND meson model card')
         mechanism = production_mechanism(card)
         manifest['production_mechanism'] = mechanism
-        shutil.copy2(args.model_card, out/'meson_model.json')
         authority = freeze_spectral_inputs(args.darkcast_path.resolve(), args.darkcast_source_receipt.resolve(), out)
         sys.path.insert(0, str(out/'width_inputs'))
         import darkcast
@@ -156,11 +197,19 @@ def run(args):
         configuration = json.loads(str(source.configuration()))
         if not configuration['check_event']:
             raise ValueError('The native Pythia event quality check must remain enabled')
-        models = resolved_parent_models(card, configuration, args.mass)
+        models = resolved_parent_models(card, configuration, args.mass,epsilon=args.epsilon,
+                                       model_directory=out)
+        kaon_source=any(kaon_channel(parent) for parent in card['parents'])
         precision_doc = Path(os.environ['PYTHIA8DATA']) / 'ErrorChecks.xml'
         precision = dict(configuration, reference=str(precision_doc), reference_sha256=digest(precision_doc),
             prescription='native generated mass for branching and bound; unchanged p4 invariant for decay',
             numerical_budget='measured BR_gamma_gamma and TFF one-sigma parameter-box envelope')
+        if kaon_source:
+            precision['kaon_native_guard']=dict(snapshot='production_snapshot',
+                rate_mass='fixed native stable mass; invariant-p4 continuation is numerical only',
+                parent_flight='preserve native sampled tau and stored vDec; no parent lifetime resampling',
+                count_bound='fixed species floor(Ecm/M0), qualified against actual collision COM energy',
+                transport='GEN graph only; material and detector transport require separate admission')
         if any(vector_dipion_channel(parent) for parent in card['parents']):
             precision['rho_numerical_guard'] = dict(
                 relative_rate_target=1.e-3, physical_parent='unchanged-zero-width-native-pole',
@@ -210,11 +259,18 @@ def run(args):
                     parent_index=None, accepted_slot=None)
                 if success:
                     collisions += 1
-                    snapshot = json.loads(str(source.snapshot()))
+                    snapshot = json.loads(str(source.production_snapshot() if kaon_source else source.snapshot()))
                     if snapshot['ecm_gev'] != ecm:
                         raise ValueError('Parent source center-of-mass energy changed')
-                    snapshot['parents'] = resolve_parent_kinematics(snapshot['parents'],
-                        precision['mass_tolerance'], args.mass, models, width['br_mumu'])
+                    try:
+                        snapshot['parents'] = resolve_parent_kinematics(snapshot['parents'],
+                            precision['mass_tolerance'], args.mass, models, width['br_mumu'])
+                    except Exception as error:
+                        if kaon_source:
+                            (out/'kaon_source_failure.json').write_text(json.dumps(dict(
+                                trial=trial,source_collisions=collisions,error=repr(error),
+                                snapshot=snapshot),indent=2,allow_nan=False)+'\n')
+                        raise
                     decision = choose_collision(snapshot['parents'], args.mass, width['br_mumu'], models,
                                                 bound, rng, snapshot['native_weight'])
                     record.update(decision, native_weight=snapshot['native_weight'], parents=snapshot['parents'])
@@ -242,6 +298,9 @@ def run(args):
                                         native_precision['native_parent_rate_model'] = owned_rates
                                 mean = dipion_kernel(channel).mean_lab_beta_gamma(parent['p4'], args.mass,
                                     channel, **native_precision)
+                            elif channel.get('decay_type')=='weak-kaon-pion':
+                                mean=vector_meson.mean_lab_beta_gamma(parent['p4'],channel['recoil_mass_gev'],
+                                    args.mass,polarization='unpolarized')
                             elif vector_parent(channel):
                                 mean = vector_meson.mean_lab_beta_gamma(parent['p4'], channel['recoil_mass_gev'],
                                     args.mass, polarization=channel['parent_polarization'])
@@ -257,10 +316,16 @@ def run(args):
                         slots += 1
                         parent, = [row for row in snapshot['parents'] if row['index'] == decision['parent_index']]
                         event = source.convert(slots)
-                        record['selected_parent_graph'] = json.loads(str(source.selected_parent_record(parent['index'])))
                         channels = exclusive_channels(models[parent['pdg_id']])
                         model, = [row for row in channels if row['channel'] == decision['selected_channel']]
-                        if vector_parent(model):
+                        if kaon_channel(model):
+                            pinned=json.loads(str(source.undecayed_kaon_record(parent['index'])))
+                            if any(parent.get(key)!=value for key,value in pinned.items()):
+                                raise ValueError('Selected native kaon changed after collision resolution')
+                            decay=sample_kaon_decay(parent,model,args.mass,width['ctau_mm'],rng)
+                            inject_undecayed_kaon_decay(source,parent['index'],decay,native_parent_record=pinned)
+                            record['selected_parent_graph']=json.loads(str(source.selected_parent_record(parent['index'])))
+                        elif vector_parent(model):
                             decay = vector_meson.sample_decay(parent['p4'], model['recoil_mass_gev'],
                                 args.mass, width['ctau_mm'], rng, polarization=model['parent_polarization'])
                             decay['recoil_pdg_id'] = model['recoil_pdg_id']
@@ -278,7 +343,9 @@ def run(args):
                                 width['ctau_mm'], rng, model=model, **native_precision)
                         else:
                             decay = sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng)
-                        inject_decay(source, parent['index'], decay)
+                        if not kaon_channel(model):
+                            record['selected_parent_graph']=json.loads(str(source.selected_parent_record(parent['index'])))
+                            inject_decay(source, parent['index'], decay)
                         writer.write(event)
                         record.update(accepted_slot=slots, selected_parent_pdg=parent['pdg_id'],
                                       sampled_decay=decay)
@@ -326,6 +393,7 @@ def run(args):
             generated_mass_support_gev=[args.mass*(1-1.e-6), args.mass*(1+1.e-6)],
             width_authority=authority, physical_width_table=width,
             meson_model_card=card, meson_model_card_sha256=digest(out/'meson_model.json'),
+            meson_physics_inputs_sha256=physics_inputs,
             exclusive_channels=card.get('channels', ['eta->gamma Aprime', 'eta-prime->gamma Aprime']),
             source_exposure=exposure, source_exposure_sha256=digest(out/'source_exposure.json'),
             source_ledger_sha256=digest(out/'meson_source_ledger.jsonl'),

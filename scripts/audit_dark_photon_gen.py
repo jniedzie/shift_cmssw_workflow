@@ -218,6 +218,23 @@ def validate_meson_radiative_record(record, selected):
     sample = selected['sampled_decay']
     recoil_pdg = sample.get('recoil_pdg_id', 22)
     model = selected.get('resolved_model')
+    if parent['pdg_id'] in (130,310,321,-321):
+        from dark_photon_meson_source import kaon_channel
+        native=sample.get('native_parent_flight')
+        if (not model or not kaon_channel(model) or not isinstance(native,dict)
+                or sample.get('native_parent_flight_attached') is not True
+                or sample.get('parent_flight_included') is not False
+                or any(parent.get(key)!=value for key,value in native.items())
+                or native.get('stored_decay_position_mm')!=graph['decay_position_mm']
+                or native.get('production_position_mm')!=graph['production_position_mm']
+                or model.get('recoil_pdg_id')!=recoil_pdg):
+            raise ValueError('Kaon source changed its pinned native flight, current or recoil')
+        polarization='transverse' if model['decay_type']=='neutral-kaon-photon' else 'longitudinal'
+        if (sample.get('dark_photon_polarization')!=polarization
+                or sample.get('parent_polarization')!='spin-zero'
+                or model['decay_type']=='weak-kaon-pion' and
+                    sample.get('recoil_mass_gev')!=model['recoil_mass_gev']):
+            raise ValueError('Kaon spin/recoil differs from its qualified current')
     vector_dipion = model and vector_dipion_channel(model)
     if abs(parent['pdg_id']) in (113,213,223,333,313,323) and not vector_dipion:
         if (not model or model.get('decay_type') != 'vector-pseudoscalar' or

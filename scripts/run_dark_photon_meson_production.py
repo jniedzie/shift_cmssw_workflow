@@ -831,6 +831,15 @@ def adopted_row(batch, gen, config=None):
 
 def compact_files(gen):
     """The full source ledger and generated payloads never enter an AFS seal."""
+    gen=Path(gen)
+    contract=gen/'contract.json'
+    if contract.is_file():
+        for relative,expected in read(contract).get('meson_physics_inputs_sha256',{}).items():
+            path=Path(relative)
+            if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='physics_inputs':
+                raise ValueError('Compact rate metadata requires its declared frozen relative path')
+            if durable.sha(gen/path)!=expected:
+                raise ValueError('Pinned rate input changed before compact metadata publication')
     result = []
     for path in sorted(Path(gen).rglob('*')):
         if (not path.is_file() or '__pycache__' in path.parts or path.suffix in ('.root', '.hepmc', '.pyc')
