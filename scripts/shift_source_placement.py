@@ -73,12 +73,11 @@ def configure_complete_source(process, input_label, *, seed, event_positions, te
     from IOMC.ShiftEventTiming.shiftEventTime_cfi import shiftEventTime
     from GeneratorInterface.Core.generatorSmeared_cfi import generatorSmeared
     from PhysicsTools.HepMCCandAlgos.genParticles_cfi import genParticles
-    # Rebuilt generatorSmeared below must never shadow the raw input label.
-    placement_contract(None, input_label, test_scope=test_scope, event_positions=event_positions)
-    process.shiftRawSource = generatorSmeared.clone(
-        currentTag=cms.untracked.InputTag(input_label, "", "@skipCurrentProcess"))
-    configure_source_placement(process, None, "shiftRawSource", test_scope=test_scope,
+    configure_source_placement(process, None, input_label, test_scope=test_scope,
                                event_positions=event_positions)
+    # Only one GeneratorSmearedProducer may listen to framework registrations.
+    # The placement producer retains the unmodified input as instance original.
+    process.shiftSourcePlacement.src = cms.InputTag(input_label, "", "@skipCurrentProcess")
     process.load("SimGeneral.HepPDTESSource.pythiapdt_cfi")
     process.shiftFullMuonDecays = cms.EDProducer(
         "CompleteShiftMuonDecayProducer", src=cms.InputTag("shiftSourcePlacement"),
@@ -92,5 +91,5 @@ def configure_complete_source(process, input_label, *, seed, event_positions, te
     process.shiftEventTime = shiftEventTime.clone(src=cms.InputTag("shiftFullMuonDecays"))
     process.generatorSmeared = generatorSmeared.clone(currentTag=cms.untracked.InputTag("shiftEventTime"))
     process.genParticles = genParticles.clone(src=cms.InputTag("generatorSmeared"))
-    return cms.Sequence(process.shiftRawSource + process.shiftSourcePlacement + process.shiftFullMuonDecays
+    return cms.Sequence(process.shiftSourcePlacement + process.shiftFullMuonDecays
                         + process.shiftEventTime + process.generatorSmeared + process.genParticles)

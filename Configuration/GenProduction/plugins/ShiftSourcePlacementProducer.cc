@@ -50,6 +50,7 @@ public:
         throw cms::Exception("Configuration") << "Repeated source-placement event identity";
     }
     produces<edm::HepMCProduct>();
+    produces<edm::HepMCProduct>("original");
     for (auto const* name : {"originalXmm", "originalYmm", "originalZmm", "originalCtMm",
                              "targetXmm", "targetYmm", "targetZmm"})
       produces<double>(name);
@@ -68,6 +69,9 @@ public:
       target = found->second;
     }
     auto result = shift::placeSource(input.GetEvent(), target);
+    // Keep the exact input graph without another GeneratorSmearedProducer:
+    // two such proxies listen to registrations and form a framework cycle.
+    event.put(std::make_unique<edm::HepMCProduct>(new HepMC::GenEvent(*input.GetEvent())), "original");
     event.put(std::make_unique<edm::HepMCProduct>(result.graph.release()));
     char const* oldNames[] = {"originalXmm", "originalYmm", "originalZmm", "originalCtMm"};
     char const* targetNames[] = {"targetXmm", "targetYmm", "targetZmm"};
