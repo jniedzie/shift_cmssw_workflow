@@ -743,9 +743,10 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
         additions = validate_meson_reservation_additions(predecessor, config)
         if registration.get('added_peer_names') != [row['name'] for row in additions]:
             raise ValueError('Meson registration changed its declared added peers')
-    from prepare_dark_photon_meson_production import source_execution_limits
+    from prepare_dark_photon_meson_production import source_execution_limits, detector_point_limit
     source_limit=source_execution_limits(original)['maximum_simultaneous_sources']
-    for key,maximum in [('simultaneous_sources',source_limit),('simultaneous_detector_points',35)]:
+    for key,maximum in [('simultaneous_sources',source_limit),
+                        ('simultaneous_detector_points',detector_point_limit(original))]:
         if key in original and (type(config.get(key)) is not int or not 1<=config[key]<=maximum):
             raise ValueError('Replacement controller scheduling limit is outside the reviewed grid: '+key)
     return config
@@ -1055,6 +1056,7 @@ def actual_source_storage(config, batch, row, status):
     """Stop an oversized actual population before detector submission."""
     if source_mechanism(config) != 'meson-radiative' or batch['operational_canary']:
         return None
+    from prepare_dark_photon_meson_production import meson_storage_limit
     gate_path = Path(config['bulk_storage_gate'])
     gate = read(gate_path)
     forecasts = gate.get('per_batch_forecast_bytes', {})
@@ -1065,7 +1067,7 @@ def actual_source_storage(config, batch, row, status):
             or gate.get('model_card_sha256') != durable.sha(config['model_card'])
             or set(forecasts) != {item['batch'] for item in config['batches']}
             or any(type(value) is not int or value <= 0 for value in forecasts.values())
-            or type(total) is not int or not 0 < total <= 30000000000
+            or type(total) is not int or not 0 < total <= meson_storage_limit(config)
             or sum(forecasts.values()) != total):
         raise ValueError('Actual source budget requires the exact reviewed bulk storage gate')
     publication = status.get('ledger_publication')
@@ -1435,6 +1437,7 @@ def storage_gate(config, observation, bulk=False, state=None):
     reservation = adaptive_reservation(config)
     additional = 500000000 if not bulk else None
     if bulk:
+        from prepare_dark_photon_meson_production import meson_storage_limit
         path = config.get('bulk_storage_gate')
         if not path or not Path(path).is_file():
             return False, dict(reason='waiting_for_reviewed_bulk_storage_and_seven_mass_GEN_gates')
@@ -1445,7 +1448,7 @@ def storage_gate(config, observation, bulk=False, state=None):
                 or gate.get('model_card_sha256') != durable.sha(config['model_card'])
                 or gate.get('worklist_sha256') != durable.sha(Path(config['directory'])/'config.json')
                 or type(gate.get('total_meson_forecast_bytes')) is not int
-                or not 0 < gate['total_meson_forecast_bytes'] <= 30000000000):
+                or not 0 < gate['total_meson_forecast_bytes'] <= meson_storage_limit(config)):
             raise ValueError('Bulk storage/physics gate differs from this frozen meson worklist')
         forecasts=gate.get('per_batch_forecast_bytes',{})
         if (set(forecasts)!={row['batch'] for row in config['batches']}
@@ -1507,6 +1510,51 @@ def cumulative_result(config,state,batch,transport,primitive):
     return result
 
 
+def histogram_promotion_floor(config, batch, result):
+    """Use completed histogram input counts, never requested or selected counts."""
+    floors = config.get('minimum_histogram_events_before_latest')
+    if floors is None:
+        return None
+    points = {row['point'] for row in config['batches']}
+    if (not isinstance(floors, dict) or set(floors)-points
+            or any(type(value) is not int or value < 0 for value in floors.values())):
+        raise ValueError('Latest histogram floors require known points and nonnegative integer counts')
+    events = result.get('events')
+    if type(events) is not int or events < 0:
+        raise ValueError('Latest promotion requires the validated histogram input count')
+    minimum = floors.get(batch['point'], 0)
+    return dict(minimum_events=minimum, validated_histogram_events=events,
+                eligible=events >= minimum)
+
+
+def prior_cumulative_campaign(config, state, batch, result, transport):
+    """Authorize only an audited earlier aggregate of this same production."""
+    previous = state.get('published', {}).get(batch['point'], {})
+    if not previous or previous.get('campaign') == result['campaign']:
+        return None
+    path = Path(previous.get('point_receipt_path', ''))
+    root = Path(config['directory'])/'aggregates'/batch['point']
+    if (path.parent.name != 'completed_points' or path.name != batch['point']+'.json'
+            or path.parent.parent.parent != root
+            or not re.fullmatch(r'v[0-9]+', path.parent.parent.name)
+            or durable.sha(path) != previous.get('point_receipt_sha256')
+            or not previous.get('source_plans')
+            or not set(previous['source_plans']).issubset(result.get('source_plans', []))):
+        raise ValueError('Previous cumulative publication differs from this production')
+    from watch_dark_photon_production import completed_histogram
+    directory = path.parent.parent
+    plan = read(directory/'plan.json')
+    ready = completed_histogram(dict(source=dict(directory=directory, campaign=plan['campaign'],
+        plan_sha256=durable.sha(directory/'plan.json'), seal_sha256=durable.sha(directory/'seal.json')),
+        row=plan['points'][0], output=Path(plan['points'][0]['final_output_base'])), transport)
+    if (ready is None or any(ready[key] != previous.get(key) for key in
+            ('campaign', 'histogram_path', 'histogram_sha256', 'events',
+             'point_receipt_path', 'point_receipt_sha256'))
+            or previous['events'] > result['events']):
+        raise ValueError('Previous cumulative histogram changed or lost input events')
+    return ready['campaign']
+
+
 def publish_batch(config, state, batch):
     from watch_dark_photon_production import EosRpc, completed_histogram
     directory = batch_directory(config, batch)
@@ -1529,7 +1577,9 @@ def publish_batch(config, state, batch):
         prior_campaigns = []
         private_canary = (unified and batch['operational_canary']
                           and config.get('publish_canary_aliases', False) is False)
-        if unified and not private_canary:
+        promotion = None if private_canary else histogram_promotion_floor(config, batch, result)
+        deferred_alias = promotion is not None and not promotion['eligible']
+        if unified and not private_canary and not deferred_alias:
             ready, evidence = prior_publication_ready(config, batch)
             entry = state.setdefault('batches', {}).setdefault(batch['batch'], {})
             entry['prior_publication'] = evidence
@@ -1557,9 +1607,9 @@ def publish_batch(config, state, batch):
         if not sample_path.exists():
             durable.new(sample_path,sample)
         anchor = None
-        if unified and not private_canary:
+        if unified and not private_canary and not deferred_alias:
             anchor = common_sample_anchor(config, batch, sample, sample_path, transport)
-        elif not unified:
+        elif not unified and not deferred_alias:
             publish_file_rpc(sample_path,config['eos_base']+'/darkphoton_'+batch['point']+'/sample.json')
         parameters=dict(sample,mean_lab_flight_reference_estimate_m=contract['mean_lab_flight_reference_estimate_m'],
             mean_beta_gamma_reference=contract['mean_beta_gamma_reference'],
@@ -1568,7 +1618,9 @@ def publish_batch(config, state, batch):
             fixed_source_collisions=batch['source_collisions'],accepted_signal_events=contract['requested_events'])
         if unified:
             parameters['global_anchor_reference'] = (anchor if anchor is not None else dict(
-                scope='Operational canary campaign only; global sample anchor and latest alias are not promoted'))
+                scope=('Histogram input count is below the latest-promotion floor; global sample anchor and latest alias are not promoted'
+                       if deferred_alias else
+                       'Operational canary campaign only; global sample anchor and latest alias are not promoted')))
         parameters_path=directory/'sample_parameters.json'
         if not parameters_path.exists():
             durable.new(parameters_path,parameters)
@@ -1580,6 +1632,16 @@ def publish_batch(config, state, batch):
                           alias_published=False, campaign_parameters_published=True)
             durable.save(directory/'publication.json', result)
             return result
+        if promotion is not None:
+            result['latest_promotion'] = promotion
+        if deferred_alias:
+            result.update(published_utc=datetime.now(timezone.utc).isoformat(), batch=batch['batch'],
+                          histogram_ready=True, alias_published=False, campaign_parameters_published=True)
+            durable.save(directory/'publication.json', result)
+            if result.get('sources_sha256'):
+                state.setdefault('published', {})[batch['point']] = result
+                state.setdefault('aggregates', {}).pop(batch['point'], None)
+            return result
         # Replacing another production mechanism requires an explicit reviewed
         # alias target in the request, rather than silently combining models.
         alias = config['eos_base']+'/darkphoton_'+batch['point']+'/latest'
@@ -1587,6 +1649,10 @@ def publish_batch(config, state, batch):
         allowed = list(config.get('allowed_previous_aliases',{}).get(batch['point'], []))
         allowed.extend(prior_campaigns)
         allowed.extend(row['campaign'] for row in config['batches'] if row['point']==batch['point'])
+        previous_campaign = (prior_cumulative_campaign(config, state, batch, result, transport)
+                             if promotion is not None else None)
+        if previous_campaign is not None:
+            allowed.append(previous_campaign)
         if old is not None and old != result['campaign'] and old not in allowed:
             raise ValueError('Existing latest target needs reviewed ownership: '+str(old))
         transport.publish_alias(alias,result['campaign'],[None,result['campaign'],*allowed])
@@ -1750,6 +1816,39 @@ def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot
         return 'failed'
 
 
+def detector_slot_claim(config, batch):
+    """Reserve the actual random-N chunk count plus two downstream workers."""
+    path = batch_directory(config, batch)/'source_status.json'
+    status = read(path)
+    events = status.get('events')
+    chunk = batch.get('events_per_job', config.get('events_per_job', 20))
+    workers = config.get('detector_workers_per_point', 100)
+    if (status.get('complete') is not True or type(events) is not int or events < 1
+            or type(chunk) is not int or chunk < 1
+            or type(workers) is not int or workers < 1):
+        raise ValueError('Detector admission requires the complete audited actual GEN count')
+    return min(workers, math.ceil(events/chunk)) + 2
+
+
+def detector_admission_pending(config, batch, entry):
+    if entry.get('published') or entry.get('detector_native_complete'):
+        return False
+    root = batch_directory(config, batch)
+    return any((root/stage/name).is_file() for stage in ('handoff', 'production')
+               for name in ('submission.json', 'submission_intent.json'))
+
+
+def detector_reservations(config, entries):
+    """Count all earlier admissions before admitting an earlier worklist row."""
+    if 'maximum_active_detector_workers' not in config:
+        return None
+    from prepare_dark_photon_meson_production import detector_point_limit
+    detector_point_limit(config)
+    claims = {row['batch']: detector_slot_claim(config, row) for row in config['batches']
+              if detector_admission_pending(config, row, entries.get(row['batch'], {}))}
+    return claims
+
+
 def step(config,state):
     state.update(checked_utc=datetime.now(timezone.utc).isoformat(),heartbeat=state.get('heartbeat',0)+1)
     scope = completion_scope(config)
@@ -1773,6 +1872,7 @@ def step(config,state):
         state['coverage_audit'] = dict(cluster=receipt['cluster'], **coverage_result(config))
     queue_snapshot=production_queue_snapshot(config)
     source_active, detector_active=0,0
+    detector_claims=detector_reservations(config, entries)
     for batch in config['batches']:
         entry=entries.setdefault(batch['batch'],{})
         directory=batch_directory(config,batch)
@@ -1801,8 +1901,22 @@ def step(config,state):
         if not (directory/'source_status.json').is_file() or not read(directory/'source_status.json').get('complete'):
             raise RuntimeError('Native source exited without complete source publication')
         production=directory/'production'
-        if not (production/'submission.json').exists() and not (production/'submission_intent.json').exists():
-            if detector_active>=config['simultaneous_detector_points']:
+        admitted = ((batch['batch'] in detector_claims or entry.get('detector_native_complete')) if detector_claims is not None else
+                    (production/'submission.json').exists() or (production/'submission_intent.json').exists())
+        new_claim = None
+        if not admitted:
+            if detector_claims is None:
+                capacity = detector_active < config['simultaneous_detector_points']
+            else:
+                new_claim = detector_slot_claim(config, batch)
+                capacity = (len(detector_claims) < config['simultaneous_detector_points']
+                    and sum(detector_claims.values()) + new_claim <= config['maximum_active_detector_workers'])
+                state['detector_worker_admission'] = dict(
+                    reserved_workers=sum(detector_claims.values()),
+                    maximum_workers=config['maximum_active_detector_workers'],
+                    admitted_source_batches=len(detector_claims), next_batch_workers=new_claim)
+            if not capacity:
+                entry['stage']='waiting_for_detector_capacity'
                 continue
             if scope is not None:
                 observation = durable.quota(config)
@@ -1812,6 +1926,8 @@ def step(config,state):
                 if not allowed:
                     entry['stage'] = 'waiting_for_detector_storage'
                     continue
+            if detector_claims is not None:
+                detector_claims[batch['batch']] = new_claim
         if config.get('parallel_handoffs') is True:
             handoff_status,detector_job=parallel_handoff(config,state,batch,entry,queue_snapshot)
             if handoff_status!='complete':
@@ -1827,9 +1943,14 @@ def step(config,state):
             continue
         if detector_status=='active':
             detector_active+=1
+        else:
+            entry['detector_native_complete']=True
+            if detector_claims is not None:
+                detector_claims.pop(batch['batch'], None)
         published=publish_batch(config,state,batch)
         if published:
-            entry.update(stage='published',published=published)
+            stage = 'histograms_ready' if published.get('alias_published') is False else 'published'
+            entry.update(stage=stage,published=published)
             durable.save(Path(config['directory'])/'state.json',state)
     canaries=[row for row in config['batches'] if row['operational_canary']]
     canary_ready=all(entries[row['batch']].get('published') for row in canaries)

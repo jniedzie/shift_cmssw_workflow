@@ -9,7 +9,7 @@ import shlex
 import shutil
 
 import run_dark_photon_meson_production as production
-from prepare_dark_photon_meson_production import source_execution_limits
+from prepare_dark_photon_meson_production import source_execution_limits, detector_point_limit
 
 
 REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
@@ -103,7 +103,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
     # Validate scheduling bounds before creating anything, using a small private
     # candidate seal in the new output only after all source authorities passed.
     limits = {'simultaneous_sources': source_execution_limits(original)['maximum_simultaneous_sources'],
-              'simultaneous_detector_points': 35}
+              'simultaneous_detector_points': detector_point_limit(original)}
     for key, maximum in limits.items():
         if type(config[key]) is not int or not 1 <= config[key] <= maximum:
             raise ValueError('Scheduling limit exceeds the reviewed grid: '+key)

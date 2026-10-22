@@ -368,6 +368,28 @@ class Admission(unittest.TestCase):
             allowed,evidence=production.storage_gate({},dict(free_bytes=10**15,free_files=10**6),bulk=True)
         self.assertFalse(allowed)
 
+    def test_large_forecast_needs_an_explicit_frozen_ceiling(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            (root/'config.json').write_text('{}');(root/'card.json').write_text('{}')
+            gate=dict(complete=True,all_seven_mass_GEN_audits_passed=True,
+                model_card_sha256=production.durable.sha(root/'card.json'),
+                worklist_sha256=production.durable.sha(root/'config.json'),
+                total_meson_forecast_bytes=80000000000,
+                per_batch_forecast_bytes=dict(a=80000000000))
+            (root/'gate.json').write_text(json.dumps(gate))
+            config=dict(directory=str(root),model_card=str(root/'card.json'),
+                bulk_storage_gate=str(root/'gate.json'),minimum_eos_free_bytes=90000000000,
+                minimum_eos_free_files=20000,batches=[dict(batch='a')])
+            with patch.object(production,'adaptive_reservation',return_value=0):
+                with self.assertRaisesRegex(ValueError,'Bulk storage/physics gate'):
+                    production.storage_gate(config,dict(free_bytes=200000000000,free_files=100000),bulk=True)
+                config['maximum_meson_forecast_bytes']=100000000000
+                allowed,evidence=production.storage_gate(config,
+                    dict(free_bytes=200000000000,free_files=100000),bulk=True)
+            self.assertTrue(allowed)
+            self.assertEqual(evidence['meson_forecast_bytes'],80000000000)
+
     def test_bulk_waits_for_both_published_canaries(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
@@ -436,6 +458,49 @@ class Admission(unittest.TestCase):
             submit.assert_called_once()
             self.assertFalse(state['complete'])
 
+    def test_worker_budget_counts_later_admissions_before_an_earlier_ready_batch(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            batches=[dict(batch=name, operational_canary=True, events_per_job=5)
+                     for name in ('waiting', 'already_admitted')]
+            for batch in batches:
+                directory=root/'batches'/batch['batch']
+                directory.mkdir(parents=True)
+                (directory/'submission.json').write_text('{}')
+                (directory/'source_status.json').write_text(json.dumps(dict(complete=True, events=10)))
+            (root/'batches/already_admitted/production').mkdir()
+            (root/'batches/already_admitted/production/submission.json').write_text('{}')
+            config=dict(directory=str(root),batches=batches,simultaneous_sources=2,
+                simultaneous_detector_points=256,maximum_active_detector_workers=4,
+                detector_workers_per_point=100)
+            state={}
+            with patch.object(production,'existing_receipt',return_value=dict(cluster=123)), \
+                 patch.object(production,'native_status',return_value='complete'), \
+                 patch.object(production.durable,'quota',return_value={}), \
+                 patch.object(production,'storage_gate',return_value=(True,{})), \
+                 patch.object(production,'handoff',return_value=dict(cluster=456)) as handoff, \
+                 patch.object(production,'publish_batch',return_value=None):
+                result=production.step(config,state)
+            self.assertEqual([call.args[1]['batch'] for call in handoff.call_args_list], ['already_admitted'])
+            self.assertEqual(result['batches']['waiting']['stage'], 'waiting_for_detector_capacity')
+            self.assertTrue(result['batches']['already_admitted']['detector_native_complete'])
+            self.assertEqual(production.detector_reservations(config,result['batches']), {})
+
+    def test_worker_budget_keeps_failed_admissions_and_uses_actual_gen_count(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary); directory=root/'batches/a'
+            (directory/'handoff').mkdir(parents=True)
+            (directory/'handoff/submission_intent.json').write_text('{}')
+            (directory/'source_status.json').write_text(json.dumps(dict(complete=True,events=23)))
+            batch=dict(batch='a',events_per_job=10,source_collisions=50000)
+            config=dict(directory=str(root),batches=[batch],maximum_active_detector_workers=2400,
+                        detector_workers_per_point=100)
+            entries=dict(a=dict(stage='handoff_failed'))
+            self.assertEqual(production.detector_reservations(config,entries), {'a':5})
+            entries['a']['detector_native_complete']=True
+            self.assertEqual(production.detector_reservations(config,entries), {})
+            self.assertIsNone(production.detector_reservations({}, {}))
+
     def test_handoff_submit_freezes_credentials_persistent_directory_and_failure_hold(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
@@ -463,6 +528,147 @@ class Admission(unittest.TestCase):
 
 
 class PublicationSafety(unittest.TestCase):
+    def publication_floor_fixture(self, root):
+        batch = dict(batch='bulk', point='m0p3_prompt', operational_canary=False, mass_gev=.3,
+            epsilon=.001, calibration_mean_beta_gamma=500., source_collisions=10000,
+            campaign='new-bulk', final_output_base='/eos/synthetic/new-bulk')
+        directory = root/'batches/bulk'
+        (directory/'production').mkdir(parents=True)
+        (directory/'gen').mkdir()
+        (directory/'production/plan.json').write_text(json.dumps(dict(campaign=batch['campaign'],
+            points=[dict(final_output_base=batch['final_output_base'])])))
+        (directory/'production/seal.json').write_text('{}')
+        (directory/'rates.json').write_text('{}')
+        (directory/'gen/contract.json').write_text(json.dumps(dict(physical_width_table=dict(ctau_mm=.01),
+            mean_lab_flight_reference_estimate_m=.005, mean_beta_gamma_reference=500.,
+            mean_beta_gamma_reference_standard_error=1., requested_events=999999)))
+        config = dict(directory=str(root), batches=[batch], production_mechanism='meson-radiative',
+            publish_canary_aliases=False, calibration_authority=dict(sha256='a'*64),
+            eos_base='/eos/user/j/jniedzie/shift_cmssw',
+            minimum_histogram_events_before_latest=dict(m0p3_prompt=20),
+            allowed_previous_aliases=dict(m0p3_prompt=['old-ready']))
+        return config, batch, directory
+
+    def test_small_cumulative_histogram_is_ready_without_replacing_larger_latest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, batch, directory = self.publication_floor_fixture(root)
+            primitive = dict(campaign='new-bulk', events=9)
+            cumulative = dict(campaign='new-cumulative', events=19, sources_sha256='source-signature',
+                              source_plans=['one', 'two'])
+            state = dict(aggregates=dict(m0p3_prompt=dict(pending=True)))
+            with patch('watch_dark_photon_production.EosRpc') as transport, \
+                 patch('watch_dark_photon_production.completed_histogram', return_value=primitive), \
+                 patch.object(production, 'cumulative_result', return_value=cumulative), \
+                 patch('export_dark_photon_cross_sections.publish_file_rpc') as publish, \
+                 patch.object(production, 'prior_publication_ready') as prior, \
+                 patch.object(production, 'common_sample_anchor') as anchor:
+                result = production.publish_batch(config, state, batch)
+            self.assertTrue(result['histogram_ready'])
+            self.assertFalse(result['alias_published'])
+            self.assertEqual(result['latest_promotion'], dict(minimum_events=20,
+                validated_histogram_events=19, eligible=False))
+            self.assertEqual(state['published']['m0p3_prompt'], result)
+            self.assertEqual(state['aggregates'], {})
+            self.assertEqual(json.loads((directory/'publication.json').read_text()), result)
+            prior.assert_not_called()
+            anchor.assert_not_called()
+            transport.return_value.alias_target.assert_not_called()
+            transport.return_value.publish_alias.assert_not_called()
+            self.assertEqual(publish.call_count, 1)
+            self.assertEqual(publish.call_args.args[1], batch['final_output_base']+'/sample_parameters.json')
+
+    def test_cumulative_histogram_at_floor_runs_normal_ownership_checks_and_promotes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, batch, _ = self.publication_floor_fixture(root)
+            cumulative = dict(campaign='new-cumulative', events=20, sources_sha256='source-signature',
+                              source_plans=['one', 'two'])
+            state = {}
+            with patch('watch_dark_photon_production.EosRpc') as transport, \
+                 patch('watch_dark_photon_production.completed_histogram', return_value=dict(events=9)), \
+                 patch.object(production, 'cumulative_result', return_value=cumulative), \
+                 patch('export_dark_photon_cross_sections.publish_file_rpc'), \
+                 patch.object(production, 'prior_publication_ready', return_value=(True,
+                     dict(allowed_previous_campaigns=['old-ready']))) as prior, \
+                 patch.object(production, 'common_sample_anchor', return_value=dict(retained_existing=True)) as anchor:
+                transport.return_value.alias_target.return_value = 'old-ready'
+                result = production.publish_batch(config, state, batch)
+            self.assertTrue(result['alias_published'])
+            self.assertTrue(result['latest_promotion']['eligible'])
+            prior.assert_called_once()
+            anchor.assert_called_once()
+            self.assertEqual(transport.return_value.publish_alias.call_args.args[1], 'new-cumulative')
+
+    def test_histogram_floor_requires_validated_counts_and_canaries_remain_private(self):
+        batch = dict(point='p')
+        self.assertIsNone(production.histogram_promotion_floor({}, batch, {}))
+        for floor in (True, -1, 1.2, '20'):
+            with self.subTest(floor=floor), self.assertRaises(ValueError):
+                production.histogram_promotion_floor(dict(batches=[batch],
+                    minimum_histogram_events_before_latest=dict(p=floor)), batch, dict(events=20))
+        for count in (None, True, -1, 1.2):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                production.histogram_promotion_floor(dict(batches=[batch],
+                    minimum_histogram_events_before_latest=dict(p=20)), batch, dict(events=count))
+        with self.assertRaises(ValueError):
+            production.histogram_promotion_floor(dict(batches=[batch],
+                minimum_histogram_events_before_latest=dict(unknown=20)), batch, dict(events=20))
+        with tempfile.TemporaryDirectory() as temporary:
+            config, batch, _ = self.publication_floor_fixture(Path(temporary))
+            batch['operational_canary'] = True
+            with patch('watch_dark_photon_production.EosRpc') as transport, \
+                 patch('watch_dark_photon_production.completed_histogram', return_value=dict(campaign='private', events=1)), \
+                 patch.object(production, 'cumulative_result', side_effect=lambda c,s,b,t,r:r), \
+                 patch('export_dark_photon_cross_sections.publish_file_rpc'), \
+                 patch.object(production, 'histogram_promotion_floor') as floor:
+                result = production.publish_batch(config, {}, batch)
+            self.assertFalse(result['alias_published'])
+            floor.assert_not_called()
+            transport.return_value.publish_alias.assert_not_called()
+
+    def test_prior_cumulative_alias_requires_unchanged_receipt_and_subset_exposure(self):
+        from watch_dark_photon_production import completed_histogram
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            point = 'm0p3_prompt'
+            directory = root/'aggregates'/point/'v0001'
+            (directory/'completed_points').mkdir(parents=True)
+            output = root/'eos'
+            histogram = output/'histograms_merged/ntuple_0.root'
+            row = dict(point=point, events=20, final_output_base=str(output))
+            (directory/'plan.json').write_text(json.dumps(dict(campaign='cumulative-v0001', points=[row])))
+            (directory/'seal.json').write_text('{}')
+            source = dict(directory=directory, campaign='cumulative-v0001',
+                plan_sha256=production.durable.sha(directory/'plan.json'),
+                seal_sha256=production.durable.sha(directory/'seal.json'))
+            report = dict(complete=True, point=point, events=20, final_output_base=str(output),
+                plan_sha256=source['plan_sha256'], seal_sha256=source['seal_sha256'],
+                score_histograms=dict(marker=dict(complete=True,
+                    published=dict(histograms=dict(path=str(histogram), bytes=123, sha256='a'*64)))))
+            path = directory/'completed_points'/(point+'.json')
+            path.write_text(json.dumps(report))
+            class Transport:
+                def root_files(self, where): return [histogram]
+                def verify_file(self, where, size, digest):
+                    self.checked = (where, size, digest)
+            transport = Transport()
+            previous = completed_histogram(dict(source=source, row=row, output=output), transport)
+            previous.update(source_plans=['one', 'two'])
+            state = dict(published={point: previous})
+            result = dict(campaign='cumulative-v0002', events=30, source_plans=['one', 'two', 'three'])
+            config, batch = dict(directory=str(root)), dict(point=point)
+            self.assertEqual(production.prior_cumulative_campaign(config, state, batch, result, transport),
+                             'cumulative-v0001')
+            self.assertEqual(transport.checked, (histogram, 123, 'a'*64))
+            for change in (dict(source_plans=['one']), dict(events=19)):
+                with self.subTest(change=change), self.assertRaises(ValueError):
+                    production.prior_cumulative_campaign(config, state, batch, dict(result, **change), transport)
+            report['events'] = 21
+            path.write_text(json.dumps(report))
+            with self.assertRaisesRegex(ValueError, 'Previous cumulative'):
+                production.prior_cumulative_campaign(config, state, batch, result, transport)
+
     def previous(self, root, complete=False, age=0):
         legacy = root/'legacy'
         legacy.mkdir()

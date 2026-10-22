@@ -61,6 +61,23 @@ def split_source_exposure(collisions, maximum):
     return [count + (index < remainder) for index in range(shards)]
 
 
+def detector_point_limit(config):
+    """Only a new frozen worker budget permits more than 35 source handoffs."""
+    maximum = config.get('maximum_active_detector_workers')
+    if maximum is None:
+        return 35
+    if type(maximum) is not int or not 1 <= maximum <= 2400:
+        raise ValueError('The frozen detector-worker budget requires 1..2400 slots')
+    return maximum
+
+
+def meson_storage_limit(config):
+    maximum = config.get('maximum_meson_forecast_bytes', 30000000000)
+    if type(maximum) is not int or not 1 <= maximum <= 100000000000:
+        raise ValueError('Require an explicit frozen meson storage ceiling of at most 100 GB')
+    return maximum
+
+
 def validate_batches(rows, prior_inventories, seed_base=761216001,
                      run_base=1761216001, detector_job_base=5500000,
                      mechanism='eta-etaprime-radiative', execution_limits=None):
@@ -148,6 +165,8 @@ def prepare(configuration, output, scripts=None):
             requirements = 'requirements = ' + ' && '.join(
                 '(TARGET.Machine != ' + json.dumps(host) + ')' for host in hosts) + '\n'
     execution_limits = source_execution_limits(config)
+    detector_limit = detector_point_limit(config)
+    meson_storage_limit(config)
     batches = validate_batches(config['batches'], config['prior_inventories'],
         config.get('seed_base',761216001),config.get('run_base',1761216001),
         config.get('detector_job_base',5500000), mechanism, execution_limits)
@@ -157,7 +176,8 @@ def prepare(configuration, output, scripts=None):
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
             type(config.get('simultaneous_sources', 2)) is not int or
             not 1 <= config.get('simultaneous_sources', 2) <= execution_limits['maximum_simultaneous_sources'] or
-            not 1 <= config.get('simultaneous_detector_points', 2) <= 35):
+            type(config.get('simultaneous_detector_points', 2)) is not int or
+            not 1 <= config.get('simultaneous_detector_points', 2) <= detector_limit):
         raise ValueError('Require explicit production namespaces and bounded concurrency')
     if mechanism == 'meson-radiative':
         config.setdefault('publish_canary_aliases', False)

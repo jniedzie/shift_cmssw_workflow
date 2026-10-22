@@ -32,6 +32,21 @@ def rows(count=1002):
 
 
 class SourcePolicyTest(unittest.TestCase):
+    def test_old_and_explicit_new_detector_and_storage_limits(self):
+        self.assertEqual(preparation.detector_point_limit({}), 35)
+        self.assertEqual(preparation.meson_storage_limit({}), 30000000000)
+        self.assertEqual(preparation.detector_point_limit(dict(maximum_active_detector_workers=2400)), 2400)
+        self.assertEqual(preparation.meson_storage_limit(dict(maximum_meson_forecast_bytes=100000000000)), 100000000000)
+        for key, value in [('maximum_active_detector_workers', True),
+                           ('maximum_active_detector_workers', 2401),
+                           ('maximum_meson_forecast_bytes', 100000000001),
+                           ('maximum_meson_forecast_bytes', False)]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                if key == 'maximum_active_detector_workers':
+                    preparation.detector_point_limit({key: value})
+                else:
+                    preparation.meson_storage_limit({key: value})
+
     def test_replacement_changes_detector_runner_only_for_explicit_runtime(self):
         import prepare_dark_photon_meson_controller as controller
         self.assertNotIn('run_shift_gen_to_nano.py', controller.replacement_tool_names({}))
