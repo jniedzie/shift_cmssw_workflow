@@ -11,6 +11,8 @@ rare decays in the same interaction. Transition form factors and dimuon BRs
 must be supplied by a separately pinned physical model card.
 """
 import math
+import json
+from functools import lru_cache
 from itertools import product
 from pathlib import Path
 
@@ -28,12 +30,59 @@ def exclusive_channels(model):
 
 
 def kaon_channel(model):
-    """K_l2 is deliberately not admitted before its source-rate envelope gate."""
-    return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion')
+    """Qualified fixed-native-mass kaon electromagnetic current families."""
+    return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion','weak-kaon-leptonic')
 
 
 def _kaon_group(model):
     return any(kaon_channel(channel) for channel in exclusive_channels(model))
+
+
+@lru_cache(maxsize=128)
+def _leptonic_rate_benchmark(current_json,signal_mass,order,check_order):
+    """One immutable O(p4) numeric rate authority, shared by event C and B.
+
+    The refined quadrature value defines this benchmark's fixed-M0 rate.
+    Order comparison is a convergence diagnostic, not a rigorous error bound
+    on integration or on unknown higher chiral orders. The reference coupling
+    factors out exactly and does not alter any physical epsilon or lifetime.
+    """
+    from dark_photon_kaon_leptonic import decay_width,form_factors
+    current=json.loads(current_json)
+    form_factors(0.,(current['parent_mass_gev']**2+current['lepton_mass_gev']**2)/2,current)
+    coarse=decay_width(current,signal_mass,epsilon=.001,quadrature_order=order)['total']/1.e-6
+    refined=decay_width(current,signal_mass,epsilon=.001,quadrature_order=check_order)['total']/1.e-6
+    if any(not math.isfinite(x) or x<0 for x in (coarse,refined)):
+        raise ValueError('Finite nonnegative full IB+SD K_l2 rates required')
+    difference=abs(coarse/refined-1) if refined else (0. if coarse==0 else math.inf)
+    return coarse,refined,difference
+
+
+def _leptonic_rate_settings(current,settings):
+    if (not isinstance(settings,dict) or
+            any(type(settings.get(key)) is not int for key in ('order','check_order')) or
+            not 8<=settings['order']<settings['check_order']<=128 or
+            type(settings.get('relative_convergence_tolerance')) not in (int,float) or
+            not math.isfinite(settings['relative_convergence_tolerance']) or
+            not 0<settings['relative_convergence_tolerance']<=1.e-3):
+        raise ValueError('Pin K_l2 quadrature orders and a separate numeric convergence tolerance')
+    return json.dumps(current,sort_keys=True,separators=(',',':'),allow_nan=False)
+
+
+def _leptonic_mass_gate(parent_mass,signal_mass,model):
+    """Separate numerical p4/endpoint guard; never infer shape closure from C."""
+    nominal=model['mass_min_gev'];settings=model['native_kinematic_precision']
+    delta=abs(parent_mass-nominal)
+    gap=abs(nominal-signal_mass-model['charged_lepton_mass_gev'])
+    mass_shift=delta/nominal
+    endpoint_shift=delta/gap if gap else (0. if delta==0 else math.inf)
+    if (mass_shift>settings['relative_mass_limit'] or
+            endpoint_shift>settings['relative_endpoint_limit']):
+        raise ValueError('K_l2 native/invariant mass or endpoint numerical precision gate failed')
+    return dict(channel=model['channel'],coefficient_authority='fixed-native-M0',
+        conditional_sampler_mass_authority='unchanged-p4-invariant',
+        relative_mass_shift=mass_shift,relative_endpoint_shift=endpoint_shift,
+        limits=dict(settings),scope='Numerical mass/endpoint gate; not a universal conditional-shape error bound')
 
 
 def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
@@ -43,6 +92,10 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
     if (not math.isfinite(parent_mass) or parent_mass<=0 or not math.isfinite(br_mumu)
             or not 0<=br_mumu<=1):
         raise ValueError('Physical kaon mass and separately supplied dimuon branching required')
+    if model['decay_type']=='weak-kaon-leptonic':
+        _leptonic_mass_gate(parent_mass,signal_mass,model)
+        width=model['leptonic_width_over_em_coupling_squared_gev']
+        return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
     if signal_mass+recoil_threshold(model) >= parent_mass:
         return 0.
     if model['decay_type']=='neutral-kaon-photon':
@@ -111,7 +164,7 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
             absolute=abs(reference.amplitude(signal_mass))**2 if opened else 0.
             model['provenance']['transition']=dict(authority,publication=reference.publication)
         model.update(recoil_pdg_id=22,recoil_mass_gev=0.,radiative_amplitude_abs2_gev_minus2=absolute)
-    else:
+    elif parent['decay_type']=='weak-kaon-pion':
         expected={321:211,-321:-211,310:111}
         if (pdg not in expected or parent.get('recoil_pdg_id')!=expected[pdg]
                 or type(parent.get('recoil_mass_gev')) not in (int,float)
@@ -128,6 +181,37 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
         model.update(recoil_pdg_id=expected[pdg],recoil_mass_gev=parent['recoil_mass_gev'],
             weak_form_factor=[form.real,form.imag],alpha_em=alpha)
         model['provenance']['transition']=weak
+    else:
+        lepton=parent.get('charged_lepton_pdg_id');neutrino=parent.get('neutrino_pdg_id')
+        current=parent.get('leptonic_form_factor_model',{})
+        expected_mass={11:.00051099895,13:MUON_MASS_GEV}.get(abs(lepton) if type(lepton) is int else 0)
+        sign=1 if pdg>0 else -1
+        precision=parent.get('native_kinematic_precision',{})
+        if (abs(pdg)!=321 or expected_mass is None or type(neutrino) is not int or lepton*sign>=0 or
+                neutrino!=sign*(abs(lepton)+1) or
+                current.get('parent_pdg_id')!=321 or current.get('parent_mass_gev')!=mass or
+                current.get('lepton_mass_gev')!=expected_mass or
+                current.get('kind')!='chpt-p4-charged-kaon-leptonic-vector' or
+                current.get('order')!='p4-one-loop' or
+                any(type(precision.get(key)) not in (int,float) or not math.isfinite(precision[key])
+                    or not 0<precision[key]<=1.e-5 for key in ('relative_mass_limit','relative_endpoint_limit'))):
+            raise ValueError('K_l2 requires its charged-kaon flavor/current and separate numerical mass/endpoint gates')
+        current=json.loads(json.dumps(current,allow_nan=False))
+        settings=dict(parent.get('leptonic_rate_quadrature',{}))
+        key=_leptonic_rate_settings(current,settings)
+        coarse,refined,difference=_leptonic_rate_benchmark(key,signal_mass,settings['order'],settings['check_order'])
+        if difference>settings['relative_convergence_tolerance']:
+            raise ValueError('K_l2 fixed-mass rate failed its declared quadrature convergence benchmark')
+        opened=signal_mass<mass-expected_mass
+        model.update(charged_lepton_pdg_id=lepton,neutrino_pdg_id=neutrino,
+            charged_lepton_mass_gev=expected_mass,recoil_pdg_ids=[lepton,neutrino],
+            recoil_masses_gev=[expected_mass,0.],leptonic_form_factor_model=current,
+            native_kinematic_precision=dict(precision),
+            leptonic_width_over_em_coupling_squared_gev=refined,
+            leptonic_rate_numerics=dict(settings,coarse_width_over_em_coupling_squared_gev=coarse,
+                relative_order_difference=difference,rate_authority='refined-fixed-native-M0-quadrature',
+                scope='Conditional O(p4) numeric benchmark; no universal physical uncertainty envelope'))
+        model['provenance']['transition']=current
     model['kinematically_open']=opened
     return model
 
@@ -155,7 +239,7 @@ def _validate_kaon_model(pdg,model):
         if (pdg not in (130,310) or model.get('recoil_pdg_id')!=22
                 or type(value) not in (int,float) or not math.isfinite(value) or value<0):
             raise ValueError('Require the separately qualified neutral-kaon gamma amplitude')
-    else:
+    elif kind=='weak-kaon-pion':
         form=model.get('weak_form_factor')
         if (model.get('recoil_pdg_id')!={321:211,-321:-211,310:111}.get(pdg)
                 or type(model.get('recoil_mass_gev')) not in (int,float)
@@ -165,6 +249,31 @@ def _validate_kaon_model(pdg,model):
                 or not isinstance(form,list) or len(form)!=2
                 or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)):
             raise ValueError('Require a matching charged/KS weak current and pion recoil')
+    elif kind=='weak-kaon-leptonic':
+        lepton=model.get('charged_lepton_pdg_id');neutrino=model.get('neutrino_pdg_id')
+        current=model.get('leptonic_form_factor_model',{})
+        expected={11:.00051099895,13:MUON_MASS_GEV}.get(abs(lepton) if type(lepton) is int else 0)
+        sign=1 if pdg>0 else -1;precision=model.get('native_kinematic_precision',{})
+        settings=model.get('leptonic_rate_numerics',{})
+        if (abs(pdg)!=321 or expected is None or type(neutrino) is not int or lepton*sign>=0 or
+                neutrino!=sign*(abs(lepton)+1) or current.get('parent_pdg_id')!=321 or
+                current.get('parent_mass_gev')!=mass or current.get('lepton_mass_gev')!=expected or
+                current.get('kind')!='chpt-p4-charged-kaon-leptonic-vector' or current.get('order')!='p4-one-loop' or
+                model.get('charged_lepton_mass_gev')!=expected or
+                model.get('recoil_pdg_ids')!=[lepton,neutrino] or model.get('recoil_masses_gev')!=[expected,0.] or
+                any(type(precision.get(key)) not in (int,float) or not math.isfinite(precision[key])
+                    or not 0<precision[key]<=1.e-5 for key in ('relative_mass_limit','relative_endpoint_limit'))):
+            raise ValueError('Require the matching K_l2 current, charges and independent numerical kinematic gates')
+        key=_leptonic_rate_settings(current,settings)
+        coarse,refined,difference=_leptonic_rate_benchmark(key,model['signal_mass_gev'],
+            settings['order'],settings['check_order'])
+        if (model.get('leptonic_width_over_em_coupling_squared_gev')!=refined or
+                settings.get('coarse_width_over_em_coupling_squared_gev')!=coarse or
+                settings.get('relative_order_difference')!=difference or
+                difference>settings['relative_convergence_tolerance']):
+            raise ValueError('K_l2 rate authority or quadrature benchmark changed after resolution')
+    else:
+        raise ValueError('Unsupported fixed-mass kaon current')
 
 
 def _kaon_snapshot_authority(parent,model,kinematic_mass):
@@ -248,6 +357,8 @@ def dipion_kernel(model):
 
 
 def recoil_threshold(model):
+    if model.get('decay_type')=='weak-kaon-leptonic':
+        return model.get('charged_lepton_mass_gev',model['leptonic_form_factor_model']['lepton_mass_gev'])
     if model.get('decay_type')=='weak-kaon-pion':
         return model['recoil_mass_gev']
     if model.get('decay_type') == 'charged-vector-dipion':
@@ -314,8 +425,6 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
         raise ValueError('Native parent species are repeated')
     for parent in card['parents']:
         pdg = parent['pdg_id']
-        if parent.get('decay_type')=='weak-kaon-leptonic':
-            raise ValueError('K_l2 source current/envelope dispatch awaits its separate qualification')
         if pdg in (130,310,321,-321) and not kaon_channel(parent):
             raise ValueError('Physical kaons require an explicitly qualified kaon current')
         if pdg not in native:
@@ -331,7 +440,8 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                 models[pdg]=model
             else:
                 previous=models[pdg];channels=exclusive_channels(previous)
-                if any(channel['decay_type']==model['decay_type'] for channel in channels):
+                if any((channel['decay_type'],channel.get('charged_lepton_pdg_id'))==
+                       (model['decay_type'],model.get('charged_lepton_pdg_id')) for channel in channels):
                     raise ValueError('Duplicate exclusive kaon current for one physical parent')
                 models[pdg]=dict(mass_min_gev=minimum,mass_max_gev=maximum,
                     exclusive_channels=channels+[model])
@@ -509,6 +619,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
     for original in parents:
         parent = dict(original)
         parent.pop('native_parent_precision_report', None)
+        parent.pop('leptonic_kinematic_precision', None)
         p4, native = parent['p4'], parent['native_mass_gev']
         if (len(p4) != 4 or not all(math.isfinite(value) for value in p4) or p4[0] <= 0 or
                 not math.isfinite(native) or native <= 0):
@@ -534,6 +645,9 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
             recoil = recoil_threshold(channel)
             if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
                 raise ValueError('Native precision changes whether the rare decay is open')
+            if channel.get('decay_type')=='weak-kaon-leptonic':
+                parent.setdefault('leptonic_kinematic_precision',[]).append(
+                    _leptonic_mass_gate(mass,signal_mass,channel))
             nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
             shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu,
                                                    native_precision=native_precision)
