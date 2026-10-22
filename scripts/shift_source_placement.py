@@ -71,7 +71,6 @@ def configure_complete_source(process, input_label, *, seed, event_positions, te
         raise ValueError("Source completion needs a seed with room for its fixed +77 offset")
     import FWCore.ParameterSet.Config as cms
     from IOMC.ShiftEventTiming.shiftEventTime_cfi import shiftEventTime
-    from GeneratorInterface.Core.generatorSmeared_cfi import generatorSmeared
     from PhysicsTools.HepMCCandAlgos.genParticles_cfi import genParticles
     configure_source_placement(process, None, input_label, test_scope=test_scope,
                                event_positions=event_positions)
@@ -89,7 +88,7 @@ def configure_complete_source(process, input_label, *, seed, event_positions, te
     process.RandomNumberGeneratorService.shiftFullMuonDecays = cms.PSet(
         initialSeed=cms.untracked.uint32(seed + 77), engineName=cms.untracked.string("HepJamesRandom"))
     process.shiftEventTime = shiftEventTime.clone(src=cms.InputTag("shiftFullMuonDecays"))
-    process.generatorSmeared = generatorSmeared.clone(currentTag=cms.untracked.InputTag("shiftEventTime"))
+    process.generatorSmeared = cms.EDProducer("ShiftHepMC2CopyProducer", src=cms.InputTag("shiftEventTime"))
     process.genParticles = genParticles.clone(src=cms.InputTag("generatorSmeared"))
     return cms.Sequence(process.shiftSourcePlacement + process.shiftFullMuonDecays
                         + process.shiftEventTime + process.generatorSmeared + process.genParticles)
