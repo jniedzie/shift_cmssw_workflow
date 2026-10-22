@@ -434,7 +434,8 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
     require(unit.get('full_Run_Lumi_preserved') is True and unit.get('complete_natural_decays') is True
             and unit.get('GENParticles_rebuilt') is True and unit.get('prepared_process') == 'SHIFTFULLGEN'
             and unit.get('completed_unshifted_label') == 'shiftFullMuonDecays'
-            and unit.get('raw_unshifted_label') == 'shiftRawSource',
+            and unit.get('raw_unshifted_label') == 'shiftSourcePlacement'
+            and unit.get('raw_unshifted_instance') == 'original',
             'missing complete decay, rebuilt truth, full accounting or exact unshifted product')
     exposure = unit['source_full_accounting']
     require(exposure.get('runs') and exposure.get('lumis'), 'missing full original Run/Lumi accounting')

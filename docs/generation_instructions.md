@@ -307,6 +307,9 @@ require exact graph equality with the prepared timed graph before SIM. Recorded
 reconstruction probabilities and W/p stay unchanged. Repeated prepared versions
 do not add original GEN exposure. This binding is canary support, not approval
 of the assumed jaw distribution or full production.
+The native raw-copy audit uses `shiftSourcePlacement:original:SHIFTFULLGEN`.
+Placement reads the prior process directly; it does not schedule a second
+GeneratorSmearedProducer, which would create a product-registration cycle.
 
 ## Streaming mu-enhanced QCD (2026-10-16)
 

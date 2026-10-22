@@ -160,7 +160,8 @@ def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights
         source_full_accounting=metadata, native_denominator_kind=kind, native_denominator=count,
         native_source_cross_section_pb=sigma, full_Run_Lumi_preserved=True, complete_natural_decays=True,
         GENParticles_rebuilt=True, prepared_process='SHIFTFULLGEN', completed_unshifted_label='shiftFullMuonDecays',
-        raw_unshifted_label='shiftRawSource', events=events, output_sha256=prepared_sha, output_bytes=len(payload))
+        raw_unshifted_label='shiftSourcePlacement', raw_unshifted_instance='original',
+        events=events, output_sha256=prepared_sha, output_bytes=len(payload))
     audit = dict(schema='shift-assumed-jaw-full-GEN-canary-v1', complete=True,
         publication_sha256_readback_verified=True, new_GEN_exposure=0, generator_run=False,
         SIM_or_detector_run=False, physics_normalization_ready=False, source_distribution_qualified=False,
@@ -215,6 +216,9 @@ class PreparedSourceTests(unittest.TestCase):
             lambda a:a['units'][0].update(source_full_accounting={}),
             lambda a:a['units'][0].update(complete_natural_decays=False),
             lambda a:a['units'][0].update(completed_unshifted_label='generatorSmeared'),
+            lambda a:a['units'][0].update(raw_unshifted_label='shiftRawSource'),
+            lambda a:a['units'][0].pop('raw_unshifted_instance'),
+            lambda a:a['units'][0].update(raw_unshifted_instance=''),
             lambda a:a['units'][0].update(prepared_process='OLDGEN'),
             lambda a:a['units'][0]['events'][0]['completion'].update(proposal_correction=2.),
             lambda a:a['units'][0]['events'][0]['completion'].pop('parent_barcodes'),
