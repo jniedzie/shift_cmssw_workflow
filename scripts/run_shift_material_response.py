@@ -185,7 +185,7 @@ def main():
         started, used = time.monotonic(), cpu()
         report.update(current_stage=name, progress_epoch=time.time())
         report.update(stage_started_epoch=time.time(), stage_deadline_epoch=time.time()+limit,
-                      stage_timeout_seconds=7200, stage_records_started=0)
+                      stage_timeout_seconds=limit, stage_records_started=0)
         save()
         progress(report, name, {})
         print(json.dumps(dict(stage=name, epoch=time.time(), sample=sample['id'])), flush=True)
