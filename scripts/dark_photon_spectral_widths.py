@@ -8,6 +8,7 @@ hypercharge implementation. This is a model benchmark, not rate approval.
 """
 from dataclasses import asdict
 import hashlib
+import importlib
 import json
 import math
 from pathlib import Path
@@ -52,6 +53,8 @@ def full_hypercharge_model(darkcast, mass, epsilon, output):
         module.write_text(text)
     card['module'] = module.name
     card['module_sha256'] = hashlib.sha256(module.read_bytes()).hexdigest()
+    # AFS can retain the directory timestamp cached before this card existed.
+    importlib.invalidate_caches()
     model = darkcast.Model(name, path=str(directory))
     return model, photon, card
 
