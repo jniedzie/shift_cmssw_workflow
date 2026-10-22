@@ -90,6 +90,70 @@ class ParentFlightTest(unittest.TestCase):
             self.flight(uniform=None, production_position_mm=(0., 0., 0., -1.e308),
                 native_decay_position_mm=(0., 0., 0., 1.e308))
 
+    def test_final_native_kaon_reuses_sampled_tau_without_claiming_an_end_vertex(self):
+        # Exact native KL regression from the October 22 unfiltered source
+        # census: final status91, sampled tau/vDec, no HepMC end vertex.
+        momentum = [216.27522913754743, -.3771051994787957,
+                    -.5616255845161958, -216.2735986896288]
+        origin = [-1.0894791012855905e-6, -1.6225693464937358e-6,
+                  -.0006248271470609258, .0006248318575208599]
+        endpoint = [-7354.24339840416, -10952.729511583824,
+                    -4217732.048273567, 4217763.844999941]
+        row = self.flight(parent_p4=momentum, parent_mass_gev=.497611,
+            production_position_mm=origin, uniform=None,
+            native_sampled_proper_flight_mm=9704.327641833348,
+            native_stored_decay_position_mm=endpoint)
+        self.assertEqual(row['proper_flight_mm'], 9704.327641833348)
+        self.assertEqual(row['decay_position_mm'], endpoint)
+        self.assertFalse(row['native_end_vertex_present'])
+        self.assertIsNone(row['unconditional_new_flight'])
+        self.assertEqual(row['maximum_native_coordinate_residual_mm'], 0.)
+        self.assertLess(row['mass_shell_residual_gev2'], row['mass_shell_roundoff_gev2'])
+        self.assertEqual(row['lifetime_method'], 'preserved-native-sampled-lifetime-without-end-vertex')
+
+    def test_stored_native_flight_requires_both_values_and_forbids_resampling(self):
+        row = self.flight()
+        good = dict(uniform=None, native_sampled_proper_flight_mm=row['proper_flight_mm'],
+            native_stored_decay_position_mm=row['decay_position_mm'])
+        self.flight(**good)
+        changes = [dict(uniform=.1), dict(native_sampled_proper_flight_mm=None),
+            dict(native_sampled_proper_flight_mm=-1.), dict(native_stored_decay_position_mm=None),
+            dict(native_decay_position_mm=row['decay_position_mm']),
+            dict(native_sampled_proper_flight_mm=row['proper_flight_mm']+1.)]
+        for change in changes:
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.flight(**dict(good, **change))
+
+    def test_mass_authority_must_close_or_carry_an_explicit_extra_budget(self):
+        with self.assertRaises(ValueError):
+            self.flight(parent_mass_gev=.6)
+        row = self.flight(parent_mass_gev=.50001, mass_shell_relative_tolerance=.001)
+        self.assertEqual(row['parent_mass_gev'], .50001)
+        self.assertEqual(row['parent_p4'], [math.hypot(3., .5), 0., 0., -3.])
+        self.assertGreater(row['mass_shell_residual_gev2'], row['mass_shell_roundoff_gev2'])
+        for value in (-.1, 1., float('nan')):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.flight(mass_shell_relative_tolerance=value)
+
+    def test_coordinate_quantization_is_bounded_at_actual_large_source_scale(self):
+        origin = [1.e12, -1.e12, 1.e12, 1.e12]
+        sampled = self.flight(production_position_mm=origin)
+        row = self.flight(production_position_mm=origin, uniform=None,
+            native_sampled_proper_flight_mm=sampled['proper_flight_mm'],
+            native_stored_decay_position_mm=sampled['decay_position_mm'])
+        self.assertLessEqual(row['maximum_native_coordinate_residual_mm'],
+                             row['native_coordinate_roundoff_mm'])
+        changed = list(sampled['decay_position_mm'])
+        changed[0] += 2.*row['native_coordinate_roundoff_mm']
+        with self.assertRaises(ValueError):
+            self.flight(production_position_mm=origin, uniform=None,
+                native_sampled_proper_flight_mm=sampled['proper_flight_mm'],
+                native_stored_decay_position_mm=changed)
+
+    def test_extreme_finite_inputs_cannot_overflow_flight_accounting(self):
+        with self.assertRaises(ValueError):
+            self.flight(parent_p4=(1.e308, 0., 0., 0.))
+
 
 class NeutralKaonOwnershipTest(unittest.TestCase):
     def particle(self, index, pdg, mothers=(), daughters=()):

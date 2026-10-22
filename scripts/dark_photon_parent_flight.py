@@ -31,16 +31,42 @@ def _positive(value, name):
     return float(value)
 
 
+def _flight_displacement(momentum, mass, proper):
+    return tuple(proper*value/mass for value in momentum[1:] + momentum[:1])
+
+
+def _native_displacement(origin, endpoint, expected):
+    actual = tuple(end-start for start, end in zip(origin, endpoint))
+    if not all(math.isfinite(value) for value in actual + expected):
+        raise ValueError('Native parent flight exceeds the finite coordinate range')
+    if actual[3] < 0:
+        raise ValueError('Native parent decay precedes its production')
+    # Coordinate subtraction at a far-away source can lose low bits. Allow
+    # floating-point roundoff at that actual scale, not a free physical shift.
+    scale = max(abs(value) for value in origin + endpoint + expected)
+    tolerance = 32*math.ulp(scale)
+    residual = max(abs(value-target) for value, target in zip(actual, expected))
+    if residual > tolerance:
+        raise ValueError('Native parent decay point does not follow its momentum/lifetime')
+    return actual, residual, tolerance
+
+
 def parent_flight(parent_p4, parent_mass_gev, production_position_mm,
                   mean_proper_ctau_mm, *, mass_authority, lifetime_authority,
-                  uniform=None, native_decay_position_mm=None):
-    """Preserve a native end vertex, or draw one unconditional vacuum flight.
+                  uniform=None, native_decay_position_mm=None,
+                  native_sampled_proper_flight_mm=None,
+                  native_stored_decay_position_mm=None,
+                  mass_shell_relative_tolerance=0.):
+    """Preserve a native flight, or draw one unconditional vacuum flight.
 
     The displacement is (px, py, pz, E) / m times the proper flight in mm.
     The supplied mass is the generator's qualified flight-mass authority; no
     momentum is rescaled to repair a native mass-shell discrepancy here.
-    Stored Pythia vDec for a final particle is not automatically a native HepMC
-    end vertex. A caller must establish that distinction before using it.
+    A final Pythia particle may already have a sampled tau and stored vDec,
+    despite having no HepMC end vertex. Supply those through the separate
+    native_sampled/native_stored arguments; never draw that lifetime again.
+    A nonzero extra mass-shell budget must come from the caller's qualified
+    native precision contract. The default allows floating-point roundoff only.
     """
     momentum = _four(parent_p4, 'parent momentum')
     origin = _four(production_position_mm, 'parent production position')
@@ -49,31 +75,50 @@ def parent_flight(parent_p4, parent_mass_gev, production_position_mm,
     for authority in (mass_authority, lifetime_authority):
         if not isinstance(authority, str) or not authority.strip():
             raise ValueError('Pin the explicit parent mass and lifetime authorities')
-    invariant = math.fsum([momentum[0]**2] + [-value**2 for value in momentum[1:]])
+    squared = tuple(value*value for value in momentum + (mass,))
+    if not all(math.isfinite(value) for value in squared):
+        raise ValueError('Parent momentum/mass exceeds the finite arithmetic range')
+    invariant = math.fsum([squared[0]] + [-value for value in squared[1:4]])
     if momentum[0] <= 0 or invariant <= 0 or not math.isfinite(invariant):
         raise ValueError('Parent momentum must be finite, future directed and timelike')
+    if (type(mass_shell_relative_tolerance) not in (int, float) or
+            not math.isfinite(mass_shell_relative_tolerance) or
+            not 0 <= mass_shell_relative_tolerance < 1):
+        raise ValueError('Supply a finite nonnegative qualified mass-shell budget below one')
+    mass_roundoff = 8*math.ulp(max(squared))
+    mass_tolerance = mass_roundoff + mass_shell_relative_tolerance*mass*mass
+    mass_residual = abs(invariant-mass*mass)
+    if mass_residual > mass_tolerance:
+        raise ValueError('Parent momentum differs from its explicit flight-mass authority')
 
-    if native_decay_position_mm is not None:
+    native_sampled = (native_sampled_proper_flight_mm is not None or
+                      native_stored_decay_position_mm is not None)
+    position_residual, position_tolerance = None, None
+    if native_sampled:
+        proper = native_sampled_proper_flight_mm
+        if (type(proper) not in (int, float) or not math.isfinite(proper) or proper < 0 or
+                native_stored_decay_position_mm is None):
+            raise ValueError('Pin both the sampled native proper flight and its stored decay point')
+        if uniform is not None or native_decay_position_mm is not None:
+            raise ValueError('Do not replace a sampled native lifetime or invent an existing end vertex')
+        endpoint = _four(native_stored_decay_position_mm, 'stored native decay point')
+        displacement, position_residual, position_tolerance = _native_displacement(
+            origin, endpoint, _flight_displacement(momentum, mass, proper))
+        method = 'preserved-native-sampled-lifetime-without-end-vertex'
+    elif native_decay_position_mm is not None:
         if uniform is not None:
             raise ValueError('Do not sample a second lifetime for a native end vertex')
         endpoint = _four(native_decay_position_mm, 'native parent decay position')
-        displacement = tuple(end-start for start, end in zip(origin, endpoint))
-        if not all(math.isfinite(value) for value in displacement):
-            raise ValueError('Native parent flight exceeds the finite coordinate range')
-        if displacement[3] < 0:
-            raise ValueError('Native parent decay precedes its production')
-        proper = displacement[3]*mass/momentum[0]
-        expected = tuple(proper*value/mass for value in momentum[1:] + momentum[:1])
-        for actual, target in zip(displacement, expected):
-            if not math.isclose(actual, target, rel_tol=1.e-10, abs_tol=1.e-6):
-                raise ValueError('Native parent end vertex does not follow its momentum')
+        proper = (endpoint[3]-origin[3])*mass/momentum[0]
+        displacement, position_residual, position_tolerance = _native_displacement(
+            origin, endpoint, _flight_displacement(momentum, mass, proper))
         method = 'preserved-native-end-vertex'
     else:
         if (type(uniform) not in (int, float) or not math.isfinite(uniform) or
                 not 0 <= uniform < 1):
             raise ValueError('Supply one explicit uniform variate in [0, 1)')
         proper = -mean*math.log1p(-uniform)
-        displacement = tuple(proper*value/mass for value in momentum[1:] + momentum[:1])
+        displacement = _flight_displacement(momentum, mass, proper)
         endpoint = tuple(start+step for start, step in zip(origin, displacement))
         if not all(math.isfinite(value) for value in endpoint):
             raise ValueError('Parent flight exceeds the finite coordinate range')
@@ -81,11 +126,17 @@ def parent_flight(parent_p4, parent_mass_gev, production_position_mm,
 
     return dict(schema='shift-vacuum-parent-flight-v1', parent_p4=list(momentum),
         parent_mass_gev=mass, parent_invariant_mass_squared_gev2=invariant,
+        mass_shell_residual_gev2=mass_residual, mass_shell_roundoff_gev2=mass_roundoff,
+        mass_shell_relative_tolerance=mass_shell_relative_tolerance,
         mass_authority=mass_authority, lifetime_authority=lifetime_authority,
         mean_proper_ctau_mm=mean, proper_flight_mm=proper, uniform=uniform,
         production_position_mm=list(origin), decay_position_mm=list(endpoint),
         displacement_mm=list(displacement), lifetime_method=method,
-        unconditional_new_flight=True if native_decay_position_mm is None else None,
+        native_end_vertex_present=native_decay_position_mm is not None,
+        native_sampled_proper_flight_mm=native_sampled_proper_flight_mm,
+        maximum_native_coordinate_residual_mm=position_residual,
+        native_coordinate_roundoff_mm=position_tolerance,
+        unconditional_new_flight=True if not native_sampled and native_decay_position_mm is None else None,
         transport_model='straight-flight-in-vacuum',
         material_attenuation_modelled=False, regeneration_modelled=False,
         coherent_neutral_kaon_mixing_modelled=False, secondary_sources_modelled=False,
