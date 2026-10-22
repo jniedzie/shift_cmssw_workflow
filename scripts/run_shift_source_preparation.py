@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # Code style: AI-code. AI-generated bounded ordinary-source preparation worker.
 """Complete natural decays at six placed originals; rebuild native GEN truth."""
-import copy,hashlib,json,math,os,pathlib,re,shutil,subprocess,sys,tempfile,time
+import copy,hashlib,json,math,os,pathlib,re,shutil,subprocess,sys,tempfile,time,struct
 from audit_shift_material_scout import metadata,product,items,identity
 from shift_material_response import source_timing_input,source_normalization
 from run_shift_weighted_gen import publish
@@ -116,6 +116,56 @@ def audit_completion(event,before,after):
     require(int(val('decayedParents','unsigned int'))==len(changed) and int(val('addedMuons','unsigned int'))==len(added),'Native decay counts differ from full graph')
     return dict(enabled_PDG_ids=enabled,parent_barcodes=parent_ids,parent_PDG_ids=parent_pdgs,sampled_proper_lifetime_mm=taus,nominal_proper_lifetime_mm=means,decayed_parents=len(changed),added_stable_muons=len(added),added_particles=len(new_particles)-len(old_particles),added_vertices=len(new_vertices)-len(old_vertices),all_original_p4_and_ancestry_preserved=True,ordinary_fraction=ordinary,proposal_density_ratio=ratio,proposal_correction=correction,maximum_p4_residual_GeV=maximum,maximum_proper_clock_residual_mm=maximum_clock,completed_unshifted_graph_sha256=graph_hash(after))
 
+ROUND_UNIT=2.**-53
+MASS_FLOAT32_UNIT=2.**-24
+MASS_FLOAT32_SUBNORMAL=2.**-149
+ROUND_OPERATIONS=8
+ROUND_ALGORITHM='gamma8-signed-mass2-float32-stock-polar-energy-v1'
+
+def float32(value):
+    return struct.unpack('f',struct.pack('f',value))[0]
+
+def signed_square(value):
+    return math.copysign(value*value,value)
+
+def signed_sqrt(value):
+    return math.copysign(math.sqrt(abs(value)),value)
+
+def mass_shell_roundoff(raw,mass,energy,polar_energy,polar_p2):
+    """Bound Cartesian cancellation, then explicitly round the mass interval.
+
+    Native mass squared uses four products and three subtractions. gamma8
+    includes the separately rounded reference products. The Float32 cast of
+    each signed-square-root endpoint includes its normal/subnormal storage
+    rounding; one outward double step covers endpoint/sqrt rounding. The
+    independent energy reference uses ROOT's polar helper, including pt==0.
+    """
+    require(all(math.isfinite(x) for x in list(raw)+[mass,energy,polar_energy,polar_p2])
+            and energy>=0 and polar_energy>=0 and polar_p2>=0,'Nonfinite or invalid truth energy')
+    squares=[x*x for x in raw]
+    require(all(math.isfinite(x) for x in squares),'Truth Cartesian products overflow')
+    gamma=ROUND_OPERATIONS*ROUND_UNIT/(1.-ROUND_OPERATIONS*ROUND_UNIT)
+    scale=math.fsum(squares);q=math.fsum([squares[3]]+[-x for x in squares[:3]])
+    underflow=ROUND_OPERATIONS*math.ulp(0.)
+    delta=gamma*scale+underflow
+    low=math.nextafter(q-delta,-math.inf);high=math.nextafter(q+delta,math.inf)
+    mass_low=float32(math.nextafter(signed_sqrt(low),-math.inf))
+    mass_high=float32(math.nextafter(signed_sqrt(high),math.inf))
+    require(math.isfinite(mass_low) and math.isfinite(mass_high)
+            and mass==float32(mass) and mass_low<=mass<=mass_high,
+            'Persisted signed mass lies outside Cartesian roundoff and Float32 encoding interval')
+    actual=signed_square(mass);mass_residual=abs(actual-q)
+    mass_bound=max(abs(signed_square(mass_low)-q),abs(signed_square(mass_high)-q))
+    energy_residual=abs(energy*energy-polar_energy*polar_energy)
+    energy_bound=gamma*math.fsum([energy*energy,polar_energy*polar_energy,polar_p2,abs(actual)])+underflow
+    require(math.isfinite(energy_bound) and energy_residual<=energy_bound,
+            'Derived energy cache differs from stock polar mass-shell roundoff')
+    return dict(signed_mass2_residual_GeV2=mass_residual,signed_mass2_bound_GeV2=mass_bound,
+        signed_mass2_bound_fraction=mass_residual/mass_bound if mass_bound else 0.,
+        energy2_residual_GeV2=energy_residual,energy2_bound_GeV2=energy_bound,
+        energy2_bound_fraction=energy_residual/energy_bound if energy_bound else 0.)
+
+
 def encoded_expected_particles(timed):
     """Build only from HepMC; let the native dictionary define its persistence."""
     import ROOT
@@ -141,7 +191,8 @@ def encoded_expected_particles(timed):
             require(all(math.isfinite(x) for x in coords+momentum),'Native expected truth encoding is nonfinite')
             maximum_vertex=max(maximum_vertex,*[abs(a-b) for a,b in zip(coords,point)])
             maximum_p4=max(maximum_p4,*[abs(a-b) for a,b in zip(momentum,p['momentum'])])
-            encoded[p['barcode']]=dict(momentum=momentum,position=coords)
+            encoded[p['barcode']]=dict(momentum=momentum,position=coords,
+                polar=[float(cand.pt()),float(cand.eta()),float(cand.phi())])
         file.Close()
     return encoded,dict(stock_persistence_schema_sha256=schema_sha,
         encoding='native reco::GenParticle constructed from newly timed HepMC, then stock ROOT dictionary roundtrip',
@@ -154,12 +205,22 @@ def audit_genparticles(event,timed):
     particles={p['barcode']:p for p in timed['particles']};vertices={v['barcode']:v for v in timed['vertices']}
     require(set(codes)==set(particles),'Truth barcodes differ from latest timed HepMC')
     expected,encoding=encoded_expected_particles(timed)
+    maxima={name:0. for name in ('signed_mass2_residual_GeV2','signed_mass2_bound_GeV2',
+        'signed_mass2_bound_fraction','energy2_residual_GeV2','energy2_bound_GeV2','energy2_bound_fraction')}
+    maximum_p4=0.;maximum_raw_p4=0.
     for index,cand in enumerate(candidates):
         barcode=codes[index];p=particles[barcode];encoded=expected[barcode]
         require(int(cand.pdgId())==p['pdg'] and int(cand.status())==p['status'],'Rebuilt truth PDG/status differs for barcode '+str(barcode))
         actual=[float(cand.px()),float(cand.py()),float(cand.pz()),float(cand.energy())]
-        if actual!=encoded['momentum']:
-            raise ValueError('Persisted truth p4 mismatch '+json.dumps(dict(event_id=identity(event),barcode=barcode,raw_HepMC=p['momentum'],native_encoded_expected=encoded['momentum'],actual=actual)))
+        polar=[float(cand.pt()),float(cand.eta()),float(cand.phi())]
+        require(polar==encoded['polar'] and actual[:3]==encoded['momentum'][:3],
+                'Persisted truth encoded pt/eta/phi or Cartesian xyz differs')
+        native_polar=cand.polarP4()
+        rounded=mass_shell_roundoff(p['momentum'],float(cand.mass()),actual[3],
+                                   float(native_polar.E()),float(native_polar.P2()))
+        for name,value in rounded.items():maxima[name]=max(maxima[name],value)
+        maximum_p4=max(maximum_p4,*[abs(a-b) for a,b in zip(actual,encoded['momentum'])])
+        maximum_raw_p4=max(maximum_raw_p4,*[abs(a-b) for a,b in zip(actual,p['momentum'])])
         coords=[float(cand.vx()),float(cand.vy()),float(cand.vz())]
         if coords!=encoded['position']:
             raise ValueError('Persisted truth vertex mismatch '+json.dumps(dict(event_id=identity(event),barcode=barcode,native_encoded_expected=encoded['position'],actual=coords)))
@@ -170,9 +231,16 @@ def audit_genparticles(event,timed):
         require(mothers==expected_mothers and daughters==expected_daughters,'Rebuilt truth mother/daughter barcode links differ for barcode '+str(barcode))
     _,latest=product(event,'genParticles','std::vector<reco::GenParticle>')
     require(len(latest)==len(candidates),'Unqualified truth lookup found stale products')
-    return dict(particles=len(candidates),stock_persistence_encoding_exact=True,
-        expected_encoded_p4_residual_GeV=0.,expected_encoded_vertex_residual_cm=0.,
-        exact_PDG_status_and_barcode_ancestry=True,rebuilt_process=PROCESS,**encoding)
+    encoding['maximum_p4_raw_to_encoded_residual_GeV']=maximum_raw_p4
+    return dict(particles=len(candidates),stock_persistence_audit_schema='shift-genparticles-conditioning-v2',
+        stock_persistence_encoding_exact=False,exact_encoded_pt_eta_phi_xyz_vertex=True,
+        expected_encoded_xyz_residual_GeV=0.,expected_encoded_p4_residual_GeV=maximum_p4,
+        expected_encoded_vertex_residual_cm=0.,exact_PDG_status_and_barcode_ancestry=True,
+        mass_shell_roundoff_checks_passed=True,roundoff_algorithm=ROUND_ALGORITHM,
+        roundoff_operations=ROUND_OPERATIONS,roundoff_unit=ROUND_UNIT,mass_float32_unit=MASS_FLOAT32_UNIT,
+        mass_float32_min_subnormal=MASS_FLOAT32_SUBNORMAL,
+        rebuilt_process=PROCESS,**{'maximum_'+name:value for name,value in maxima.items()},**encoding)
+
 
 
 def source_configuration(unit,plan):

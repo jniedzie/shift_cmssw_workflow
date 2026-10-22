@@ -4,6 +4,7 @@ import ast
 import copy
 import gzip
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -95,6 +96,72 @@ class SourceCensusTests(unittest.TestCase):
                         self.assertFalse(audit['usable_as_physics_weight'])
                     else:
                         with self.assertRaises(ValueError):prep.feature_census(path,unit,value,output)
+
+
+class PersistenceRoundoffTests(unittest.TestCase):
+    def test_failed_photon_and_massive_signed_and_subnormal_cases(self):
+        photon=[-.08279411007317763,-.27006711821923624,-.8492992675623033,.8950420989472605]
+        result=prep.mass_shell_roundoff(photon,1.932630233625332e-8,.8950421263950256,
+                                       .8950421263950255,.8950421263950255**2)
+        self.assertLessEqual(result['signed_mass2_bound_fraction'],1.)
+        self.assertGreater(result['energy2_residual_GeV2'],0.)
+        for raw,mass,energy,p2 in [([0.,0.,0.,2.],2.,2.,0.),
+                ([2.,0.,0.,1.],prep.float32(-math.sqrt(3.)),1.,4.),
+                ([0.,0.,0.,1.e-200],0.,0.,0.)]:
+            with self.subTest(raw=raw):
+                result=prep.mass_shell_roundoff(raw,mass,energy,energy,p2)
+                self.assertLessEqual(result['signed_mass2_bound_fraction'],1.)
+        with self.assertRaises(ValueError):
+            prep.mass_shell_roundoff([0.,0.,0.,1.e-200],prep.MASS_FLOAT32_SUBNORMAL,0.,0.,0.)
+
+    def test_one_percent_mass_or_energy_corruption_is_rejected(self):
+        with self.assertRaises(ValueError):prep.mass_shell_roundoff([0.,0.,0.,2.],prep.float32(2.02),2.,2.,0.)
+        with self.assertRaises(ValueError):prep.mass_shell_roundoff([0.,0.,0.,2.],2.,2.02,2.,0.)
+        with self.assertRaises(ValueError):prep.mass_shell_roundoff([0.,0.,0.,2.],2.,-2.,2.,0.)
+
+    def test_graph_weight_corruption_still_fails_exactly(self):
+        before=dict(vertices=[dict(position=[1.,2.,3.,0.])],anchor=[1.,2.,3.,0.],weights=[.1],particles=[1])
+        after=copy.deepcopy(before);after['weights'][0]*=1.01
+        with self.assertRaises(ValueError):prep.compare_graphs(before,after,[1.,2.,3.],0.)
+
+    def test_truth_vertex_or_ancestry_corruption_still_fails_exactly(self):
+        class Polar:
+            def E(self):return math.sqrt(26.)
+            def P2(self):return 25.
+        class Ref:
+            def key(self):return 0
+        class Candidate:
+            def pdgId(self):return 13
+            def status(self):return 1
+            def px(self):return 3.
+            def py(self):return 0.
+            def pz(self):return 4.
+            def energy(self):return math.sqrt(26.)
+            def pt(self):return 3.
+            def eta(self):return math.asinh(4./3.)
+            def phi(self):return 0.
+            def mass(self):return 1.
+            def polarP4(self):return Polar()
+            def vx(self):return 1.+self.vertex_error
+            def vy(self):return 2.
+            def vz(self):return 3.
+            def numberOfMothers(self):return int(self.link_error)
+            def motherRef(self,i):return Ref()
+            def numberOfDaughters(self):return 0
+        timed=dict(particles=[dict(barcode=1,pdg=13,status=1,momentum=[3.,0.,4.,math.sqrt(26.)],production_vertex=-1,end_vertex=None)],
+                   vertices=[dict(barcode=-1,position=[10.,20.,30.,0.],incoming=[],outgoing=[1])])
+        expected={1:dict(momentum=[3.,0.,4.,math.sqrt(26.)],position=[1.,2.,3.],polar=[3.,math.asinh(4./3.),0.])}
+        for vertex_error,link_error in [(0.,False),(1.,False),(0.,True)]:
+            c=Candidate();c.vertex_error=vertex_error;c.link_error=link_error
+            def product(event,label,kind):return None,([1] if kind=='std::vector<int>' else [c])
+            with patch.object(prep,'product',side_effect=product),patch.object(prep,'encoded_expected_particles',return_value=(expected,{})),patch.object(prep,'identity',return_value=[1,1,1]):
+                if vertex_error or link_error:
+                    with self.assertRaises(ValueError):prep.audit_genparticles(None,timed)
+                else:
+                    result=prep.audit_genparticles(None,timed)
+                    self.assertEqual(result['stock_persistence_audit_schema'],'shift-genparticles-conditioning-v2')
+                    self.assertFalse(result['stock_persistence_encoding_exact'])
+                    self.assertTrue(result['mass_shell_roundoff_checks_passed'])
 
 
 if __name__=='__main__':unittest.main()
