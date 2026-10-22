@@ -1,0 +1,1647 @@
+{
+  "code_style": "AI-code. AI-generated attributed leading-meson union model.",
+  "schema": "shift-dark-photon-meson-model-v1",
+  "model": "visible-photon-like-dark-photon-leading-meson-union",
+  "mechanism": "meson-radiative",
+  "physics_scope": "Exclusive primary non-diffractive pp light-meson electromagnetic benchmarks: eta/eta-prime photon and coherent charged-dipion transitions, and rho/omega/phi/Kstar radiative transitions including charge conjugates. Native parent sources use explicit zero-width pole masses, with unpolarized vector parents. Measured rates and published transition models carry recorded tensions and missing uncertainties. Not an inclusive validated meson-production or limit model. The neutral-rho charged-dipion radiation channel uses the conserved minimal scalar-QED current, including its contact term, normalized to the approximately unity rho-to-dipion branching fraction. Extra structure-dependent radiation is not included. Charged rho\u00b1 -> pi\u00b1 pi0 A-prime is added as an explicit local g_EM=2 charged-vector benchmark, with coherent parent radiation, charged-pion radiation and contact term. Its published full-model photon comparison has an unresolved 11.6 percent rate discrepancy; no physical uncertainty is inferred from that comparison. Adds nine qualified KL/KS/charged-kaon radiative and weak-current numerical benchmarks and coherent rho0/omega->pi0 pi0 A-prime leading currents. This finite 30-channel union is not proof of all-meson completeness. Natural kaon flight, material transport and fixed detector constraints require the separate full-chain gate. Unknown timelike hadronic operators, source-spectrum uncertainties and listed residual families remain explicit.",
+  "radiative_branching_formula": "2 * epsilon^2 * BR(P -> gamma gamma) * (1 - mass^2 / parent_mass^2)^3 * abs(F(mass^2)/F(0))^2",
+  "radiative_branching_reference": "https://arxiv.org/pdf/2401.09136v2#page=4",
+  "radiative_branching_reference_note": "Eq. 6 is pointlike; multiplying by the measured transition form factor follows the electromagnetic transition amplitude in Eqs. 1-5.",
+  "muon_mass_gev": 0.1056583755,
+  "parents": [
+    {
+      "pdg_id": 221,
+      "name": "eta",
+      "mass_gev": 0.547862,
+      "mass_uncertainty_gev": 1.7e-05,
+      "br_gamma_gamma": 0.3936,
+      "br_gamma_gamma_uncertainty": 0.0018,
+      "pdg_reference": "https://pdgweb.lbl.gov/2025/listings/rpp2025-list-eta.pdf",
+      "transition_form_factor": {
+        "kind": "single-pole",
+        "squared_formula": "1 / (1 - q2/lambda^2)^2",
+        "lambda_gev": 0.749,
+        "lambda_stat_gev": 0.027,
+        "lambda_syst_gev": 0.008,
+        "systematic_choice": "Conservative conclusion value; the abstract quotes 0.007 GeV.",
+        "reference": "https://arxiv.org/pdf/2401.09136v2",
+        "equation": 3,
+        "physical_dimuon_mass_range_gev": [
+          0.211316751,
+          0.547862
+        ]
+      },
+      "channel": "eta->gamma_Aprime"
+    },
+    {
+      "pdg_id": 331,
+      "name": "eta-prime",
+      "mass_gev": 0.95778,
+      "mass_uncertainty_gev": 6e-05,
+      "br_gamma_gamma": 0.02307,
+      "br_gamma_gamma_uncertainty": 0.00035,
+      "branching_error_choice": "Conservative detailed PDG fit error; the summary table quotes 0.00033.",
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-eta-prime-958.pdf",
+      "transition_form_factor": {
+        "kind": "finite-width-multipole",
+        "squared_formula": "lambda^2 * (lambda^2 + gamma^2) / ((lambda^2 - q2)^2 + lambda^2 * gamma^2)",
+        "lambda_gev": 0.802,
+        "lambda_stat_gev": 0.007,
+        "lambda_syst_gev": 0.008,
+        "gamma_gev": 0.113,
+        "gamma_stat_gev": 0.01,
+        "gamma_syst_gev": 0.002,
+        "reference": "https://arxiv.org/pdf/2401.09136v2",
+        "equation": 5,
+        "physical_dimuon_mass_range_gev": [
+          0.211316751,
+          0.95778
+        ],
+        "validity_note": "Effective measured timelike parametrization, finite through the vector pole. Narrow rho-omega interference and endpoint precision are not validated by this benchmark. Do not replace it with a zero-width pole."
+      },
+      "channel": "eta_prime->gamma_Aprime"
+    },
+    {
+      "pdg_id": 223,
+      "name": "omega",
+      "mass_gev": 0.78266,
+      "mass_uncertainty_gev": 0.00013,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 0.0833,
+      "br_p_gamma_uncertainty": 0.0025,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-omega-782.pdf",
+      "transition_form_factor": {
+        "kind": "single-pole-slope",
+        "squared_formula": "1 / (1 - slope * q2)^2",
+        "slope_gev_minus2": 2.223,
+        "slope_stat_gev_minus2": 0.026,
+        "slope_syst_gev_minus2": 0.037,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.64
+        ],
+        "reference": "https://arxiv.org/abs/1608.07898",
+        "equations": [
+          5,
+          7
+        ],
+        "data_table": 2,
+        "validity_note": "Measured form factor ends at .64 GeV. Do not extrapolate its artificial pole near .671 GeV. Native off-shell omega tails are excluded only by the declared zero-width source approximation, not by censoring generated events."
+      },
+      "channel": "omega->pi0_Aprime"
+    },
+    {
+      "pdg_id": 333,
+      "name": "phi",
+      "mass_gev": 1.01946,
+      "mass_uncertainty_gev": 1.6e-05,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.01306,
+      "br_p_gamma_uncertainty": 0.00024,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-phi-1020.pdf",
+      "transition_form_factor": {
+        "kind": "single-pole-slope",
+        "squared_formula": "1 / (1 - slope * q2)^2",
+        "slope_gev_minus2": 1.28,
+        "slope_stat_gev_minus2": 0.1,
+        "slope_syst_gev_minus2": 0.09,
+        "slope_syst_up_gev_minus2": 0.09,
+        "slope_syst_down_gev_minus2": 0.08,
+        "systematic_choice": "Use the larger final-publication asymmetric error in the diagnostic parameter-box envelope.",
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.471598
+        ],
+        "reference": "https://doi.org/10.1016/j.physletb.2015.01.011",
+        "final_publication_pdf": "https://uu.diva-portal.org/smash/get/diva2:807360/FULLTEXT01.pdf",
+        "equations": [
+          1,
+          3,
+          8
+        ],
+        "data_table": 3,
+        "validity_note": "Final journal result 1.28, not the earlier preprint value 1.17. Apply only below the pole-source phi-minus-eta endpoint."
+      },
+      "channel": "phi->eta_Aprime"
+    },
+    {
+      "pdg_id": 333,
+      "name": "phi",
+      "mass_gev": 1.01946,
+      "mass_uncertainty_gev": 1.6e-05,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 0.00133,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-phi-1020.pdf",
+      "channel": "phi->pi0_Aprime",
+      "transition_form_factor": {
+        "kind": "running-width-vector-pole",
+        "reference": "https://arxiv.org/abs/1409.7708",
+        "equations": [
+          49,
+          50
+        ],
+        "valid_mass_range_gev": [
+          0.0,
+          0.8844832
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "propagator_width": "rho-pipi-pwave",
+        "pion_mass_gev": 0.13957039,
+        "kaon_mass_gev": 0.493677,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published finite-width rho VMD benchmark, not the full dispersive calculation of this reference. Keeps F(0)=1 and the physical rho width; its discrepancy from KLOE bins is tested and recorded. Native phi mass remains a pole source. No arbitrary rescaling of the measured-bin central values.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published running-width rho VMD benchmark, checked against KLOE Table1 and integrated phi-pi0 Dalitz branching fraction. Full dispersive amplitude and vector-source mass/spin uncertainties remain unresolved.",
+      "production_rate_validated": false,
+      "measured_transition_validation": {
+        "kind": "measured-bin-abs2",
+        "reference": "https://arxiv.org/abs/1601.06565",
+        "data_table": 1,
+        "valid_mass_range_gev": [
+          0.0010219979,
+          0.7
+        ],
+        "interpolation": "piecewise-constant-bin-average",
+        "bins": [
+          {
+            "mass_range_gev": [
+              0.0010219979,
+              0.03
+            ],
+            "abs2": 1,
+            "uncertainty": 0.11,
+            "effective_mass_gev": 0.009
+          },
+          {
+            "mass_range_gev": [
+              0.03,
+              0.06
+            ],
+            "abs2": 1.18,
+            "uncertainty": 0.22,
+            "effective_mass_gev": 0.0433
+          },
+          {
+            "mass_range_gev": [
+              0.06,
+              0.09
+            ],
+            "abs2": 0.93,
+            "uncertainty": 0.21,
+            "effective_mass_gev": 0.074
+          },
+          {
+            "mass_range_gev": [
+              0.09,
+              0.12
+            ],
+            "abs2": 1.09,
+            "uncertainty": 0.19,
+            "effective_mass_gev": 0.1042
+          },
+          {
+            "mass_range_gev": [
+              0.12,
+              0.15
+            ],
+            "abs2": 1.19,
+            "uncertainty": 0.23,
+            "effective_mass_gev": 0.1344
+          },
+          {
+            "mass_range_gev": [
+              0.15,
+              0.19
+            ],
+            "abs2": 1.42,
+            "uncertainty": 0.33,
+            "effective_mass_gev": 0.169
+          },
+          {
+            "mass_range_gev": [
+              0.19,
+              0.23
+            ],
+            "abs2": 1.46,
+            "uncertainty": 0.47,
+            "effective_mass_gev": 0.2091
+          },
+          {
+            "mass_range_gev": [
+              0.23,
+              0.27
+            ],
+            "abs2": 1.22,
+            "uncertainty": 0.58,
+            "effective_mass_gev": 0.2491
+          },
+          {
+            "mass_range_gev": [
+              0.27,
+              0.31
+            ],
+            "abs2": 2.3,
+            "uncertainty": 0.53,
+            "effective_mass_gev": 0.2888
+          },
+          {
+            "mass_range_gev": [
+              0.31,
+              0.35
+            ],
+            "abs2": 2.17,
+            "uncertainty": 0.65,
+            "effective_mass_gev": 0.3275
+          },
+          {
+            "mass_range_gev": [
+              0.35,
+              0.4
+            ],
+            "abs2": 3.01,
+            "uncertainty": 1.34,
+            "effective_mass_gev": 0.38
+          },
+          {
+            "mass_range_gev": [
+              0.4,
+              0.45
+            ],
+            "abs2": 3.14,
+            "uncertainty": 1.71,
+            "effective_mass_gev": 0.4266
+          },
+          {
+            "mass_range_gev": [
+              0.45,
+              0.5
+            ],
+            "abs2": 6.07,
+            "uncertainty": 2.05,
+            "effective_mass_gev": 0.4761
+          },
+          {
+            "mass_range_gev": [
+              0.5,
+              0.55
+            ],
+            "abs2": 8.49,
+            "uncertainty": 4.27,
+            "effective_mass_gev": 0.526
+          },
+          {
+            "mass_range_gev": [
+              0.55,
+              0.7
+            ],
+            "abs2": 17.4,
+            "uncertainty": 10.3,
+            "effective_mass_gev": 0.6329
+          }
+        ],
+        "validity_note": "Measured finite bin averages are used as a piecewise constant benchmark, not pointwise measurements; the last .55-.7 GeV bin is broad. No extrapolation above .7 GeV and no singular fit-pole near .704 GeV. Bin errors combine statistical and systematic uncertainties, covariance unavailable.",
+        "model_discrepancy_quantified": false
+      }
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "mass_uncertainty_gev": 0.00023,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 0.00047,
+      "br_p_gamma_uncertainty": 8e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->pi0_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.6402832
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published rho0-pi0 chiral TFF benchmark; broad physical rho spectrum and spin alignment not yet modeled.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 213,
+      "name": "rho_plus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 211,
+      "recoil_mass_gev": 0.13957039,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_plus->pi_charged_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.63553961
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Explicit isospin extension of rho0-pi0 normalized chiral TFF to charged rho-pi; measured charged radiative BR. Charged timelike shape and broad parent spectra unvalidated.",
+      "production_rate_validated": false,
+      "mass_convention": "PDG 2025 charged rho tau/e+e- pole benchmark .77511 GeV; the separate hadroproduction average .7665 GeV is not used. Native source mass-shape uncertainty remains unresolved."
+    },
+    {
+      "pdg_id": -213,
+      "name": "rho_minus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -211,
+      "recoil_mass_gev": 0.13957039,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 5e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_minus->pi_charged_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.63553961
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Explicit isospin extension of rho0-pi0 normalized chiral TFF to charged rho-pi; measured charged radiative BR. Charged timelike shape and broad parent spectra unvalidated.",
+      "production_rate_validated": false,
+      "mass_convention": "PDG 2025 charged rho tau/e+e- pole benchmark .77511 GeV; the separate hadroproduction average .7665 GeV is not used. Native source mass-shape uncertainty remains unresolved."
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "mass_uncertainty_gev": 0.00023,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.0003,
+      "br_p_gamma_uncertainty": 2.1e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->eta_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          7,
+          8,
+          10,
+          11,
+          12,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.227398
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "propagator_width": "rho-pipi-pwave",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false,
+        "pion_mass_gev": 0.13957039,
+        "kaon_mass_gev": 0.493677
+      },
+      "qualification_scope": "Published rho0-eta chiral TFF benchmark. Only .22 GeV grid point is pole-kinematically open; broad rho tails remain excluded by source approximation.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 223,
+      "name": "omega",
+      "mass_gev": 0.78266,
+      "mass_uncertainty_gev": 0.00013,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.00045,
+      "br_p_gamma_uncertainty": 4e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-omega-782.pdf",
+      "channel": "omega->eta_Aprime",
+      "transition_form_factor": {
+        "kind": "chiral-contact-vector",
+        "reference": "https://arxiv.org/abs/1111.1291",
+        "equations": [
+          5,
+          6,
+          10,
+          13
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.234798
+        ],
+        "pole_mass_gev": 0.78266,
+        "pole_width_gev": 0.00868,
+        "propagator_width": "constant",
+        "contact_vector_ratio": 2.017899940533709,
+        "parameter_uncertainties": {
+          "contact_vector_ratio": 0.1479016069423902
+        },
+        "couplings": {
+          "sigma_V": 0.58,
+          "f_V": 0.20173,
+          "h_V": 0.041
+        },
+        "validity_note": "Published tree-level chiral resonance model, normalized at zero. SigmaV=0.58 is a fit to old NA60 omega-pi data; its fit error/covariance and SU3-breaking model uncertainty are unavailable. The listed coupling-input envelope is not a full theory uncertainty.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Published omega-eta chiral TFF benchmark. Only .22 GeV grid point is pole-kinematically open.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 313,
+      "name": "kstar0",
+      "mass_gev": 0.89555,
+      "mass_uncertainty_gev": 0.0002,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 311,
+      "recoil_mass_gev": 0.497611,
+      "br_p_gamma": 0.00246,
+      "br_p_gamma_uncertainty": 0.00021,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar0->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.39793899999999993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": -313,
+      "name": "ant_kstar0",
+      "mass_gev": 0.89555,
+      "mass_uncertainty_gev": 0.0002,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -311,
+      "recoil_mass_gev": 0.497611,
+      "br_p_gamma": 0.00246,
+      "br_p_gamma_uncertainty": 0.00021,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "ant_kstar0->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.39793899999999993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 323,
+      "name": "kstar_plus",
+      "mass_gev": 0.89167,
+      "mass_uncertainty_gev": 0.00026,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 321,
+      "recoil_mass_gev": 0.493677,
+      "br_p_gamma": 0.00098,
+      "br_p_gamma_uncertainty": 9e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar_plus->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.397993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": -323,
+      "name": "kstar_minus",
+      "mass_gev": 0.89167,
+      "mass_uncertainty_gev": 0.00026,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": -321,
+      "recoil_mass_gev": 0.493677,
+      "br_p_gamma": 0.00098,
+      "br_p_gamma_uncertainty": 9e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-K-star-892.pdf",
+      "channel": "kstar_minus->K_Aprime",
+      "transition_form_factor": {
+        "kind": "finite-width-vector-pole",
+        "reference": "https://doi.org/10.1140/epjc/s10052-026-16108-x",
+        "equations": [
+          2,
+          3,
+          5
+        ],
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.397993
+        ],
+        "pole_mass_gev": 0.77526,
+        "pole_width_gev": 0.1491,
+        "parameter_uncertainties": {
+          "pole_mass_gev": 0.00023,
+          "pole_width_gev": 0.0008
+        },
+        "validity_note": "Published single-rho VMD benchmark, using the finite-width propagator from Eq2, normalized as a complex amplitude at zero. Unlike Eq3 zero-width simplification, it remains finite through the rho pole. Pole-source endpoint is below .4 GeV so the resonance is not sampled. Neither strange-transition SU3 coefficients nor model discrepancy are measured; this is not a precision prediction.",
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Theoretical finite-width single-rho VMD benchmark with measured radiative BR, explicit charge conjugates. Broad Kstar mass spectrum and multiple-vector interference unvalidated.",
+      "production_rate_validated": false
+    },
+    {
+      "pdg_id": 221,
+      "channel": "eta->piplus_piminus_Aprime",
+      "decay_type": "pseudoscalar-dipion",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi_gamma": 0.0438,
+      "br_pipi_gamma_stat": 0.0002,
+      "br_pipi_gamma_syst": 0.001,
+      "br_pipi_gamma_reference": "https://arxiv.org/abs/2109.12812",
+      "dipion_model": {
+        "kind": "besiii-coherent-magnetic-dipion",
+        "reference": "https://arxiv.org/abs/2501.10130",
+        "equations": [
+          4,
+          5
+        ],
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.547862,
+        "parent_mass_continuation": "fixed-pole-total-width",
+        "c1_minus_c2": 1.0,
+        "c3": 1.0,
+        "rho_mass_gev": 0.749,
+        "rho_mass_stat_gev": 0.054,
+        "rho_width_gev": 0.1491,
+        "virtual_rho_mass_gev": 0.749,
+        "virtual_width_prescription": "hadronic-pion-running-width",
+        "normalization": {
+          "channel": "pipi-lepton-pair",
+          "branching_fraction": 0.000307,
+          "branching_fraction_stat": 1.2e-05,
+          "branching_fraction_syst": 1.9e-05,
+          "lepton_mass_gev": 0.00051099895,
+          "alpha": 0.0072973525692838015,
+          "reference": "https://arxiv.org/abs/2501.10130"
+        },
+        "crosschecks": {
+          "radiative_branching_fraction": 0.0438,
+          "radiative_branching_reference": "https://arxiv.org/abs/2109.12812",
+          "muon_dalitz_upper_limit_90cl": 4e-07,
+          "muon_dalitz_reference": "https://arxiv.org/abs/2501.10130",
+          "validated_absolute_rate": false,
+          "note": "The real-photon rate and differential spectrum are independent cross-checks. The fitted effective rho mass is uncertain, and no covariance is available. Photon-normalized prediction for the measured ee mode differs by about 10 percent. Record this discrepancy; normalization to the measured ee mode is not independent rate validation."
+        }
+      },
+      "mass_gev": 0.547862,
+      "pdg_reference": "https://pdgweb.lbl.gov/2025/listings/rpp2025-list-eta.pdf"
+    },
+    {
+      "pdg_id": 331,
+      "channel": "eta_prime->piplus_piminus_Aprime",
+      "decay_type": "pseudoscalar-dipion",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi_gamma": 0.299,
+      "br_pipi_gamma_stat": 0.0003,
+      "br_pipi_gamma_syst": 0.0055,
+      "br_pipi_gamma_reference": "https://arxiv.org/abs/1902.03823",
+      "dipion_model": {
+        "kind": "besiii-coherent-magnetic-dipion",
+        "reference": "https://arxiv.org/abs/2402.01993",
+        "equations": [
+          4,
+          6,
+          7,
+          11
+        ],
+        "fit": "Table 4, hidden gauge Model I",
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.95778,
+        "parent_mass_continuation": "fixed-pole-total-width",
+        "c1_minus_c2": 1.0,
+        "c3": 1.0,
+        "rho_mass_gev": 0.7653,
+        "rho_mass_stat_gev": 0.0012,
+        "rho_mass_syst_gev": 0.0202,
+        "rho_width_gev": 0.1491,
+        "virtual_rho_mass_gev": 0.9543,
+        "virtual_rho_mass_stat_gev": 0.0878,
+        "virtual_rho_mass_syst_gev": 0.0364,
+        "virtual_width_prescription": "hadronic-pion-running-width",
+        "omega_mixing": {
+          "mass_gev": 0.7787,
+          "mass_stat_gev": 0.0013,
+          "mass_syst_gev": 0.0173,
+          "width_gev": 0.00868,
+          "amplitude": 0.0085,
+          "amplitude_stat": 0.0014,
+          "amplitude_syst": 0.0007,
+          "phase_radians": 1.4,
+          "phase_stat_radians": 0.3,
+          "phase_syst_radians": 0.1
+        },
+        "normalization": {
+          "channel": "pipi-lepton-pair",
+          "branching_fraction": 2.16e-05,
+          "branching_fraction_stat": 1.2e-06,
+          "branching_fraction_syst": 6e-07,
+          "lepton_mass_gev": 0.1056583755,
+          "alpha": 0.0072973525692838015,
+          "reference": "https://arxiv.org/abs/2402.01993"
+        },
+        "crosschecks": {
+          "radiative_branching_fraction": 0.299,
+          "radiative_branching_reference": "https://arxiv.org/abs/1902.03823",
+          "electron_dalitz_branching_fraction": 0.00245,
+          "electron_dalitz_stat": 2e-05,
+          "electron_dalitz_syst": 8e-05,
+          "electron_dalitz_reference": "https://arxiv.org/abs/2402.01993",
+          "validated_absolute_rate": false,
+          "note": "Gamma-normalized predictions for ee and mu-mu are about 10 percent below the measured Dalitz rates. Using the measured mu-mu mode fixes one overall amplitude; it does not independently validate the real-photon prediction. Published fit covariance and numerical differential data were not available in the inspected article."
+        }
+      },
+      "mass_gev": 0.95778,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-eta-prime-958.pdf"
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "decay_type": "vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->piplus_piminus_Aprime",
+      "rho_radiative_model": {
+        "kind": "gauged-derivative-scalar-qed",
+        "alpha": 0.0072973525692838015,
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.77526,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.49611922
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "normalization": {
+          "channel": "pipi",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "PDG quotes approximately 100 percent; unity is the explicit dominant-mode approximation, with no invented measurement error."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9903217",
+        "assumption": "Minimal gauged derivative rho-pion coupling: both charged-pion radiation diagrams plus the contact term. Extra transverse structure-dependent currents are set to zero in this exploratory benchmark.",
+        "signal_rate_validated": false,
+        "photon_validation": {
+          "cut_energy_gev": 0.05,
+          "branching_fraction": 0.0099,
+          "branching_fraction_uncertainty": 0.0016,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Independent real-photon rate check, not a fit or a massive-signal uncertainty estimate."
+        },
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "numerical_mass_tolerance_note": "The strict default pole comparison uses the declared 1e-6 GeV numerical band. A separately explicit native-Pythia context preserves the original four-vector and native zero-width pole probability, requires unchanged Check:mTolErr and open-channel agreement, and limits the diagnostic rate change to 0.1 percent. Outside the interpolation band the diagnostic uses exact quadrature; this is not physical off-shell rho support."
+      }
+    },
+    {
+      "pdg_id": 213,
+      "name": "rho_plus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "charged-vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_ids": [
+        211,
+        111
+      ],
+      "charged_pion_mass_gev": 0.13957039,
+      "neutral_pion_mass_gev": 0.1349768,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_plus->pi_charged_pi0_Aprime",
+      "charged_rho_radiative_model": {
+        "kind": "gauged-proca-pion-g2-pole",
+        "electromagnetic_gyromagnetic_ratio": 2,
+        "alpha": 0.0072973525692838015,
+        "charged_pion_mass_gev": 0.13957039,
+        "neutral_pion_mass_gev": 0.1349768,
+        "reference_parent_mass_gev": 0.77511,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.50056281
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "normalization": {
+          "channel": "charged-pion-neutral-pion",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Approximately unity is an explicit dominant-mode normalization. No measured branching error is invented."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9707202",
+        "assumption": "Local gauged charged-vector/pion pole benchmark with g_EM=2: charged-pion radiation, charged-rho radiation and the derivative contact term are coherent. Unequal pion masses and all physical vector polarizations are retained. Gauge invariance alone does not determine g_EM. Higher electromagnetic operators, timelike hadronic form factors and pion rescattering are not modeled.",
+        "signal_rate_validated": false,
+        "numerical_mass_tolerance_note": "Strict physical pole coefficient by default. Explicit native-Pythia numerical context retains the original p4 and unchanged Check:mTolErr, requires open-channel agreement and a diagnostic rate change below 0.1 percent. No physical rho-width support is introduced; exact quadrature handles diagnostics outside the qualified tiny interpolation band.",
+        "photon_cross_check": {
+          "reference": "https://arxiv.org/abs/0708.3256",
+          "location": "Table III and Eq.16",
+          "comparison_kind": "Published full meson-model calculation; not an experimental rate or a fitted normalization",
+          "comparison_parent_mass_gev": 0.775,
+          "cut_energy_gev": 0.05,
+          "cut_frame": "rho rest frame",
+          "pointlike_g2_prediction": 0.003738282632,
+          "published_full_model_prediction": 0.00423,
+          "relative_difference": -0.11624524066193864,
+          "native_pole_pointlike_prediction": 0.0037394139219397993,
+          "quantitative_massive_signal_uncertainty_available": false,
+          "note": "The pointlike g_EM=2 benchmark is11.6percent below the published full-model real-photon ratio at the matching pole and cut. No tuning, uncertainty estimate or precision-agreement claim is inferred from this comparison; structure-dependent interference remains unresolved."
+        }
+      },
+      "qualification_scope": "Explicit g_EM=2 charged-vector pole benchmark. Physical parent inventory and pole are shared with the existing two-body rho transition. The timelike hadronic rate and model discrepancy are unresolved.",
+      "production_rate_validated": false,
+      "mass_convention": "Same .77511GeV PDG2025 charged-rho pole as the existing two-body source; no parent mass retuning."
+    },
+    {
+      "pdg_id": -213,
+      "name": "rho_minus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "charged-vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_ids": [
+        -211,
+        111
+      ],
+      "charged_pion_mass_gev": 0.13957039,
+      "neutral_pion_mass_gev": 0.1349768,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_minus->pi_charged_pi0_Aprime",
+      "charged_rho_radiative_model": {
+        "kind": "gauged-proca-pion-g2-pole",
+        "electromagnetic_gyromagnetic_ratio": 2,
+        "alpha": 0.0072973525692838015,
+        "charged_pion_mass_gev": 0.13957039,
+        "neutral_pion_mass_gev": 0.1349768,
+        "reference_parent_mass_gev": 0.77511,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.50056281
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "normalization": {
+          "channel": "charged-pion-neutral-pion",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Approximately unity is an explicit dominant-mode normalization. No measured branching error is invented."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9707202",
+        "assumption": "Local gauged charged-vector/pion pole benchmark with g_EM=2: charged-pion radiation, charged-rho radiation and the derivative contact term are coherent. Unequal pion masses and all physical vector polarizations are retained. Gauge invariance alone does not determine g_EM. Higher electromagnetic operators, timelike hadronic form factors and pion rescattering are not modeled.",
+        "signal_rate_validated": false,
+        "numerical_mass_tolerance_note": "Strict physical pole coefficient by default. Explicit native-Pythia numerical context retains the original p4 and unchanged Check:mTolErr, requires open-channel agreement and a diagnostic rate change below 0.1 percent. No physical rho-width support is introduced; exact quadrature handles diagnostics outside the qualified tiny interpolation band.",
+        "photon_cross_check": {
+          "reference": "https://arxiv.org/abs/0708.3256",
+          "location": "Table III and Eq.16",
+          "comparison_kind": "Published full meson-model calculation; not an experimental rate or a fitted normalization",
+          "comparison_parent_mass_gev": 0.775,
+          "cut_energy_gev": 0.05,
+          "cut_frame": "rho rest frame",
+          "pointlike_g2_prediction": 0.003738282632,
+          "published_full_model_prediction": 0.00423,
+          "relative_difference": -0.11624524066193864,
+          "native_pole_pointlike_prediction": 0.0037394139219397993,
+          "quantitative_massive_signal_uncertainty_available": false,
+          "note": "The pointlike g_EM=2 benchmark is11.6percent below the published full-model real-photon ratio at the matching pole and cut. No tuning, uncertainty estimate or precision-agreement claim is inferred from this comparison; structure-dependent interference remains unresolved."
+        }
+      },
+      "qualification_scope": "Explicit g_EM=2 charged-vector pole benchmark. Physical parent inventory and pole are shared with the existing two-body rho transition. The timelike hadronic rate and model discrepancy are unresolved.",
+      "production_rate_validated": false,
+      "mass_convention": "Same .77511GeV PDG2025 charged-rho pole as the existing two-body source; no parent mass retuning."
+    },
+    {
+      "pdg_id": 130,
+      "mass_gev": 0.49761,
+      "mean_proper_ctau_mm": 15330.0,
+      "decay_type": "neutral-kaon-photon",
+      "channel": "KL->gamma_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "br_gamma_gamma": 0.0005471,
+      "br_gamma_gamma_reference": "https://pdg.lbl.gov/2024/listings/rpp2024-list-K-long.pdf",
+      "transition_form_factor": {
+        "kind": "kl-dip-single-virtual",
+        "parent_pdg_id": 130,
+        "alpha_dip": -1.729,
+        "rho_mass_gev": 0.77526,
+        "valid_mass_range_gev": [
+          0.0,
+          0.49761
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ex/0702039"
+      },
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
+    },
+    {
+      "pdg_id": 310,
+      "mass_gev": 0.49761,
+      "mean_proper_ctau_mm": 26.842,
+      "decay_type": "neutral-kaon-photon",
+      "channel": "KS->gamma_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "ks_dispersive_reference": {
+        "path": "dark_photon_ks_dispersive_2016.json",
+        "sha256": "15b1330ed008b81b5af0c2b7824b33afacad4e9373838bc6761f6029af4abdd2"
+      },
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
+    },
+    {
+      "pdg_id": 321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-pion",
+      "channel": "K+->pi+_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "recoil_pdg_id": 211,
+      "recoil_mass_gev": 0.13957039,
+      "weak_form_factor_model": {
+        "kind": "chpt-p6-kaon-em-vector",
+        "parent_pdg_id": 321,
+        "a": -0.575,
+        "b": -0.722,
+        "alpha_pipi": -2.04e-07,
+        "beta_pipi": -2.05e-08,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "loop_pion_mass_gev": 0.13957039,
+        "pion_vector_rv_squared": 2.5,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.35410661
+        ],
+        "reference": "https://arxiv.org/html/2209.05076v3#S4",
+        "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5",
+        "domain_restriction_note": "Restrict the published benchmark domain to the unchanged native parent endpoint; no fit parameter changes."
+      },
+      "alpha_em": 0.0072973525692838015
+    },
+    {
+      "pdg_id": -321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-pion",
+      "channel": "K-->pi-_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "recoil_pdg_id": -211,
+      "recoil_mass_gev": 0.13957039,
+      "weak_form_factor_model": {
+        "kind": "chpt-p6-kaon-em-vector",
+        "parent_pdg_id": -321,
+        "a": -0.575,
+        "b": -0.722,
+        "alpha_pipi": -2.04e-07,
+        "beta_pipi": -2.05e-08,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "loop_pion_mass_gev": 0.13957039,
+        "pion_vector_rv_squared": 2.5,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.35410661
+        ],
+        "reference": "https://arxiv.org/html/2209.05076v3#S4",
+        "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5",
+        "domain_restriction_note": "Restrict the published benchmark domain to the unchanged native parent endpoint; no fit parameter changes."
+      },
+      "alpha_em": 0.0072973525692838015
+    },
+    {
+      "pdg_id": 310,
+      "mass_gev": 0.49761,
+      "mean_proper_ctau_mm": 26.842,
+      "decay_type": "weak-kaon-pion",
+      "channel": "KS->pi0_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "weak_form_factor_model": {
+        "kind": "chpt-p6-kaon-em-vector",
+        "parent_pdg_id": 310,
+        "a": 1.06,
+        "b": 0.424,
+        "alpha_pipi": -5.2e-08,
+        "beta_pipi": -5.333333333333333e-09,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "loop_pion_mass_gev": 0.13957039,
+        "pion_vector_rv_squared": 2.5,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.3626332
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ex/0409011#page=11",
+        "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5",
+        "domain_restriction_note": "Restrict the published benchmark domain to the unchanged native parent endpoint; no fit parameter changes."
+      },
+      "alpha_em": 0.0072973525692838015,
+      "native_record_mass_support_gev": [
+        0.49761,
+        0.497611
+      ],
+      "native_record_mass_support_reference": "Initialized Pythia physical130/310 and flavour311 zero-width mass tables, independently pinned by native_kaon_mass_authorities. Existing K* recoil settings set311:m0=0.497611; all source conditions remain unchanged."
+    },
+    {
+      "pdg_id": 321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K+->e+_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": -11,
+      "neutrino_pdg_id": 12,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.00051099895,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": 321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K+->mu+_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": -13,
+      "neutrino_pdg_id": 14,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.1056583755,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": -321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K-->e-_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": 11,
+      "neutrino_pdg_id": -12,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.00051099895,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": -321,
+      "mass_gev": 0.493677,
+      "mean_proper_ctau_mm": 3713.0,
+      "decay_type": "weak-kaon-leptonic",
+      "channel": "K-->mu-_nu_Aprime",
+      "parent_mass_model": "native-stable-kaon",
+      "pdg_reference": "Pythia 8.317 initialized native ParticleData; matching unchanged source mass authority",
+      "lifetime_reference": "Pythia 8.317 initialized native tau0; preserve exact native sampled tau/vDec",
+      "relative_numerical_mass_precision_budget": 1e-05,
+      "charged_lepton_pdg_id": 13,
+      "neutrino_pdg_id": -14,
+      "leptonic_form_factor_model": {
+        "kind": "chpt-p4-charged-kaon-leptonic-vector",
+        "parent_pdg_id": 321,
+        "order": "p4-one-loop",
+        "parent_mass_gev": 0.493677,
+        "lepton_mass_gev": 0.1056583755,
+        "charged_pion_mass_gev": 0.13957039,
+        "fpi_gev": 0.0932,
+        "fk_gev": 0.1136,
+        "l9": 0.0069,
+        "l10": -0.0055,
+        "lec_scale_gev": 0.77,
+        "alpha_em": 0.0072973525692838015,
+        "fermi_constant_gev_minus2": 1.1663787e-05,
+        "v_us": 0.22,
+        "valid_q2_range_gev2": [
+          0.0,
+          0.244
+        ],
+        "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=18"
+      },
+      "leptonic_rate_quadrature": {
+        "order": 24,
+        "check_order": 48,
+        "relative_convergence_tolerance": 0.0002
+      },
+      "native_kinematic_precision": {
+        "relative_mass_limit": 1e-07,
+        "relative_endpoint_limit": 1e-06
+      }
+    },
+    {
+      "pdg_id": 113,
+      "channel": "113->pi0_pi0_Aprime",
+      "mass_gev": 0.77526,
+      "pdg_reference": "Unchanged initialized narrow-source parent mass; input current and total width: hep-ph/0105179",
+      "decay_type": "neutral-vector-dipion",
+      "pion_mass_gev": 0.1349768,
+      "recoil_pdg_ids": [
+        111,
+        111
+      ],
+      "parent_polarization": "unpolarized",
+      "parent_mass_model": "zero-width-pole",
+      "neutral_dipion_model": {
+        "reference": "https://arxiv.org/pdf/hep-ph/0105179",
+        "reference_parent_mass_gev": 0.77526,
+        "pion_mass_gev": 0.1349768,
+        "total_width_gev": 0.1502,
+        "total_width_reference": "Explicit primary-2001 total-width normalization; not tuned to a signal or photon rate",
+        "current": {
+          "kind": "gauged-neutral-vector-dipion-leading",
+          "reference": "https://arxiv.org/pdf/hep-ph/0105179",
+          "virtual_vertex_prescription": "constant-local-lagrangian",
+          "on_shell_rescattering_factorization": true,
+          "physical_production_ready": false,
+          "alpha_em": 0.0072973525692838015,
+          "vector_exchanges": [
+            {
+              "mass_gev": 0.782,
+              "width_gev": 0.00849,
+              "width_prescription": "constant-primary-2001",
+              "coupling_product_gev_inverse2": 11.275487234076744
+            }
+          ],
+          "charged_scalar_loops": [
+            {
+              "mass_gev": 0.13957,
+              "vector_coupling": 6.038691911333116,
+              "rescattering": {
+                "kind": "linear-sigma-pion",
+                "sigma_mass_gev": 0.478,
+                "sigma_width_gev": 0.324,
+                "width_prescription": "constant-primary-2001",
+                "fpi_gev": 0.0924,
+                "pion_mass_gev": 0.13957
+              }
+            },
+            {
+              "mass_gev": 0.49368,
+              "vector_coupling": 3.0193459556665574,
+              "rescattering": {
+                "kind": "chpt-kaon-to-neutral-pions-leading",
+                "fpi_gev": 0.0924,
+                "fkaon_gev": 0.0924,
+                "pion_mass_gev": 0.13957
+              }
+            }
+          ]
+        },
+        "numerical_cdf": {
+          "cells_s": 128,
+          "cells_cos": 64,
+          "loop_order": 128
+        },
+        "numerical_accuracy": {
+          "relative_rate_convergence_target": 0.001,
+          "qualification": "Independent phase/loop quadrature and positive-grid refinement; benchmark diagnostic, not a universal integration bound"
+        },
+        "native_kinematic_precision": {
+          "relative_mass_limit": 1e-07,
+          "relative_endpoint_limit": 1e-06
+        },
+        "source_continuation": "Whole conditional-distribution L1 measure charged as2*C_native to the complete fixed-source0.1% gate",
+        "reference_pole_note": "The native parent pole remains the unchanged source-table mass; internal current poles/couplings retain their explicit primary-era values.",
+        "theoretical_limitations": [
+          "Minimal gauging fixes both loop tensors within this Lagrangian. It does not determine additional higher-derivative local timelike operators or hadronic form factors.",
+          "The selected linear-sigma rescattering scenario replaces the chiral term; adding an independent sigma amplitude would double count it. Zero scalar flavor mixing and a constant sigma width are explicit benchmark assumptions.",
+          "Kaon rescattering uses its leading chiral term. Flavor breaking, scalar kaon rescattering, empirical FV minus 2GV contact structures and higher chiral orders are not covered by the scalar scenarios.",
+          "Photon measurements test normalization and interference at q2=0. They do not bound virtual-only currents.",
+          "Natural rho/omega ancestors in the collision source are included in the parent inventory. Future exclusive replacement needs a source/ancestry audit and coherent sibling handling before any admission.",
+          "No detector, trigger, material, dimuon branching, production uncertainty or acceptance claim follows from this rate kernel."
+        ]
+      }
+    },
+    {
+      "pdg_id": 223,
+      "channel": "223->pi0_pi0_Aprime",
+      "mass_gev": 0.78266,
+      "pdg_reference": "Unchanged initialized narrow-source parent mass; input current and total width: hep-ph/0105179",
+      "decay_type": "neutral-vector-dipion",
+      "pion_mass_gev": 0.1349768,
+      "recoil_pdg_ids": [
+        111,
+        111
+      ],
+      "parent_polarization": "unpolarized",
+      "parent_mass_model": "zero-width-pole",
+      "neutral_dipion_model": {
+        "reference": "https://arxiv.org/pdf/hep-ph/0105179",
+        "reference_parent_mass_gev": 0.78266,
+        "pion_mass_gev": 0.1349768,
+        "total_width_gev": 0.00849,
+        "total_width_reference": "Explicit primary-2001 total-width normalization; not tuned to a signal or photon rate",
+        "current": {
+          "kind": "gauged-neutral-vector-dipion-leading",
+          "reference": "https://arxiv.org/pdf/hep-ph/0105179",
+          "virtual_vertex_prescription": "constant-local-lagrangian",
+          "on_shell_rescattering_factorization": true,
+          "physical_production_ready": false,
+          "alpha_em": 0.0072973525692838015,
+          "vector_exchanges": [
+            {
+              "mass_gev": 0.77,
+              "width_gev": 0.1502,
+              "pion_mass_gev": 0.13957,
+              "width_prescription": "rho-pipi-running-primary-2003",
+              "coupling_product_gev_inverse2": 3.758495744692248,
+              "mixing_partner": {
+                "mass_gev": 0.782,
+                "width_gev": 0.00849,
+                "width_prescription": "constant-primary-2001"
+              },
+              "mixing_coupling_ratio": 3.0,
+              "mixing_mass_squared_gev2": -0.0038
+            }
+          ],
+          "charged_scalar_loops": [
+            {
+              "mass_gev": 0.49368,
+              "vector_coupling": 3.0193459556665574,
+              "rescattering": {
+                "kind": "chpt-kaon-to-neutral-pions-leading",
+                "fpi_gev": 0.0924,
+                "fkaon_gev": 0.0924,
+                "pion_mass_gev": 0.13957
+              }
+            }
+          ],
+          "external_mixing": {
+            "coefficient": [
+              -0.005786175447920138,
+              0.03386914062196254
+            ],
+            "partner_model": {
+              "kind": "gauged-neutral-vector-dipion-leading",
+              "reference": "https://arxiv.org/pdf/hep-ph/0105179",
+              "virtual_vertex_prescription": "constant-local-lagrangian",
+              "on_shell_rescattering_factorization": true,
+              "physical_production_ready": false,
+              "alpha_em": 0.0072973525692838015,
+              "vector_exchanges": [
+                {
+                  "mass_gev": 0.782,
+                  "width_gev": 0.00849,
+                  "width_prescription": "constant-primary-2001",
+                  "coupling_product_gev_inverse2": 11.275487234076744
+                }
+              ],
+              "charged_scalar_loops": [
+                {
+                  "mass_gev": 0.13957,
+                  "vector_coupling": 6.038691911333116,
+                  "rescattering": {
+                    "kind": "linear-sigma-pion",
+                    "sigma_mass_gev": 0.478,
+                    "sigma_width_gev": 0.324,
+                    "width_prescription": "constant-primary-2001",
+                    "fpi_gev": 0.0924,
+                    "pion_mass_gev": 0.13957
+                  }
+                },
+                {
+                  "mass_gev": 0.49368,
+                  "vector_coupling": 3.0193459556665574,
+                  "rescattering": {
+                    "kind": "chpt-kaon-to-neutral-pions-leading",
+                    "fpi_gev": 0.0924,
+                    "fkaon_gev": 0.0924,
+                    "pion_mass_gev": 0.13957
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "numerical_cdf": {
+          "cells_s": 128,
+          "cells_cos": 64,
+          "loop_order": 128
+        },
+        "numerical_accuracy": {
+          "relative_rate_convergence_target": 0.001,
+          "qualification": "Independent phase/loop quadrature and positive-grid refinement; benchmark diagnostic, not a universal integration bound"
+        },
+        "native_kinematic_precision": {
+          "relative_mass_limit": 1e-07,
+          "relative_endpoint_limit": 1e-06
+        },
+        "source_continuation": "Whole conditional-distribution L1 measure charged as2*C_native to the complete fixed-source0.1% gate",
+        "reference_pole_note": "The native parent pole remains the unchanged source-table mass; internal current poles/couplings retain their explicit primary-era values.",
+        "theoretical_limitations": [
+          "Minimal gauging fixes both loop tensors within this Lagrangian. It does not determine additional higher-derivative local timelike operators or hadronic form factors.",
+          "The selected linear-sigma rescattering scenario replaces the chiral term; adding an independent sigma amplitude would double count it. Zero scalar flavor mixing and a constant sigma width are explicit benchmark assumptions.",
+          "Kaon rescattering uses its leading chiral term. Flavor breaking, scalar kaon rescattering, empirical FV minus 2GV contact structures and higher chiral orders are not covered by the scalar scenarios.",
+          "Photon measurements test normalization and interference at q2=0. They do not bound virtual-only currents.",
+          "Natural rho/omega ancestors in the collision source are included in the parent inventory. Future exclusive replacement needs a source/ancestry audit and coherent sibling handling before any admission.",
+          "No detector, trigger, material, dimuon branching, production uncertainty or acceptance claim follows from this rate kernel."
+        ]
+      }
+    }
+  ],
+  "form_factor_uncertainty": {
+    "prescription": "Store central values and individual parameter shifts; a box envelope with statistical and systematic errors combined in quadrature is a diagnostic, not a joint confidence interval.",
+    "parameter_covariance_available": false,
+    "parent_rate_uncertainties_are_correlated_across_mass_points": true,
+    "parent_spectrum_uncertainty_included": false
+  },
+  "width_authority": {
+    "provider": "DarkCast 2.1",
+    "commit": "5a2a53a8984827be06e2939e6c3705f79d180048",
+    "reference": "https://arxiv.org/abs/1801.04847",
+    "source": "https://gitlab.com/darkcast/releases",
+    "provider_function": "run_dark_photon_spectral_gen.physical_width_table",
+    "electromagnetic_coupling_magnitude": 0.302822,
+    "provider_muon_mass_gev": 0.10566,
+    "muon_mass_note": "The pinned provider threshold is 3.249 keV above the decay-kernel threshold. The initial grid starts at 0.22 GeV; sub-keV threshold scans require a recorded consistent mass override.",
+    "hadronic_width": "Pinned data-driven electromagnetic exclusive spectral channels, including low-mass hadrons and resonances; do not replace with free-quark R or add another running-alpha factor.",
+    "hidden_decay_channels": false,
+    "neutral_current_width_included": false,
+    "physical_width_validated": false
+  },
+  "source": {
+    "beam_energy_gev": 6800.0,
+    "target": "stationary proton",
+    "source_class": "SoftQCD:nonDiffractive",
+    "additional_pythia_settings": [
+      "SigmaTotal:mode=1"
+    ],
+    "cross_section_model": "Pythia 8.317 energy-dependent SaS/Donnachie-Landshoff non-diffractive pp; CP5 hadronization/MPI settings retained",
+    "cross_section_reference": "https://pythia.org/latest-manual/TotalCrossSections.html",
+    "cross_section_note": "Explicit mode 1 replaces the CP5 mode 0 fixed LHC total/elastic rates. ND-only generator prediction at the actual fixed-target energy; parent spectra and absolute normalization are provisional, not a data calibration.",
+    "muon_filter": false,
+    "unit_source_event_weights": true,
+    "all_successful_source_interactions_in_denominator": true,
+    "zero_parent_interactions_in_denominator": true,
+    "count_distinct_physical_parent_mesons": true,
+    "include_eta_feeddown_from_etaprime": true,
+    "normalization_formula": "sigma_source * epsilon^2 * mean_full_source(sum_all_distinct_physical_parents(sum_owned_exclusive_channels(BR_channel / epsilon^2))) * BR_Aprime_to_mumu",
+    "unit_weight_signal_proposal": "Accept one full collision proportional to the sum of all physical parent/channel coefficients, then select exactly one parent and exclusive channel from that same sum. Natural-source parent inventory is never repeated for additional channels.",
+    "no_geometry_or_decay_position_filter": true,
+    "force_decay_branching_correction_count": 1,
+    "multiple_rare_decays_order_epsilon4_neglected": true,
+    "double_counting_rule": "Keep DY and this meson mechanism distinct. Sum different physical mechanisms with their own rates; never average their generator cross sections.",
+    "vector_source_prescription": "Set each declared vector parent mass and mass-selection bounds to its referenced pole before generation, with mWidth=0. The same narrow prescription is explicit for the dipion eta parents. Never repair an existing parent four-vector or discard off-shell source collisions.",
+    "vector_source_precision": "Narrow-width approximation only. Compare rates/spectra with a separately qualified finite-width prescription before claiming complete meson physics, especially near endpoints.",
+    "spin_precision": "Vector-parent isotropy assumes no spin alignment. This is not measured for SHIFT and must remain an uncertainty/validation gap.",
+    "dipion_prescription": "Coherent conserved magnetic current with contact, rho and eta-prime rho-omega interference; retain the pion/muon-plane correlation. Normalize each parent amplitude once to its measured Dalitz branching fraction; real-photon rates are independent cross-checks and retain their recorded tensions.",
+    "neutral_dipion_prescription": "One coherent loop/scalar/VMD amplitude with both massive transverse tensors, identical-pi0 symmetry factor and full correlated dimuon polarization. Source coefficient and unit-weight sampling share the exact positive bilinear numerical CDF integral; epsilon, lifetime, source event weights and parent momenta remain unchanged."
+  },
+  "initial_grid": {
+    "masses_gev": [
+      0.22,
+      0.25,
+      0.3,
+      0.4,
+      0.5,
+      0.7,
+      0.9
+    ],
+    "mean_lab_flight_m": [
+      5,
+      30,
+      100,
+      1000
+    ],
+    "prompt": true,
+    "lab_to_ctau": "Use the original eta/eta-prime reference-grid physical epsilon and proper lifetime when comparing or combining mechanisms. A common LAB directory label is a declared reference, not the actual equal mean flight of all mechanisms.",
+    "endpoint_diagnostics_gev": [
+      0.2114,
+      0.5478,
+      0.802,
+      0.9577
+    ],
+    "validity_note": "New narrow-source light-meson channels open only below their own physical recoil threshold; each form factor retains its declared mass domain. At .9 GeV only eta-prime -> gamma Aprime is open in this pole-source benchmark. Broad vector tails are a separate unresolved source-model gap."
+  },
+  "omitted_mechanisms": [
+    "other multiparticle and excited-meson electromagnetic transitions",
+    "heavy-flavour and quarkonium transitions",
+    "finite-width vector source tails",
+    "measured vector spin alignment",
+    "diffractive source interactions",
+    "proton bremsstrahlung",
+    "direct vector-meson mixing",
+    "thick-target secondary production",
+    "Other weak kaon amplitudes and heavy-flavour decays; finite relevance notes are in SHIFT_BSM.md"
+  ],
+  "pi0_to_dimuon_signal_kinematically_closed": true,
+  "normalization_ready": false,
+  "detector_simulated": false,
+  "production_rate_validated": false,
+  "channels": [
+    "eta->gamma_Aprime",
+    "eta_prime->gamma_Aprime",
+    "omega->pi0_Aprime",
+    "phi->eta_Aprime",
+    "phi->pi0_Aprime",
+    "rho0->pi0_Aprime",
+    "rho_plus->pi_charged_Aprime",
+    "rho_minus->pi_charged_Aprime",
+    "rho0->eta_Aprime",
+    "omega->eta_Aprime",
+    "kstar0->K_Aprime",
+    "ant_kstar0->K_Aprime",
+    "kstar_plus->K_Aprime",
+    "kstar_minus->K_Aprime",
+    "eta->piplus_piminus_Aprime",
+    "eta_prime->piplus_piminus_Aprime",
+    "rho0->piplus_piminus_Aprime",
+    "rho_plus->pi_charged_pi0_Aprime",
+    "rho_minus->pi_charged_pi0_Aprime",
+    "KL->gamma_Aprime",
+    "KS->gamma_Aprime",
+    "K+->pi+_Aprime",
+    "K-->pi-_Aprime",
+    "KS->pi0_Aprime",
+    "K+->e+_nu_Aprime",
+    "K+->mu+_nu_Aprime",
+    "K-->e-_nu_Aprime",
+    "K-->mu-_nu_Aprime",
+    "113->pi0_pi0_Aprime",
+    "223->pi0_pi0_Aprime"
+  ],
+  "physics_complete": false,
+  "vector_branching_formula": "epsilon^2 * BR(V -> P gamma) * abs(F(mass^2)/F(0))^2 * [pstar(mass)/pstar(0)]^3; no identical-photon factor two",
+  "vector_branching_reference": "https://arxiv.org/abs/1210.3927",
+  "completion_policy": "Keep physics_complete false until every relevant channel has a validated rate and differential source model or a quantitative omitted-yield bound at each mass/lifetime. Photon branching fractions and a short parent-counting probe are not such bounds.",
+  "radiative_branching_formula_scope": "Pseudoscalar -> photon Aprime only; vector and dipion channels use their separately declared kernels and normalization authorities.",
+  "charged_rho_channel_group_count": 1,
+  "exclusive_channel_count": 19,
+  "catalogue_channel_group_count": 15,
+  "native_precision_policy": {
+    "kind": "full-fixed-source-conservative-parent-measure-v1",
+    "required_relative_bound": 0.001
+  },
+  "finite_scope_note": "The 588 real-photon decay inventory did not cover virtual-only weak currents. The source census and finite leading-family audit do not establish universal physics completeness."
+}

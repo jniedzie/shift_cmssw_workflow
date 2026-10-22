@@ -460,7 +460,7 @@ def meson_source_exposure(contract, directory):
                         roundoff['coefficient_difference_from_kinematic_mass']))
                     same_native_parent_precision_report(parent.get('native_parent_precision_report'),
                         checked_parent.get('native_parent_precision_report'),deferred_policy=deferred_precision)
-                    for key in ('kaon_source_count_authority','leptonic_kinematic_precision'):
+                    for key in ('kaon_source_count_authority','leptonic_kinematic_precision','native_channel_precision_reports'):
                         if key in parent or key in checked_parent:
                             same_resolved_meson_model(parent.get(key),checked_parent.get(key))
                     shift = parent["coefficient_relative_precision_shift"]

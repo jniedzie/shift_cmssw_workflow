@@ -1,5 +1,5 @@
-# Code style: AI-code. AI-generated coherent neutral-vector dipion rate kernel.
-"""Rate-only V -> pi0 pi0 A' in a declared gauged leading model.
+# Code style: AI-code. AI-generated coherent neutral-vector dipion current and numerical sampler.
+"""V -> pi0 pi0 A' in a declared gauged leading numerical benchmark.
 
 The real-photon authority is Bramon et al., hep-ph/0105179, Eqs4--18,21--22.
 The charged scalar is minimally coupled to both vector sources. Two triangle
@@ -22,19 +22,24 @@ exchange and external/internal rho-omega mixing are coherent with the loop.
 Local timelike vertices, the selected rescattering model and its pole/width
 prescription are assumptions. Additional derivative currents, counterterms
 and higher chiral orders remain unknown. Model comparisons are not universal
-rate bounds. No sampler, production adapter, source weights or transport are
-provided. All rates exclude BR(A' -> mu+mu-).
+rate bounds. A positive bilinear numerical density supplies one shared rate
+and unit-weight CDF sampler, with exact conditional dimuon polarization.
+Production admission and transport require separate gates. All rates exclude
+BR(A' -> mu+mu-).
 
 Four-vectors are (E,px,py,pz), GeV; the metric is (+---). Identical pi0s
 receive one explicit 1/2! phase-space factor.
 """
 import cmath
+import bisect
 from functools import lru_cache
+import hashlib
+import json
 import math
 
 from dark_photon_dipion_meson import _gauss_legendre
 from dark_photon_double_radiative import _dot, _vertex, polarizations
-from dark_photon_meson import boost
+from dark_photon_meson import boost,MUON_MASS_GEV
 from dark_photon_vector_meson import two_body_momentum
 
 REFERENCE='https://arxiv.org/pdf/hep-ph/0105179'
@@ -326,3 +331,220 @@ def decay_width(parent_mass,pion_mass,mass,*,model,epsilon_em,order=24,loop_orde
                 row=differential_width(parent_mass,pion_mass,mass,s,cosine,model=model,loop_order=loop_order)
                 for name in sums:sums[name]+=(high-low)/2*weight*angular_weight*row[name]*epsilon_em**2
     return sums
+
+
+def _linear_cdf(a,b,uniform):
+    """Exact inverse of the normalized nonnegative linear density a+(b-a)x."""
+    if min(a,b)<0 or a+b<=0 or not 0<uniform<1:
+        raise ValueError('Positive linear-CDF normalization and open uniform variate required')
+    if abs(b-a)<=8*math.ulp(max(a,b)):return uniform
+    target=uniform*(a+b)/2
+    return 2*target/(a+math.sqrt(max(0.,a*a+2*(b-a)*target)))
+
+
+class NumericalDecayTable:
+    """An explicit positive bilinear numerical model with exact CDF sampling.
+
+    This table is an approximation to the stated leading current. Its exact
+    cell integrals define BOTH its rate and normalized sampling distribution.
+    No scanned maximum is used. Qualify grid refinement and independent rate
+    and shape checks before admitting a new point. The conditional dimuon
+    polarization is evaluated from the coherent current at the sampled point.
+    """
+    def __init__(self,parent_mass,pion_mass,mass,*,model,cells_s=64,cells_cos=32,loop_order=96):
+        if (not 2*MUON_MASS_GEV<mass<parent_mass-2*pion_mass or
+                any(type(n) is not int or not 8<=n<=512 for n in (cells_s,cells_cos))):
+            raise ValueError('Open dimuon/dipion channel and explicit bounded CDF grid required')
+        self.parent_mass,self.pion_mass,self.mass=parent_mass,pion_mass,mass
+        self.model=model;self.loop_order=loop_order
+        self.low,self.high=4*pion_mass**2,(parent_mass-mass)**2
+        edges={i/cells_s for i in range(cells_s+1)}
+        currents=[model]+([model['external_mixing']['partner_model']] if model.get('external_mixing') else [])
+        for current in currents:
+            for row in current['charged_scalar_loops']:
+                threshold=4*row['mass_gev']**2
+                if self.low<threshold<self.high:
+                    edges.add(2/math.pi*math.asin(math.sqrt((threshold-self.low)/(self.high-self.low))))
+        self.axes=sorted(edges);self.cosines=[-1+2*j/cells_cos for j in range(cells_cos+1)]
+        values=[]
+        for t in self.axes:
+            if t in (0.,1.):values.append([0.]*(cells_cos+1));continue
+            s=self.invariant(t);jacobian=(self.high-self.low)*math.pi/2*math.sin(math.pi*t)
+            row=[differential_width(parent_mass,pion_mass,mass,s,c,model=model,loop_order=loop_order)['total']*jacobian
+                for c in self.cosines]
+            if any(not math.isfinite(v) or v<0 for v in row):
+                raise ValueError('Finite nonnegative numerical joint density required')
+            values.append(row)
+        self.values=values;self.cells=[];self.cumulative=[];total=0.
+        self.spectrum=[]
+        for i,(left,right) in enumerate(zip(self.axes,self.axes[1:])):
+            marginal=0.
+            for j in range(cells_cos):
+                corners=(values[i][j],values[i+1][j],values[i][j+1],values[i+1][j+1])
+                integral=(right-left)*2/cells_cos*math.fsum(corners)/4
+                if integral>0:
+                    total+=integral;self.cells.append((i,j,corners));self.cumulative.append(total)
+                marginal+=integral
+            self.spectrum.append((self.invariant((left+right)/2),marginal))
+        if not math.isfinite(total) or total<=0:raise ValueError('Positive finite CDF rate required')
+        self.integral=total
+        payload=dict(parent_mass_gev=parent_mass,pion_mass_gev=pion_mass,mass_gev=mass,
+            axes=self.axes,cosines=self.cosines,values=values,loop_order=loop_order,
+            interpolation='nonnegative-bilinear-joint-density-in-sine-squared-invariant-coordinate')
+        self.sha256=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+
+    def invariant(self,t):return self.low+(self.high-self.low)*math.sin(math.pi*t/2)**2
+
+    def sample(self,rng):
+        for _ in range(128):
+            draw=rng.random()*self.integral
+            index=min(bisect.bisect_right(self.cumulative,draw),len(self.cells)-1)
+            i,j,(f00,f10,f01,f11)=self.cells[index]
+            first,second=rng.random(),rng.random()
+            if not 0<first<1 or not 0<second<1:continue
+            u=_linear_cdf((f00+f01)/2,(f10+f11)/2,first)
+            v=_linear_cdf((1-u)*f00+u*f10,(1-u)*f01+u*f11,second)
+            t=self.axes[i]+u*(self.axes[i+1]-self.axes[i])
+            cosine=self.cosines[j]+v*(self.cosines[j+1]-self.cosines[j])
+            s=self.invariant(t)
+            if self.low<s<self.high:return s,cosine
+        raise RuntimeError('CDF draws repeatedly landed on zero-measure endpoints')
+
+
+@lru_cache(maxsize=64)
+def _cached_decay_table(key,mass):
+    model=json.loads(key);settings=model['numerical_cdf']
+    return NumericalDecayTable(model['reference_parent_mass_gev'],model['pion_mass_gev'],mass,
+        model=model['current'],cells_s=settings['cells_s'],cells_cos=settings['cells_cos'],
+        loop_order=settings['loop_order'])
+
+
+def _table(model,mass):
+    inputs=model.get('neutral_dipion_model',model)
+    return _cached_decay_table(json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False),mass)
+
+
+def _mass_precision(parent_mass,mass,model,**native_precision):
+    inputs=model.get('neutral_dipion_model',model);nominal=inputs['reference_parent_mass_gev']
+    _positive(nominal,'reference parent mass');_positive(inputs['pion_mass_gev'],'neutral pion mass')
+    _positive(inputs['total_width_gev'],'physical parent total width')
+    _positive(inputs.get('em_mixing_over_epsilon_abs2',1.),'EM mixing over kinetic epsilon squared')
+    _positive(parent_mass,'event parent mass');_positive(mass,'signal mass')
+    settings=inputs['native_kinematic_precision'];delta=abs(parent_mass-nominal)
+    deferred=native_precision.get('defer_to_full_source',False)
+    if type(deferred) is not bool:raise ValueError('Full-source deferral must be explicit boolean')
+    if deferred:
+        native=native_precision.get('native_mass_gev');energy=native_precision.get('native_energy_gev')
+        tolerance=native_precision.get('native_mass_tolerance')
+        if (native!=nominal or type(energy) not in (int,float) or not math.isfinite(energy) or energy<=0 or
+                type(tolerance) not in (int,float) or not math.isfinite(tolerance) or tolerance<=0 or
+                delta/max(energy,1.)>tolerance):
+            raise ValueError('Unchanged native mass, energy and Pythia tolerance required for continuation')
+        if (parent_mass>mass+2*inputs['pion_mass_gev']) != (nominal>mass+2*inputs['pion_mass_gev']):
+            raise ValueError('Native precision changes neutral-dipion channel opening')
+        return inputs
+    gap=abs(nominal-mass-2*inputs['pion_mass_gev'])
+    if (delta/nominal>settings['relative_mass_limit'] or
+            (delta/gap if gap else math.inf)>settings['relative_endpoint_limit']):
+        raise ValueError('Neutral-dipion invariant mass or endpoint precision gate failed')
+    return inputs
+
+
+def branching_coefficient(parent_mass,mass,model,**native_precision):
+    """Fixed-M0 CDF rate / physical total width, before kinetic epsilon² and BRμμ."""
+    inputs=_mass_precision(parent_mass,mass,model,**native_precision)
+    if mass>=inputs['reference_parent_mass_gev']-2*inputs['pion_mass_gev']:return 0.
+    return (_table(model,mass).integral/inputs['total_width_gev']*
+            inputs.get('em_mixing_over_epsilon_abs2',1.))
+
+
+def mean_lab_beta_gamma(parent,mass,model,**native_precision):
+    from dark_photon_vector_meson import mean_lab_beta_gamma as angular_mean
+    squared=math.fsum([parent[0]**2]+[-x*x for x in parent[1:]])
+    if squared<=0:raise ValueError('Timelike native parent required')
+    actual=math.sqrt(squared);native_precision=dict(native_precision,native_energy_gev=parent[0])
+    inputs=_mass_precision(actual,mass,model,**native_precision);table=_table(model,mass)
+    low,high=4*inputs['pion_mass_gev']**2,(actual-mass)**2
+    # The cached marginal is independent of global parent orientation. The
+    # same small invariant-mass continuation as the sampler sets endpoints.
+    return math.fsum(weight*angular_mean(parent,math.sqrt(low+(high-low)*(s-table.low)/(table.high-table.low)),
+        mass,polarization='unpolarized') for s,weight in table.spectrum)/table.integral
+
+
+def sample_decay(parent,mass,proper_ctau_mm,rng,*,model,**native_precision):
+    """Unit-weight bilinear-CDF decay and exact coherent polarization -> μμ."""
+    from dark_photon_kaon_leptonic import (sample_vector_muon_direction,
+        _isotropic_rotation,_boost_from_parent_rest)
+    squared=math.fsum([parent[0]**2]+[-x*x for x in parent[1:]])
+    if squared<=0 or parent[0]<=0:raise ValueError('Future timelike native parent required')
+    actual=math.sqrt(squared);native_precision=dict(native_precision,native_energy_gev=parent[0])
+    inputs=_mass_precision(actual,mass,model,**native_precision);table=_table(model,mass)
+    _positive(proper_ctau_mm,'dark-photon proper lifetime')
+    sampled_s,cosine=table.sample(rng)
+    fraction=(sampled_s-table.low)/(table.high-table.low)
+    s=4*inputs['pion_mass_gev']**2+fraction*((actual-mass)**2-4*inputs['pion_mass_gev']**2)
+    P,q,first,second=rest_kinematics(actual,inputs['pion_mass_gev'],mass,s,cosine)
+    states=polarizations(q,mass);rho=[[0j]*3 for _ in range(3)]
+    for ep in polarizations(P,actual):
+        amplitudes=[amplitude_components(P,q,first,second,ep,eq,model=inputs['current'],
+            loop_order=inputs['numerical_cdf']['loop_order'])['total'] for eq in states]
+        for i in range(3):
+            for j in range(3):rho[i][j]+=amplitudes[i]*amplitudes[j].conjugate()/3
+    direction,angular_trials=sample_vector_muon_direction(rho,mass,rng)
+    beta=tuple(x/q[0] for x in q[1:])
+    axes=[boost(state,tuple(-x for x in beta))[1:] for state in states]
+    momentum=math.sqrt((mass/2-MUON_MASS_GEV)*(mass/2+MUON_MASS_GEV))
+    spatial=tuple(momentum*math.fsum(direction[i]*axes[i][j] for i in range(3)) for j in range(3))
+    muon,antimuon=[boost((mass/2,*(sign*x for x in spatial)),beta) for sign in (1.,-1.)]
+    rotation=_isotropic_rotation(rng)
+    moved=[_boost_from_parent_rest((v[0],*(rotation@v[1:])),parent,actual)
+        for v in (q,first,second,muon,antimuon)]
+    q,first,second,muon,antimuon=moved;proper=-proper_ctau_mm*math.log1p(-rng.random())
+    return dict(dark_photon_p4=q,muon_p4=muon,antimuon_p4=antimuon,
+        recoil_p4s=[first,second],recoil_pdg_ids=[111,111],recoil_masses_gev=[inputs['pion_mass_gev']]*2,
+        recoil_natural_decay_required=True,dark_photon_mass_gev=mass,muon_mass_gev=MUON_MASS_GEV,
+        proper_decay_length_mm=proper,decay_displacement_mm=tuple(proper*x/mass for x in q[1:]),
+        decay_ct_mm=proper*q[0]/mass,unconditional_decay=True,parent_polarization='unpolarized',
+        amplitude_model='gauged-coherent-neutral-vector-dipion-leading',
+        polarization_model='full-coherent-massive-vector-density',
+        numerical_distribution='exact-positive-bilinear-CDF-benchmark',cdf_table_sha256=table.sha256,
+        cdf_rate_over_em_mixing_squared_gev=table.integral,dipion_mass_squared=s,
+        pion_helicity_cosine=cosine,angular_proposal_trials=angular_trials,
+        reference_parent_mass_gev=inputs['reference_parent_mass_gev'],event_parent_mass_gev=actual)
+
+
+def native_channel_precision_report(parent_mass,mass,model,**native_precision):
+    """Charge the entire continued conditional distribution, without a shape fit.
+
+    With one fixed native rate C, the total variation (unnormalized L1) of
+    any two normalized conditional distributions is at most2*C. This deliberately
+    conservative contribution must fit the separate complete-source0.1% gate.
+    It is not a bound on unknown hadronic operators or on this leading model.
+    """
+    inputs=_mass_precision(parent_mass,mass,model,**native_precision)
+    nominal=inputs['reference_parent_mass_gev']
+    continued=parent_mass!=nominal and mass<nominal-2*inputs['pion_mass_gev']
+    if continued and native_precision.get('defer_to_full_source') is not True:
+        raise ValueError('Neutral-dipion source continuation requires the complete-source policy')
+    coefficient=branching_coefficient(nominal,mass,model)
+    return dict(schema='shift-neutral-vector-dipion-native-channel-precision-v1',
+        channel=model.get('channel'),native_parent_mass_gev=nominal,kinematic_parent_mass_gev=parent_mass,
+        deferred_full_source_check=continued,scope='deferred-full-source' if continued else 'same-native-mass',
+        nominal_parent_coefficient=coefficient,
+        conservative_absolute_parent_measure_bound=2*coefficient if continued else 0.,
+        coefficient_authority='fixed-native-M0-shared-positive-CDF-rate',
+        uncertainty_scope='Entire conditional distribution only; unknown hadronic currents remain separate')
+
+
+def numerical_rate_authority(model,mass):
+    """Expose the exact numerical rate shared by source normalization and CDF."""
+    inputs=model.get('neutral_dipion_model',model)
+    _mass_precision(inputs['reference_parent_mass_gev'],mass,model)
+    opened=mass<inputs['reference_parent_mass_gev']-2*inputs['pion_mass_gev']
+    table=_table(model,mass) if opened else None
+    return dict(schema='shift-neutral-vector-dipion-positive-cdf-rate-v1',
+        signal_mass_gev=mass,reference_parent_mass_gev=inputs['reference_parent_mass_gev'],
+        interpolation='positive-bilinear-in-sine-squared-invariant-coordinate',
+        settings=dict(inputs['numerical_cdf']),cdf_table_sha256=table.sha256 if table else None,
+        width_over_em_mixing_squared_gev=table.integral if table else 0.,
+        numerical_accuracy='Fixed grid validated by independent quadrature/refinement; not a rigorous universal error bound')

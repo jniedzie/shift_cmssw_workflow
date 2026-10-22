@@ -41,15 +41,18 @@ def deferred_native_precision_measure(parents,br_mumu,policy):
     if not math.isfinite(br_mumu) or not 0<=br_mumu<=1:raise ValueError('Physical dimuon branching required')
     terms=[];count=0
     for parent in parents:
-        report=parent.get('native_parent_precision_report',{})
-        if report.get('deferred_full_source_check') is not True:continue
-        value=report.get('conservative_absolute_parent_measure_bound')
-        if (not enabled or report.get('scope')!='deferred-full-source' or
-                type(value) not in (int,float) or not math.isfinite(value) or value<0 or
-                type(report.get('nominal_parent_coefficient')) not in (int,float) or
-                not math.isfinite(report['nominal_parent_coefficient']) or report['nominal_parent_coefficient']<0):
-            raise ValueError('Invalid deferred native-parent measure or undeclared full-source policy')
-        terms.append(value*br_mumu);count+=1
+        reports=[parent.get('native_parent_precision_report',{})]+parent.get('native_channel_precision_reports',[])
+        exceptional=False
+        for report in reports:
+            if report.get('deferred_full_source_check') is not True:continue
+            value=report.get('conservative_absolute_parent_measure_bound')
+            if (not enabled or report.get('scope')!='deferred-full-source' or
+                    type(value) not in (int,float) or not math.isfinite(value) or value<0 or
+                    type(report.get('nominal_parent_coefficient')) not in (int,float) or
+                    not math.isfinite(report['nominal_parent_coefficient']) or report['nominal_parent_coefficient']<0):
+                raise ValueError('Invalid deferred native-parent measure or undeclared full-source policy')
+            terms.append(value*br_mumu);exceptional=True
+        count+=int(exceptional)
     return math.fsum(terms),count
 
 
@@ -445,14 +448,17 @@ def charged_rho_parent_rate_model(pdg, model):
 
 
 def dipion_channel(model):
-    return model.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion')
+    return model.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion','neutral-vector-dipion')
 
 
 def vector_dipion_channel(model):
-    return model.get('decay_type') in ('vector-dipion', 'charged-vector-dipion')
+    return model.get('decay_type') in ('vector-dipion', 'charged-vector-dipion','neutral-vector-dipion')
 
 
 def dipion_kernel(model):
+    if model.get('decay_type')=='neutral-vector-dipion':
+        import dark_photon_neutral_vector_dipion
+        return dark_photon_neutral_vector_dipion
     if model.get('decay_type') == 'charged-vector-dipion':
         import dark_photon_charged_rho_radiative
         return dark_photon_charged_rho_radiative
@@ -501,7 +507,9 @@ def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, na
     if kaon_channel(model):
         return _kaon_coefficient(parent_mass,signal_mass,model,br_mumu)
     if dipion_channel(model):
-        context = native_precision if vector_dipion_channel(model) else None
+        context = dict(native_precision or {}) if vector_dipion_channel(model) else {}
+        if model.get('decay_type') not in ('neutral-vector-dipion','charged-vector-dipion'):
+            context.pop('defer_to_full_source',None)
         return dipion_kernel(model).branching_coefficient(parent_mass, signal_mass, model,
                                                           **(context or {})) * br_mumu
     if vector_parent(model):
@@ -526,6 +534,9 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
         if (any(not isinstance(name, str) or not name for name in expected) or
                 len(set(expected)) != len(expected) or card.get('channels') != expected):
             raise ValueError('Explicit channel names do not match the exclusive parent/recoil models')
+    if any(parent.get('decay_type')=='neutral-vector-dipion' for parent in card['parents']):
+        if not validate_native_precision_policy(card.get('native_precision_policy')):
+            raise ValueError('Neutral-dipion source requires the explicit complete-source precision policy')
     models = {}
     native = {row['pdg_id']: row for row in configuration['parents']}
     if len(native) != len(configuration['parents']):
@@ -562,7 +573,8 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
             relative_model_uncertainty=model_precision_budget(parent, mass) if opened else 0.,
             kinematically_open=opened, provenance=dict(pdg=parent['pdg_reference'],
                 transition=parent.get('transition_form_factor', parent.get('dipion_model',
-                    parent.get('rho_radiative_model', parent.get('charged_rho_radiative_model', {}))))['reference']))
+                    parent.get('rho_radiative_model', parent.get('charged_rho_radiative_model',
+                    parent.get('neutral_dipion_model',{})))))['reference']))
         model['channel'] = parent.get('channel', str(pdg) + '->gamma_Aprime')
         if vector_parent(parent):
             for key in ('decay_type', 'recoil_pdg_id', 'recoil_mass_gev', 'br_p_gamma',
@@ -572,7 +584,10 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                     maximum != parent['mass_gev']):
                 raise ValueError('Vector pole branching model requires an unchanged zero-width native source')
         elif dipion_channel(parent):
-            keys = (('decay_type', 'charged_pion_mass_gev', 'neutral_pion_mass_gev',
+            keys = (('decay_type','pion_mass_gev','neutral_dipion_model','recoil_pdg_ids',
+                     'parent_polarization','parent_mass_model')
+                    if parent.get('decay_type')=='neutral-vector-dipion' else
+                    ('decay_type', 'charged_pion_mass_gev', 'neutral_pion_mass_gev',
                      'br_pipi', 'charged_rho_radiative_model', 'recoil_pdg_ids',
                      'parent_polarization', 'parent_mass_model')
                     if parent.get('decay_type') == 'charged-vector-dipion' else
@@ -582,6 +597,13 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                     ('decay_type', 'pion_mass_gev', 'br_pipi_gamma', 'dipion_model'))
             for key in keys:
                 model[key] = parent[key]
+            if parent.get('decay_type')=='neutral-vector-dipion':
+                from dark_photon_model import mixing_parameters
+                if type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01:
+                    raise ValueError('Neutral dipion current requires the unchanged physical epsilon')
+                model['neutral_dipion_model']=dict(parent['neutral_dipion_model'],
+                    em_mixing_over_epsilon_abs2=(mixing_parameters(mass,epsilon).em_coefficient/epsilon)**2)
+                model['numerical_cdf_rate_authority']=dipion_kernel(model).numerical_rate_authority(model,mass)
             if vector_dipion_channel(parent):
                 model['relative_numerical_mass_precision_budget'] = model.pop('relative_model_uncertainty')
             if (vector_dipion_channel(parent) and
@@ -609,6 +631,7 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
 
 def model_precision_budget(parent, signal_mass):
     """Measured BR/TFF one-sigma parameter-box envelope, not a tuned goal."""
+    if parent.get('decay_type')=='neutral-vector-dipion':return 1.e-3
     if vector_dipion_channel(parent):
         # This is a numerical-accuracy target, separate from the experimental
         # photon check and from unknown timelike hadronic-model uncertainties.
@@ -728,6 +751,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
     for original in parents:
         parent = dict(original)
         parent.pop('native_parent_precision_report', None)
+        parent.pop('native_channel_precision_reports',None)
         parent.pop('leptonic_kinematic_precision', None)
         p4, native = parent['p4'], parent['native_mass_gev']
         if (len(p4) != 4 or not all(math.isfinite(value) for value in p4) or p4[0] <= 0 or
@@ -747,11 +771,19 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
                 raise ValueError('Native kaon mass differs from its exact stable support')
         native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
                                 native_mass_tolerance=mass_tolerance)
+        if deferred_policy and any(c.get('decay_type')=='neutral-vector-dipion' for c in exclusive_channels(model)):
+            native_precision['defer_to_full_source']=True
         owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
         if owned_rates is not None:
             native_precision['native_parent_rate_model'] = owned_rates
             if deferred_policy:native_precision['defer_to_full_source']=True
         for channel in exclusive_channels(model):
+            channel_precision=dict(native_precision)
+            if channel.get('decay_type')=='neutral-vector-dipion':
+                if not deferred_policy:raise ValueError('Neutral-dipion source requires explicit full-source precision policy')
+                channel_precision['defer_to_full_source']=True
+                report=dipion_kernel(channel).native_channel_precision_report(mass,signal_mass,channel,**channel_precision)
+                parent.setdefault('native_channel_precision_reports',[]).append(report)
             recoil = recoil_threshold(channel)
             if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
                 raise ValueError('Native precision changes whether the rare decay is open')
@@ -760,7 +792,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
                     _leptonic_mass_gate(mass,signal_mass,channel))
             nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
             shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu,
-                                                   native_precision=native_precision)
+                                                   native_precision=channel_precision)
             relative = shifted / nominal - 1 if nominal else 0.
             budget = channel.get('relative_numerical_mass_precision_budget',
                                  channel.get('relative_model_uncertainty'))
@@ -830,8 +862,19 @@ def validate_models(models):
         if kaon_channel(model):
             _validate_kaon_model(pdg,model)
             continue
-        if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion'):
+        if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion','neutral-vector-dipion'):
             raise ValueError('Unsupported exclusive radiative decay type')
+        if model.get('decay_type')=='neutral-vector-dipion':
+            inputs=model['neutral_dipion_model']
+            if (pdg not in (113,223) or model.get('parent_polarization')!='unpolarized' or
+                    model.get('parent_mass_model')!='zero-width-pole' or
+                    model.get('mass_max_gev')!=model['mass_min_gev'] or
+                    inputs['reference_parent_mass_gev']!=model['mass_min_gev'] or
+                    inputs['pion_mass_gev']!=model['pion_mass_gev'] or model.get('recoil_pdg_ids')!=[111,111] or
+                    type(inputs.get('total_width_gev')) not in (int,float) or
+                    not math.isfinite(inputs['total_width_gev']) or inputs['total_width_gev']<=0):
+                raise ValueError('Neutral dipion benchmark requires its explicit native pole, width, pi0 pair and spin')
+            continue
         branching_key = ('br_pipi' if vector_dipion_channel(model) else
                          'br_pipi_gamma' if dipion_channel(model) else
                          'br_p_gamma' if vector_parent(model) else 'br_gamma_gamma')

@@ -260,7 +260,10 @@ def validate_meson_radiative_record(record, selected):
         if (charged and abs(parent['pdg_id']) != 213 or
                 model.get('decay_type') == 'vector-dipion' and parent['pdg_id'] != 113):
             raise ValueError('Rho dipion decay type differs from the selected physical parent')
-        recoil_ids = ([211 if parent['pdg_id'] > 0 else -211,111] if charged else [211,-211])
+        neutral=model.get('decay_type')=='neutral-vector-dipion'
+        if neutral and parent['pdg_id'] not in (113,223):raise ValueError('Neutral dipion has an unsupported vector parent')
+        recoil_ids = ([111,111] if neutral else
+                      [211 if parent['pdg_id'] > 0 else -211,111] if charged else [211,-211])
         recoil_masses = ([model['charged_pion_mass_gev'],model['neutral_pion_mass_gev']]
                          if charged else [model['pion_mass_gev']]*2)
         if (sample.get('recoil_pdg_ids') != recoil_ids or
@@ -279,9 +282,12 @@ def validate_meson_radiative_record(record, selected):
     dark, = [row for row in daughters if row['pdg_id'] == 32]
     if dark['status'] != 3:
         raise ValueError('Radiative recoil/signal status changed')
+    remaining=[row for row in daughters if row['pdg_id']!=32]
     for pdg,momentum in expected:
-        recoil, = [row for row in daughters if row['pdg_id'] == pdg]
-        pinned = [row for row in sample.get('recoil_records',[]) if row['pdg_id'] == pdg]
+        matches=[row for row in remaining if row['pdg_id']==pdg and row['p4']==momentum]
+        if not matches:raise ValueError('Exclusive recoil momentum is missing or reused')
+        recoil=matches[0];remaining.remove(recoil)
+        pinned = [row for row in sample.get('recoil_records',[]) if row['pdg_id'] == pdg and row.get('p4',momentum)==momentum]
         status = pinned[0]['status'] if len(pinned) == 1 else (1 if pdg == 22 else 2)
         if recoil['status'] != status:
             raise ValueError('Radiative recoil/signal status changed')
@@ -324,14 +330,18 @@ def validate_meson_radiative_graph(dark, selected):
     result = validate_meson_radiative_record(record, selected)
     sample = selected['sampled_decay']
     if 'recoil_pdg_ids' in sample:
-        recoil_models = list(zip(sample['recoil_pdg_ids'],sample['recoil_masses_gev']))
+        recoil_models = list(zip(sample['recoil_pdg_ids'],sample['recoil_masses_gev'],sample['recoil_p4s']))
     else:
-        recoil_models = [(sample.get('recoil_pdg_id',22), sample.get('recoil_mass_gev',0.))]
-    for recoil_pdg, recoil_mass in recoil_models:
+        recoil_models = [(sample.get('recoil_pdg_id',22),sample.get('recoil_mass_gev',0.),None)]
+    remaining=[child for child in objects(vertex.particles_out_const_begin(),vertex.particles_out_const_end())
+               if int(child.pdg_id())!=32]
+    for recoil_pdg,recoil_mass,recoil_p4 in recoil_models:
         if recoil_pdg == 22:
             continue
-        recoil, = [child for child in objects(vertex.particles_out_const_begin(), vertex.particles_out_const_end())
-                   if int(child.pdg_id()) == recoil_pdg]
+        matches=[child for child in remaining if int(child.pdg_id())==recoil_pdg and
+                 (recoil_p4 is None or momentum(child)==recoil_p4)]
+        if not matches:raise ValueError('Natural exclusive recoil is missing or reused')
+        recoil=matches[0];remaining.remove(recoil)
         if float(recoil.generated_mass()) != recoil_mass or (recoil_pdg in (111,221) and not recoil.end_vertex()):
             raise ValueError('Vector recoil lost its physical mass or natural decay')
         pending, visited, leaves = [recoil], set(), 0
@@ -357,8 +367,8 @@ def validate_meson_radiative_graph(dark, selected):
             if max(abs(a-b) for a,b in zip(p4,total)) > 1.e-6*max(1.,p4[0]):
                 raise ValueError('Natural recoil decay violates momentum conservation')
             pending.extend(children)
-        result['natural_recoil_descendants'] = len(visited)-1
-        result['natural_recoil_final_particles'] = leaves
+        result['natural_recoil_descendants'] = result.get('natural_recoil_descendants',0)+len(visited)-1
+        result['natural_recoil_final_particles'] = result.get('natural_recoil_final_particles',0)+leaves
     return result
 
 
