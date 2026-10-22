@@ -32,6 +32,9 @@ def inputs():
         row=dict(pdg_id=pdg,mass_gev=mass,mean_proper_ctau_mm=mean,decay_type=kind,
             channel=name,parent_mass_model='native-stable-kaon',pdg_reference='synthetic native test table',
             lifetime_reference='synthetic native test lifetime',relative_numerical_mass_precision_budget=1.e-5)
+        if pdg in (130,310):
+            row.update(native_record_mass_support_gev=[mass],
+                native_record_mass_support_reference='synthetic initialized physical/flavor union')
         if kind=='neutral-kaon-photon':
             if pdg==130:
                 row.update(br_gamma_gamma=.0005471,br_gamma_gamma_reference='explicit test calibration',
@@ -50,6 +53,8 @@ def inputs():
     native=dict(ecm_gev=ECM,check_event=True,parents=[dict(pdg_id=p,
         mass_min_gev=.493677 if abs(p)==321 else .497611,
         mass_max_gev=.493677 if abs(p)==321 else .497611,mass_width_gev=0.) for p in (130,310,321,-321)])
+    native['native_kaon_mass_authorities']=[dict(pdg_id=p,mass_gev=.497611,
+        mass_min_gev=.497611,mass_max_gev=.497611,mass_width_gev=0.) for p in (130,310,311)]
     return card,native
 
 
@@ -205,6 +210,43 @@ class KaonSourceTest(unittest.TestCase):
         closed=resolved_parent_models(self.card,self.native,.7,epsilon=EPSILON)
         self.assertEqual(coefficient_bound(ECM,BR,closed,.7),0.)
         with self.assertRaises(ValueError):parent_branching_coefficient(.497611,.25,self.models[130],BR)
+
+    def test_finite_neutral_support_uses_initialized_flavor_and_physical_masses(self):
+        card,native=inputs()
+        for parent in card['parents']:
+            if parent['pdg_id'] in (130,310):
+                parent['mass_gev']=.49761
+                parent['native_record_mass_support_gev']=[.49761,.497611]
+        for row in native['parents']:
+            if row['pdg_id'] in (130,310):row.update(mass_min_gev=.49761,mass_max_gev=.49761)
+        for row in native['native_kaon_mass_authorities']:
+            if row['pdg_id'] in (130,310):row.update(mass_gev=.49761,mass_min_gev=.49761,mass_max_gev=.49761)
+        models=resolved_parent_models(card,native,MASS,epsilon=EPSILON)
+        for pdg in (130,310):
+            model=models[pdg]
+            for mass in (.49761,.497611):
+                row=parent_row(pdg,model);row['native_mass_gev']=mass
+                row['p4']=[mass,0.,0.,0.];row['source_com_energy_gev']=mass
+                resolved,=resolve_parent_kinematics([row],.001,MASS,models,BR)
+                self.assertEqual(resolved['mass_gev'],mass)
+                self.assertEqual(resolved['p4'],row['p4'])
+                for channel in exclusive_channels(model):
+                    self.assertEqual(channel['reference_parent_mass_gev'],.49761)
+                    self.assertEqual(channel['native_parent_count_bound'],math.floor(ECM/.49761))
+                    self.assertEqual(channel['native_mass_rate_coefficients'][1]['branching_over_epsilon_squared'],
+                        parent_branching_coefficient(.497611,MASS,channel,1.))
+            row['native_mass_gev']=.4976105;row['p4']=[.4976105,0.,0.,0.];row['source_com_energy_gev']=.4976105
+            with self.assertRaisesRegex(ValueError,'finite declared'):
+                resolve_parent_kinematics([row],.001,MASS,models,BR)
+        expected=math.fsum(channel['native_parent_count_bound']*max(
+            parent_branching_coefficient(value,MASS,channel,BR) for value in channel['native_record_mass_support_gev'])
+            for model in models.values() for channel in exclusive_channels(model))
+        self.assertEqual(coefficient_bound(ECM,BR,models,MASS),expected)
+        for field in ('native_record_mass_support_gev','native_record_mass_support_reference'):
+            broken=copy.deepcopy(card);broken['parents'][0].pop(field)
+            with self.assertRaises(ValueError):resolved_parent_models(broken,native,MASS,epsilon=EPSILON)
+        broken=copy.deepcopy(native);broken['native_kaon_mass_authorities'][2]['mass_gev']=.497612
+        with self.assertRaises(ValueError):resolved_parent_models(card,broken,MASS,epsilon=EPSILON)
 
 
 if __name__=='__main__':unittest.main()

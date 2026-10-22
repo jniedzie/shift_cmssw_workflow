@@ -38,6 +38,34 @@ def _kaon_group(model):
     return any(kaon_channel(channel) for channel in exclusive_channels(model))
 
 
+def _kaon_mass_support(pdg,reference,support,authorities):
+    """Finite native bookkeeping masses, independently pinned to table rows.
+
+    A neutral flavor311 record can become130/310 without replacing its mass.
+    Those two initialized table values are distinct authorities, not floating
+    point roundoff or a continuous physical line shape.
+    """
+    if (not isinstance(support,list) or not support or
+            any(type(x) not in (int,float) or not math.isfinite(x) or x<=0 for x in support)
+            or support!=sorted(set(support)) or reference not in support):
+        raise ValueError('Declare a finite sorted unique native kaon mass support')
+    if pdg not in (130,310):
+        if support!=[reference]:raise ValueError('Charged kaon native support must remain its exact table mass')
+        return support,[]
+    if not isinstance(authorities,list):
+        raise ValueError('Neutral kaon support requires initialized physical/flavor mass authorities')
+    rows=[row for row in authorities if row.get('pdg_id') in (pdg,311)]
+    if (len(rows)!=2 or {row['pdg_id'] for row in rows}!={pdg,311} or
+            any(type(row.get('mass_gev')) not in (int,float) or not math.isfinite(row['mass_gev'])
+                or row['mass_gev']<=0 or row.get('mass_min_gev')!=row['mass_gev']
+                or row.get('mass_max_gev')!=row['mass_gev'] or row.get('mass_width_gev')!=0.
+                for row in rows) or
+            next(row['mass_gev'] for row in rows if row['pdg_id']==pdg)!=reference or
+            support!=sorted({row['mass_gev'] for row in rows})):
+        raise ValueError('Neutral native mass support must equal its zero-width physical/flavor table union')
+    return support,[dict(row) for row in sorted(rows,key=lambda row:row['pdg_id'])]
+
+
 @lru_cache(maxsize=128)
 def _leptonic_rate_benchmark(current_json,signal_mass,order,check_order):
     """One immutable O(p4) numeric rate authority, shared by event C and B.
@@ -103,12 +131,27 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
                  *model['radiative_amplitude_abs2_gev_minus2'])
     else:
         from dark_photon_weak_meson import decay_width
+        form=_kaon_weak_form_factor(parent_mass,model['recoil_mass_gev'],signal_mass,
+            model['weak_form_factor_model'])
         width=decay_width(parent_mass,model['recoil_mass_gev'],signal_mass,.001,
-            model['alpha_em'],complex(*model['weak_form_factor']))/1.e-6
+            model['alpha_em'],form)/1.e-6
     return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
 
 
-def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=None):
+def _kaon_weak_form_factor(parent_mass,recoil_mass,signal_mass,current):
+    """Evaluate the unchanged fit, restricting its domain to this endpoint.
+
+    A declared native bookkeeping mass need not equal the publication's
+    reference mass. Shrinking the fit domain changes no coefficient and
+    never extends it beyond the published range.
+    """
+    from dark_photon_weak_meson import chiral_form_factor
+    domain=current['valid_mass_range_gev']
+    restricted=dict(current,valid_mass_range_gev=[domain[0],min(domain[1],parent_mass-recoil_mass)])
+    return chiral_form_factor(parent_mass,recoil_mass,signal_mass,restricted)
+
+
+def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=None,mass_authorities=None):
     """Resolve a constant current on exact stable-kaon native mass support.
 
     All reference inputs are explicit; no photon normalization is inferred
@@ -125,6 +168,10 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
         raise ValueError('Kaon source rates require exact zero-width native mass support')
     if (type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01):
         raise ValueError('Resolve kaon currents at the explicit physical epsilon')
+    support,authorities=_kaon_mass_support(pdg,mass,
+        parent.get('native_record_mass_support_gev',[mass]),mass_authorities)
+    if pdg in (130,310) and not parent.get('native_record_mass_support_reference'):
+        raise ValueError('Declare the physical/flavor native mass support provenance')
     mean=parent.get('mean_proper_ctau_mm');budget=parent.get('relative_numerical_mass_precision_budget')
     if (type(mean) not in (int,float) or not math.isfinite(mean) or mean<=0
             or not parent.get('lifetime_reference') or not parent.get('pdg_reference')
@@ -132,17 +179,20 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
             or not math.isfinite(ecm) or ecm<=mass):
         raise ValueError('Pin kaon lifetime, native mass authority and numerical precision budget')
     width=HBAR_C_GEV_MM/mean
-    model=dict(decay_type=parent['decay_type'],mass_min_gev=mass,mass_max_gev=mass,
+    model=dict(decay_type=parent['decay_type'],mass_min_gev=min(support),mass_max_gev=max(support),
+        reference_parent_mass_gev=mass,native_record_mass_support_gev=list(support),
+        native_record_mass_authorities=authorities,
         parent_mass_model='native-stable-kaon',signal_mass_gev=signal_mass,
         mean_proper_ctau_mm=mean,total_parent_width_gev=width,
         relative_numerical_mass_precision_budget=budget,source_ecm_gev=ecm,
-        native_parent_count_bound=math.floor(ecm/mass),
+        native_parent_count_bound=math.floor(ecm/min(support)),
         em_mixing_over_epsilon_abs2=(mixing_parameters(signal_mass,epsilon).em_coefficient/epsilon)**2,
         physical_epsilon=epsilon,channel=parent['channel'],provenance=dict(
-            pdg=parent['pdg_reference'],lifetime=parent['lifetime_reference']))
+            pdg=parent['pdg_reference'],lifetime=parent['lifetime_reference'],
+            native_mass_support=parent.get('native_record_mass_support_reference',parent['pdg_reference'])))
     if parent['decay_type']=='neutral-kaon-photon':
         if pdg not in (130,310):raise ValueError('Only physical KL/KS have the qualified gamma current')
-        opened=signal_mass<mass
+        opened=signal_mass<max(support)
         if pdg==130:
             branching=parent.get('br_gamma_gamma')
             if (type(branching) not in (int,float) or not math.isfinite(branching)
@@ -175,11 +225,10 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
                 or not weak.get('loop_reference') or weak.get('parent_pdg_id')!=pdg
                 or type(alpha) not in (int,float) or not math.isfinite(alpha) or alpha<=0):
             raise ValueError('Require the matching charged/KS weak-current model and EM convention')
-        from dark_photon_weak_meson import chiral_form_factor
-        opened=signal_mass<mass-parent['recoil_mass_gev']
-        form=chiral_form_factor(mass,parent['recoil_mass_gev'],signal_mass,weak) if opened else 0j
+        opened=signal_mass<max(support)-parent['recoil_mass_gev']
+        form=_kaon_weak_form_factor(mass,parent['recoil_mass_gev'],signal_mass,weak) if signal_mass<mass-parent['recoil_mass_gev'] else 0j
         model.update(recoil_pdg_id=expected[pdg],recoil_mass_gev=parent['recoil_mass_gev'],
-            weak_form_factor=[form.real,form.imag],alpha_em=alpha)
+            weak_form_factor=[form.real,form.imag],weak_form_factor_model=dict(weak),alpha_em=alpha)
         model['provenance']['transition']=weak
     else:
         lepton=parent.get('charged_lepton_pdg_id');neutrino=parent.get('neutrino_pdg_id')
@@ -213,21 +262,27 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
                 scope='Conditional O(p4) numeric benchmark; no universal physical uncertainty envelope'))
         model['provenance']['transition']=current
     model['kinematically_open']=opened
+    model['native_mass_rate_coefficients']=[dict(native_mass_gev=value,
+        branching_over_epsilon_squared=_kaon_coefficient(value,signal_mass,model,1.)) for value in support]
     return model
 
 
 def _validate_kaon_model(pdg,model):
     from dark_photon_model import HBAR_C_GEV_MM,mixing_parameters
-    kind=model['decay_type'];mass=model.get('mass_min_gev')
+    kind=model['decay_type'];mass=model.get('reference_parent_mass_gev')
     positive=('mass_min_gev','source_ecm_gev','mean_proper_ctau_mm','total_parent_width_gev',
               'signal_mass_gev','em_mixing_over_epsilon_abs2','physical_epsilon',
               'relative_numerical_mass_precision_budget')
     if (pdg not in (130,310,321,-321) or model.get('parent_mass_model')!='native-stable-kaon'
             or any(type(model.get(k)) not in (int,float) or not math.isfinite(model[k])
                    or model[k]<=0 for k in positive)
-            or model.get('mass_max_gev')!=mass or not model.get('provenance')
-            or model.get('native_parent_count_bound')!=math.floor(model['source_ecm_gev']/mass)):
+            or not model.get('provenance')):
         raise ValueError('Require a finite fixed-mass kaon current and native count authority')
+    support,_=_kaon_mass_support(pdg,mass,model.get('native_record_mass_support_gev'),
+        model.get('native_record_mass_authorities'))
+    if (model['mass_min_gev']!=min(support) or model.get('mass_max_gev')!=max(support) or
+            model.get('native_parent_count_bound')!=math.floor(model['source_ecm_gev']/min(support))):
+        raise ValueError('Kaon finite support differs from its deterministic source-count authority')
     if (model['physical_epsilon']>.01 or model['signal_mass_gev']<=2*MUON_MASS_GEV
             or model['relative_numerical_mass_precision_budget']>=1
             or model['total_parent_width_gev']!=HBAR_C_GEV_MM/model['mean_proper_ctau_mm']
@@ -240,14 +295,15 @@ def _validate_kaon_model(pdg,model):
                 or type(value) not in (int,float) or not math.isfinite(value) or value<0):
             raise ValueError('Require the separately qualified neutral-kaon gamma amplitude')
     elif kind=='weak-kaon-pion':
-        form=model.get('weak_form_factor')
+        form=model.get('weak_form_factor');current=model.get('weak_form_factor_model',{})
         if (model.get('recoil_pdg_id')!={321:211,-321:-211,310:111}.get(pdg)
                 or type(model.get('recoil_mass_gev')) not in (int,float)
                 or not 0<model['recoil_mass_gev']<mass
                 or type(model.get('alpha_em')) not in (int,float)
                 or not math.isfinite(model['alpha_em']) or model['alpha_em']<=0
                 or not isinstance(form,list) or len(form)!=2
-                or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)):
+                or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)
+                or current.get('parent_pdg_id')!=pdg or current.get('kind')!='chpt-p6-kaon-em-vector'):
             raise ValueError('Require a matching charged/KS weak current and pion recoil')
     elif kind=='weak-kaon-leptonic':
         lepton=model.get('charged_lepton_pdg_id');neutrino=model.get('neutrino_pdg_id')
@@ -274,6 +330,10 @@ def _validate_kaon_model(pdg,model):
             raise ValueError('K_l2 rate authority or quadrature benchmark changed after resolution')
     else:
         raise ValueError('Unsupported fixed-mass kaon current')
+    expected=[dict(native_mass_gev=value,branching_over_epsilon_squared=
+        _kaon_coefficient(value,model['signal_mass_gev'],model,1.)) for value in support]
+    if model.get('native_mass_rate_coefficients')!=expected:
+        raise ValueError('Kaon per-native-mass rate authority changed after resolution')
 
 
 def _kaon_snapshot_authority(parent,model,kinematic_mass):
@@ -286,6 +346,8 @@ def _kaon_snapshot_authority(parent,model,kinematic_mass):
     The integer count limit must stay unchanged after those allowances.
     """
     channel=next(c for c in exclusive_channels(model) if kaon_channel(c))
+    if parent.get('native_mass_gev') not in channel['native_record_mass_support_gev']:
+        raise ValueError('Native kaon mass is outside the finite declared table support')
     total=parent.get('source_total_p4');momentum=parent['p4']
     mothers=parent.get('mother_indices');daughters=parent.get('daughter_indices')
     if (parent.get('native_final') is not True or type(parent.get('native_status')) is not int
@@ -313,7 +375,7 @@ def _kaon_snapshot_authority(parent,model,kinematic_mass):
     native_delta=abs(kinematic_mass-parent['native_mass_gev'])
     if energy+arithmetic+native_delta<parent['native_mass_gev']:
         raise ValueError('Physical native kaon COM energy violates its qualified mass floor')
-    mass_floor=parent['native_mass_gev']-native_delta-2*arithmetic
+    mass_floor=channel['mass_min_gev']-native_delta-2*arithmetic
     if (mass_floor<=0 or low<mass_floor
             or math.floor(ecm_high/mass_floor)!=channel['native_parent_count_bound']):
         raise ValueError('Kaon arithmetic allowance changes the fixed integer source-count envelope')
@@ -323,6 +385,7 @@ def _kaon_snapshot_authority(parent,model,kinematic_mass):
         com_energy_arithmetic_allowance_gev=arithmetic,
         native_invariant_mass_difference_gev=native_delta,
         stable_native_mass_floor_gev=parent['native_mass_gev'],
+        finite_support_minimum_mass_gev=channel['mass_min_gev'],
         roundoff_mass_floor_gev=mass_floor,
         native_parent_count_bound=channel['native_parent_count_bound'],
         authority='Final native parent with no daughters; independent physical COM and unchanged integer-count checks')
@@ -435,7 +498,8 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
         if kaon_channel(parent):
             if configuration.get('check_event') is not True:
                 raise ValueError('Kaon count authority requires the unchanged native event check')
-            model=_resolved_kaon_model(parent,native[pdg],mass,epsilon,configuration['ecm_gev'],model_directory)
+            model=_resolved_kaon_model(parent,native[pdg],mass,epsilon,configuration['ecm_gev'],
+                model_directory,configuration.get('native_kaon_mass_authorities'))
             if pdg not in models:
                 models[pdg]=model
             else:
@@ -443,7 +507,7 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                 if any((channel['decay_type'],channel.get('charged_lepton_pdg_id'))==
                        (model['decay_type'],model.get('charged_lepton_pdg_id')) for channel in channels):
                     raise ValueError('Duplicate exclusive kaon current for one physical parent')
-                models[pdg]=dict(mass_min_gev=minimum,mass_max_gev=maximum,
+                models[pdg]=dict(mass_min_gev=model['mass_min_gev'],mass_max_gev=model['mass_max_gev'],
                     exclusive_channels=channels+[model])
             continue
         recoil = recoil_threshold(parent)
@@ -634,7 +698,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
         model = models[parent['pdg_id']]
         if _kaon_group(model):
             parent['kaon_source_count_authority']=_kaon_snapshot_authority(parent,model,mass)
-            if native!=model['mass_min_gev'] or native!=model['mass_max_gev']:
+            if native not in exclusive_channels(model)[0]['native_record_mass_support_gev']:
                 raise ValueError('Native kaon mass differs from its exact stable support')
         native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
                                 native_mass_tolerance=mass_tolerance)
@@ -703,7 +767,9 @@ def validate_models(models):
                 raise ValueError('Exclusive channel names must be unique for a physical parent')
             if any(kaon_channel(channel) for channel in channels):
                 shared=('mean_proper_ctau_mm','total_parent_width_gev','source_ecm_gev',
-                        'physical_epsilon','em_mixing_over_epsilon_abs2','native_parent_count_bound')
+                        'physical_epsilon','em_mixing_over_epsilon_abs2','native_parent_count_bound',
+                        'reference_parent_mass_gev','native_record_mass_support_gev',
+                        'native_record_mass_authorities')
                 if (not all(kaon_channel(channel) for channel in channels)
                         or any(channel.get(key)!=channels[0].get(key)
                                for channel in channels for key in shared)):
@@ -792,8 +858,9 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
             if mass_gev is None:raise ValueError('A fixed signal mass is required for kaon proposal bounds')
             if ecm_gev!=model['source_ecm_gev']:
                 raise ValueError('Kaon count envelope belongs to another native source energy')
-            terms.append(model['native_parent_count_bound']*parent_branching_coefficient(
-                model['mass_min_gev'],mass_gev,model,br_mumu))
+            maximum=max(parent_branching_coefficient(value,mass_gev,model,br_mumu)
+                for value in model['native_record_mass_support_gev'])
+            terms.append(model['native_parent_count_bound']*maximum)
             continue
         if dipion_channel(model):
             if mass_gev is None:
