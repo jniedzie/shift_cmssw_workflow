@@ -35,6 +35,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.annotations = []
         self.corrupt_readback = None
         self.timing_signature_mismatch = False
+        self.fail_nano = False
         self.source_bytes = b'original GEN'
         self.exposure = {'full_source_trials': 100}
         self.original = dict(id=[1, 2, 3], weight=2.)
@@ -59,6 +60,8 @@ class MaterialResponsePublicationTest(unittest.TestCase):
             else:
                 self.remote[target] = Path(source).read_bytes()
         elif argv[0] == 'cmsRun':
+            if argv[1] == 'step4_cfg.py' and self.fail_nano:
+                raise RuntimeError('Synthetic Nano end-lumi failure')
             output = {'timing_cfg.py': 'timed_gen.root', 'sim_cfg.py': 'step1.root',
                       'step2_cfg.py': 'step2.root', 'step3_cfg.py': 'step3.root',
                       'step4_cfg.py': 'step4.root'}[argv[1]]
@@ -329,12 +332,37 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.request.update(diagnostic_edm_tiers=['SIM', 'RECO'], publication_bound_bytes=70000)
         with self.assertRaisesRegex(ValueError, 'registered storage allocation'):
             self.run_worker()
-        ordinary_bytes = Path('step4.root').stat().st_size+Path('evidence.tar.gz').stat().st_size+65536
-        self.assertLessEqual(ordinary_bytes, self.request['publication_bound_bytes'])
+        self.assertFalse(Path('step4.root').exists())
         self.assertFalse(self.remote)
         self.assertTrue(Path('step1.root').exists())
         self.assertTrue(Path('step3.root').exists())
         self.assertFalse(json.loads(Path('report.json').read_text())['complete'])
+
+    def test_requested_RECO_is_hash_checked_and_retained_if_Nano_later_fails(self):
+        self.request['diagnostic_edm_tiers'] = ['SIM', 'RECO']
+        self.fail_nano = True
+        with self.assertRaisesRegex(RuntimeError, 'Nano end-lumi failure'):
+            self.run_worker()
+        report = json.loads(Path('report.json').read_text())
+        self.assertFalse(report['complete'])
+        checkpoint = report['validated_reco_checkpoint']
+        self.assertTrue(checkpoint['audit']['passed'])
+        published = checkpoint['published'][0]
+        self.assertEqual(published['sha256'], hashlib.sha256(Path('step3.root').read_bytes()).hexdigest())
+        self.assertEqual(self.remote[published['url']], Path('step3.root').read_bytes())
+        self.assertEqual(list(self.remote), [published['url']])
+        self.assertFalse(any(url.endswith('/complete.json') for url in self.remote))
+        self.assertEqual(report['full_source_exposure'], self.exposure)
+
+    def test_final_combined_bound_keeps_only_existing_RECO_checkpoint_on_failure(self):
+        self.request.update(diagnostic_edm_tiers=['SIM', 'RECO'], publication_bound_bytes=110000)
+        with self.assertRaisesRegex(ValueError, 'registered storage allocation'):
+            self.run_worker()
+        report = json.loads(Path('report.json').read_text())
+        self.assertFalse(report['complete'])
+        self.assertEqual(list(self.remote), [report['validated_reco_checkpoint']['published'][0]['url']])
+        self.assertLessEqual(len(next(iter(self.remote.values())))+65536,
+                             self.request['publication_bound_bytes'])
 
     def test_bad_edm_readback_keeps_scratch_and_never_publishes_complete_marker(self):
         self.request['diagnostic_edm_tiers'] = ['SIM', 'RECO']

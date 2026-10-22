@@ -302,6 +302,11 @@ open('timing_cfg.py','w').write(p.dumpPython())
             report['stages'][-1]['audit'] = check
             if stage < 4 and metadata(output) != measured['full_original_run_lumi_metadata']:
                 raise ValueError('Detector tier changed source exposure')
+            if stage == 3 and any(item['tier'] == 'RECO' for item in diagnostic_outputs):
+                # Retain the audited input before Nano can fail. Final publication
+                # uses the same path, so this checkpoint adds no duplicate tier.
+                report['validated_reco_checkpoint'] = dict(audit=check,
+                    published=publish_outputs([(str(output), 'reco.root')], request))
             save()
             previous = output
         answers = response('step4.root')
