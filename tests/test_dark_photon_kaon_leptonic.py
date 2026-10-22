@@ -2,6 +2,7 @@
 import json
 import math
 from pathlib import Path
+import random
 import sys
 import unittest
 
@@ -12,7 +13,10 @@ from dark_photon_meson import boost
 from dark_photon_kaon_leptonic import (
     GAMMA, GAMMA5, METRIC, current_operators, decay_width, differential_width,
     distinguishable_dilepton_differential_width, equal_mass_h_over_q2,
-    form_factors, polarization_basis, rest_kinematics, spin_density)
+    form_factors, polarization_basis, rest_kinematics, spin_density,
+    LeptonicProductionProposal, production_cell_bound, sample_decay,
+    sample_vector_muon_direction, slash, IDENTITY)
+from dark_photon_meson import MUON_MASS_GEV
 
 
 CARD = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_kl2_chpt_1993.json'
@@ -201,6 +205,163 @@ class LeptonicRateTest(unittest.TestCase):
             authority['explicit_conventions']['hbar_gev_seconds'])
         expected = authority['independent_controls']['old_nonidentical_virtual_prediction']['born_branching_full']
         self.assertLess(abs(integral*conversion/expected-1.), .007)
+
+
+class LeptonicEventTest(unittest.TestCase):
+    def test_analytic_envelopes_cover_each_cell_and_are_useful(self):
+        # This finite control supplements the norm proof; scanned maxima
+        # neither define nor enlarge the envelope used by the sampler.
+        rng = random.Random(7711)
+        for lepton, mass in (('muon', .22), ('muon', .3), ('electron', .22),
+                             ('electron', .3), ('electron', .4)):
+            card = model(lepton)
+            proposal = LeptonicProductionProposal(card, mass, weak_cells=6, angular_cells=4)
+            for weak, angle, bound in proposal.cells:
+                for fraction in (.00001, .5, .99999, rng.random()):
+                    squared = weak[0]+(weak[1]-weak[0])*fraction
+                    cosine = angle[0]+(angle[1]-angle[0])*rng.random()
+                    target = np.trace(differential_width(card, mass, squared, cosine,
+                        epsilon=.001)['total']).real
+                    self.assertLess(target, bound)
+            rate = decay_width(card, mass, epsilon=.001, quadrature_order=12)['total']
+            self.assertGreater(rate/proposal.envelope_integral, .08)
+
+    def test_production_marginals_match_independent_quadrature(self):
+        rng = random.Random(93981)
+        for lepton, mass, count in (('muon', .25, 1600), ('electron', .3, 1600)):
+            card = model(lepton)
+            low, high = card['lepton_mass_gev']**2, (card['parent_mass_gev']-mass)**2
+            nodes, weights = np.polynomial.legendre.leggauss(20)
+            norm, first, second = 0., np.zeros(3), np.zeros(3)
+            for node, weight in zip(nodes, weights):
+                squared = (high+low)/2+(high-low)*node/2
+                for cosine, angular_weight in zip(nodes, weights):
+                    density = np.trace(differential_width(card, mass, float(squared),
+                        float(cosine), epsilon=.001)['total']).real
+                    value = np.array([node, cosine, node*cosine])
+                    w = density*weight*angular_weight
+                    norm += w; first += w*value; second += w*value**2
+            expected, variance = first/norm, second/norm-(first/norm)**2
+            proposal = LeptonicProductionProposal(card, mass)
+            actual = []
+            for _ in range(count):
+                row = proposal.sample(rng)
+                x = 2*(row['weak_mass_squared']-low)/(high-low)-1
+                c = row['lepton_helicity_cosine']
+                actual.append((x, c, x*c))
+            pulls = (np.mean(actual, axis=0)-expected)/np.sqrt(variance/count)
+            self.assertLess(np.max(np.abs(pulls)), 5.)
+
+    def test_vector_decay_moments_retain_coherent_and_longitudinal_terms(self):
+        rng = random.Random(5033)
+        mass = .4
+        beta_squared = 1-4*(MUON_MASS_GEV/mass)**2
+        for state in (np.array([0., 0., 1.]), np.array([1., 1., .7j]),
+                      np.array([1., .4+.2j, 1.3])):
+            rho = np.outer(state, state.conjugate())
+            normalized = rho.real/np.trace(rho).real
+            expected = (np.eye(3)*(1/3-beta_squared/15)-
+                2*beta_squared*normalized/15)/(1-beta_squared/3)
+            directions = np.array([sample_vector_muon_direction(rho, mass, rng)[0]
+                for _ in range(6500)])
+            products = np.einsum('ni,nj->nij', directions, directions)
+            error = products.std(axis=0)/math.sqrt(len(products))
+            self.assertLess(np.max(np.abs(products.mean(axis=0)-expected)/
+                np.maximum(error, 1.e-10)), 5.)
+
+    def test_conditional_angle_matches_independent_massive_muon_dirac_trace(self):
+        card = model()
+        point = rest_kinematics(card['parent_mass_gev'], card['lepton_mass_gev'], .3, .025, .4)
+        rho = spin_density(*point, card, epsilon=.001)['total']
+        mass, ml = .3, MUON_MASS_GEV
+        beta_squared = 1-4*(ml/mass)**2
+        for vector in ((.2, .5, math.sqrt(.71)), (-.8, 0., .6), (0., 1., 0.)):
+            n = np.array(vector)
+            momentum = mass/2*math.sqrt(beta_squared)*n
+            minus, plus = (mass/2, *momentum), (mass/2, *(-momentum))
+            leptonic = np.array([[np.trace((slash(minus)+ml*IDENTITY)@GAMMA[i+1]@
+                (slash(plus)-ml*IDENTITY)@GAMMA[j+1]) for j in range(3)] for i in range(3)])
+            actual = float(np.sum(rho*leptonic).real)/(2*mass**2*np.trace(rho).real)
+            expected = 1-beta_squared*float(n@rho.real@n)/np.trace(rho).real
+            self.assertAlmostEqual(actual, expected, places=13)
+
+    def test_full_chain_boosted_masses_conservation_and_separate_parent_flight(self):
+        for lepton in ('electron', 'muon'):
+            card = model(lepton)
+            for beta in ((0., 0., 0.), (.1, -.2, .8), (0., 0., -.999999)):
+                parent = boost((card['parent_mass_gev'], 0., 0., 0.), beta)
+                for parent_id in (321, -321):
+                    row = sample_decay(parent, .25, 200., random.Random(541),
+                        model=card, parent_pdg_id=parent_id)
+                    dark = np.array(row['dark_photon_p4'])
+                    primary = np.array(row['charged_lepton_p4'])+row['neutrino_p4']+dark
+                    np.testing.assert_allclose(primary, parent, rtol=2.e-10, atol=1.e-13)
+                    np.testing.assert_allclose(np.array(row['muon_p4'])+row['antimuon_p4'], dark,
+                        rtol=2.e-10, atol=1.e-13)
+                    for key, mass in (('dark_photon_p4', .25), ('muon_p4', MUON_MASS_GEV),
+                                     ('antimuon_p4', MUON_MASS_GEV),
+                                     ('charged_lepton_p4', card['lepton_mass_gev']), ('neutrino_p4', 0.)):
+                        p = np.array(row[key])
+                        self.assertLess(abs(np.sum(METRIC*p*p)-mass**2),
+                            256*math.ulp(max(parent[0]**2, 1.)))
+                    self.assertFalse(row['native_parent_flight_attached'])
+                    self.assertTrue(row['unconditional_decay'])
+                    self.assertEqual(row['recoil_pdg_ids'],
+                        [row['charged_lepton_pdg_id'], row['neutrino_pdg_id']])
+                    json.dumps(row, allow_nan=False)
+                    np.testing.assert_allclose(row['decay_displacement_mm'],
+                        row['proper_decay_length_mm']*dark[1:]/.25)
+                    self.assertAlmostEqual(row['decay_ct_mm'],
+                        row['proper_decay_length_mm']*dark[0]/.25)
+
+    def test_cp_reflection_swaps_charges_without_conjugating_strong_phases(self):
+        card = model()
+        parent = (card['parent_mass_gev'], 0., 0., 0.)
+        for seed in (41, 110, 871):
+            positive = sample_decay(parent, .3, 10., random.Random(seed), model=card)
+            negative = sample_decay(parent, .3, 10., random.Random(seed), model=card, parent_pdg_id=-321)
+            for key in ('dark_photon_p4', 'charged_lepton_p4', 'neutrino_p4'):
+                np.testing.assert_allclose(negative[key], np.array(positive[key])*METRIC)
+            np.testing.assert_allclose(negative['muon_p4'], np.array(positive['antimuon_p4'])*METRIC)
+            np.testing.assert_allclose(negative['antimuon_p4'], np.array(positive['muon_p4'])*METRIC)
+            self.assertEqual(positive['charged_lepton_pdg_id'], -13)
+            self.assertEqual(negative['charged_lepton_pdg_id'], 13)
+            self.assertEqual(negative['neutrino_pdg_id'], -14)
+            for part in ('real', 'imaginary'):
+                np.testing.assert_array_equal(negative['production_density_matrix_'+part],
+                    positive['production_density_matrix_'+part])
+
+    def test_unconditional_rotation_and_exponential_lifetime(self):
+        card, rng, count = model('electron'), random.Random(78286), 500
+        directions, lengths = [], []
+        for _ in range(count):
+            row = sample_decay((card['parent_mass_gev'], 0., 0., 0.), .3, 100., rng, model=card)
+            spatial = np.array(row['dark_photon_p4'][1:])
+            directions.append(spatial/np.linalg.norm(spatial))
+            lengths.append(row['proper_decay_length_mm']/100.)
+        directions = np.array(directions)
+        self.assertLess(np.max(np.abs(directions.mean(axis=0)))*math.sqrt(3*count), 5.)
+        self.assertLess(np.max(np.abs((directions**2).mean(axis=0)-1/3))/math.sqrt(4/(45*count)), 5.)
+        self.assertLess(abs(np.mean(lengths)-1)*math.sqrt(count), 5.)
+        self.assertLess(abs(np.mean(np.array(lengths)**2)-2)*math.sqrt(count/20), 5.)
+
+    def test_invalid_density_parent_and_trial_limits_fail_instead_of_biasing(self):
+        card, rng = model(), random.Random(391)
+        for density in (np.zeros((3, 3)), np.diag([1., -1., 1.]), np.ones((2, 2)),
+                        np.array([[1., 2j, 0.], [-2j, 1., 0.], [0., 0., 1.]])):
+            with self.assertRaises(ValueError):
+                sample_vector_muon_direction(density, .3, rng)
+        with self.assertRaises(ValueError):
+            sample_decay((.5, 0., 0., 0.), .25, 10., rng, model=card)
+        with self.assertRaises(ValueError):
+            sample_decay((card['parent_mass_gev'], 0., 0., 0.), .25, 10., rng,
+                model=dict(card, lepton_mass_gev=0.))
+        proposal = LeptonicProductionProposal(card, .25)
+        with self.assertRaises(ValueError):
+            proposal.sample(rng, maximum_trials=0)
+        proposal.cells = [(w, c, bound*1.e-12) for w, c, bound in proposal.cells]
+        with self.assertRaisesRegex(RuntimeError, 'envelope violated'):
+            proposal.sample(rng)
 
 
 if __name__ == '__main__':

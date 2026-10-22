@@ -7,10 +7,10 @@ Both charged external legs occur in IB. The transverse SD tensor includes
 the virtual-only A2,A4 terms and the complex charged-kaon EM form factor.
 Replacing a real-photon branching fraction would omit these contributions.
 
-This standalone rate library does not attach native parent endvertices or
+This standalone library does not attach native parent endvertices or
 simulate material. It retains the full three-polarization density, IB, SD and
-their interference, so a future event sampler must not replace it by an
-isotropic A' decay. Production rates exclude BR(A' -> mu+mu-). The continuum
+their interference in both rates and the unit-weight event sampler.
+Production rates exclude BR(A' -> mu+mu-). The continuum
 conversion helper applies only to a distinguishable virtual dilepton pair;
 identical final positive leptons require the exchange amplitude separately.
 
@@ -23,10 +23,11 @@ and truncation limitations. It is not a precision fit or a transport model.
 """
 import itertools
 import math
+import bisect
 
 import numpy as np
 
-from dark_photon_meson import boost
+from dark_photon_meson import MUON_MASS_GEV, boost
 from dark_photon_vector_meson import two_body_momentum
 
 
@@ -240,11 +241,15 @@ def rest_kinematics(parent_mass, lepton_mass, mass, weak_mass_squared, cosine):
     dark = (math.hypot(momentum, mass), 0., 0., momentum)
     weak_energy = math.hypot(momentum, weak_mass)
     internal = (weak_mass_squared-lepton_mass**2)/(2*weak_mass)
-    lepton_rest = (math.hypot(internal, lepton_mass),
-        internal*math.sqrt(1-cosine**2), 0., internal*cosine)
-    neutrino_rest = (internal, -lepton_rest[1], 0., -lepton_rest[3])
-    beta = (0., 0., -momentum/weak_energy)
-    lepton, neutrino = boost(lepton_rest, beta), boost(neutrino_rest, beta)
+    transverse = internal*math.sqrt(1-cosine**2)
+    fraction = 1-lepton_mass**2/weak_mass_squared
+    # Analytic W boost avoids gamma=1/sqrt(1-beta²) cancellation for a
+    # nearly massless W at the electron endpoint. Construct complementary
+    # daughters together so total energy/momentum does not lose precision.
+    neutrino_energy = fraction*(weak_energy+momentum*cosine)/2
+    neutrino_z = -fraction*(weak_energy*cosine+momentum)/2
+    neutrino = (neutrino_energy, -transverse, 0., neutrino_z)
+    lepton = (weak_energy-neutrino_energy, transverse, 0., -momentum-neutrino_z)
     return (parent_mass, 0., 0., 0.), lepton, neutrino, dark
 
 
@@ -311,3 +316,280 @@ def distinguishable_dilepton_differential_width(model, pair_mass, pair_lepton_ma
         quadrature_order=quadrature_order)[component]/epsilon**2
     ratio = (pair_lepton_mass/pair_mass)**2
     return width*model['alpha_em']/(3*math.pi*pair_mass**2)*math.sqrt(1-4*ratio)*(1+2*ratio)
+
+
+def production_cell_bound(model, mass, weak_interval, cosine_interval, *, _factors=None):
+    """Analytic upper bound on dGamma/(dW² dcosθ), for epsilon=0.001.
+
+    This is an amplitude bound, not a scanned maximum. In the kaon rest
+    frame the positive spin projectors have operator norms 2Eν and 2Eℓ.
+    Thus Trρ <= 4Eν Eℓ sum_a ||J_a||_F² <= EW² sum_a ||J_a||_F².
+    The IB norm below uses its exact projected Dirac decomposition; SD uses
+    its explicit transverse and longitudinal tensor components. The triangle
+    inequality then bounds their coherent sum, including interference.
+
+    Cell minima/maxima follow monotonic two-body energies and positive
+    propagators. The longitudinal IB cancellation is performed algebraically
+    before taking absolute values. Roundoff padding covers the scalar bound
+    arithmetic; the sampler also rejects any observed envelope violation.
+    """
+    parent, ml = model['parent_mass_gev'], model['lepton_mass_gev']
+    low, high = weak_interval
+    c_low, c_high = cosine_interval
+    if not (ml**2 <= low < high <= (parent-mass)**2 and -1 <= c_low < c_high <= 1):
+        raise ValueError('Open physical production cell required')
+    r_low = ml**2/high
+    r_high = ml**2/low if low else 0.
+    pmax = two_body_momentum(parent, math.sqrt(low), mass)
+    pmin = two_body_momentum(parent, math.sqrt(high), mass)
+    eqmax = (parent**2+mass**2-low)/(2*parent)
+    ewmax = (parent**2+high-mass**2)/(2*parent)
+    amax, amin = (parent**2-low-mass**2)/2, (parent**2-high-mass**2)/2
+    bmax, bmin = parent*pmax, parent*pmin
+    first = (1+r_low)*amin
+    second = ((1-r_low)*bmax*c_high if c_high >= 0 else
+              (1-r_high)*bmin*c_high)
+    # Dℓ = q²+2ℓ.q >= mA²+2mℓmA independently of the cell.
+    error = 64*np.finfo(float).eps*(abs(first)+abs(second)+mass**2)
+    d_lepton = max((mass**2+2*ml*mass)*(1-64*np.finfo(float).eps),
+                  first-second+mass**2-error)
+    d_parent = (parent**2-high)*(1-64*np.finfo(float).eps)
+    internal_max = (high-ml**2)/(2*math.sqrt(high))
+    closest_cosine = 0. if c_low <= 0 <= c_high else min(abs(c_low), abs(c_high))
+    lxmax = internal_max*math.sqrt(max(0., 1-closest_cosine**2))
+    # C_L = mA(1-r)[MK p+(2W²+q.W)c]/(DP Dℓ).
+    longitudinal_ib = (mass*(1-r_low)*(bmax+(2*high+amax)*max(abs(c_low), abs(c_high)))/
+                       (d_parent*d_lepton))
+    ib_norm_squared = 8*(model['fk_gev']*ml)**2*(
+        (4*lxmax**2+2*(eqmax**2+pmax**2)+mass**2)/d_lepton**2+longitudinal_ib**2)
+    factors = form_factors(mass**2, (low+high)/2, model) if _factors is None else _factors
+    v, a1, a2 = [complex(factors[name]) for name in ('V1', 'A1', 'A2')]
+    # A4=-A2/(MK²-W²), including the IB-only zero-current control.
+    a4max = abs(a2)/d_parent
+    transverse = abs(v)**2*parent**2*pmax**2+(abs(a1)*amax+abs(a2)*mass**2)**2
+    temporal = mass*pmax*(abs(a1-a2)+a4max*parent*ewmax)
+    spatial = mass*(abs(a1)*ewmax+abs(a2)*eqmax+a4max*parent*pmax**2)
+    sd_norm_squared = 8*(2*transverse+temporal**2+spatial**2)
+    current_bound = (math.sqrt(ib_norm_squared)+math.sqrt(sd_norm_squared))**2
+    phase = pmax*(1-r_low)/(256*math.pi**3*parent**2)
+    coefficient = (1.e-6*4*math.pi*model['alpha_em']*
+                   model['fermi_constant_gev_minus2']**2*model['v_us']**2)
+    bound = phase*coefficient*ewmax**2*current_bound
+    return math.nextafter(bound*(1+512*np.finfo(float).eps), math.inf)
+
+
+class LeptonicProductionProposal:
+    """Finite analytic envelopes for exact unit-weight rejection sampling.
+
+    Cells are selected with probability proportional to their area times
+    bound, then sampled uniformly and rejected against the full spin trace.
+    The accepted density is therefore the target differential width divided
+    by its integral. No rate rescaling, event weights or acceptance cut enters.
+    Changing the partition changes speed only. Endpoints have zero measure.
+    """
+
+    def __init__(self, model, mass, *, weak_cells=12, angular_cells=8):
+        self.model, self.mass = dict(model), _number(mass, 'vector mass', positive=True)
+        parent, ml = model['parent_mass_gev'], model['lepton_mass_gev']
+        if mass <= 2*MUON_MASS_GEV or mass >= parent-ml:
+            raise ValueError('Open leptonic-kaon and dimuon channels required')
+        if any(type(count) is not int or count < 1 for count in (weak_cells, angular_cells)):
+            raise ValueError('Positive integer proposal cell counts required')
+        low, high = ml**2, (parent-mass)**2
+        # V1,A1,A2 depend only on q² at this order; A4's W² denominator is
+        # bounded explicitly in each cell. Avoid repeating the same loops.
+        factors = form_factors(mass**2, (low+high)/2, model)
+        self.cells, self.cumulative = [], []
+        total = 0.
+        for i in range(weak_cells):
+            weak = (low if i == 0 else low+(high-low)*i/weak_cells,
+                    high if i+1 == weak_cells else low+(high-low)*(i+1)/weak_cells)
+            for j in range(angular_cells):
+                angle = (-1+2*j/angular_cells, -1+2*(j+1)/angular_cells)
+                bound = production_cell_bound(model, mass, weak, angle, _factors=factors)
+                total += bound*(weak[1]-weak[0])*(angle[1]-angle[0])
+                self.cells.append((weak, angle, bound))
+                self.cumulative.append(total)
+        if not math.isfinite(total) or total <= 0:
+            raise ValueError('Finite positive leptonic proposal normalization required')
+        self.envelope_integral = total
+
+    def sample(self, rng, *, maximum_trials=1000000):
+        """Return a rest-frame production point and its full spin density."""
+        if type(maximum_trials) is not int or maximum_trials < 1:
+            raise ValueError('Explicit positive rejection trial limit required')
+        for trial in range(1, maximum_trials+1):
+            index = min(bisect.bisect_right(self.cumulative,
+                rng.random()*self.envelope_integral), len(self.cells)-1)
+            weak, angle, bound = self.cells[index]
+            # An RNG may legally return zero. Do not evaluate the singular
+            # zero-measure W endpoint or a zero-energy neutrino there.
+            squared = weak[0]+(weak[1]-weak[0])*rng.random()
+            if not self.model['lepton_mass_gev']**2 < squared < (self.model['parent_mass_gev']-self.mass)**2:
+                continue
+            cosine = angle[0]+(angle[1]-angle[0])*rng.random()
+            point = rest_kinematics(self.model['parent_mass_gev'],
+                self.model['lepton_mass_gev'], self.mass, squared, cosine)
+            density = spin_density(*point, self.model, epsilon=.001)['total']
+            weak_mass = math.sqrt(squared)
+            internal = (squared-self.model['lepton_mass_gev']**2)/(2*weak_mass)
+            phase = point[3][3]*internal/(128*math.pi**3*self.model['parent_mass_gev']**2*weak_mass)
+            target = phase*float(np.trace(density).real)
+            if not math.isfinite(target) or target < -64*math.ulp(bound):
+                raise RuntimeError('Invalid leptonic production density')
+            if target > bound:
+                raise RuntimeError('Analytic leptonic production envelope violated')
+            if rng.random()*bound < target:
+                return dict(point=point, density=density, weak_mass_squared=squared,
+                    lepton_helicity_cosine=cosine, proposal_trials=trial,
+                    envelope_integral=self.envelope_integral)
+        raise RuntimeError('Leptonic production rejection trial limit exhausted')
+
+
+def sample_vector_muon_direction(density, mass, rng, *, maximum_trials=10000):
+    """Exact conditional vector-current dimuon angle in the density basis.
+
+    After the muon spin sum D_ij is proportional to δ_ij-β²n_i n_j.
+    For positive ρ, 0 <= n^T Reρ n <= Trρ, so Trρ is a proven rejection
+    envelope. Its mean efficiency is 1-β²/3, at least two thirds. Imaginary
+    circular polarization cannot be measured by this parity-even decay;
+    real off-diagonal entries retain the azimuthal correlations.
+    """
+    _number(mass, 'vector mass', positive=True)
+    if type(maximum_trials) is not int or maximum_trials < 1:
+        raise ValueError('Explicit positive angular trial limit required')
+    rho = np.asarray(density, dtype=complex)
+    if rho.shape != (3, 3) or not np.all(np.isfinite(rho)) or mass <= 2*MUON_MASS_GEV:
+        raise ValueError('Finite massive-vector density and open dimuon channel required')
+    trace = float(np.trace(rho).real)
+    tolerance = 128*np.finfo(float).eps*trace
+    if trace <= 0 or np.max(np.abs(rho-rho.conjugate().T)) > tolerance:
+        raise ValueError('Positive Hermitian production density required')
+    # Pivoted Schur complement: its first pivot is at least Trρ/3, so no
+    # small diagonal is divided out. A stable 2x2 eigenvalue then tests PSD.
+    # A LAPACK call per decay can start an expensive threaded BLAS team.
+    normalized = rho/trace
+    pivot = int(np.argmax(normalized.diagonal().real))
+    first, second = [index for index in range(3) if index != pivot]
+    denominator = normalized[pivot, pivot].real
+    d1 = (normalized[first, first]-abs(normalized[first, pivot])**2/denominator).real
+    d2 = (normalized[second, second]-abs(normalized[second, pivot])**2/denominator).real
+    off = normalized[first, second]-normalized[first, pivot]*normalized[pivot, second]/denominator
+    minimum = (d1+d2-math.hypot(d1-d2, 2*abs(off)))/2
+    if minimum < -128*np.finfo(float).eps:
+        raise ValueError('Positive Hermitian production density required')
+    beta_squared = 1-4*(MUON_MASS_GEV/mass)**2
+    for trial in range(1, maximum_trials+1):
+        cosine, phi = 2*rng.random()-1, 2*math.pi*rng.random()
+        sine = math.sqrt(max(0., 1-cosine*cosine))
+        direction = np.array([sine*math.cos(phi), sine*math.sin(phi), cosine])
+        acceptance = 1-beta_squared*float(direction@rho.real@direction)/trace
+        if not -128*np.finfo(float).eps <= acceptance <= 1+128*np.finfo(float).eps:
+            raise RuntimeError('Vector dimuon angular envelope violated')
+        if rng.random() < acceptance:
+            return direction, trial
+    raise RuntimeError('Vector dimuon angular rejection trial limit exhausted')
+
+
+def _isotropic_rotation(rng):
+    """Haar SO(3): isotropic third axis and uniform rotation around it."""
+    cosine, phi, psi = 2*rng.random()-1, 2*math.pi*rng.random(), 2*math.pi*rng.random()
+    sine = math.sqrt(max(0., 1-cosine*cosine))
+    third = np.array([sine*math.cos(phi), sine*math.sin(phi), cosine])
+    first = np.array([cosine*math.cos(phi), cosine*math.sin(phi), -sine])
+    second = np.array([-math.sin(phi), math.cos(phi), 0.])
+    return np.column_stack((math.cos(psi)*first+math.sin(psi)*second,
+        -math.sin(psi)*first+math.cos(psi)*second, third))
+
+
+def _boost_from_parent_rest(vector, parent, rest_mass):
+    """Use γ=E/M directly, preserving a highly boosted native parent sum.
+
+    Reconstructing γ from 1-β² discards the small rest mass at native kaon
+    boosts. This is the same Lorentz transformation with the supplied parent
+    invariant mass, without repairing/rescaling its four-vector.
+    """
+    product = math.fsum(float(p)*float(v) for p, v in zip(parent[1:], vector[1:]))
+    energy = (parent[0]*vector[0]+product)/rest_mass
+    shift = vector[0]/rest_mass+product/(rest_mass*(parent[0]+rest_mass))
+    return (float(energy), *(float(v+shift*p) for v, p in zip(vector[1:], parent[1:])))
+
+
+def sample_decay(parent, mass, proper_ctau_mm, rng, *, model, parent_pdg_id=321,
+                 maximum_trials=1000000, parent_mass_relative_tolerance=0.):
+    """K± -> ℓ±ν A′ -> ℓ±ν μ+μ− with full correlated polarization.
+
+    K− uses CP reflection and charge exchange of the whole K+ chain, assuming
+    real Vus and CP-conserving strong/electromagnetic currents. Absorptive
+    strong form factors are not conjugated. The source must apply BRμμ once.
+
+    Exact daughter closure uses the incoming four-vector's invariant mass.
+    The model's physical parent mass remains separately recorded. A native
+    source must qualify any additional inherited mass precision budget before
+    passing parent_mass_relative_tolerance. The default covers only the
+    scalar boost/invariant arithmetic at the incoming energy scale. This
+    helper neither repairs the parent nor attaches its native endvertex.
+    """
+    parent = _p4(parent)
+    if parent[0] <= 0 or parent_pdg_id not in (321, -321):
+        raise ValueError('Future-directed charged kaon required')
+    squared = math.fsum([parent[0]**2]+[-component**2 for component in parent[1:]])
+    if squared <= 0:
+        raise ValueError('Timelike kaon required')
+    proper_ctau_mm = _number(proper_ctau_mm, 'dark-photon proper lifetime', positive=True)
+    _number(parent_mass_relative_tolerance, 'inherited relative mass-squared precision', nonnegative=True)
+    event_mass = math.sqrt(squared)
+    shell_tolerance = (64*math.ulp(max(float(np.max(np.abs(parent)))**2,
+        model['parent_mass_gev']**2))+parent_mass_relative_tolerance*model['parent_mass_gev']**2)
+    if abs(squared-model['parent_mass_gev']**2) > shell_tolerance:
+        raise ValueError('Incoming kaon mass is outside the explicit arithmetic precision budget')
+    ml = model['lepton_mass_gev']
+    if math.isclose(ml, MUON_MASS_GEV, rel_tol=1.e-12):
+        lepton_abs_pdg = 13
+    elif math.isclose(ml, .00051099895, rel_tol=1.e-12):
+        lepton_abs_pdg = 11
+    else:
+        raise ValueError('The event sampler requires the physical electron or muon mass')
+    event_model = dict(model, parent_mass_gev=event_mass)
+    proposal = LeptonicProductionProposal(event_model, mass)
+    event = proposal.sample(rng, maximum_trials=maximum_trials)
+    _, lepton, neutrino, dark = event['point']
+    direction, angular_trials = sample_vector_muon_direction(event['density'], mass, rng)
+    basis = polarization_basis(dark)
+    dark_beta = tuple(component/dark[0] for component in dark[1:])
+    rest_axes = np.array([boost(state, tuple(-value for value in dark_beta))[1:] for state in basis])
+    muon_momentum = math.sqrt((mass/2-MUON_MASS_GEV)*(mass/2+MUON_MASS_GEV))
+    spatial = muon_momentum*(direction@rest_axes)
+    muon, antimuon = [boost((mass/2, *(sign*spatial)), dark_beta) for sign in (1., -1.)]
+    rotation = _isotropic_rotation(rng)
+    rest_vectors = [np.asarray(vector) for vector in (lepton, neutrino, dark, muon, antimuon)]
+    # Parity reverses every spatial momentum; charge conjugation exchanges
+    # the DP muon labels and the primary charged lepton/neutrino identities.
+    if parent_pdg_id == -321:
+        rest_vectors = [vector*METRIC for vector in rest_vectors]
+        rest_vectors[3], rest_vectors[4] = rest_vectors[4], rest_vectors[3]
+    moved = [_boost_from_parent_rest((vector[0], *(rotation@vector[1:])), parent, event_mass)
+             for vector in rest_vectors]
+    proper = -proper_ctau_mm*math.log1p(-rng.random())
+    lepton, neutrino, dark, muon, antimuon = moved
+    sign = 1 if parent_pdg_id == 321 else -1
+    return dict(dark_photon_p4=dark, charged_lepton_p4=lepton, neutrino_p4=neutrino,
+        muon_p4=muon, antimuon_p4=antimuon, charged_lepton_pdg_id=-sign*lepton_abs_pdg,
+        neutrino_pdg_id=sign*(lepton_abs_pdg+1), parent_pdg_id=parent_pdg_id,
+        recoil_p4s=[lepton, neutrino], recoil_pdg_ids=[-sign*lepton_abs_pdg, sign*(lepton_abs_pdg+1)],
+        recoil_masses_gev=[model['lepton_mass_gev'], 0.], recoil_natural_decay_required=True,
+        dark_photon_mass_gev=mass, muon_mass_gev=MUON_MASS_GEV,
+        charged_lepton_mass_gev=model['lepton_mass_gev'],
+        physical_parent_mass_gev=model['parent_mass_gev'], event_parent_mass_gev=event_mass,
+        parent_mass_squared_precision_budget_gev2=shell_tolerance,
+        proper_decay_length_mm=proper, decay_displacement_mm=tuple(proper*p/mass for p in dark[1:]),
+        decay_ct_mm=proper*dark[0]/mass, weak_mass_squared=event['weak_mass_squared'],
+        lepton_helicity_cosine=event['lepton_helicity_cosine'],
+        muon_direction_in_kplus_proposal_basis=tuple(float(value) for value in direction),
+        production_density_matrix_real=event['density'].real.tolist(),
+        production_density_matrix_imaginary=event['density'].imag.tolist(),
+        density_basis='canonical-K+-rest-linear-polarizations-before-rotation-and-CP',
+        production_proposal_trials=event['proposal_trials'], angular_proposal_trials=angular_trials,
+        dark_photon_polarization='full-three-state-density', parent_polarization='spin-zero',
+        cp_conjugate=parent_pdg_id == -321, unconditional_decay=True,
+        native_parent_flight_attached=False, material_transport_qualified=False)

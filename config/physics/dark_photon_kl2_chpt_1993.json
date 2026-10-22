@@ -9,7 +9,15 @@
     "url": "https://arxiv.org/pdf/hep-ph/9209261",
     "equations": "4.8-4.22; equal-mass loops from Appendix A.9-A.11; real-photon controls from 3.14-3.17"
   },
-  "scope": "A standalone historical O(p4) chiral benchmark for K+ to lepton+ neutrino A-prime, retaining both external-leg IB terms, complex pion/kaon loops, virtual-only form factors and all three vector polarizations. Charge-conjugate total rates assume CP symmetry. A K- polarization/event sampler requires its own conjugated amplitude.",
+  "scope": "A standalone historical O(p4) chiral rate and event benchmark for K+ to lepton+ neutrino A-prime, retaining both external-leg IB terms, complex pion/kaon loops, virtual-only form factors and all three vector polarizations. K- events use an explicit CP reflection and charge exchange of the complete chain, assuming real Vus and CP-conserving strong/electromagnetic currents; absorptive strong phases are retained.",
+  "event_sampler": {
+    "production": "Unit-weight analytic-cell rejection against the full IB+SD spin density. The cell bounds follow positive spin-projector operator norms, explicit positive propagator minima and current Frobenius norms; no empirical scan defines them.",
+    "dimuon": "Full conditional three-state density: Tr(rho)-beta_mu^2*n^T*Re(rho)*n. Tr(rho) is a proven rejection bound, with mean efficiency at least 2/3.",
+    "normalization": "The shape proposal uses epsilon=0.001 internally, which cancels in normalized sampling. The caller applies the physical production rate and dimuon branching exactly once.",
+    "mass_authority": "Daughter construction uses the incoming parent four-vector's invariant mass and records the separate physical model mass. Extra inherited mass-squared precision is caller-qualified; no parent four-vector is rescaled.",
+    "native_attachment_qualified": false,
+    "charged_lepton_recoil_and_transport_qualified": false
+  },
   "form_factor_model": {
     "kind": "chpt-p4-charged-kaon-leptonic-vector",
     "parent_pdg_id": 321,
@@ -51,7 +59,7 @@
   },
   "unqualified_terms": [
     "The historical LEC/normalization card is not a current precision fit. Higher chiral orders and measured form-factor alternatives are separate model uncertainties.",
-    "An event sampler must retain the polarization density and lepton-vector correlations; none is supplied here.",
+    "The event sampler retains polarization and lepton-vector correlations, but native whole-collision attachment, charged-lepton recoil admission and transport remain separate qualification gates.",
     "Parent flight, charged bending, material interactions, secondary sources and detector acceptance are not supplied.",
     "The measured identical-muon NA62 branching fraction is not a normalization for the distinguishable single-current continuum conversion."
   ],
