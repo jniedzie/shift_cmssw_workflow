@@ -233,6 +233,107 @@ def combined_rate(populations, *, point, campaign):
     return result
 
 
+def disjoint_parent_component_rates(components, *, point, campaign):
+    """Prepare rates for separately normalized, parent-disjoint meson sources.
+
+    Repeated runs of each source are pooled by ``combined_rate`` first. Sources
+    with different rare-decay parents then add. This deliberately rejects two
+    cards that share a parent: distinct channel names alone do not prove that
+    their amplitudes or cascades are independent. It is currently suitable for
+    the existing light-meson source plus its physical-kaon complement.
+
+    This prepares accounting only. It does not merge files, certify a source
+    model, or publish an alias. Native GEN weights remain unchanged. The extra
+    histogram scales describe an optional weighted histogram representation,
+    whose subsequent ordinary normalization is total_sigma / total_GEN_sumw.
+    """
+    if not isinstance(components, list) or len(components) < 2:
+        raise ValueError('Require at least two independently normalized components')
+    rows, names, parent_owners = [], set(), {}
+    all_ids, all_runs, all_seeds, all_gen = set(), set(), set(), set()
+    physical, conditions = None, None
+    common_fields = ('mass_gev', 'epsilon', 'proper_ctau_mm', 'physical_br_mumu',
+                     'beam_energy_GeV', 'source_model', 'cross_section_convention',
+                     'generated_mass_support_gev')
+    for component in components:
+        name = component.get('name')
+        digest = component.get('conditions_sha256')
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or name in names:
+            raise ValueError('Component names must be unique safe names')
+        if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+            raise ValueError('Require pinned detector/source conditions for every component')
+        if conditions is None:
+            conditions = digest
+        elif digest != conditions:
+            raise ValueError('Components have different detector/source conditions')
+        populations = unique_populations(component['populations'])
+        first = populations[0]['rate']
+        if first.get('mechanism') != 'meson-radiative':
+            raise ValueError('Parent-disjoint combination currently requires meson sources')
+        current = {field: first[field] for field in common_fields}
+        if physical is None:
+            physical = current
+        elif current != physical:
+            raise ValueError('Components describe different physical points or source conventions')
+        pooled = combined_rate(populations, point=point, campaign=campaign)
+        parents = first.get('meson_model_card', {}).get('parents')
+        if not isinstance(parents, list) or not parents:
+            raise ValueError('Every component needs an explicit rare-parent inventory')
+        owned = set()
+        for parent in parents:
+            pdg = parent.get('pdg_id')
+            if type(pdg) is not int or pdg == 0:
+                raise ValueError('Invalid rare-parent PDG identity')
+            if pdg in parent_owners:
+                raise ValueError('Components share a rare parent; amplitude ownership needs review')
+            owned.add(pdg)
+        for population in populations:
+            parent, record = population['parent'], population['rate']
+            identities = set(map(tuple, parent['event_ids']))
+            runs = {identity[0] for identity in identities}
+            seed, gen = record['seed'], parent['gen_sha256']
+            if (identities & all_ids or runs & all_runs or seed in all_seeds or gen in all_gen):
+                raise ValueError('Components reuse GEN identities, runs, seeds or populations')
+            all_ids.update(identities)
+            all_runs.update(runs)
+            all_seeds.add(seed)
+            all_gen.add(gen)
+        names.add(name)
+        parent_owners.update({pdg: name for pdg in owned})
+        rate = pooled['physical_selected_cross_sections_pb'][0]
+        denominator = pooled['full_gen']['sum_weights']
+        if not math.isfinite(denominator) or denominator <= 0:
+            raise ValueError('Every component needs a positive full GEN denominator')
+        rows.append(dict(name=name, parent_pdg_ids=sorted(owned), rate=pooled,
+            full_gen_weight_sum=denominator,
+            selected_cross_section_pb=rate['value_pb'],
+            cross_section_per_gen_weight_pb=rate['value_pb'] / denominator))
+    total_sigma = math.fsum(row['selected_cross_section_pb'] for row in rows)
+    total_sumw = math.fsum(row['full_gen_weight_sum'] for row in rows)
+    reference = total_sigma / total_sumw
+    for row in rows:
+        row['histogram_scale'] = row['cross_section_per_gen_weight_pb'] / reference
+    return dict(schema='shift-dark-photon-disjoint-parent-component-rates-v1',
+        point=point, campaign=campaign, physical_point=physical,
+        conditions_sha256=conditions, components=rows,
+        physical_selected_cross_sections_pb=[dict(value_pb=total_sigma,
+            error_pb=math.sqrt(math.fsum(
+                row['rate']['physical_selected_cross_sections_pb'][0]['error_pb']**2 for row in rows)))],
+        combination=dict(method='Pool repeated identical proposals within each source; sum parent-disjoint source rates',
+            cross_sections_summed=True, source_collisions_is_luminosity=False,
+            extra_decay_branching_fraction_applied=False,
+            uncertainty_scope='Independent Monte Carlo errors only; common theory/source uncertainties are not bounded'),
+        histogram_normalization=dict(reference_gen_weight_sum=total_sumw,
+            cross_section_per_stored_weight_pb=reference,
+            expected_full_gen_stored_sumw=math.fsum(
+                row['histogram_scale'] * row['full_gen_weight_sum'] for row in rows),
+            expected_full_gen_stored_sumw2=math.fsum(
+                row['histogram_scale']**2 * row['full_gen_weight_sum'] for row in rows),
+            native_gen_weights_changed=False, scale_flow_bins=True, scale_sumw2_by_squared_factor=True,
+            shape_normalization='Sum physical components first; normalize the resulting shape once'),
+        normalization_ready=False, physics_valid=False, production_rate_validated=False)
+
+
 def load_source(source, expected_model, conditions_digest):
     plan_path = checked(source['plan_path'], source['plan_sha256'])
     plan, directory = read(plan_path), plan_path.parent

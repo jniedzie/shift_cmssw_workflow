@@ -15,7 +15,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from aggregate_dark_photon_samples import (combined_rate, completed_histogram_input, event_rows, execute, group_inputs,
+from aggregate_dark_photon_samples import (combined_rate, disjoint_parent_component_rates,
+                                         completed_histogram_input, event_rows, execute, group_inputs,
                                          qualified_finalizer, sha, unique_populations,
                                          validate_event_rows, verify_aggregate_seal)
 
@@ -36,6 +37,106 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
         parent=dict(gen_sha256=hashlib.sha256(str(run).encode()).hexdigest(), event_ids=identities,
                     native_sumw=float(events), native_sumw2=float(events)), rate=record,
         inputs=[dict(path='nano_' + str(run), events=events, event_ids=identities)])
+
+
+class DisjointParentAccounting(unittest.TestCase):
+    @staticmethod
+    def component(name, pdg, populations):
+        for item in populations:
+            rate = item['rate']
+            exposure = rate['proposal_ledger']['n_tried']
+            rate.update(mechanism='meson-radiative', meson_model_card={'parents': [{'pdg_id': pdg}]},
+                rate_scope='non-diffractive pp', source_exposure=dict(
+                    fixed_source_collisions=exposure, source_collisions=exposure,
+                    native_n_accepted=exposure, accepted_signal_events=rate['full_gen']['accepted_events'],
+                    coefficient_sum=1., coefficient_sum_squared=1.,
+                    physical_probability_sum=1., physical_probability_sum_squared=1.))
+            rate['full_gen']['source_collisions'] = exposure
+        return dict(name=name, conditions_sha256='a' * 64, populations=populations)
+
+    def combine(self, components):
+        return disjoint_parent_component_rates(components, point='m15_lab_30m', campaign='combined')
+
+    def test_pool_repeats_then_add_distinct_rates_with_separate_denominators(self):
+        components = [self.component('light', 221, [population(10, 2, 100, 2.),
+                       population(20, 8, 300, 6.)]),
+                      self.component('kaon', 130, [population(30, 2, 100, 3., .2)])]
+        result = self.combine(components)
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'], 8.)
+        self.assertAlmostEqual(result['physical_selected_cross_sections_pb'][0]['error_pb'],
+                               math.sqrt(.025**2 + .075**2 + .2**2))
+        light, kaon = result['components']
+        self.assertEqual(light['selected_cross_section_pb'], 5.)
+        self.assertEqual(light['full_gen_weight_sum'], 10.)
+        self.assertEqual(kaon['full_gen_weight_sum'], 2.)
+        self.assertEqual(light['cross_section_per_gen_weight_pb'], .5)
+        self.assertEqual(kaon['cross_section_per_gen_weight_pb'], 1.5)
+        self.assertEqual(result['histogram_normalization']['expected_full_gen_stored_sumw'], 12.)
+        self.assertEqual(result['histogram_normalization']['expected_full_gen_stored_sumw2'], 15.75)
+        self.assertFalse(result['normalization_ready'])
+        # In a selected bin with two light events and one kaon event, the
+        # correct yield is 2500 at 1000 pb^-1. A single raw-population scale
+        # would incorrectly give 2000. The variance includes squared weights.
+        factors = [row['histogram_scale'] for row in result['components']]
+        reference = result['histogram_normalization']['cross_section_per_stored_weight_pb']
+        selected_bin = 2 * factors[0] + factors[1]
+        variance = 2 * factors[0]**2 + factors[1]**2
+        self.assertAlmostEqual(1000 * reference * selected_bin, 2500.)
+        self.assertAlmostEqual((1000 * reference)**2 * variance, 2750000.)
+        # The same factors must apply to underflow/overflow and not only
+        # visible bins; no second dimuon branching fraction is needed.
+        self.assertAlmostEqual(reference * factors[1], 1.5)
+        self.assertEqual(light['rate']['source_exposure']['source_collisions'], 400)
+
+    def test_shared_parent_and_full_union_cannot_be_added_to_old_component(self):
+        first = self.component('old', 221, [population(10)])
+        second = self.component('union', 130, [population(20)])
+        second['populations'][0]['rate']['meson_model_card']['parents'].append({'pdg_id': 221})
+        with self.assertRaisesRegex(ValueError, 'share a rare parent'):
+            self.combine([first, second])
+
+    def test_sibling_channels_within_one_component_keep_one_parent_owner(self):
+        first = self.component('old', 221, [population(10)])
+        second = self.component('kaon', 310, [population(20)])
+        second['populations'][0]['rate']['meson_model_card']['parents'].append({'pdg_id': 310})
+        self.assertEqual(self.combine([first, second])['components'][1]['parent_pdg_ids'], [310])
+
+    def test_cross_component_reuse_and_different_conditions_or_physics_fail(self):
+        for case in ('reused_seed', 'reused_population', 'conditions', 'mass', 'br', 'convention'):
+            with self.subTest(case=case):
+                first = self.component('old', 221, [population(10)])
+                second = self.component('kaon', 130, [population(20)])
+                rate = second['populations'][0]['rate']
+                if case == 'reused_seed':
+                    rate['seed'] = 10
+                elif case == 'reused_population':
+                    second['populations'][0]['parent']['gen_sha256'] = first['populations'][0]['parent']['gen_sha256']
+                elif case == 'conditions':
+                    second['conditions_sha256'] = 'b' * 64
+                elif case == 'mass':
+                    rate['mass_gev'] = 16.
+                elif case == 'br':
+                    rate['physical_br_mumu'] = .3
+                elif case == 'convention':
+                    rate['cross_section_convention'] = 'different convention'
+                with self.assertRaises(ValueError):
+                    self.combine([first, second])
+
+    def test_component_inventory_and_names_are_mandatory(self):
+        for case in ('missing_inventory', 'zero_pdg', 'duplicate_name', 'missing_conditions'):
+            with self.subTest(case=case):
+                first = self.component('old', 221, [population(10)])
+                second = self.component('kaon', 130, [population(20)])
+                if case == 'missing_inventory':
+                    second['populations'][0]['rate']['meson_model_card']['parents'] = []
+                elif case == 'zero_pdg':
+                    second['populations'][0]['rate']['meson_model_card']['parents'][0]['pdg_id'] = 0
+                elif case == 'duplicate_name':
+                    second['name'] = 'old'
+                elif case == 'missing_conditions':
+                    del second['conditions_sha256']
+                with self.assertRaises(ValueError):
+                    self.combine([first, second])
 
 
 class PopulationAccounting(unittest.TestCase):
