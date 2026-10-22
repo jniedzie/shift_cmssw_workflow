@@ -17,6 +17,7 @@ from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_for
 import dark_photon_vector_meson as vector_meson
 
 PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323)
+PSEUDOSCALAR_DIPION_CORRECTION_LIMIT = 1.e-3
 
 
 def exclusive_channels(model):
@@ -216,6 +217,59 @@ def model_precision_budget(parent, signal_mass):
     return max(abs(value/central-1) for value in values)
 
 
+def pseudoscalar_dipion_precision_report(parent, kinematic_mass, signal_mass, model, br_mumu):
+    """Bound a tiny exceptional dipion contribution using its own parent.
+
+    Keep the photon sibling's original isolated BR/TFF check. Only the dipion
+    rate difference plus its entire nominal conditional-distribution weight
+    gets the 0.1% same-parent correction budget. The parent's total L1 rate
+    shift must also fit its original nominal-weighted BR/TFF envelope. This
+    does not claim 0.1% accuracy for the photon sibling or the full parent.
+    """
+    channels = exclusive_channels(model)
+    kinds = [row.get('decay_type', 'pseudoscalar-photon') for row in channels]
+    native = parent['native_mass_gev']
+    if (parent['pdg_id'] not in (221, 331) or len(channels) != 2
+            or sorted(kinds) != ['pseudoscalar-dipion', 'pseudoscalar-photon']
+            or model.get('mass_min_gev') != native or model.get('mass_max_gev') != native):
+        raise ValueError('Exceptional dipion precision requires the two owned eta/eta-prime pole channels')
+    rates = []
+    for channel in channels:
+        if ((kinematic_mass > signal_mass+recoil_threshold(channel)) !=
+                (native > signal_mass+recoil_threshold(channel))):
+            raise ValueError('Native precision changes whether an owned rare decay is open')
+        nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
+        shifted = parent_branching_coefficient(kinematic_mass, signal_mass, channel, br_mumu)
+        budget = channel['relative_model_uncertainty']
+        if not math.isfinite(budget) or budget < 0:
+            raise ValueError('A finite original BR/TFF precision budget is required')
+        relative = shifted/nominal-1 if nominal else 0.
+        exceptional = abs(relative) > budget
+        if exceptional and channel.get('decay_type') != 'pseudoscalar-dipion':
+            raise ValueError('Photon sibling exceeds its unchanged isolated BR/TFF precision budget')
+        rates.append(dict(channel=channel['channel'], nominal=nominal, kinematic=shifted,
+                          relative_shift=relative, original_budget=budget, exceptional=exceptional))
+    total = math.fsum(row['nominal'] for row in rates)
+    if total <= 0:
+        raise ValueError('A positive same-parent nominal rate is required')
+    exceptional = [row for row in rates if row['exceptional']]
+    correction = math.fsum(abs(row['kinematic']-row['nominal'])+row['nominal']
+                          for row in exceptional)/total
+    l1 = math.fsum(abs(row['kinematic']-row['nominal']) for row in rates)/total
+    measured_budget = math.fsum(row['nominal']*row['original_budget'] for row in rates)/total
+    if correction > PSEUDOSCALAR_DIPION_CORRECTION_LIMIT:
+        raise ValueError('Exceptional dipion rate plus conditional-shape bound exceeds 0.1% of its own parent')
+    if l1 > measured_budget:
+        raise ValueError('Total parent rate shift exceeds its original weighted BR/TFF precision budget')
+    return dict(schema='shift-pseudoscalar-native-dipion-precision-v1',
+                parent_pdg_id=parent['pdg_id'], signal_mass_gev=signal_mass,
+                native_parent_mass_gev=native, kinematic_parent_mass_gev=kinematic_mass,
+                channels=rates, exceptional_dipion_rate_plus_shape_bound=correction,
+                required_exceptional_dipion_bound=PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,
+                parent_l1_relative_rate_shift=l1, parent_original_weighted_model_budget=measured_budget,
+                scope='0.1% applies only to the exceptional dipion contribution; sibling BR/TFF checks remain unchanged')
+
+
 def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_mumu):
     """Preserve native momenta and bookkept masses; never repair or drop one.
 
@@ -258,6 +312,10 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
             budget = channel.get('relative_numerical_mass_precision_budget',
                                  channel.get('relative_model_uncertainty'))
             if abs(relative) > budget:
+                if channel.get('decay_type') == 'pseudoscalar-dipion':
+                    parent['native_parent_precision_report'] = pseudoscalar_dipion_precision_report(
+                        parent, mass, signal_mass, model, br_mumu)
+                    continue
                 if channel.get('decay_type') != 'charged-vector-dipion' or owned_rates is None:
                     raise ValueError('Native mass precision effect exceeds the declared numerical or BR/TFF precision budget')
                 # Near its endpoint this channel is tiny. Keep it, and retain

@@ -21,7 +21,8 @@ from dark_photon_meson import MUON_MASS_GEV, mean_lab_beta_gamma, radiative_bran
 from dark_photon_meson_source import (coefficient_bound, choose_collision, source_cross_section_pb,
     model_precision_budget, resolve_parent_kinematics, resolved_parent_models,
     parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
-    dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model)
+    dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
+    PSEUDOSCALAR_DIPION_CORRECTION_LIMIT)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import native_source, inject_decay, cmssw_native_libraries
 from fixed_target_generation import beam_settings
@@ -164,6 +165,13 @@ def run(args):
                 'Same-parent sum of absolute exclusive-rate shifts plus the entire nominal '
                 'fraction of a dipion channel exceeding its isolated precision budget; '
                 'combined bound remains 0.1%, with a ledger report only on that exceptional path')
+        if any(parent.get('decay_type') == 'pseudoscalar-dipion' for parent in card['parents']):
+            precision['pseudoscalar_dipion_guard'] = dict(
+                exceptional_dipion_rate_plus_shape_bound=PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,
+                scope='Exceptional dipion contribution divided by the SAME physical parent total',
+                sibling_check='Unchanged isolated measured BR/TFF envelope',
+                total_parent_check='L1 rate shift below the original nominal-weighted BR/TFF envelope',
+                total_parent_accuracy='Not a 0.1% total-parent accuracy claim')
         ecm = configuration['ecm_gev']
         bound = coefficient_bound(ecm, width['br_mumu'], models, args.mass)
         if bound <= 0:
