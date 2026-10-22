@@ -1,0 +1,56 @@
+{
+  "code_style": "AI-code. AI-generated attributed reference inputs for the local VMD benchmark.",
+  "schema": "shift-neutral-pseudoscalar-local-vmd-reference-v1",
+  "publication": {
+    "title": "Theoretical analysis of the doubly radiative decays eta(') to pi0 gamma gamma and eta' to eta gamma gamma",
+    "authors": ["Rafel Escribano", "Sergi Gonzalez-Solis", "Renata Jora", "Emilio Royo"],
+    "doi": "10.1103/PhysRevD.102.034026",
+    "url": "https://doi.org/10.1103/PhysRevD.102.034026",
+    "fulltext": "https://inspirehep.net/files/5ad4546e0dd36019a3d991effe34b3d9",
+    "license": "https://creativecommons.org/licenses/by/4.0/"
+  },
+  "virtual_vertex_prescription": "constant-local-couplings",
+  "omitted_scalar_and_chiral_terms": true,
+  "model_scope": "Two anomalous local VP field-strength vertices, both photon attachments and finite-width rho/omega/phi propagators. A specified leading electromagnetic VMD component, not a model-independent timelike rate bound.",
+  "uncertainty_scope": "Table I coupling magnitudes have quoted empirical errors. A rectangular enlargement plus absolute interference sum is a conditional model envelope, not a joint statistical confidence interval. Scalar/chiral contributions and additional virtual-current form factors are not enclosed.",
+  "coupling_sign_authority": "Table I measures magnitudes. Relative real signs are supplied by Eq. 11: phi-eta-prime is negative; the other listed couplings are positive. Absolute envelopes allow all phases.",
+  "pole_input_scope": "Explicit pole inputs for this reproduction, consistent with the publication's PDG pole convention. The paper does not print its exact numerical pole card; agreement is assessed within the quoted coupling-input errors, not claimed bit-for-bit.",
+  "pion_mass_gev": 0.13957039,
+  "pseudoscalars": {
+    "111": {"name": "pi0", "mass_gev": 0.1349768},
+    "221": {"name": "eta", "mass_gev": 0.547862, "total_width_gev": 0.00000131},
+    "331": {"name": "eta-prime", "mass_gev": 0.95778, "total_width_gev": 0.000196}
+  },
+  "vectors": [
+    {
+      "pdg_id": 113, "name": "rho0", "mass_gev": 0.77526, "width_gev": 0.1491,
+      "width_prescription": "rho-pipi-primary-eq10",
+      "couplings_gev_inverse": {"111": [0.22, 0.01], "221": [0.48, 0.02], "331": [0.40, 0.01]}
+    },
+    {
+      "pdg_id": 223, "name": "omega", "mass_gev": 0.78265, "width_gev": 0.00849,
+      "width_prescription": "constant",
+      "couplings_gev_inverse": {"111": [0.70, 0.01], "221": [0.135, 0.006], "331": [0.127, 0.004]}
+    },
+    {
+      "pdg_id": 333, "name": "phi", "mass_gev": 1.019461, "width_gev": 0.004249,
+      "width_prescription": "constant",
+      "couplings_gev_inverse": {"111": [0.041, 0.001], "221": [0.2093, 0.0020], "331": [-0.216, 0.004]}
+    }
+  ],
+  "quark_model_fit": {
+    "equations": [11, 24],
+    "g_gev_inverse": [0.70, 0.01],
+    "z_non_strange": [0.83, 0.02],
+    "z_strange_mass_ratio": [0.65, 0.01],
+    "phi_p_degrees": [41.4, 0.5],
+    "phi_v_degrees": [3.3, 0.1],
+    "fit_quality_note": "The primary isospin-limit fit has chi2/dof=5.3; fit covariance and the unprinted precision of rounded inputs are not reconstructed."
+  },
+  "massless_vmd_width_targets_ev": [
+    {"parent": 221, "recoil": 111, "empirical": [0.16, 0.01], "quark_model": [0.16, 0.01]},
+    {"parent": 331, "recoil": 111, "empirical": [570.0, 30.0], "quark_model": [700.0, 40.0]},
+    {"parent": 331, "recoil": 221, "empirical": [21.2, 1.2], "quark_model": [19.1, 1.0]}
+  ],
+  "production_warning": "Inclusive eta-prime modes contain vector feed-down already present in V to P A-prime samples. These inputs authorize a rate diagnostic only; coherent replacement and ancestry overlap validation are required before adding production."
+}
