@@ -21,7 +21,8 @@ from audit_shift_material_scout import audit, digest, metadata
 from run_shift_gen_to_nano import audit_edm, audit_nano, command, event_progress, progress, signatures
 from shift_gen_material_features import event_features, hepmc_unit_names, read_hepmc
 from shift_material_preselection import admission_probability, pair_priority
-from shift_material_response import retained_tail_counts, sampling_probabilities
+from shift_material_response import (retained_tail_counts, sampling_probabilities,
+                                     source_normalization, source_rate_weight, source_timing_input)
 from shift_event_weights import annotate_proposal_weights
 
 
@@ -88,6 +89,8 @@ def main():
     request = json.loads(request_path.read_text())
     diagnostic_outputs = diagnostic_edm_outputs(request)
     source, sample = request['source'], request['sample']
+    timing_input = source_timing_input(source)
+    source_normalization(source)
     inclusion = sampling_probabilities(sample)
     tools = Path(__file__).resolve().parent.parent
     report = dict(schema='shift-material-response-worker-v1', complete=False,
@@ -128,9 +131,9 @@ def main():
                 raise ValueError('Private input changed: '+path)
         exposure = metadata('gen.root')
         report['full_source_exposure'] = exposure
-        # Raw production GEN stores generatorSmeared, before the established
-        # nominal SHIFT time-coordinate translation. Persist that translation
-        # once, without running a generator, decay module or detector stage.
+        # Reproduce the nominal source time once from its native unshifted
+        # graph. Ordinary DY already timed generatorSmeared, so its adapter
+        # explicitly selects the preserved original VtxSmeared product.
         # This lets the material audit compare exact timed graphs end to end.
         selected_rows = [dict(id=eid, weight=w) for eid,w in zip(sample['event_ids'], sample['native_weights'])]
         dump('event_ids.json', sample['event_ids'])
@@ -138,7 +141,7 @@ def main():
 import FWCore.ParameterSet.Config as cms
 p=cms.Process('SHIFTTIMING')
 p.load('IOMC.ShiftEventTiming.shiftEventTime_cfi')
-p.shiftEventTime.src=cms.InputTag('generatorSmeared')
+p.shiftEventTime.src=cms.InputTag(sys.argv[4])
 p.source=cms.Source('PoolSource',fileNames=cms.untracked.vstring('file:'+sys.argv[1]),eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))]))
 p.maxEvents=cms.untracked.PSet(input=cms.untracked.int32(int(sys.argv[3])))
 p.path=cms.Path(p.shiftEventTime)
@@ -147,7 +150,7 @@ p.end=cms.EndPath(p.out)
 open('timing_cfg.py','w').write(p.dumpPython())
 '''
         command([sys.executable, '-c', timing, str(Path('gen.root').resolve()),
-                 str(Path('timed_gen.root').resolve()), str(len(selected_rows))], timeout=600)
+                 str(Path('timed_gen.root').resolve()), str(len(selected_rows)), timing_input], timeout=600)
         before = signatures(Path('gen.root'), 0, len(selected_rows), indices=sample['indices'])
         run_stage('TIMING', ['cmsRun', 'timing_cfg.py'], 1800)
         after = signatures(Path('timed_gen.root'), 0, len(selected_rows))
@@ -240,16 +243,22 @@ open('sim_cfg.py','w').write(p.dumpPython())
             sampling_probability=p, sampling_gen_weight=x['weight']/p,
             proposal_density_ratio=1., proposal_correction=1.,
             proposal_gen_weight=x['weight']/p, admitted=True) for x, p in zip(original_rows, inclusion)]
+        kind, denominator, _ = source_normalization(source)
+        source_exposure = dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
+                               original_full_Run_Lumi_metadata=exposure)
+        if kind == 'fixed_source_trials':
+            source_exposure['full_source_trials'] = denominator
+        else:
+            source_exposure.update(denominator_kind=kind, full_source_events=denominator)
         report['weight_annotation'] = annotate_proposal_weights(Path('step4.root'), weight_rows,
-            [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
-                  full_source_trials=source['full_source_trials'], original_full_Run_Lumi_metadata=exposure)],
+            [source_exposure],
             expected_nano_sha256=digest('step4.root'))
         detector_cpu = sum(x['cpu_seconds'] for x in report['stages'])
         for answer, feat, original, p in zip(answers, features, original_rows, inclusion):
             answer.update(original_source_sha256=source['gen_sha256'], source_id=source['source_id'],
                 stratum=source['stratum'], native_weight=original['weight'],
                 benchmark_probability=p, candidate_probability=feat['candidate_probability'],
-                rate_weight=original['weight']*source['sigma_nd_pb']/source['full_source_trials'],
+                rate_weight=source_rate_weight(source, original['weight']),
                 detector_cpu_seconds=detector_cpu/len(answers), feature_cpu_seconds=feature_cpu/len(answers))
         dump('response.json', dict(schema='shift-material-response-v1', events=answers,
              source_id=source['source_id'], source_GEN_sha256=source['gen_sha256'],

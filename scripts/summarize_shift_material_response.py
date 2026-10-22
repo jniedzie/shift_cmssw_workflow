@@ -2,7 +2,6 @@
 # Code style: AI-code. AI-generated strict material-response completion check.
 """Close declared response cohorts and compare the frozen candidate selection."""
 import argparse
-import collections
 import hashlib
 import json
 import math
@@ -10,7 +9,8 @@ from pathlib import Path
 import subprocess
 import sys
 
-from shift_material_response import bootstrap_comparison, shape_comparison, response_reporting_scope
+from shift_material_response import (bootstrap_comparison, shape_comparison, response_reporting_scope,
+                                     source_exposures, source_rate_weight)
 
 
 def summarize(directory, canary=False):
@@ -48,14 +48,15 @@ def summarize(directory, canary=False):
     else:
         # Full source exposure belongs once to the union of all chunks, not to
         # every Nano file or to each independent source's already scaled rate.
-        exposure = collections.defaultdict(int)
-        for source in plan['sources'].values():
-            exposure[source['stratum']] += source['full_source_trials']
+        exposure, denominator_kinds = source_exposures(plan['sources'].values())
         for row in rows:
             source = plan['sources'][row['source_id']]
-            row['rate_weight'] = row['native_weight']*source['sigma_nd_pb']/exposure[source['stratum']]
+            row['rate_weight'] = source_rate_weight(source, row['native_weight'], exposure[source['stratum']])
         out = dict(schema='shift-material-response-comparison-v1', complete=True,
-                   conditional_saved_GEN_study=True, full_source_trials_by_bin=dict(exposure),
+                   conditional_saved_GEN_study=True,
+                   full_source_trials_by_bin={key: count for key, count in exposure.items()
+                                              if denominator_kinds[key] == 'fixed_source_trials'},
+                   native_source_exposure_by_bin=exposure, denominator_kind_by_bin=denominator_kinds,
                    all_bins=bootstrap_comparison(rows), bins={}, publications=publications,
                    shapes=shape_comparison(rows, plan['policy']),
                    **response_reporting_scope(plan),

@@ -18,7 +18,8 @@ import tempfile
 import time
 
 from shift_material_preselection import admission_probability
-from shift_material_response import bootstrap_comparison, shape_comparison, TARGETS
+from shift_material_response import (bootstrap_comparison, shape_comparison, TARGETS,
+                                     source_exposures, source_rate_weight)
 
 
 def sha(path):
@@ -104,12 +105,10 @@ def run(directory, authority):
             priorities[key] = feature['ranking']
             rows.append(row)
         evidence.append(publication)
-    exposures = {}
-    for source in plan['sources'].values():
-        exposures[source['stratum']] = exposures.get(source['stratum'], 0)+source['full_source_trials']
+    exposures, denominator_kinds = source_exposures(plan['sources'].values())
     for row in rows:
         source = plan['sources'][row['source_id']]
-        row['rate_weight'] = row['native_weight']*source['sigma_nd_pb']/exposures[row['stratum']]
+        row['rate_weight'] = source_rate_weight(source, row['native_weight'], exposures[row['stratum']])
     comparisons = {}
     for floor in authority['control_probabilities']:
         policy = dict(plan['policy'], control_probability=floor, unknown_probability=floor)
@@ -122,7 +121,10 @@ def run(directory, authority):
             all_bins=bootstrap_comparison(rows, replicates=authority['bootstrap_replicates'],
                                           confidence=authority['confidence']),
             shapes=shape_comparison(rows, policy), physics_normalization_ready=False,
-            full_source_trials_by_bin=exposures, inclusive_transport_complete=False)
+            full_source_trials_by_bin={key: count for key, count in exposures.items()
+                                       if denominator_kinds[key] == 'fixed_source_trials'},
+            native_source_exposure_by_bin=exposures, denominator_kind_by_bin=denominator_kinds,
+            inclusive_transport_complete=False)
         label = 'control_'+str(floor).replace('.', 'p')
         path = directory/(label+'_qualification.json')
         path.write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')

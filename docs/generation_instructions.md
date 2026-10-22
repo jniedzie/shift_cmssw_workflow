@@ -223,6 +223,23 @@ chamber hits, then measure Both-Both performance with the recorded reconstructio
 version. Reconstruction is being improved independently; do not rebuild or
 change the shared release for these selection studies.
 
+The response-source adapter also accepts the native weighted direct-J/psi
+receipt (`family='jpsi'`) and ordinary unit-weight DY receipt (`family='dy'`).
+The latter needs the original receipt-bound contract, semantic audit and GEN
+bytes, with an explicit relocated GEN path when needed. J/psi keeps its full
+fixed-trial denominator and native W; DY keeps its accepted-GEN denominator and
+native run cross section. They are distinct conventions: never label DY's
+accepted count as Pythia trials, or apply another muon-filter/branching factor.
+Both adapters remain diagnostic-only with the forced-decay convention open.
+The shared response worker, summary and proposal-weight annotation preserve
+these denominator kinds. The older QCD loss-trace reader remains QCD-specific.
+Native DY has already timed `generatorSmeared`; its explicit timing input is
+the preserved unshifted `VtxSmeared`, so the nominal source-time shift is
+reproduced once. Weighted J/psi and existing QCD keep their original untimed
+`generatorSmeared` input. Compare full nominal graph signatures before SIM.
+These historical-source checks do not qualify a collision inside a collimator
+jaw: bind the new source position/material and generator-model audit separately.
+
 ## Streaming mu-enhanced QCD (2026-10-16)
 
 The new stream consumes only completed, published true-production GEN receipts.

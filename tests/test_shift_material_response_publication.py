@@ -27,6 +27,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         os.chdir(directory.name)
         self.remote = {}
         self.commands = []
+        self.annotations = []
         self.corrupt_readback = None
         self.source_bytes = b'original GEN'
         self.exposure = {'full_source_trials': 100}
@@ -77,11 +78,13 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                     full_original_run_lumi_metadata=self.exposure)), \
                 mock.patch('audit_shift_material_scout.identity', return_value=(1, 2, 3)), \
                 mock.patch.object(worker, 'hepmc_unit_names'), \
-                mock.patch.object(worker, 'read_hepmc', return_value=([], 2., [2.], [])), \
+                mock.patch.object(worker, 'read_hepmc', return_value=([], self.original['weight'],
+                                                                      [self.original['weight']], [])), \
                 mock.patch.object(worker, 'event_features', return_value={}), \
                 mock.patch.object(worker, 'pair_priority', return_value={}), \
                 mock.patch.object(worker, 'admission_probability', return_value=.2), \
-                mock.patch.object(worker, 'annotate_proposal_weights', return_value={'passed': True}), \
+                mock.patch.object(worker, 'annotate_proposal_weights',
+                                  side_effect=lambda *args, **kwargs: self.annotations.append((args, kwargs)) or {'passed': True}), \
                 mock.patch.object(worker, 'response', return_value=[dict(event_id=[1, 2, 3],
                     retained_pairs=[], tail_counts={'pairs': 0})]), \
                 mock.patch('builtins.print'):
@@ -95,6 +98,28 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.assertEqual([Path(item['url']).name for item in report['published']], ['nano.root', 'evidence.tar.gz'])
         self.assertFalse(Path('step1.root').exists())
         self.assertFalse(Path('step3.root').exists())
+        self.check_downstream(report)
+
+    def test_native_DY_uses_untimed_input_accepted_denominator_and_exact_inverse_sampling(self):
+        source = self.request['source']
+        del source['sigma_nd_pb'], source['full_source_trials']
+        source.update(source_family='dy', denominator_kind='accepted_gen_events', full_source_events=100,
+                      native_cross_section_pb=10., mean_abs_native_weight=1., timing_input_label='VtxSmeared')
+        self.original['weight'] = 1.
+        self.request['sample']['native_weights'] = [1.]
+        self.exposure = {'native_RUN_LO_events': 100}
+        report = self.run_worker()
+        timing = next(args for args in self.commands if len(args) > 3 and args[1] == '-c'
+                      and 'timing_cfg.py' in args[2])
+        self.assertEqual(timing[-1], 'VtxSmeared')
+        rows, exposure = self.annotations[0][0][1:3]
+        self.assertEqual(rows[0]['sampling_gen_weight'], 2.)
+        self.assertEqual(exposure[0]['full_source_events'], 100)
+        self.assertNotIn('full_source_trials', exposure[0])
+        with tarfile.open(fileobj=io.BytesIO(self.remote['root://eosuser.cern.ch/'+
+                                                       self.request['publication_directory']+'/evidence.tar.gz']), mode='r:gz') as archive:
+            response = json.load(archive.extractfile('response.json'))
+        self.assertEqual(response['events'][0]['rate_weight'], .1)
         self.check_downstream(report)
 
     def test_all_edm_tiers_are_hash_verified_before_cleanup_and_declared_in_evidence(self):
