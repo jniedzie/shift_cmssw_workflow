@@ -22,7 +22,8 @@ from dark_photon_meson_source import (coefficient_bound, choose_collision, sourc
     model_precision_budget, resolve_parent_kinematics, resolved_parent_models,
     parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
     dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
-    kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT)
+    kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,validate_native_precision_policy,
+    deferred_native_precision_measure,full_source_native_precision_summary)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import (native_source, inject_decay, cmssw_native_libraries,
     inject_undecayed_kaon_decay)
@@ -195,6 +196,8 @@ def run(args):
             manifest['cmssw_git_status'] = subprocess.check_output(
                 ['git', '-C', str(release / 'src'), 'status', '--short'], text=True).splitlines()
         card,physics_inputs = freeze_meson_model(args.model_card,out/'meson_model.json')
+        precision_policy=card.get('native_precision_policy')
+        deferred_precision=validate_native_precision_policy(precision_policy)
         if card['schema'] != 'shift-dark-photon-meson-model-v1' or card['source']['source_class'] != 'SoftQCD:nonDiffractive':
             raise ValueError('Require the explicit ND meson model card')
         mechanism = production_mechanism(card)
@@ -261,6 +264,8 @@ def run(args):
                 'coefficient_beta_gamma_sum', 'coefficient_beta_gamma_sum_squared',
                 'coefficient_beta_gamma_cross_sum', 'coefficient_precision_difference_sum')}
         max_precision_shift = 0.
+        deferred_parent_count=0
+        if deferred_precision:sums['conservative_native_precision_measure_sum']=[0.,0.]
 
         def accumulate(name, value):
             total, lost = sums[name]
@@ -285,7 +290,8 @@ def run(args):
                         raise ValueError('Parent source center-of-mass energy changed')
                     try:
                         snapshot['parents'] = resolve_parent_kinematics(snapshot['parents'],
-                            precision['mass_tolerance'], args.mass, models, width['br_mumu'])
+                            precision['mass_tolerance'], args.mass, models, width['br_mumu'],
+                            native_precision_policy=precision_policy)
                     except Exception as error:
                         if kaon_source:
                             (out/'kaon_source_failure.json').write_text(json.dumps(dict(
@@ -295,6 +301,12 @@ def run(args):
                     decision = choose_collision(snapshot['parents'], args.mass, width['br_mumu'], models,
                                                 bound, rng, snapshot['native_weight'])
                     record.update(decision, native_weight=snapshot['native_weight'], parents=snapshot['parents'])
+                    if deferred_precision:
+                        measure,count=deferred_native_precision_measure(snapshot['parents'],width['br_mumu'],precision_policy)
+                        record['conservative_native_precision_measure_bound']=measure
+                        record['exceptional_native_precision_parent_count']=count
+                        accumulate('conservative_native_precision_measure_sum',measure)
+                        deferred_parent_count+=count
                     record['physical_probability'] = args.epsilon**2*decision['coefficient_sum']
                     accumulate('coefficient_sum', decision['coefficient_sum'])
                     accumulate('coefficient_sum_squared', decision['coefficient_sum']**2)
@@ -317,6 +329,7 @@ def run(args):
                                     owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
                                     if owned_rates is not None:
                                         native_precision['native_parent_rate_model'] = owned_rates
+                                        if deferred_precision:native_precision['defer_to_full_source']=True
                                 mean = dipion_kernel(channel).mean_lab_beta_gamma(parent['p4'], args.mass,
                                     channel, **native_precision)
                             elif kaon_channel(channel):
@@ -359,6 +372,7 @@ def run(args):
                                     models[parent['pdg_id']])
                                 if owned_rates is not None:
                                     native_precision['native_parent_rate_model'] = owned_rates
+                                    if deferred_precision:native_precision['defer_to_full_source']=True
                             decay = dipion_kernel(model).sample_decay(parent['p4'], args.mass,
                                 width['ctau_mm'], rng, model=model, **native_precision)
                         else:
@@ -394,7 +408,12 @@ def run(args):
             source_ledger_sha256=digest(out/'meson_source_ledger.jsonl'))
         exposure['relative_rate_precision_shift'] = (sums['coefficient_precision_difference_sum'][0] /
             sums['coefficient_sum'][0] if sums['coefficient_sum'][0] else None)
+        if deferred_precision:
+            exposure['full_source_native_precision']=full_source_native_precision_summary(precision_policy,
+                sums['coefficient_sum'][0],sums['conservative_native_precision_measure_sum'][0],deferred_parent_count)
         (out/'source_exposure.json').write_text(json.dumps(exposure, indent=2)+'\n')
+        if deferred_precision and not exposure['full_source_native_precision']['complete']:
+            raise ValueError('Complete fixed-source conservative native-precision measure exceeds0.1%; publication closed')
         reference, reference_error = None, None
         if sums['coefficient_sum'][0]:
             reference = sums['coefficient_beta_gamma_sum'][0]/sums['coefficient_sum'][0]

@@ -263,6 +263,18 @@ def meson_physics_input_files(directory,contract):
     return inputs
 
 
+def same_native_parent_precision_report(stored,checked,*,deferred_policy=False):
+    """Retain exact deferred proofs and the original strict report schema."""
+    if stored==checked:return
+    if (not deferred_policy and isinstance(stored,dict) and isinstance(checked,dict) and
+            checked.get('deferred_full_source_check') is False):
+        legacy=dict(checked)
+        for key in ('deferred_full_source_check','scope','nominal_parent_coefficient',
+                    'conservative_absolute_parent_measure_bound'):legacy.pop(key,None)
+        if stored==legacy:return
+    raise ValueError('Stored native parent precision report differs from its pinned model audit')
+
+
 def meson_source_exposure(contract, directory):
     """Reconstruct the fixed collision exposure, including failures and zeroes.
 
@@ -290,7 +302,10 @@ def meson_source_exposure(contract, directory):
         raise ValueError("Unknown meson physical model card")
     parents = {item["pdg_id"]: item for item in card["parents"]}
     unified = contract.get("production_mechanism") == "meson-radiative"
-    from dark_photon_meson_source import PARENTS
+    from dark_photon_meson_source import (PARENTS,validate_native_precision_policy,
+        deferred_native_precision_measure,full_source_native_precision_summary)
+    precision_policy=card.get('native_precision_policy')
+    deferred_precision=validate_native_precision_policy(precision_policy)
     supported = set(PARENTS) if unified else {221, 331}
     if not parents or set(parents) - supported or (not unified and len(parents) != len(card["parents"])):
         raise ValueError("Require distinct supported exclusive meson parent models")
@@ -369,6 +384,10 @@ def meson_source_exposure(contract, directory):
               "physical_probability_sum", "physical_probability_sum_squared")}
     if precision is not None:
         totals["coefficient_precision_difference_sum"] = [0., 0.]
+    if deferred_precision:
+        if precision is None:raise ValueError('Deferred full-source precision requires pinned native checks')
+        totals['conservative_native_precision_measure_sum']=[0.,0.]
+    deferred_parent_count=0
     maximum_precision_shift = 0.
     precision_difference_roundoff=0.
 
@@ -404,7 +423,16 @@ def meson_source_exposure(contract, directory):
             checked_parents = {}
             if precision is not None:
                 checked_parents = {parent["index"]: parent for parent in resolve_parent_kinematics(
-                    row["parents"], precision["mass_tolerance"], contract["mass_gev"], precision_models, branching)}
+                    row["parents"], precision["mass_tolerance"], contract["mass_gev"], precision_models, branching,
+                    native_precision_policy=precision_policy)}
+            if deferred_precision:
+                measure,exceptions=deferred_native_precision_measure(checked_parents.values(),branching,precision_policy)
+                same_number(row['conservative_native_precision_measure_bound'],measure,'per-collision conservative native measure')
+                if (type(row.get('exceptional_native_precision_parent_count')) is not int or
+                        row['exceptional_native_precision_parent_count']!=exceptions):
+                    raise ValueError('Per-collision exceptional native-parent count changed')
+                accumulate('conservative_native_precision_measure_sum',measure)
+                deferred_parent_count+=exceptions
             for parent in row["parents"]:
                 identity, pdg = parent["index"], parent["pdg_id"]
                 if type(identity) is not int or identity <= 0 or identity in identities or pdg not in parents:
@@ -430,8 +458,8 @@ def meson_source_exposure(contract, directory):
                             absolute_roundoff=roundoff.get(key,0.))
                     precision_difference_roundoff=math.fsum((precision_difference_roundoff,
                         roundoff['coefficient_difference_from_kinematic_mass']))
-                    if parent.get('native_parent_precision_report') != checked_parent.get('native_parent_precision_report'):
-                        raise ValueError('Stored native parent precision report differs from its pinned model audit')
+                    same_native_parent_precision_report(parent.get('native_parent_precision_report'),
+                        checked_parent.get('native_parent_precision_report'),deferred_policy=deferred_precision)
                     for key in ('kaon_source_count_authority','leptonic_kinematic_precision'):
                         if key in parent or key in checked_parent:
                             same_resolved_meson_model(parent.get(key),checked_parent.get(key))
@@ -496,6 +524,18 @@ def meson_source_exposure(contract, directory):
             same_signed_number(exposure[name], value, name,absolute_roundoff=precision_difference_roundoff)
         else:
             same_number(exposure[name], value, name)
+    if deferred_precision:
+        summary=full_source_native_precision_summary(precision_policy,expected['coefficient_sum'],
+            expected['conservative_native_precision_measure_sum'],deferred_parent_count)
+        if not summary['complete']:raise ValueError('Complete source native-precision bound exceeds0.1%')
+        stored=exposure.get('full_source_native_precision')
+        if not isinstance(stored,dict) or set(stored)!=set(summary):
+            raise ValueError('Full-source native-precision completion proof is missing or changed')
+        for key,value in summary.items():
+            if key in ('schema','complete','exceptional_parent_count'):
+                if type(stored[key]) is not type(value) or stored[key]!=value:
+                    raise ValueError('Full-source native-precision completion proof changed: '+key)
+            else:same_number(stored[key],value,'full-source native-precision '+key)
     if precision is not None:
         same_signed_number(exposure["maximum_coefficient_relative_precision_shift"], maximum_precision_shift,
             "maximum parent precision shift",absolute_roundoff=32*math.ulp(1.))

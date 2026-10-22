@@ -22,6 +22,50 @@ import dark_photon_vector_meson as vector_meson
 PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
            130, 310, 321, -321)
 PSEUDOSCALAR_DIPION_CORRECTION_LIMIT = 1.e-3
+FULL_SOURCE_NATIVE_PRECISION_POLICY = dict(
+    kind='full-fixed-source-conservative-parent-measure-v1',required_relative_bound=1.e-3)
+
+
+def validate_native_precision_policy(policy):
+    """The optional full-source guard has one fixed, explicit numerical target."""
+    if policy is None:return False
+    if (not isinstance(policy,dict) or policy!=FULL_SOURCE_NATIVE_PRECISION_POLICY or
+            type(policy.get('required_relative_bound')) not in (int,float)):
+        raise ValueError('Require the exact frozen full-source native-precision policy')
+    return True
+
+
+def deferred_native_precision_measure(parents,br_mumu,policy):
+    """Sum conservative exceptional-parent measures, with BRμμ applied once."""
+    enabled=validate_native_precision_policy(policy)
+    if not math.isfinite(br_mumu) or not 0<=br_mumu<=1:raise ValueError('Physical dimuon branching required')
+    terms=[];count=0
+    for parent in parents:
+        report=parent.get('native_parent_precision_report',{})
+        if report.get('deferred_full_source_check') is not True:continue
+        value=report.get('conservative_absolute_parent_measure_bound')
+        if (not enabled or report.get('scope')!='deferred-full-source' or
+                type(value) not in (int,float) or not math.isfinite(value) or value<0 or
+                type(report.get('nominal_parent_coefficient')) not in (int,float) or
+                not math.isfinite(report['nominal_parent_coefficient']) or report['nominal_parent_coefficient']<0):
+            raise ValueError('Invalid deferred native-parent measure or undeclared full-source policy')
+        terms.append(value*br_mumu);count+=1
+    return math.fsum(terms),count
+
+
+def full_source_native_precision_summary(policy,coefficient_sum,measure_sum,exceptional_parents):
+    """Completion gate over every source collision; never clips a contribution."""
+    if not validate_native_precision_policy(policy):raise ValueError('Full-source policy must be explicit')
+    if (any(type(x) not in (int,float) or not math.isfinite(x) or x<0 for x in (coefficient_sum,measure_sum)) or
+            type(exceptional_parents) is not int or exceptional_parents<0):
+        raise ValueError('Finite nonnegative full-source precision accounting required')
+    relative=measure_sum/coefficient_sum if coefficient_sum else (0. if measure_sum==0 else math.inf)
+    passed=math.isfinite(relative) and relative<=policy['required_relative_bound']
+    return dict(schema='shift-meson-full-source-native-precision-v1',
+        full_source_coefficient_sum=coefficient_sum,
+        conservative_absolute_measure_bound_sum=measure_sum,relative_bound=relative,
+        required_relative_bound=policy['required_relative_bound'],exceptional_parent_count=exceptional_parents,
+        complete=passed)
 
 
 def exclusive_channels(model):
@@ -659,7 +703,7 @@ def pseudoscalar_dipion_precision_report(parent, kinematic_mass, signal_mass, mo
                 scope='0.1% applies only to the exceptional dipion contribution; sibling BR/TFF checks remain unchanged')
 
 
-def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_mumu):
+def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_mumu,*,native_precision_policy=None):
     """Preserve native momenta and bookkept masses; never repair or drop one.
 
     Pythia ErrorChecks.xml defines Check:mTolErr as the mass deviation divided
@@ -669,6 +713,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
     """
     if not math.isfinite(mass_tolerance) or mass_tolerance <= 0:
         raise ValueError('An explicit native Pythia mass tolerance is required')
+    deferred_policy=validate_native_precision_policy(native_precision_policy)
     result = []
     kaons=[parent for parent in parents if parent['pdg_id'] in (130,310,321,-321)]
     if kaons:
@@ -705,6 +750,7 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
         owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
         if owned_rates is not None:
             native_precision['native_parent_rate_model'] = owned_rates
+            if deferred_policy:native_precision['defer_to_full_source']=True
         for channel in exclusive_channels(model):
             recoil = recoil_threshold(channel)
             if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
