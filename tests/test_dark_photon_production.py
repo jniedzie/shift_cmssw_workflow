@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import subprocess
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -348,6 +349,17 @@ class TelemetryWorkerDerivation(unittest.TestCase):
 
 
 class PrivateDetectorProfile(unittest.TestCase):
+    def test_private_bootstrap_preserves_native_exit_and_failure_archive_trap(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            (root/'dark_photon_detector_runtime.py').write_text('raise SystemExit(7)\n')
+            original='#!/bin/bash\nset -euo pipefail\ntrap \'echo "$?" > failure_receipt\' EXIT\nunset PYTHONPATH\n'
+            wrapper=root/'worker.sh'
+            wrapper.write_text(production_preparation.private_runtime_shell(original,root,root/'frozen'))
+            completed=subprocess.run(['/bin/bash',str(wrapper)],cwd=root,capture_output=True,text=True)
+            self.assertEqual(completed.returncode,7)
+            self.assertEqual((root/'failure_receipt').read_text().strip(),'7')
+
     def profile(self, root):
         from dark_photon_detector_runtime import CORE_SOURCES
         scripts = Path(production_preparation.__file__).parent

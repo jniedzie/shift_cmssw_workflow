@@ -319,6 +319,14 @@ def private_runtime_worker(text):
     return text
 
 
+def private_runtime_shell(text, output, frozen):
+    # Keep the shell alive so its EXIT trap returns the bounded failure archive.
+    return (text[:text.index('unset PYTHONPATH')]
+            + '/usr/bin/python3 ' + str(output / 'dark_photon_detector_runtime.py')
+            + ' --profile ' + str(frozen / 'detector_runtime.json')
+            + ' --entry ' + str(output / 'chunk_worker.py') + ' -- "$@"\n')
+
+
 def deployment_wrapper(kind):
     """Keep deployed entry points small; freeze their reusable implementation."""
     if kind == 'finalizer':
@@ -457,10 +465,7 @@ def prepare(args):
         if name == 'chunk_worker.py':
             text = extend_worker(text, profile, runtime_profile)
         elif name == 'detector_worker.sh' and runtime_profile is not None:
-            text = text[:text.index('unset PYTHONPATH')]
-            text += ('exec /usr/bin/python3 ' + str(output / 'dark_photon_detector_runtime.py')
-                     + ' --profile ' + str(frozen / 'detector_runtime.json')
-                     + ' --entry ' + str(output / 'chunk_worker.py') + ' -- "$@"\n')
+            text = private_runtime_shell(text, output, frozen)
         elif name == 'finalize_point.py':
             # Retain the exact qualified stage/weight/scoring validators in the
             # new namespace; the new entry point supports all bounded groups.
