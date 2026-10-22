@@ -346,7 +346,8 @@ def run(plan):
             require(derived_branches,'Missing newly prepared derived branches');file_check.Close()
             positions={tuple(x['event_id']):x['target_position_cm'] for x in unit['positions']};checks=[]
             for event in Events(str(output)):
-                eid=identity(event);key=tuple(eid);require(key in before,'Unexpected output original')
+                eid=identity(event);report['current_event_id']=list(eid)
+                key=tuple(eid);require(key in before,'Unexpected output original')
                 old=before[key];placed=graph(event,('shiftSourcePlacement','','SHIFTFULLGEN'))
                 timed=graph(event,('shiftEventTime','','SHIFTFULLGEN'))
                 unplaced_nominal=graph(event,('sourceNominalBeforePlacement','','SHIFTFULLGEN'))
