@@ -13,6 +13,8 @@ import runpy
 import subprocess
 import tempfile
 import time
+import tarfile
+from itertools import zip_longest
 
 from audit_shift_weighted_gen import (ALGORITHM, DIRECT_JPSI_IDS, read_edm,
     validate_config, validate_ledger, validate_snapshot)
@@ -21,7 +23,7 @@ from run_shift_weighted_gen import publish
 FORCING = ['443:onMode = off', '443:onIfMatch = 13 -13']
 PAYLOADS = ('gen.root', 'audit.json', '443_events.jsonl.gz', 'source_slots.jsonl.gz', 'proposal_ledger.json',
             'gen_cfg.py', 'forced_validation_cfg.py', 'config_change_receipt.json',
-            'native_decay_table.json', 'cmsRun.log', 'worker_preflight.json')
+            'native_decay_table.json', 'source_replay.json', 'cmsRun.log', 'worker_preflight.json')
 
 
 def sha(path):
@@ -146,6 +148,11 @@ def summaries(rows, ledger):
 def make_config(plan_path, arm):
     import FWCore.ParameterSet.Config as cms
     plan = json.loads(plan_path.read_text());spec = next(x for x in plan['arms'] if x['name'] == arm)
+    canonical = plan['canonical_replay']
+    require(canonical['source_trials'] == 20000 and canonical['run'] == plan['canonical_run']
+        and next(x for x in plan['arms'] if x['name'] == 'forced') ==
+            dict(name='forced', run=canonical['run'], seed=canonical['generator_seed']),
+        'Forced arm must replay the canonical source, reusing its exposure')
     native = plan_path.parent/'reference/native_cfg.py'
     require(sha(native) == plan['native_reference']['native_cfg.py']['sha256'], 'Native config changed')
     p = runpy.run_path(str(native))['process']
@@ -291,7 +298,12 @@ def audit_arm(plan_path, arm, directory):
     dump(directory/'audit.json',report)
 
 
-def comparison(forced,natural):
+def comparison(forced,natural,replay):
+    require(replay.get('complete') is True and replay.get('full_HepMC_native_binary64_values_and_serialization_exact') is True
+        and replay.get('GenEventInfo_IDs_native_weights_and_order_exact') is True
+        and replay.get('full_Run_Lumi_native_ledger_exact') is True
+        and replay.get('exposure_reused_not_additive') is True and replay.get('source_trials') == 20000,
+        'Canonical forced replay must gate natural rate interpretation')
     require(forced['complete'] and natural['complete'] and forced['arm']=='forced' and
         natural['arm']=='natural' and forced['plan_sha256']==natural['plan_sha256'], 'Unpaired diagnostic arms')
     require(forced['fixed_source_trials']==natural['fixed_source_trials']==20000 and
@@ -324,6 +336,20 @@ def load_request(path):
     for name,item in plan['native_reference'].items():
         local=plan_path.parent/'reference'/name
         require(sha(local)==item['sha256'] and local.stat().st_size==item['bytes'], 'Native reference changed: '+name)
+    require(plan['assets']['native_runtime_sha256'] ==
+        '5d5a20a506fe8901916acd34b456c1c194148ae32aee3c62a2f6d5191374e807' and
+        json.loads((tools/'runtimes.json').read_text())['cmssw']['sha256'] == plan['assets']['native_runtime_sha256'],
+        'Diagnostic needs its exact original native runtime')
+    require(plan['assets']['weighted_plugin_sha256'] ==
+        '922c14f1016ff174256b928faaf64ac244a41604635c3fc3609e78eb44251ffe',
+        'Canonical native weighted hook changed')
+    reference=tools/'plugin/original_source_reference.tar.gz'
+    require(sha(reference)==plan['assets']['source_reference_sha256'],'Original source reference changed')
+    with tarfile.open(reference) as archive:
+        for name,expected in [('MultipartonInteractions_tail.cc','0dea34d3b52d4459909c493dafc6cf1f64d91e532529046505879f8d0863ce76'),
+                              ('ProcessContainer_weighted_stats.cc','9c7c3eb0dbe91cbbe617600099cde052238665068fead2353a408904d334af91')]:
+            require(hashlib.sha256(archive.extractfile(name).read()).hexdigest()==expected,
+                    'Canonical original source bytes changed: '+name)
     return request,tools,plan_path,plan
 
 
@@ -365,6 +391,14 @@ def run_arm(path,prepare_only=False):
                        check=True,timeout=request['stage_timeout_seconds'])
     audit_arm(plan_path,arm,Path.cwd())
     audit=json.loads(Path('audit.json').read_text())
+    if arm == 'forced':
+        with tempfile.TemporaryDirectory(prefix='canonical_jpsi_') as temporary:
+            golden=Path(temporary)/'golden.root'
+            fetch(plan['canonical_replay']['GEN_url'],golden,
+                  dict(bytes=plan['canonical_replay']['GEN_bytes'],sha256=plan['canonical_replay']['GEN_sha256']))
+            dump('source_replay.json',native_source_replay(golden,Path('gen.root'),plan))
+    else:
+        dump('source_replay.json',dict(canonical_replay_applies=False,independent_natural_control=True))
     payload=sum(Path(name).stat().st_size for name in PAYLOADS)
     require(payload+1048576<=request['publication_bound_bytes'],'Complete source/evidence exceeds registered arm bytes')
     report=dict(complete=True,diagnostic_only=True,arm=arm,events=audit['accepted_events'],
@@ -373,12 +407,91 @@ def run_arm(path,prepare_only=False):
         request_sha256=sha(path),plan_sha256=sha(plan_path),helper_sha256=sha(Path(__file__)),
         storage_registration_sha256=request['storage_registration_sha256'],audit_sha256=sha('audit.json'),
         wall_seconds=time.monotonic()-started,publication_bound_bytes=request['publication_bound_bytes'],
+        exposure_role='reused_canonical_source_replay' if arm == 'forced' else 'independent_natural_control',
         normalization_ready=False,full_production_ready=False,correction_applied=False)
     report['published']=publish([(Path(name),name) for name in PAYLOADS],request['publication_directory'])
     report['publication_sha256_readback_verified']=True;dump('report.json',report)
     require(Path('report.json').stat().st_size<=65536,'Oversized arm receipt')
     publish([(Path('report.json'),'complete.json')],request['publication_directory'])
 
+
+
+def replay_frame(event):
+    """Full native HepMC encoding and exact binary64 fields plus GenEventInfo, with no ROOT file identity."""
+    import ROOT
+    from DataFormats.FWLite import Handle
+    def get(label,kind):
+        h=Handle(kind);event.getByLabel(label,h)
+        require(h.isValid(),'Missing canonical replay product '+str(label));return h,h.product()
+    if not hasattr(ROOT,'shiftJpsiExactHepMC'):
+        require(ROOT.gInterpreter.Declare(r"""
+#include "HepMC/GenEvent.h"
+#include "HepMC/IO_GenEvent.h"
+#include <sstream>
+std::string shiftJpsiExactHepMC(const HepMC::GenEvent& event) {
+  std::ostringstream out;
+  {HepMC::IO_GenEvent writer(static_cast<std::ostream&>(out));writer.precision(16);writer.write_event(&event);}
+  // HepMC ASCII permits at most16 decimal digits. Supplement every floating
+  // field with exact hexadecimal doubles, retaining native ASCII for all
+  // identifiers, edges, flow codes, weight names and discrete metadata.
+  out<<std::hexfloat<<"\nEXACT_BINARY64 "<<event.event_scale()<<' '<<event.alphaQCD()<<' '<<event.alphaQED();
+  for(double x:event.weights())out<<' '<<x;
+  for(auto v=event.vertices_begin();v!=event.vertices_end();++v){
+    const auto& x=(*v)->position();out<<" V "<<(*v)->barcode()<<' '<<x.x()<<' '<<x.y()<<' '<<x.z()<<' '<<x.t();
+    for(double w:(*v)->weights())out<<' '<<w;
+  }
+  for(auto i=event.particles_begin();i!=event.particles_end();++i){
+    const auto& p=(*i)->momentum();const auto& s=(*i)->polarization();
+    out<<" P "<<(*i)->barcode()<<' '<<p.px()<<' '<<p.py()<<' '<<p.pz()<<' '<<p.e()
+       <<' '<<(*i)->generated_mass()<<' '<<s.theta()<<' '<<s.phi();
+  }
+  if(auto p=event.pdf_info())out<<" PDF "<<p->x1()<<' '<<p->x2()<<' '<<p->scalePDF()<<' '<<p->pdf1()<<' '<<p->pdf2();
+  if(auto c=event.cross_section())out<<" XSEC "<<c->cross_section()<<' '<<c->cross_section_error();
+  if(auto h=event.heavy_ion())out<<" HI "<<h->impact_parameter()<<' '<<h->event_plane_angle()<<' '<<h->eccentricity()<<' '<<h->sigma_inel_NN();
+  return out.str();
+}
+"""),'Cannot encode complete native HepMC')
+    graphs={}
+    for name,label in [('generatorSmeared','generatorSmeared'),('generator:unsmeared',('generator','unsmeared'))]:
+        handle,value=get(label,'edm::HepMCProduct')
+        graphs[name]=hashlib.sha256(str(ROOT.shiftJpsiExactHepMC(value.GetEvent())).encode()).hexdigest()
+    handle,info=get('generator','GenEventInfoProduct');pdf=info.pdf();a=event.eventAuxiliary()
+    return dict(event_id=[int(a.run()),int(a.luminosityBlock()),int(a.event())],graphs=graphs,
+        info=dict(weights=list(map(float,info.weights())),process=int(info.signalProcessID()),
+            qScale=float(info.qScale()),alphaQCD=float(info.alphaQCD()),alphaQED=float(info.alphaQED()),
+            binningValues=list(map(float,info.binningValues())),DJRValues=list(map(float,info.DJRValues())),
+            nMEPartons=int(info.nMEPartons()),nMEPartonsFiltered=int(info.nMEPartonsFiltered()),
+            pdf=dict(id=[int(pdf.id.first),int(pdf.id.second)],x=[float(pdf.x.first),float(pdf.x.second)],
+                xPDF=[float(pdf.xPDF.first),float(pdf.xPDF.second)],scalePDF=float(pdf.scalePDF)) if pdf else None))
+
+
+def exact_replay_frames(left,right):
+    """Compare ordered frame streams; source slots and native W cannot change."""
+    digest=hashlib.sha256();count=0;seen=set()
+    for a,b in zip_longest(left,right):
+        require(a is not None and b is not None,'Canonical replay event count differs')
+        require(a==b,'Canonical replay graph/info/W differs at '+str(a['event_id']))
+        identity=tuple(a['event_id']);require(identity not in seen,'Duplicate canonical replay event')
+        seen.add(identity);count+=1
+        digest.update(json.dumps(a,sort_keys=True,separators=(',',':'),allow_nan=False).encode()+b'\n')
+    return count,digest.hexdigest()
+
+
+def native_source_replay(golden,replay,plan):
+    from DataFormats.FWLite import Events
+    from audit_shift_material_scout import metadata
+    require(sha(golden)==plan['canonical_replay']['GEN_sha256'], 'Canonical golden file changed')
+    old,new=metadata(golden),metadata(replay)
+    require(old==new,'Canonical full Run/Lumi/native fixed-slot ledger differs')
+    n,digest=exact_replay_frames((replay_frame(e) for e in Events(str(golden))),
+                               (replay_frame(e) for e in Events(str(replay))))
+    require(n==plan['canonical_replay']['saved_events'],'Canonical saved original count differs')
+    return dict(complete=True,events=n,source_trials=20000,original_GEN_sha256=sha(golden),
+        replay_GEN_sha256=sha(replay),native_all_event_graph_info_W_sha256=digest,
+        full_Run_Lumi_sha256=hashlib.sha256(json.dumps(old,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest(),
+        ROOT_GUID_and_process_history_not_compared=True,full_HepMC_native_binary64_values_and_serialization_exact=True,
+        GenEventInfo_IDs_native_weights_and_order_exact=True,full_Run_Lumi_native_ledger_exact=True,
+        exposure_reused_not_additive=True,new_independent_source_exposure=0)
 
 def fetch(url,path,expected=None):
     subprocess.run(['xrdcp','--silent','--cksum','adler32',url,str(path)],check=True,timeout=900)
@@ -398,7 +511,7 @@ def verify(path,prepare_only=False):
     if prepare_only:
         from DataFormats.FWLite import Events, Handle
         dump('summary.json',dict(complete=True,prepared_only=True,GEN_or_cmsRun=False));return
-    audits=[];completions=[]
+    audits=[];completions=[];replay=None
     with tempfile.TemporaryDirectory(prefix='jpsi_native_readback_') as temporary:
         for arm in ('forced','natural'):
             directory=Path(temporary)/arm;directory.mkdir()
@@ -419,6 +532,14 @@ def verify(path,prepare_only=False):
                 require(item['path']==arm_request['publication_directory']+'/'+name and
                     item['independent_sha256_readback'] is True,'Unbound published source artifact')
                 fetch(base+'/'+name,directory/name,item)
+            if arm == 'forced':
+                golden=directory/'golden.root'
+                fetch(plan['canonical_replay']['GEN_url'],golden,
+                      dict(bytes=plan['canonical_replay']['GEN_bytes'],sha256=plan['canonical_replay']['GEN_sha256']))
+                replay=native_source_replay(golden,directory/'gen.root',plan)
+                require(replay==json.loads((directory/'source_replay.json').read_text()),
+                        'Canonical native replay differs on independent readback')
+                golden.unlink()
             old=json.loads((directory/'audit.json').read_text());old_rows=(directory/'443_events.jsonl.gz').read_bytes()
             audit_arm(plan_path,arm,directory)
             fresh=json.loads((directory/'audit.json').read_text())
@@ -428,7 +549,10 @@ def verify(path,prepare_only=False):
             completions.append(dict(arm=arm,published_complete_sha256=sha(directory/'complete.json'),
                 native_all_saved_originals_read_again=True,fixed_trials=fresh['fixed_source_trials'],
                 accepted_events=fresh['accepted_events']))
-    dump('comparison.json',comparison(*audits))
+    require(replay is not None and replay['complete'],'Canonical forced replay must gate natural rate interpretation')
+    result=comparison(*audits,replay);result['canonical_forced_replay']=replay
+    result['forced_exposure_is_reused_not_new_statistics']=True
+    dump('comparison.json',result)
     names=['comparison.json','forced_native_audit.json','natural_native_audit.json']
     require(sum(Path(name).stat().st_size for name in names)+131072<=request['publication_bound_bytes'],
             'Comparison exceeds registered byte bound')

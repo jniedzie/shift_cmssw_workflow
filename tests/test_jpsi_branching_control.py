@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from jpsi_branching_control import channels, comparison, rate, summaries, source_slots
+from jpsi_branching_control import channels, comparison, rate, summaries, source_slots, exact_replay_frames
 
 
 def particle(code,pdg,status,mothers=(),daughters=()):
@@ -85,11 +85,32 @@ class FixedTrials(unittest.TestCase):
         a=dict(complete=True,arm='forced',plan_sha256='x',fixed_source_trials=20000,
                source_model_sha256='a',ledger=dict(sigma_nd_mb=1.),statistics={'source_class':rate([1.],20000,1.)})
         b=copy.deepcopy(a);b['arm']='natural'
-        out=comparison(a,b)
+        proof=dict(complete=True,full_HepMC_native_binary64_values_and_serialization_exact=True,
+            GenEventInfo_IDs_native_weights_and_order_exact=True,full_Run_Lumi_native_ledger_exact=True,
+            exposure_reused_not_additive=True,source_trials=20000)
+        with self.assertRaisesRegex(ValueError,'must gate'):comparison(a,b,{})
+        out=comparison(a,b,proof)
         self.assertEqual(out['comparisons']['source_class']['natural_over_forced'],1.)
         self.assertFalse(out['correction_applied']);self.assertFalse(out['normalization_ready'])
         b['fixed_source_trials']=19999
-        with self.assertRaises(ValueError):comparison(a,b)
+        with self.assertRaises(ValueError):comparison(a,b,proof)
+
+
+class CanonicalReplay(unittest.TestCase):
+    def test_complete_graph_info_weight_and_ID_stream(self):
+        a=[dict(event_id=[7,1,2],graphs={'raw':'a','timed':'b'},info={'weights':[.25]})]
+        self.assertEqual(exact_replay_frames(iter(a),iter(copy.deepcopy(a)))[0],1)
+        for field in ['weight','graph','identity']:
+            b=copy.deepcopy(a)
+            if field=='weight':b[0]['info']['weights'][0]=.5
+            elif field=='graph':b[0]['graphs']['raw']='changed vertex or edge'
+            else:b[0]['event_id'][2]=3
+            with self.assertRaisesRegex(ValueError,'differs'):exact_replay_frames(iter(a),iter(b))
+
+    def test_missing_repeated_originals_fail(self):
+        a=[dict(event_id=[7,1,2],graphs={},info={})]
+        with self.assertRaisesRegex(ValueError,'count'):exact_replay_frames(a,[])
+        with self.assertRaisesRegex(ValueError,'Duplicate'):exact_replay_frames(a+a,a+a)
 
 
 if __name__=='__main__':unittest.main()
