@@ -20,14 +20,16 @@ import time
 from dark_photon_meson import MUON_MASS_GEV, mean_lab_beta_gamma, radiative_branching, sample_decay, transition_form_factor_abs2
 from dark_photon_meson_source import (coefficient_bound, choose_collision, source_cross_section_pb,
     model_precision_budget, resolve_parent_kinematics, resolved_parent_models,
-    parent_branching_coefficient, vector_parent, dipion_channel, exclusive_channels, production_mechanism)
+    parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
+    dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import native_source, inject_decay, cmssw_native_libraries
 from fixed_target_generation import beam_settings
 from run_dark_photon_spectral_gen import digest, freeze_spectral_inputs, physical_width_table
 
 SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_meson_source.py',
-           'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py',
+           'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py', 'dark_photon_rho_radiative.py',
+           'dark_photon_charged_rho_radiative.py',
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
@@ -115,9 +117,13 @@ def run(args):
                 settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
                 settings.append(f"{abs(parent['recoil_pdg_id'])}:m0={parent['recoil_mass_gev']:.17g}")
             elif dipion_channel(parent):
-                pdg, pole = parent['pdg_id'], parent['mass_gev']
+                pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
                 settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
-                settings.append(f"211:m0={parent['pion_mass_gev']:.17g}")
+                if parent['decay_type'] == 'charged-vector-dipion':
+                    settings.extend([f"211:m0={parent['charged_pion_mass_gev']:.17g}",
+                                     f"111:m0={parent['neutral_pion_mass_gev']:.17g}"])
+                else:
+                    settings.append(f"211:m0={parent['pion_mass_gev']:.17g}")
         source = native_source(settings, args.seed, list(dict.fromkeys(parent['pdg_id'] for parent in card['parents'])))
         native_libraries = [dict(path=library, sha256=digest(Path(library)))
                             for library in cmssw_native_libraries()]
@@ -131,6 +137,18 @@ def run(args):
         precision = dict(configuration, reference=str(precision_doc), reference_sha256=digest(precision_doc),
             prescription='native generated mass for branching and bound; unchanged p4 invariant for decay',
             numerical_budget='measured BR_gamma_gamma and TFF one-sigma parameter-box envelope')
+        if any(vector_dipion_channel(parent) for parent in card['parents']):
+            precision['rho_numerical_guard'] = dict(
+                relative_rate_target=1.e-3, physical_parent='unchanged-zero-width-native-pole',
+                kinematic_parent='unchanged-native-four-vector',
+                native_mass_tolerance='unchanged-Pythia-Check:mTolErr',
+                outside_interpolation='exact-quadrature',
+                interpretation='numerical-accuracy-target-not-hadronic-model-uncertainty')
+        if any(parent.get('decay_type') == 'charged-vector-dipion' for parent in card['parents']):
+            precision['rho_numerical_guard']['charged_parent_bound'] = (
+                'Same-parent sum of absolute exclusive-rate shifts plus the entire nominal '
+                'fraction of a dipion channel exceeding its isolated precision budget; '
+                'combined bound remains 0.1%, with a ledger report only on that exceptional path')
         ecm = configuration['ecm_gev']
         bound = coefficient_bound(ecm, width['br_mumu'], models, args.mass)
         if bound <= 0:
@@ -184,8 +202,15 @@ def run(args):
                             if coefficient == 0:
                                 continue
                             if dipion_channel(channel):
-                                import dark_photon_dipion_meson as dipion
-                                mean = dipion.mean_lab_beta_gamma(parent['p4'], args.mass, channel)
+                                native_precision = (dict(native_mass_gev=parent['native_mass_gev'],
+                                    native_mass_tolerance=parent['native_mass_tolerance'])
+                                    if vector_dipion_channel(channel) else {})
+                                if channel['decay_type'] == 'charged-vector-dipion':
+                                    owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
+                                    if owned_rates is not None:
+                                        native_precision['native_parent_rate_model'] = owned_rates
+                                mean = dipion_kernel(channel).mean_lab_beta_gamma(parent['p4'], args.mass,
+                                    channel, **native_precision)
                             elif vector_parent(channel):
                                 mean = vector_meson.mean_lab_beta_gamma(parent['p4'], channel['recoil_mass_gev'],
                                     args.mass, polarization=channel['parent_polarization'])
@@ -209,8 +234,17 @@ def run(args):
                                 args.mass, width['ctau_mm'], rng, polarization=model['parent_polarization'])
                             decay['recoil_pdg_id'] = model['recoil_pdg_id']
                         elif dipion_channel(model):
-                            import dark_photon_dipion_meson as dipion
-                            decay = dipion.sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng, model=model)
+                            native_precision = (dict(native_mass_gev=parent['native_mass_gev'],
+                                native_mass_tolerance=parent['native_mass_tolerance'])
+                                if vector_dipion_channel(model) else {})
+                            if model['decay_type'] == 'charged-vector-dipion':
+                                native_precision['charge'] = 1 if parent['pdg_id'] > 0 else -1
+                                owned_rates = charged_rho_parent_rate_model(parent['pdg_id'],
+                                    models[parent['pdg_id']])
+                                if owned_rates is not None:
+                                    native_precision['native_parent_rate_model'] = owned_rates
+                            decay = dipion_kernel(model).sample_decay(parent['p4'], args.mass,
+                                width['ctau_mm'], rng, model=model, **native_precision)
                         else:
                             decay = sample_decay(parent['p4'], args.mass, width['ctau_mm'], rng)
                         inject_decay(source, parent['index'], decay)

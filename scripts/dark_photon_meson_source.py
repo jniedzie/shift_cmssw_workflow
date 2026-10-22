@@ -13,7 +13,7 @@ must be supplied by a separately pinned physical model card.
 import math
 from itertools import product
 
-from dark_photon_meson import MUON_MASS_GEV, dot, radiative_branching, transition_form_factor_abs2
+from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_form_factor_abs2
 import dark_photon_vector_meson as vector_meson
 
 PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323)
@@ -24,11 +24,37 @@ def exclusive_channels(model):
     return model.get('exclusive_channels', [model])
 
 
+def charged_rho_parent_rate_model(pdg, model):
+    """Use only the two owned channels of this same physical charged parent."""
+    channels = exclusive_channels(model)
+    if len(channels) == 2 and any(row.get('decay_type') == 'charged-vector-dipion'
+                                  for row in channels):
+        return dict(parent_pdg_id=pdg, exclusive_channels=[dict(row, pdg_id=pdg) for row in channels])
+    return None
+
+
 def dipion_channel(model):
-    return model.get('decay_type') == 'pseudoscalar-dipion'
+    return model.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion')
+
+
+def vector_dipion_channel(model):
+    return model.get('decay_type') in ('vector-dipion', 'charged-vector-dipion')
+
+
+def dipion_kernel(model):
+    if model.get('decay_type') == 'charged-vector-dipion':
+        import dark_photon_charged_rho_radiative
+        return dark_photon_charged_rho_radiative
+    if model.get('decay_type') == 'vector-dipion':
+        import dark_photon_rho_radiative
+        return dark_photon_rho_radiative
+    import dark_photon_dipion_meson
+    return dark_photon_dipion_meson
 
 
 def recoil_threshold(model):
+    if model.get('decay_type') == 'charged-vector-dipion':
+        return model['charged_pion_mass_gev']+model['neutral_pion_mass_gev']
     if dipion_channel(model):
         return 2 * model['pion_mass_gev']
     return model.get('recoil_mass_gev', 0.) if vector_parent(model) else 0.
@@ -51,14 +77,16 @@ def production_mechanism(card):
     return mechanism
 
 
-def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu):
+def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, native_precision=None):
     """One physical exclusive channel, with epsilon squared factored out."""
     if 'exclusive_channels' in model:
-        return math.fsum(parent_branching_coefficient(parent_mass, signal_mass, channel, br_mumu)
+        return math.fsum(parent_branching_coefficient(parent_mass, signal_mass, channel, br_mumu,
+                         native_precision=native_precision)
                          for channel in exclusive_channels(model))
     if dipion_channel(model):
-        import dark_photon_dipion_meson as dipion
-        return dipion.branching_coefficient(parent_mass, signal_mass, model) * br_mumu
+        context = native_precision if vector_dipion_channel(model) else None
+        return dipion_kernel(model).branching_coefficient(parent_mass, signal_mass, model,
+                                                          **(context or {})) * br_mumu
     if vector_parent(model):
         value = vector_meson.radiative_branching(parent_mass, model['recoil_mass_gev'],
             signal_mass, .001, model['br_p_gamma'], model['form_factor_abs2'])
@@ -99,7 +127,8 @@ def resolved_parent_models(card, configuration, mass):
             form_factor_abs2=form_factor,
             relative_model_uncertainty=model_precision_budget(parent, mass) if opened else 0.,
             kinematically_open=opened, provenance=dict(pdg=parent['pdg_reference'],
-                transition=parent.get('transition_form_factor', parent.get('dipion_model', {}))['reference']))
+                transition=parent.get('transition_form_factor', parent.get('dipion_model',
+                    parent.get('rho_radiative_model', parent.get('charged_rho_radiative_model', {}))))['reference']))
         model['channel'] = parent.get('channel', str(pdg) + '->gamma_Aprime')
         if vector_parent(parent):
             for key in ('decay_type', 'recoil_pdg_id', 'recoil_mass_gev', 'br_p_gamma',
@@ -109,8 +138,22 @@ def resolved_parent_models(card, configuration, mass):
                     maximum != parent['mass_gev']):
                 raise ValueError('Vector pole branching model requires an unchanged zero-width native source')
         elif dipion_channel(parent):
-            for key in ('decay_type', 'pion_mass_gev', 'br_pipi_gamma', 'dipion_model'):
+            keys = (('decay_type', 'charged_pion_mass_gev', 'neutral_pion_mass_gev',
+                     'br_pipi', 'charged_rho_radiative_model', 'recoil_pdg_ids',
+                     'parent_polarization', 'parent_mass_model')
+                    if parent.get('decay_type') == 'charged-vector-dipion' else
+                    ('decay_type', 'pion_mass_gev', 'br_pipi', 'rho_radiative_model',
+                     'parent_polarization', 'parent_mass_model')
+                    if parent.get('decay_type') == 'vector-dipion' else
+                    ('decay_type', 'pion_mass_gev', 'br_pipi_gamma', 'dipion_model'))
+            for key in keys:
                 model[key] = parent[key]
+            if vector_dipion_channel(parent):
+                model['relative_numerical_mass_precision_budget'] = model.pop('relative_model_uncertainty')
+            if (vector_dipion_channel(parent) and
+                    (native[pdg].get('mass_width_gev') != 0. or
+                     minimum != parent['mass_gev'] or maximum != parent['mass_gev'])):
+                raise ValueError('Vector dipion rates require an unchanged zero-width native source')
         else:
             model['br_gamma_gamma'] = parent['br_gamma_gamma']
         if pdg not in models:
@@ -132,6 +175,10 @@ def resolved_parent_models(card, configuration, mass):
 
 def model_precision_budget(parent, signal_mass):
     """Measured BR/TFF one-sigma parameter-box envelope, not a tuned goal."""
+    if vector_dipion_channel(parent):
+        # This is a numerical-accuracy target, separate from the experimental
+        # photon check and from unknown timelike hadronic-model uncertainties.
+        return dipion_kernel(parent).NATIVE_KINEMATIC_RATE_PRECISION_LIMIT
     if dipion_channel(parent):
         normalization = parent['dipion_model']['normalization']
         return math.hypot(normalization['branching_fraction_stat'],
@@ -182,11 +229,12 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
     result = []
     for original in parents:
         parent = dict(original)
+        parent.pop('native_parent_precision_report', None)
         p4, native = parent['p4'], parent['native_mass_gev']
         if (len(p4) != 4 or not all(math.isfinite(value) for value in p4) or p4[0] <= 0 or
                 not math.isfinite(native) or native <= 0):
             raise ValueError('Invalid native parent mass or four-vector')
-        squared = p4[0]**2-dot(p4[1:], p4[1:])
+        squared = math.fsum((p4[0]**2, *(-value*value for value in p4[1:])))
         if squared <= 0:
             raise ValueError('Native parent four-vector is not timelike')
         mass = math.sqrt(squared)
@@ -194,19 +242,35 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
         if deviation > mass_tolerance:
             raise ValueError('Native parent violates the unchanged Pythia mass tolerance')
         model = models[parent['pdg_id']]
+        native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
+                                native_mass_tolerance=mass_tolerance)
+        owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
+        if owned_rates is not None:
+            native_precision['native_parent_rate_model'] = owned_rates
         for channel in exclusive_channels(model):
             recoil = recoil_threshold(channel)
             if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
                 raise ValueError('Native precision changes whether the rare decay is open')
             nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
-            shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu)
+            shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu,
+                                                   native_precision=native_precision)
             relative = shifted / nominal - 1 if nominal else 0.
-            if abs(relative) > channel['relative_model_uncertainty']:
-                raise ValueError('Native mass precision effect exceeds the measured BR/TFF uncertainty')
+            budget = channel.get('relative_numerical_mass_precision_budget',
+                                 channel.get('relative_model_uncertainty'))
+            if abs(relative) > budget:
+                if channel.get('decay_type') != 'charged-vector-dipion' or owned_rates is None:
+                    raise ValueError('Native mass precision effect exceeds the declared numerical or BR/TFF precision budget')
+                # Near its endpoint this channel is tiny. Keep it, and retain
+                # the independently checked bound on the SAME parent's full
+                # contribution, including its entire conditional-shape weight.
+                parent['native_parent_precision_report'] = dipion_kernel(channel).native_parent_precision_report(
+                    mass, signal_mass, channel, **native_precision)
         coefficient = parent_branching_coefficient(native, signal_mass, model, br_mumu)
-        kinematic = parent_branching_coefficient(mass, signal_mass, model, br_mumu)
+        kinematic = parent_branching_coefficient(mass, signal_mass, model, br_mumu,
+                                                 native_precision=native_precision)
         relative = kinematic/coefficient-1 if coefficient else 0.
         parent.update(mass_gev=native, kinematic_mass_gev=mass, native_mass_shell_deviation=deviation,
+                      native_mass_tolerance=mass_tolerance,
                       coefficient_relative_precision_shift=relative,
                       coefficient_difference_from_kinematic_mass=kinematic-coefficient)
         result.append(parent)
@@ -231,9 +295,10 @@ def validate_models(models):
             continue
         if not model.get('provenance'):
             raise ValueError('Parent branching/form-factor provenance is required')
-        if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion'):
+        if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion'):
             raise ValueError('Unsupported exclusive radiative decay type')
-        branching_key = ('br_pipi_gamma' if dipion_channel(model) else
+        branching_key = ('br_pipi' if vector_dipion_channel(model) else
+                         'br_pipi_gamma' if dipion_channel(model) else
                          'br_p_gamma' if vector_parent(model) else 'br_gamma_gamma')
         for key in ('mass_min_gev', branching_key, 'form_factor_abs2'):
             value = model.get(key)
@@ -254,6 +319,30 @@ def validate_models(models):
                 raise ValueError('Unsupported exclusive vector transition or charge-conjugate assignment')
             if model.get('mass_max_gev') != model['mass_min_gev']:
                 raise ValueError('Pole branching fractions require an explicitly zero-width vector source')
+        elif model.get('decay_type') == 'charged-vector-dipion':
+            if (abs(pdg) != 213 or model.get('parent_polarization') != 'unpolarized' or
+                    model.get('parent_mass_model') != 'zero-width-pole' or
+                    model.get('mass_max_gev') != model['mass_min_gev'] or
+                    model.get('recoil_pdg_ids') != [211 if pdg > 0 else -211, 111]):
+                raise ValueError('Charged rho dipion radiation requires its explicit pole, spin and charged-pion/pi0 assignment')
+            inputs = model['charged_rho_radiative_model']
+            if (model['charged_pion_mass_gev'] != inputs['charged_pion_mass_gev'] or
+                    model['neutral_pion_mass_gev'] != inputs['neutral_pion_mass_gev'] or
+                    model['mass_min_gev'] != inputs['reference_parent_mass_gev'] or
+                    model['br_pipi'] != inputs['normalization']['branching_fraction']):
+                raise ValueError('Charged rho dipion radiation differs from its explicit unequal masses or rate normalization')
+            dipion_kernel(model).branching_coefficient(model['mass_min_gev'], .22, model)
+        elif model.get('decay_type') == 'vector-dipion':
+            if (pdg != 113 or model.get('parent_polarization') != 'unpolarized' or
+                    model.get('parent_mass_model') != 'zero-width-pole' or
+                    model.get('mass_max_gev') != model['mass_min_gev']):
+                raise ValueError('Rho dipion radiation requires an explicit unpolarized neutral pole source')
+            inputs = model['rho_radiative_model']
+            if (model['pion_mass_gev'] != inputs['pion_mass_gev'] or
+                    model['mass_min_gev'] != inputs['reference_parent_mass_gev'] or
+                    model['br_pipi'] != inputs['normalization']['branching_fraction']):
+                raise ValueError('Rho dipion radiation differs from its explicit mass or rate normalization')
+            dipion_kernel(model).branching_coefficient(model['mass_min_gev'], .22, model)
         elif pdg not in (221, 331):
             raise ValueError('Pseudoscalar photon channel has an unsupported parent')
         if ('mass_max_gev' in model and (not math.isfinite(model['mass_max_gev']) or

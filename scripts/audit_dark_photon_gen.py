@@ -202,7 +202,7 @@ def meson_accepted_slots(path, contract):
 def validate_meson_radiative_record(record, selected):
     """Pin the selected native meson, exclusive recoil and physical vertex."""
     parent, graph = selected['parent'], selected['graph']
-    from dark_photon_meson_source import PARENTS
+    from dark_photon_meson_source import PARENTS, dipion_channel, vector_dipion_channel
     if (record['mother_barcode'] != parent['index'] or graph['barcode'] != parent['index'] or
             record['mother_pdg_id'] != parent['pdg_id'] or parent['pdg_id'] not in PARENTS or
             graph['pdg_id'] != parent['pdg_id']):
@@ -218,7 +218,8 @@ def validate_meson_radiative_record(record, selected):
     sample = selected['sampled_decay']
     recoil_pdg = sample.get('recoil_pdg_id', 22)
     model = selected.get('resolved_model')
-    if abs(parent['pdg_id']) in (113,213,223,333,313,323):
+    vector_dipion = model and vector_dipion_channel(model)
+    if abs(parent['pdg_id']) in (113,213,223,333,313,323) and not vector_dipion:
         if (not model or model.get('decay_type') != 'vector-pseudoscalar' or
                 model.get('recoil_pdg_id') != recoil_pdg or
                 sample.get('recoil_mass_gev') != model.get('recoil_mass_gev') or
@@ -226,11 +227,21 @@ def validate_meson_radiative_record(record, selected):
                 type(sample.get('recoil_natural_decay_required')) is not bool or
                 recoil_pdg in (111,221) and sample.get('recoil_natural_decay_required') is not True):
             raise ValueError('Vector-meson recoil/spin convention differs from its explicit source model')
-    if model and model.get('decay_type') == 'pseudoscalar-dipion':
-        if (sample.get('recoil_pdg_ids') != [211,-211] or
-                sample.get('recoil_masses_gev') != [model['pion_mass_gev']]*2 or
+    if model and dipion_channel(model):
+        charged = model.get('decay_type') == 'charged-vector-dipion'
+        if (charged and abs(parent['pdg_id']) != 213 or
+                model.get('decay_type') == 'vector-dipion' and parent['pdg_id'] != 113):
+            raise ValueError('Rho dipion decay type differs from the selected physical parent')
+        recoil_ids = ([211 if parent['pdg_id'] > 0 else -211,111] if charged else [211,-211])
+        recoil_masses = ([model['charged_pion_mass_gev'],model['neutral_pion_mass_gev']]
+                         if charged else [model['pion_mass_gev']]*2)
+        if (sample.get('recoil_pdg_ids') != recoil_ids or
+                sample.get('recoil_masses_gev') != recoil_masses or
                 len(sample.get('recoil_p4s', [])) != 2):
             raise ValueError('Dipion recoils differ from the explicit source model')
+        if vector_dipion and (sample.get('parent_polarization') != 'unpolarized' or
+                sample.get('recoil_natural_decay_required') is not True):
+            raise ValueError('Rho dipion radiation changed its spin or natural recoil convention')
         expected = [(pdg, p4) for pdg,p4 in zip(sample['recoil_pdg_ids'],sample['recoil_p4s'])]
     else:
         recoil_key = 'photon_p4' if recoil_pdg == 22 else 'recoil_p4'

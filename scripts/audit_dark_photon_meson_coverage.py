@@ -25,6 +25,7 @@ REFERENCES = {
     'phi_eta': 'https://doi.org/10.1016/j.physletb.2015.01.011',
     'phi_pi0': 'https://arxiv.org/abs/1601.06565',
     'dipion': 'https://arxiv.org/abs/2012.04257',
+    'charged_rho': 'https://arxiv.org/abs/hep-ph/9707202',
     'mixing': 'https://arxiv.org/abs/2504.06828',
     'proton': 'https://arxiv.org/abs/2409.11096',
 }
@@ -52,7 +53,9 @@ UPSTREAM_GENERATOR = {
 
 
 def _entry(channel, parent, recoil, endpoint, reason, reference='pdg'):
-    return dict(channel=channel, parent_pdg_id=parent, recoil_pdg_id=recoil,
+    return dict(channel=channel, parent_pdg_id=parent,
+                recoil_pdg_id=recoil if not isinstance(recoil, list) else None,
+                **(dict(recoil_pdg_ids=recoil) if isinstance(recoil, list) else {}),
                 pole_endpoint_gev=endpoint, reason=reason,
                 reference=REFERENCES[reference])
 
@@ -85,6 +88,10 @@ CATALOGUE = [
            'Require a differential three-body electromagnetic amplitude and pion correlations.', 'dipion'),
     _entry('etaprime -> pi+ pi- Aprime', 331, None, .67863922,
            'Treat resonant and nonresonant dipion coherently; do not add rho-gamma and inclusive dipion twice.', 'dipion'),
+    _entry('rho0 -> pi+ pi- Aprime', 113, None, .49611922,
+           'Conserved charged-pion radiation current with its contact term; validate the measured photon cut rate and label structure-dependent terms unresolved.'),
+    _entry('rho+- -> pi+- pi0 Aprime', 213, [211, 111], .50056281,
+           'Both charges require pion radiation, charged-vector radiation and the contact current with unequal pion masses. The g_EM=2 local pole benchmark does not fix higher electromagnetic moments, timelike form factors or broad-parent interference; the full-model photon rate differs by about 12 percent.', 'charged_rho'),
     _entry('other exclusive meson electromagnetic transitions', None, None, None,
            'Inventory multiparticle, scalar, tensor, axial-vector and excited-meson transitions; real-photon rates are not fixed-mass bounds.'),
     _entry('heavy-flavour and quarkonium transitions', None, None, None,
@@ -174,7 +181,9 @@ def model_owned_channels(model):
 
 
 def model_recoil(owner):
-    if owner.get('decay_type') == 'pseudoscalar-dipion':
+    if owner.get('decay_type') == 'charged-vector-dipion':
+        recoil = owner.get('recoil_pdg_ids')
+    elif owner.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion'):
         recoil = owner.get('recoil_pdg_ids', [211, -211])
     elif 'recoil_pdg_ids' in owner:
         recoil = owner['recoil_pdg_ids']
@@ -183,8 +192,12 @@ def model_recoil(owner):
     if (not isinstance(recoil, list) or not recoil
             or any(type(pdg) is not int or pdg == 0 for pdg in recoil)):
         raise ValueError('Exclusive recoil ownership requires daughter PDG IDs')
-    if owner.get('decay_type') == 'pseudoscalar-dipion' and sorted(recoil) != [-211, 211]:
+    if owner.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion') and sorted(recoil) != [-211, 211]:
         raise ValueError('A charged dipion channel must own both pion daughters')
+    if owner.get('decay_type') == 'charged-vector-dipion':
+        parent = owner.get('pdg_id')
+        if parent not in (-213, 213) or sorted(recoil) != sorted([211 if parent > 0 else -211, 111]):
+            raise ValueError('Charged-rho dipion ownership requires the charge-matched pion and pi0')
     return tuple(sorted(recoil))
 
 
@@ -192,12 +205,19 @@ def catalogue_ownership(item):
     parent, recoil = item['parent_pdg_id'], item['recoil_pdg_id']
     if parent is None:
         return []
-    if recoil is None:
-        return [(parent, (-211, 211))]
-    required = [(parent, (recoil,))]
-    # These catalogue rows represent the full charged/conjugate source group.
+    if 'recoil_pdg_ids' in item:
+        daughters = tuple(item['recoil_pdg_ids'])
+    elif recoil is None:
+        daughters = (-211, 211)
+    else:
+        daughters = (recoil,)
+    required = [(parent, tuple(sorted(daughters)))]
+    # Conjugate charged daughters and retain self-conjugate neutral mesons.
+    # In particular rho- owns pi- pi0, never pi- anti-pi0 or pi+ pi-.
     if parent in (213, 313, 323):
-        required.append((-parent, (-recoil,)))
+        self_conjugate = {22, 111, 113, 221, 223, 331, 333}
+        conjugate = tuple(sorted(pdg if pdg in self_conjugate else -pdg for pdg in daughters))
+        required.append((-parent, conjugate))
     return required
 
 
@@ -277,7 +297,7 @@ def audit_coverage(model, masses, inventory):
         if owned:
             domains = []
             for owner in owned:
-                tff = owner.get('transition_form_factor', owner.get('dipion_model', {}))
+                tff = owner.get('transition_form_factor', owner.get('dipion_model', owner.get('rho_radiative_model', owner.get('charged_rho_radiative_model', {}))))
                 domain = tff.get('valid_mass_range_gev', tff.get('physical_dimuon_mass_range_gev'))
                 domains.append(domain)
             row['declared_form_factor_domains_gev'] = domains

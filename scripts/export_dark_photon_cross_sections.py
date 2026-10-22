@@ -388,6 +388,8 @@ def meson_source_exposure(contract, directory):
                     for key in ("kinematic_mass_gev", "native_mass_shell_deviation",
                                 "coefficient_relative_precision_shift", "coefficient_difference_from_kinematic_mass"):
                         same_signed_number(parent[key], checked_parent[key], key)
+                    if parent.get('native_parent_precision_report') != checked_parent.get('native_parent_precision_report'):
+                        raise ValueError('Stored charged-rho parent precision report differs from its pinned model audit')
                     shift = parent["coefficient_relative_precision_shift"]
                     maximum_precision_shift = max(maximum_precision_shift, abs(shift))
                     accumulate("coefficient_precision_difference_sum", parent["coefficient_difference_from_kinematic_mass"])

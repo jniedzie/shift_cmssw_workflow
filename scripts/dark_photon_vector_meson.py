@@ -193,7 +193,7 @@ def mean_lab_beta_gamma(parent, recoil_mass, mass, *, polarization):
     if len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0:
         raise ValueError('Invalid parent four-vector')
     p2 = dot(parent[1:],parent[1:])
-    squared = math.fsum((parent[0]**2,-p2))
+    squared = math.fsum((parent[0]**2, *(-component**2 for component in parent[1:])))
     if squared <= 0 or mass <= 0:
         raise ValueError('A timelike parent and positive signal mass are required')
     parent_mass = math.sqrt(squared)

@@ -97,7 +97,7 @@ class CoverageTest(unittest.TestCase):
                 positive = dict(pdg_id=parent, recoil_pdg_id=recoil, channel='positive')
                 model = dict(channels=['positive'], parents=[positive])
                 report = audit_coverage(model, [.22], source())
-                partial, = [row for row in report['catalogue'] if row['parent_pdg_id'] == parent]
+                partial, = [row for row in report['catalogue'] if row['parent_pdg_id'] == parent and row['recoil_pdg_id'] == recoil]
                 self.assertFalse(partial['implemented_in_model'])
                 self.assertTrue(partial['partially_implemented_in_model'])
                 self.assertEqual(partial['missing_parent_pdg_ids'], [-parent])
@@ -106,9 +106,64 @@ class CoverageTest(unittest.TestCase):
                 model['parents'].append(dict(pdg_id=-parent, recoil_pdg_id=-recoil, channel='negative'))
                 model['channels'].append('negative')
                 report = audit_coverage(model, [.22], source())
-                complete, = [row for row in report['catalogue'] if row['parent_pdg_id'] == parent]
+                complete, = [row for row in report['catalogue'] if row['parent_pdg_id'] == parent and row['recoil_pdg_id'] == recoil]
                 self.assertTrue(complete['implemented_in_model'])
                 self.assertEqual(complete['owned_model_channels'], ['positive', 'negative'])
+
+    def test_charged_rho_dipion_owns_charge_correct_both_daughters(self):
+        item, = [row for row in CATALOGUE if row['channel'] == 'rho+- -> pi+- pi0 Aprime']
+        self.assertEqual(catalogue_ownership(item), [(213, (111, 211)), (-213, (-211, 111))])
+        positive = dict(pdg_id=213, channel='rho_plus->pi_charged_pi0_Aprime',
+            decay_type='charged-vector-dipion', recoil_pdg_ids=[211, 111],
+            charged_rho_radiative_model=dict(valid_mass_range_gev=[.211316751, .50056281]))
+        negative = dict(positive, pdg_id=-213, channel='rho_minus->pi_charged_pi0_Aprime',
+                        recoil_pdg_ids=[-211, 111])
+        model = dict(parents=[positive], channels=[positive['channel']])
+        report = audit_coverage(model, [.22, .5, .5006, .7], source())
+        row, = [row for row in report['catalogue'] if row['channel'] == item['channel']]
+        self.assertFalse(row['implemented_in_model'])
+        self.assertTrue(row['partially_implemented_in_model'])
+        self.assertEqual(row['missing_parent_pdg_ids'], [-213])
+        model['parents'].append(negative)
+        model['channels'].append(negative['channel'])
+        report = audit_coverage(model, [.22, .5, .5006, .7], source())
+        row, = [row for row in report['catalogue'] if row['channel'] == item['channel']]
+        self.assertTrue(row['implemented_in_model'])
+        self.assertEqual(row['owned_model_channels'], model['channels'])
+        self.assertEqual(row['pole_mass_open_points_gev'], [.22, .5])
+        self.assertEqual(row['declared_form_factor_domains_gev'], [[.211316751, .50056281]]*2)
+        self.assertFalse(report['physics_complete'])
+        self.assertEqual(row['status'], 'needs_validation')
+        self.assertIn('g_EM=2', row['reason'])
+        self.assertIn('12 percent', row['reason'])
+        for recoil in (None, [211, -211], [-211, 111], [211, -111], [211]):
+            bad = dict(positive, recoil_pdg_ids=recoil)
+            with self.subTest(recoil=recoil), self.assertRaises(ValueError):
+                model_owned_channels(dict(parents=[bad]))
+
+    def test_charged_rho_and_two_body_channel_share_parent_without_overlap(self):
+        channels = [dict(pdg_id=213, channel='rho_plus->pi_charged_Aprime', recoil_pdg_id=211),
+            dict(pdg_id=213, channel='rho_plus->pi_charged_pi0_Aprime',
+                 decay_type='charged-vector-dipion', recoil_pdg_ids=[211, 111])]
+        flat = dict(parents=channels, channels=[row['channel'] for row in channels])
+        grouped = dict(parents=[dict(pdg_id=213, exclusive_channels=channels)], channels=flat['channels'])
+        expected = {(213, (211,)), (213, (111, 211))}
+        self.assertEqual(set(model_owned_channels(flat)), expected)
+        self.assertEqual(set(model_owned_channels(grouped)), expected)
+        self.assertEqual(audit_coverage(flat, [.22], source()), audit_coverage(grouped, [.22], source()))
+        duplicate = dict(parents=channels+[dict(channels[1], recoil_pdg_ids=[111, 211])])
+        with self.assertRaisesRegex(ValueError, 'ownership'):
+            model_owned_channels(duplicate)
+
+    def test_charged_model_missing_nonfinite_or_short_domain_stays_unsupported(self):
+        for domain in (None, [.211316751, float('inf')], [.211316751, .3]):
+            parents = [dict(pdg_id=sign*213, channel=str(sign), decay_type='charged-vector-dipion',
+                recoil_pdg_ids=[sign*211, 111],
+                charged_rho_radiative_model=dict(valid_mass_range_gev=domain)) for sign in (1, -1)]
+            report = audit_coverage(dict(parents=parents, channels=['1', '-1']), [.4], source())
+            row, = [row for row in report['catalogue'] if row['channel'] == 'rho+- -> pi+- pi0 Aprime']
+            self.assertEqual(row['unsupported_form_factor_mass_points_gev'], [.4])
+            self.assertFalse(report['physics_complete'])
 
     def test_unknown_declared_transition_is_reported_without_claiming_closure(self):
         report = audit_coverage(dict(channels=['a0->gamma_Aprime'],
@@ -123,14 +178,15 @@ class CoverageTest(unittest.TestCase):
             for pdg, recoil in catalogue_ownership(item):
                 row = dict(pdg_id=pdg, channel=str(pdg) + ':' + str(recoil))
                 if len(recoil) == 2:
-                    row.update(decay_type='pseudoscalar-dipion', recoil_pdg_ids=list(recoil))
+                    row.update(decay_type='charged-vector-dipion' if abs(pdg) == 213 else 'pseudoscalar-dipion',
+                               recoil_pdg_ids=list(recoil))
                 else:
                     row['recoil_pdg_id'] = recoil[0]
                 parents.append(row)
         inventory = dict(source(), source_sampling_verified=True, resolved_source_configuration=True)
         model = dict(parents=parents, channels=[row['channel'] for row in parents], physics_complete=True)
         report = audit_coverage(model, [.22, .5, .9], inventory)
-        self.assertEqual(report['coverage_counts'], dict(implemented=13, unvalidated=13,
+        self.assertEqual(report['coverage_counts'], dict(implemented=15, unvalidated=15,
             missing_models=4, missing_sources=2, unclassified_model_channels=0))
         self.assertEqual(len(report['remaining_channels']), 6)
         self.assertTrue(all(row['status'] == 'needs_validation' for row in report['unvalidated_channels']))
@@ -183,23 +239,52 @@ class CoverageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'ownership'):
             audit_coverage(dict(parents=[dict(pdg_id=221), dict(pdg_id=221)]), [.3], source())
 
-    def test_extended_card_current_grid_and_unsupported_omega_interval(self):
+    def test_expanded19_grid_retains_one_inventory_per_charged_parent(self):
+        # Exercise the promoted card directly; historical coverage is separate.
         path = Path(__file__).resolve().parents[1] / 'config/campaigns/dark_photon_meson_extended_model.json'
         card = json.loads(path.read_text())
         species = {p['pdg_id']: p for p in card['parents']}
         configuration = dict(parents=[dict(pdg_id=pdg, mass_min_gev=p['mass_gev'],
             mass_max_gev=p['mass_gev'], mass_width_gev=0.) for pdg, p in species.items()])
         report = audit_coverage(card, [.22, .25, .3, .4, .5, .7, .9], source())
-        self.assertEqual(len(card['channels']), 16)
-        self.assertEqual(report['coverage_counts'], dict(implemented=13, unvalidated=13,
+        self.assertEqual(len(card['channels']), 19)
+        self.assertEqual(report['coverage_counts'], dict(implemented=15, unvalidated=15,
             missing_models=4, missing_sources=2, unclassified_model_channels=0))
+        self.assertFalse(report['physics_complete'])
+        self.assertEqual(len(model_owned_channels(card)), 19)
+        for mass in (.22, .25, .3, .4, .5, .7, .9):
+            models = resolved_parent_models(card, configuration, mass)
+            self.assertEqual(len(models), 11)
+            self.assertEqual(sum(len(group.get('exclusive_channels', [group]))
+                                 for group in models.values()), 19)
+            for sign in (1, -1):
+                channels = models[sign*213]['exclusive_channels']
+                self.assertEqual(len(channels), 2)
+                dipion, = [row for row in channels if row['decay_type'] == 'charged-vector-dipion']
+                self.assertEqual(dipion['recoil_pdg_ids'], [sign*211, 111])
+                self.assertEqual(dipion['kinematically_open'], mass < .50056281)
+
+    def test_historical17_card_grid_and_unsupported_omega_interval(self):
+        # Preserve the exact previous card, including all its original inputs.
+        path = Path(__file__).resolve().parent / 'fixtures/dark_photon_meson_extended_model17.json'
+        card = json.loads(path.read_text())
+        species = {p['pdg_id']: p for p in card['parents']}
+        configuration = dict(parents=[dict(pdg_id=pdg, mass_min_gev=p['mass_gev'],
+            mass_max_gev=p['mass_gev'], mass_width_gev=0.) for pdg, p in species.items()])
+        report = audit_coverage(card, [.22, .25, .3, .4, .5, .7, .9], source())
+        self.assertEqual(len(card['channels']), 17)
+        self.assertEqual(report['coverage_counts'], dict(implemented=14, unvalidated=14,
+            missing_models=5, missing_sources=2, unclassified_model_channels=0))
         self.assertTrue(all(not row['missing_parent_pdg_ids'] for row in report['catalogue']
                             if row['implemented_in_model']))
         for mass in (.22, .25, .3, .4, .5, .7, .9):
             models = resolved_parent_models(card, configuration, mass)
             self.assertEqual(set(models), {221, 331, 223, 333, 113, 213, -213, 313, -313, 323, -323})
             self.assertEqual(sum(len(group.get('exclusive_channels', [group]))
-                                 for group in models.values()), 16)
+                                 for group in models.values()), 17)
+            rho = models[113]['exclusive_channels']
+            radiation, = [row for row in rho if row['decay_type'] == 'vector-dipion']
+            self.assertEqual(radiation['kinematically_open'], mass < .49611922)
             if mass >= .7:
                 self.assertTrue(all(not row['kinematically_open']
                                     for row in models[223]['exclusive_channels']))

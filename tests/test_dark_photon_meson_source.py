@@ -102,7 +102,7 @@ class MesonSourceTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Pythia mass tolerance'):
             resolve_parent_kinematics([original],1.e-10,.3,self.models,.2)
         self.models[221]['relative_model_uncertainty'] = 1.e-10
-        with self.assertRaisesRegex(ValueError,'measured BR/TFF'):
+        with self.assertRaisesRegex(ValueError,'BR/TFF precision budget'):
             resolve_parent_kinematics([original],1.e-3,.3,self.models,.2)
         crossing = dict(index=1,pdg_id=221,native_mass_gev=.300001,p4=[.299999,0.,0.,0.])
         with self.assertRaisesRegex(ValueError,'whether the rare decay is open'):

@@ -3,7 +3,7 @@
   "schema": "shift-dark-photon-meson-model-v1",
   "model": "visible-photon-like-dark-photon",
   "mechanism": "meson-radiative",
-  "physics_scope": "Exclusive primary non-diffractive pp light-meson electromagnetic benchmarks: eta/eta-prime photon and coherent charged-dipion transitions, and rho/omega/phi/Kstar radiative transitions including charge conjugates. Native parent sources use explicit zero-width pole masses, with unpolarized vector parents. Measured rates and published transition models carry recorded tensions and missing uncertainties. Not an inclusive validated meson-production or limit model.",
+  "physics_scope": "Exclusive primary non-diffractive pp light-meson electromagnetic benchmarks: eta/eta-prime photon and coherent charged-dipion transitions, and rho/omega/phi/Kstar radiative transitions including charge conjugates. Native parent sources use explicit zero-width pole masses, with unpolarized vector parents. Measured rates and published transition models carry recorded tensions and missing uncertainties. Not an inclusive validated meson-production or limit model. The neutral-rho charged-dipion radiation channel uses the conserved minimal scalar-QED current, including its contact term, normalized to the approximately unity rho-to-dipion branching fraction. Extra structure-dependent radiation is not included. Charged rho\u00b1 -> pi\u00b1 pi0 A-prime is added as an explicit local g_EM=2 charged-vector benchmark, with coherent parent radiation, charged-pion radiation and contact term. Its published full-model photon comparison has an unresolved 11.6 percent rate discrepancy; no physical uncertainty is inferred from that comparison.",
   "radiative_branching_formula": "2 * epsilon^2 * BR(P -> gamma gamma) * (1 - mass^2 / parent_mass^2)^3 * abs(F(mass^2)/F(0))^2",
   "radiative_branching_reference": "https://arxiv.org/pdf/2401.09136v2#page=4",
   "radiative_branching_reference_note": "Eq. 6 is pointlike; multiplying by the measured transition form factor follows the electromagnetic transition amplitude in Eqs. 1-5.",
@@ -814,6 +814,168 @@
       },
       "mass_gev": 0.95778,
       "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-eta-prime-958.pdf"
+    },
+    {
+      "pdg_id": 113,
+      "name": "rho0",
+      "mass_gev": 0.77526,
+      "decay_type": "vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "pion_mass_gev": 0.13957039,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho0->piplus_piminus_Aprime",
+      "rho_radiative_model": {
+        "kind": "gauged-derivative-scalar-qed",
+        "alpha": 0.0072973525692838015,
+        "pion_mass_gev": 0.13957039,
+        "reference_parent_mass_gev": 0.77526,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.49611922
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "normalization": {
+          "channel": "pipi",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "PDG quotes approximately 100 percent; unity is the explicit dominant-mode approximation, with no invented measurement error."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9903217",
+        "assumption": "Minimal gauged derivative rho-pion coupling: both charged-pion radiation diagrams plus the contact term. Extra transverse structure-dependent currents are set to zero in this exploratory benchmark.",
+        "signal_rate_validated": false,
+        "photon_validation": {
+          "cut_energy_gev": 0.05,
+          "branching_fraction": 0.0099,
+          "branching_fraction_uncertainty": 0.0016,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Independent real-photon rate check, not a fit or a massive-signal uncertainty estimate."
+        },
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "numerical_mass_tolerance_note": "The strict default pole comparison uses the declared 1e-6 GeV numerical band. A separately explicit native-Pythia context preserves the original four-vector and native zero-width pole probability, requires unchanged Check:mTolErr and open-channel agreement, and limits the diagnostic rate change to 0.1 percent. Outside the interpolation band the diagnostic uses exact quadrature; this is not physical off-shell rho support."
+      }
+    },
+    {
+      "pdg_id": 213,
+      "name": "rho_plus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "charged-vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_ids": [
+        211,
+        111
+      ],
+      "charged_pion_mass_gev": 0.13957039,
+      "neutral_pion_mass_gev": 0.1349768,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_plus->pi_charged_pi0_Aprime",
+      "charged_rho_radiative_model": {
+        "kind": "gauged-proca-pion-g2-pole",
+        "electromagnetic_gyromagnetic_ratio": 2,
+        "alpha": 0.0072973525692838015,
+        "charged_pion_mass_gev": 0.13957039,
+        "neutral_pion_mass_gev": 0.1349768,
+        "reference_parent_mass_gev": 0.77511,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.50056281
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "normalization": {
+          "channel": "charged-pion-neutral-pion",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Approximately unity is an explicit dominant-mode normalization. No measured branching error is invented."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9707202",
+        "assumption": "Local gauged charged-vector/pion pole benchmark with g_EM=2: charged-pion radiation, charged-rho radiation and the derivative contact term are coherent. Unequal pion masses and all physical vector polarizations are retained. Gauge invariance alone does not determine g_EM. Higher electromagnetic operators, timelike hadronic form factors and pion rescattering are not modeled.",
+        "signal_rate_validated": false,
+        "numerical_mass_tolerance_note": "Strict physical pole coefficient by default. Explicit native-Pythia numerical context retains the original p4 and unchanged Check:mTolErr, requires open-channel agreement and a diagnostic rate change below 0.1 percent. No physical rho-width support is introduced; exact quadrature handles diagnostics outside the qualified tiny interpolation band.",
+        "photon_cross_check": {
+          "reference": "https://arxiv.org/abs/0708.3256",
+          "location": "Table III and Eq.16",
+          "comparison_kind": "Published full meson-model calculation; not an experimental rate or a fitted normalization",
+          "comparison_parent_mass_gev": 0.775,
+          "cut_energy_gev": 0.05,
+          "cut_frame": "rho rest frame",
+          "pointlike_g2_prediction": 0.003738282632,
+          "published_full_model_prediction": 0.00423,
+          "relative_difference": -0.11624524066193864,
+          "native_pole_pointlike_prediction": 0.0037394139219397993,
+          "quantitative_massive_signal_uncertainty_available": false,
+          "note": "The pointlike g_EM=2 benchmark is11.6percent below the published full-model real-photon ratio at the matching pole and cut. No tuning, uncertainty estimate or precision-agreement claim is inferred from this comparison; structure-dependent interference remains unresolved."
+        }
+      },
+      "qualification_scope": "Explicit g_EM=2 charged-vector pole benchmark. Physical parent inventory and pole are shared with the existing two-body rho transition. The timelike hadronic rate and model discrepancy are unresolved.",
+      "production_rate_validated": false,
+      "mass_convention": "Same .77511GeV PDG2025 charged-rho pole as the existing two-body source; no parent mass retuning."
+    },
+    {
+      "pdg_id": -213,
+      "name": "rho_minus",
+      "mass_gev": 0.77511,
+      "mass_uncertainty_gev": 0.00034,
+      "decay_type": "charged-vector-dipion",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_ids": [
+        -211,
+        111
+      ],
+      "charged_pion_mass_gev": 0.13957039,
+      "neutral_pion_mass_gev": 0.1349768,
+      "br_pipi": 1.0,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+      "channel": "rho_minus->pi_charged_pi0_Aprime",
+      "charged_rho_radiative_model": {
+        "kind": "gauged-proca-pion-g2-pole",
+        "electromagnetic_gyromagnetic_ratio": 2,
+        "alpha": 0.0072973525692838015,
+        "charged_pion_mass_gev": 0.13957039,
+        "neutral_pion_mass_gev": 0.1349768,
+        "reference_parent_mass_gev": 0.77511,
+        "valid_mass_range_gev": [
+          0.211316751,
+          0.50056281
+        ],
+        "parent_polarization": "unpolarized",
+        "parent_mass_continuation": "zero-width-pole",
+        "pole_mass_numerical_tolerance_gev": 1e-06,
+        "normalization": {
+          "channel": "charged-pion-neutral-pion",
+          "branching_fraction": 1.0,
+          "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf",
+          "note": "Approximately unity is an explicit dominant-mode normalization. No measured branching error is invented."
+        },
+        "reference": "https://arxiv.org/abs/hep-ph/9707202",
+        "assumption": "Local gauged charged-vector/pion pole benchmark with g_EM=2: charged-pion radiation, charged-rho radiation and the derivative contact term are coherent. Unequal pion masses and all physical vector polarizations are retained. Gauge invariance alone does not determine g_EM. Higher electromagnetic operators, timelike hadronic form factors and pion rescattering are not modeled.",
+        "signal_rate_validated": false,
+        "numerical_mass_tolerance_note": "Strict physical pole coefficient by default. Explicit native-Pythia numerical context retains the original p4 and unchanged Check:mTolErr, requires open-channel agreement and a diagnostic rate change below 0.1 percent. No physical rho-width support is introduced; exact quadrature handles diagnostics outside the qualified tiny interpolation band.",
+        "photon_cross_check": {
+          "reference": "https://arxiv.org/abs/0708.3256",
+          "location": "Table III and Eq.16",
+          "comparison_kind": "Published full meson-model calculation; not an experimental rate or a fitted normalization",
+          "comparison_parent_mass_gev": 0.775,
+          "cut_energy_gev": 0.05,
+          "cut_frame": "rho rest frame",
+          "pointlike_g2_prediction": 0.003738282632,
+          "published_full_model_prediction": 0.00423,
+          "relative_difference": -0.11624524066193864,
+          "native_pole_pointlike_prediction": 0.0037394139219397993,
+          "quantitative_massive_signal_uncertainty_available": false,
+          "note": "The pointlike g_EM=2 benchmark is11.6percent below the published full-model real-photon ratio at the matching pole and cut. No tuning, uncertainty estimate or precision-agreement claim is inferred from this comparison; structure-dependent interference remains unresolved."
+        }
+      },
+      "qualification_scope": "Explicit g_EM=2 charged-vector pole benchmark. Physical parent inventory and pole are shared with the existing two-body rho transition. The timelike hadronic rate and model discrepancy are unresolved.",
+      "production_rate_validated": false,
+      "mass_convention": "Same .77511GeV PDG2025 charged-rho pole as the existing two-body source; no parent mass retuning."
     }
   ],
   "form_factor_uncertainty": {
@@ -920,11 +1082,17 @@
     "kstar_plus->K_Aprime",
     "kstar_minus->K_Aprime",
     "eta->piplus_piminus_Aprime",
-    "eta_prime->piplus_piminus_Aprime"
+    "eta_prime->piplus_piminus_Aprime",
+    "rho0->piplus_piminus_Aprime",
+    "rho_plus->pi_charged_pi0_Aprime",
+    "rho_minus->pi_charged_pi0_Aprime"
   ],
   "physics_complete": false,
   "vector_branching_formula": "epsilon^2 * BR(V -> P gamma) * abs(F(mass^2)/F(0))^2 * [pstar(mass)/pstar(0)]^3; no identical-photon factor two",
   "vector_branching_reference": "https://arxiv.org/abs/1210.3927",
   "completion_policy": "Keep physics_complete false until every relevant channel has a validated rate and differential source model or a quantitative omitted-yield bound at each mass/lifetime. Photon branching fractions and a short parent-counting probe are not such bounds.",
-  "radiative_branching_formula_scope": "Pseudoscalar -> photon Aprime only; vector and dipion channels use their separately declared kernels and normalization authorities."
+  "radiative_branching_formula_scope": "Pseudoscalar -> photon Aprime only; vector and dipion channels use their separately declared kernels and normalization authorities.",
+  "charged_rho_channel_group_count": 1,
+  "exclusive_channel_count": 19,
+  "catalogue_channel_group_count": 15
 }
