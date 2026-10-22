@@ -17,10 +17,63 @@ from audit_dark_photon_gen import validate_meson_radiative_record
 from run_dark_photon_meson_gen import SOURCES,freeze_meson_model,sample_kaon_decay,kaon_mean_beta_gamma
 from run_dark_photon_meson_production import compact_files
 from prepare_dark_photon_meson_production import TOOLS
-from export_dark_photon_cross_sections import input_files
+from export_dark_photon_cross_sections import input_files,meson_source_exposure
 
 
 class KaonRunnerTest(unittest.TestCase):
+    def check_leptonic_export(self,raw,model,signal,epsilon,branching,ctau,physical):
+        """Two source collisions, including a zero, plus one failed native call."""
+        from dark_photon_meson_source import resolve_parent_kinematics,coefficient_bound
+        configuration=dict(ecm_gev=10.,check_event=True,mass_tolerance=.001,energy_tolerance=.01,
+            parents=[dict(pdg_id=raw['pdg_id'],mass_min_gev=.493677,mass_max_gev=.493677,mass_width_gev=0.)])
+        candidate=dict(index=7,pdg_id=raw['pdg_id'],native_mass_gev=.493677,p4=[.493677,0.,0.,0.],
+            native_final=True,native_status=91,mother_indices=[999],daughter_indices=[],
+            source_total_p4=[10.,0.,0.,0.],source_com_energy_gev=.493677,mean_proper_lifetime_mm=3713.)
+        parent,=resolve_parent_kinematics([candidate],.001,signal,{raw['pdg_id']:model},branching)
+        coefficient=physical/epsilon**2;bound=coefficient_bound(10.,branching,{raw['pdg_id']:model},signal)
+        empty=dict(schema='shift-meson-source-trial-v1',native_weight=1.,parents=[],coefficient_sum=0.,
+            physical_probability=0.,acceptance_probability=0.,accepted=False,parent_index=None,accepted_slot=None)
+        accepted=dict(empty,trial=1,generator_success=True,parents=[parent],coefficient_sum=coefficient,
+            physical_probability=physical,acceptance_probability=coefficient/bound,accepted=True,
+            parent_index=7,accepted_slot=1,selected_channel=raw['channel'])
+        rows=[accepted,dict(empty,trial=2,generator_success=False,native_weight=None),
+              dict(empty,trial=3,generator_success=True)]
+        card=dict(schema='shift-dark-photon-meson-model-v1',mechanism='meson-radiative',
+                  parents=[raw],channels=[raw['channel']])
+        exposure=dict(schema='shift-meson-source-exposure-v1',fixed_source_collisions=2,
+            source_calls=3,source_collisions=2,generator_failures=1,native_n_tried=3,native_n_accepted=2,
+            zero_eligible_parent_collisions=1,sum_native_weights=2.,sum_native_weights_squared=2.,
+            coefficient_sum=coefficient,coefficient_sum_squared=coefficient**2,
+            physical_probability_sum=physical,physical_probability_sum_squared=physical**2,
+            coefficient_precision_difference_sum=parent['coefficient_difference_from_kinematic_mass'],
+            accepted_signal_events=1,analytic_coefficient_bound=bound,coefficient_includes_br_mumu=True,
+            coefficient_excludes_epsilon_squared=True,unit_output_gen_weights=True,
+            maximum_coefficient_relative_precision_shift=abs(parent['coefficient_relative_precision_shift']),
+            relative_rate_precision_shift=parent['coefficient_difference_from_kinematic_mass']/coefficient,
+            sigma_source_mb=26.,sigma_source_error_mb=0.)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);ledger=directory/'meson_source_ledger.jsonl'
+            ledger.write_text(''.join(json.dumps(row)+'\n' for row in rows))
+            exposure['source_ledger_sha256']=hashlib.sha256(ledger.read_bytes()).hexdigest()
+            (directory/'source_exposure.json').write_text(json.dumps(exposure))
+            (directory/'meson_model.json').write_text(json.dumps(card))
+            reference=directory/'ErrorChecks.xml';reference.write_text('synthetic native precision authority')
+            configuration.update(reference=str(reference),reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+                prescription='native generated mass for branching and bound; unchanged p4 invariant for decay')
+            width=1.973269804e-13/ctau;authority=dict(provider='synthetic fixed-width authority')
+            contract=dict(mass_gev=signal,epsilon=epsilon,requested_events=1,production_mechanism='meson-radiative',
+                source_exposure=exposure,meson_model_card=card,source_precision=configuration,
+                resolved_parent_models={str(raw['pdg_id']):model},exclusive_channels=card['channels'],
+                source_ledger_sha256=exposure['source_ledger_sha256'],width_authority=authority,
+                physical_width_table=dict(mass_gev=signal,epsilon=epsilon,total_width_gev=width,ctau_mm=ctau,
+                    br_mumu=branching,partial_widths_gev={'mu_mu':branching*width,'other':(1-branching)*width},
+                    spectral_source=authority))
+            for name,key in [('source_exposure.json','source_exposure_sha256'),('meson_model.json','meson_model_card_sha256')]:
+                contract[key]=hashlib.sha256((directory/name).read_bytes()).hexdigest()
+            exported,rate,_=meson_source_exposure(contract,directory)
+            self.assertAlmostEqual(rate['value_pb'],26e9*physical/2)
+            self.assertEqual((exported['source_calls'],exported['source_collisions'],exported['accepted_signal_events']),(3,2,1))
+
     def test_declared_rate_input_is_frozen_portably_and_refreezes_identically(self):
         source=ROOT/'config/physics/dark_photon_kaon_source_canary.json'
         with tempfile.TemporaryDirectory() as temporary:
@@ -130,6 +183,7 @@ class KaonRunnerTest(unittest.TestCase):
                 physical=decay_width(current,signal,epsilon=em,quadrature_order=48)['total']/(HBAR_C_GEV_MM/3713.)*branching
                 self.assertAlmostEqual(coefficient*epsilon**2/physical,1.,places=12)
                 self.assertAlmostEqual(source_cross_section_pb(26.,epsilon,coefficient,2),26e9*physical/2)
+                self.check_leptonic_export(raw,model,signal,epsilon,branching,ctau,physical)
                 parent=dict(index=7,pdg_id=pdg,native_mass_gev=.493677,p4=[.493677,0.,0.,0.])
                 sample=sample_kaon_decay(parent,model,signal,ctau,random.Random(8))
                 doubled=sample_kaon_decay(parent,model,signal,2*ctau,random.Random(8))
