@@ -363,9 +363,9 @@ def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
     the missing hadronic model or a general sibling-shape uncertainty.
 
     An explicitly deferred report does not pass this parent. It provides an
-    absolute bound for an independent fixed-source audit: the sum of both
-    nonnegative parent measures bounds their L1 difference, even if their
-    conditional distributions have disjoint support. The runner must retain
+    absolute bound for an independent fixed-source audit: twice the larger
+    parent measure bounds their L1 difference and the nominal-weight output's
+    conditional variation, even for disjoint support. The runner must retain
     every parent and collision and pass the unchanged full-source 0.1% budget
     before accepting or publishing the sample. Default callers remain strict.
     """
@@ -418,7 +418,7 @@ def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
                 deferred_full_source_check=deferred,
                 scope='deferred-full-source' if deferred else 'same-parent',
                 nominal_parent_coefficient=total,
-                conservative_absolute_parent_measure_bound=(total+shifted+companion_shifted
+                conservative_absolute_parent_measure_bound=(2*max(total,shifted+companion_shifted)
                                                             if deferred else 0.),
                 required_relative_bound=NATIVE_KINEMATIC_RATE_PRECISION_LIMIT)
 

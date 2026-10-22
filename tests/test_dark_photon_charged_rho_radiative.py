@@ -351,11 +351,8 @@ class ChargedRhoRadiativeTest(unittest.TestCase):
         self.assertGreater(report['parent_l1_relative_rate_shift'],.001)
         # No claim that this parent passes. Its whole nominal and continued
         # measures are charged, without assuming any conditional-shape match.
-        expected=(2*report['nominal_parent_coefficient']+
-                  report['kinematic_channel_coefficient']-report['nominal_channel_coefficient'])
-        self.assertGreater(report['conservative_absolute_parent_measure_bound'],
-                           report['nominal_parent_coefficient'])
-        self.assertAlmostEqual(report['conservative_absolute_parent_measure_bound'],expected,delta=2.e-6)
+        self.assertGreaterEqual(report['conservative_absolute_parent_measure_bound'],
+                                2*report['nominal_parent_coefficient'])
         coefficient=rho.branching_coefficient(parent_mass,.22,MODEL,defer_to_full_source=True,**context)
         self.assertEqual(coefficient,report['kinematic_channel_coefficient'])
         sample_context={key:value for key,value in context.items() if key!='native_energy_gev'}
@@ -372,6 +369,14 @@ class ChargedRhoRadiativeTest(unittest.TestCase):
         invalid=dict(context,native_mass_tolerance=1.e-10)
         with self.assertRaisesRegex(ValueError,'unchanged Pythia'):
             rho.native_parent_precision_report(parent_mass,.22,MODEL,defer_to_full_source=True,**invalid)
+
+        # A downward continuation must still bound two disjoint conditional
+        # distributions with the unchanged nominal production weight.
+        lower=rho.native_parent_precision_report(.77465,.22,MODEL,
+                    defer_to_full_source=True,**context)
+        self.assertTrue(lower['deferred_full_source_check'])
+        self.assertEqual(lower['conservative_absolute_parent_measure_bound'],
+                         2*lower['nominal_parent_coefficient'])
 
     def test_cubic_interpolation_meets_unchanged_checks_and_never_extrapolates(self):
         key = rho._model_key(MODEL)
