@@ -110,8 +110,8 @@ def prepare(configuration, output, scripts=None):
                         if mechanism == 'meson-radiative' else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
     if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
-            not 1 <= config.get('simultaneous_sources', 2) <= 3 or
-            not 1 <= config.get('simultaneous_detector_points', 2) <= 3):
+            not 1 <= config.get('simultaneous_sources', 2) <= 7 or
+            not 1 <= config.get('simultaneous_detector_points', 2) <= 35):
         raise ValueError('Require explicit production namespaces and bounded concurrency')
     if mechanism == 'meson-radiative':
         config.setdefault('publish_canary_aliases', False)

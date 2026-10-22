@@ -414,6 +414,7 @@ class HandoffTests(unittest.TestCase):
                     report = dict(source_stratum='qcd', progress_epoch=100,
                                   stage_timeout_seconds=limit, stage_deadline_epoch=2900)
                     with patch.dict(worker.os.environ, {'_CONDOR_SCRATCH_DIR':directory}), \
+                         patch.dict(worker._last_chirp_values, {}, clear=True), \
                          patch.object(worker.shutil, 'which', return_value='/usr/bin/condor_chirp'), \
                          patch.object(worker.time, 'time', return_value=2000), \
                          patch.object(worker.subprocess, 'run') as chirp:
@@ -456,6 +457,62 @@ class HandoffTests(unittest.TestCase):
             self.assertEqual(result['event_ids'], [[31, 1, 2], [31, 1, 9]])
             self.assertEqual(result['weights'], [1e-8, 3e-9])
             self.assertEqual(result['normalization_record'], ledger)
+
+
+class TelemetryDeduplication(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        previous = Path.cwd()
+        os.chdir(temporary.name)
+        self.addCleanup(os.chdir,previous)
+        for context in (patch.dict(worker.os.environ,{'_CONDOR_SCRATCH_DIR':temporary.name}),
+                        patch.dict(worker._last_chirp_values,{},clear=True),
+                        patch.object(worker.shutil,'which',return_value='/fake/condor_chirp')):
+            context.start()
+            self.addCleanup(context.stop)
+        self.report = dict(source_stratum='fixed',stage_timeout_seconds=7200,
+                           stage_deadline_epoch=10000,stage_records_started=0)
+
+    def updates(self, chirp):
+        return [(call.args[0][2],json.loads(call.args[0][3])) for call in chirp.call_args_list]
+
+    def test_identical_values_keep_only_the_progress_update(self):
+        with patch.object(worker.time,'time',return_value=1000),patch.object(worker.subprocess,'run') as chirp:
+            worker.progress(self.report,'SIM',{'GEN':5})
+            worker.progress(self.report,'SIM',{'GEN':5})
+        updates=self.updates(chirp)
+        self.assertEqual(len(updates),8)
+        self.assertEqual(updates[-1],('ShiftNtupleProgressEpoch',1000))
+        self.assertEqual(json.loads(Path('report.json').read_text())['validated_tier_events'],{'GEN':5})
+
+    def test_stage_changes_follow_progress_and_keep_actual_record_updates(self):
+        with patch.object(worker.subprocess,'run'):
+            worker.progress(self.report,'SIM',{'GEN':5})
+        self.report.update(stage_timeout_seconds=900,stage_deadline_epoch=20000,stage_records_started=1)
+        with patch.object(worker.time,'time',return_value=2000),patch.object(worker.subprocess,'run') as chirp:
+            worker.progress(self.report,'NANO_AUDIT',{'GEN':5})
+        self.assertEqual(self.updates(chirp),[
+            ('ShiftNtupleProgressEpoch',2000),('ShiftNtupleStageTimeout',900),
+            ('ShiftNtupleStageDeadlineEpoch',20000),('ShiftNtupleStageRecordsStarted',1),
+            ('ShiftNtupleTier','NANO_AUDIT')])
+
+    def test_failed_write_is_not_cached_and_retries_without_aborting(self):
+        with patch.object(worker.subprocess,'run'):
+            worker.progress(self.report,'SIM',{'GEN':5})
+        self.report['stage_timeout_seconds']=900
+        def fail_timeout(argv,**options):
+            if argv[2]=='ShiftNtupleStageTimeout':
+                raise subprocess.TimeoutExpired('chirp',10)
+        with patch.object(worker.time,'time',return_value=2000), \
+             patch.object(worker.subprocess,'run',side_effect=fail_timeout):
+            worker.progress(self.report,'SIM',{'GEN':5})
+        self.assertIn('telemetry_error',self.report)
+        self.assertEqual(worker._last_chirp_values['ShiftNtupleStageTimeout'],7200)
+        with patch.object(worker.time,'time',return_value=2030),patch.object(worker.subprocess,'run') as chirp:
+            worker.progress(self.report,'SIM',{'GEN':5})
+        self.assertEqual(self.updates(chirp),[
+            ('ShiftNtupleProgressEpoch',2030),('ShiftNtupleStageTimeout',900)])
 
 
 if __name__ == '__main__':

@@ -7,6 +7,7 @@ remain recorded and do not prevent unrelated complete points from publishing.
 The operational canary must publish before the controller admits bulk work.
 """
 import argparse
+import ast
 import copy
 from datetime import datetime, timezone
 import fcntl
@@ -218,7 +219,7 @@ def healthy_peer_state(directory, maximum_age, observed):
         checked = datetime.fromisoformat(state['checked_utc']).timestamp()
     except (FileNotFoundError, ValueError, KeyError, TypeError):
         return None
-    if state.get('error') or not -60 <= observed - checked <= maximum_age:
+    if state.get('error') or state.get('failures') or not -60 <= observed - checked <= maximum_age:
         return None
     return state
 
@@ -338,7 +339,45 @@ def closed_primitive(directory, point, events, before):
     return True
 
 
-def supplement_campaign_claim(authority, observed, maximum_age):
+def meson_published_batch(directory, batch, published, observed):
+    """Bind credit to this source and its verified final histogram receipt."""
+    if not isinstance(published, dict) or published.get('batch') != batch['batch']:
+        return False
+    if datetime.fromisoformat(published['published_utc']).timestamp() > observed:
+        return False
+    directory = Path(directory)
+    production = directory/'batches'/batch['batch']/'production'
+    report_path = Path(published['point_receipt_path'])
+    primitive = production/'completed_points'/(batch['point']+'.json')
+    if (not report_path.is_absolute() or '..' in report_path.parts
+            or not report_path.is_relative_to(directory)
+            or report_path.name != batch['point']+'.json'
+            or (report_path != primitive and str(production/'plan.json') not in published.get('source_plans', []))
+            or sha(report_path) != published['point_receipt_sha256']):
+        raise ValueError('Meson published receipt changed ownership, source batch or checksum')
+    report = read(report_path)
+    marker = report.get('score_histograms', {}).get('marker', {})
+    histogram = marker.get('published', {}).get('histograms', {})
+    histogram_path = Path(published.get('histogram_path', ''))
+    campaign = published.get('campaign')
+    if (report.get('complete') is not True or report.get('point') != batch['point']
+            or report.get('events') != published.get('events') or marker.get('complete') is not True
+            or histogram.get('path') != published.get('histogram_path')
+            or histogram.get('sha256') != published.get('histogram_sha256')
+            or not re.fullmatch(r'[0-9a-f]{64}', histogram.get('sha256', ''))
+            or not isinstance(campaign, str) or not campaign
+            or histogram_path.parent.name != 'histograms_merged'
+            or histogram_path.parent.parent.name != campaign
+            or histogram_path.parent.parent.parent.name != 'darkphoton_'+batch['point']
+            or report.get('final_output_base') != str(histogram_path.parent.parent)):
+        raise ValueError('Meson published ROOT receipt differs from its complete point')
+    source = read(production.parent/'source_status.json')
+    if source.get('complete') is not True or source['source_collisions'] != batch['source_collisions']:
+        raise ValueError('Meson storage credit changed the fixed full source exposure')
+    return closed_primitive(production, batch['point'], source['events'], observed)
+
+
+def supplement_campaign_claim(authority, observed, maximum_age, observer_config=None):
     allocation = pinned_json(authority['worklist'])
     directory = Path(authority['directory'])
     state = healthy_peer_state(directory, maximum_age, observed)
@@ -379,26 +418,26 @@ def supplement_campaign_claim(authority, observed, maximum_age):
     forecast = pinned_json(authority['forecast'])
     amounts = forecast['per_batch_forecast_bytes']
     if (forecast['worklist_sha256'] != authority['worklist']['sha256']
+            or allocation.get('directory') != str(directory)
+            or (allocation.get('model_card') is not None
+                and forecast.get('model_card_sha256') != sha(allocation['model_card']))
             or set(amounts) != {row['batch'] for row in allocation['batches']}
             or any(type(n) is not int or n <= 0 for n in amounts.values())
             or sum(amounts.values()) != forecast['total_meson_forecast_bytes']):
         raise ValueError('Supplement meson forecast differs from the full fixed source allocation')
+    if authority.get('controller_directory') and observer_config is not None:
+        from run_dark_photon_meson_production import terminal_meson_peer_state
+        terminal_state = terminal_meson_peer_state(observer_config, authority, observed)
+        if terminal_state is not None:
+            state, terminal = terminal_state, True
     credited = 0
     for batch in allocation['batches'] if state else []:
         published = state.get('batches',{}).get(batch['batch'],{}).get('published')
-        if not isinstance(published,dict) or datetime.fromisoformat(published['published_utc']).timestamp() > observed:
-            continue
-        report = Path(published['point_receipt_path'])
-        production = directory/'batches'/batch['batch']/'production'
-        source = read(production.parent/'source_status.json')
-        if source.get('complete') is not True or source['source_collisions'] != batch['source_collisions']:
-            raise ValueError('Meson storage credit changed the fixed full source exposure')
-        if sha(report) != published['point_receipt_sha256']:
-            raise ValueError('Meson published point receipt changed')
-        if closed_primitive(production,batch['point'],source['events'],observed):
+        if meson_published_batch(directory, batch, published, observed):
             credited += amounts[batch['batch']]
     return dict(name=authority['name'],remaining_bytes=sum(amounts.values())-credited,
-                credited_bytes=credited,peer_healthy=state is not None)
+                credited_bytes=credited,peer_healthy=state is not None,
+                terminal_completion_verified=terminal)
 
 
 def supplement_canaries(config, policy, policy_hash):
@@ -473,7 +512,10 @@ def supplement_admission(config, observation):
     roots = [row['directory'] for row in campaigns]
     if len(set(roots)) != len(roots) or config['directory'] not in roots:
         raise ValueError('Supplement admission omits its own campaign or repeats a peer')
-    claims = [supplement_campaign_claim(row,observed,policy.get('maximum_peer_age_seconds',1200)) for row in campaigns]
+    claims = [supplement_campaign_claim(dict(row, **(
+        {'controller_directory': config['meson_peer_controller_directories'][row['name']]}
+        if row['kind'] == 'meson' and row['name'] in config.get('meson_peer_controller_directories', {}) else {})),
+        observed,policy.get('maximum_peer_age_seconds',1200), config) for row in campaigns]
     required = policy['minimum_free_bytes']+sum(row['remaining_bytes'] for row in claims)
     evidence = dict(reason='admitted' if observation['free_bytes'] >= required else 'waiting_for_shared_storage',
                     observed_utc=observation['observed_utc'],free_bytes=observation['free_bytes'],
@@ -636,17 +678,51 @@ def available_sources(config):
     return result
 
 
+def aggregate_helper_names(config):
+    """Freeze the model's closure from its own physics tools, including imports."""
+    helpers = ['aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
+               'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py']
+    if config.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
+        helpers += ['dark_photon_meson.py', 'dark_photon_meson_source.py']
+        if config.get('model_card'):
+            decay_types = {row.get('decay_type') for parent in read(config['model_card'])['parents']
+                           for row in parent.get('exclusive_channels', [parent])}
+            if decay_types & {'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion'}:
+                helpers += ['dark_photon_vector_meson.py']
+            if decay_types & {'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion'}:
+                helpers += ['dark_photon_dipion_meson.py']
+            # The charged kernel also imports the neutral kernel's numerical guards.
+            if decay_types & {'vector-dipion', 'charged-vector-dipion'}:
+                helpers += ['dark_photon_rho_radiative.py']
+            if 'charged-vector-dipion' in decay_types:
+                helpers += ['dark_photon_charged_rho_radiative.py']
+        elif config.get('production_mechanism') == 'meson-radiative':
+            raise ValueError('Meson aggregate requires its actual model card to freeze decay kernels')
+    for name in helpers:
+        source = Path(config['tools'])/name
+        if not source.is_file():
+            raise FileNotFoundError('Required aggregate helper is missing: '+str(source))
+        # Modern meson_source imports vector_meson even for an eta-only card;
+        # the frozen legacy source does not. Follow actual top-level imports,
+        # while the explicit model above supplies lazily imported decay kernels.
+        for statement in ast.parse(source.read_text()).body:
+            modules = ([row.name for row in statement.names] if isinstance(statement, ast.Import)
+                       else [statement.module] if isinstance(statement, ast.ImportFrom) else [])
+            for module in modules:
+                if module and module.startswith('dark_photon_'):
+                    dependency = module.split('.')[0]+'.py'
+                    if dependency not in helpers:
+                        helpers.append(dependency)
+    return tuple(helpers)
+
+
 def aggregate_plan(config, point, sources, directory):
     directory = Path(directory)
+    helpers = aggregate_helper_names(config)
     directory.mkdir(parents=True)
     for name in ('logs', 'completed_points', 'failures'):
         (directory / name).mkdir()
     dependencies = {}
-    helpers = ('aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
-               'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py')
-    if config.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
-        helpers += ('dark_photon_meson.py', 'dark_photon_meson_source.py',
-                    'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py')
     for name in helpers:
         target = directory / name
         shutil.copy2(Path(config['tools']) / name, target)

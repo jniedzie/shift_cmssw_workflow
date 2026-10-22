@@ -299,6 +299,9 @@ def audit_edm(path, source_rows):
     return {'events': len(ids), 'event_ids': ids, 'sumw': math.fsum(weights)}
 
 
+_last_chirp_values = {}
+
+
 def progress(report, tier, validated_events):
     """Keep a durable final record and lightweight live Condor telemetry."""
     report['current_tier'] = tier
@@ -325,8 +328,13 @@ def progress(report, tier, validated_events):
                                 ('ShiftNtupleStageRecordsStarted', report.get('stage_records_started', 0)),
                                 ('ShiftNtupleTier', tier),
                                 *[('ShiftNtuple'+key+'Events', count) for key, count in validated_events.items()]]:
+                if (name != 'ShiftNtupleProgressEpoch' and name in _last_chirp_values
+                        and _last_chirp_values[name] == value):
+                    continue
                 subprocess.run([chirp, 'set_job_attr', name, json.dumps(value)],
                                check=True, timeout=10, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                if name != 'ShiftNtupleProgressEpoch':
+                    _last_chirp_values[name] = value
         except (subprocess.SubprocessError, OSError) as error:
             # Chirp only supplies scheduler visibility.  It must not turn a
             # successful detector job into a failure: worker-side stage and

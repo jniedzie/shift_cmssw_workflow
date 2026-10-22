@@ -605,20 +605,21 @@ class PublicationSafety(unittest.TestCase):
             self.assertFalse(json.loads((directory/'actual_source_storage.json').read_text())['passed'])
             self.assertTrue((directory/'gen/meson_ledger_publication.json').is_file())
 
-    def test_legacy_forecast_credit_requires_global_terminal_closure(self):
+    def test_legacy_forecast_does_not_inherit_the_main_publication_owner(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)
             config,state,legacy=self.previous(root)
             forecast=UnifiedSource().authority(root,'forecast.json',dict(complete=True,
-                total_meson_forecast_bytes=300,per_batch_forecast_bytes=dict(a=100,b=200)))
+                worklist_sha256=config['prior_meson_publication']['sha256'],
+                total_meson_forecast_bytes=300,per_batch_forecast_bytes=dict(canary=100,bulk=100,other=100)))
             config['additional_reserved_meson_forecasts']=[dict(name='old_eta',forecast=forecast,
                 completion_authority=config['prior_meson_publication'])]
-            self.assertEqual(production.additional_reservations(config)[0],300)
             state.update(complete=True,checked_utc=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat())
             (legacy/'state.json').write_text(json.dumps(state))
             with patch.object(production.durable,'jobs',return_value=[]), \
                  patch.object(production,'native_status',return_value='complete'):
-                self.assertEqual(production.additional_reservations(config)[0],0)
+                # A stale terminal peer needs its own explicit current owner.
+                self.assertEqual(production.additional_reservations(config)[0],300)
                 state['batches']['other']={}
                 (legacy/'state.json').write_text(json.dumps(state))
                 self.assertEqual(production.additional_reservations(config)[0],300)

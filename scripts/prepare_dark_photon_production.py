@@ -2,6 +2,7 @@
 # Code style: AI-code. AI-generated reusable immutable BSM production preparation.
 """Freeze a qualified GEN-to-merged-histogram deployment; never submit jobs."""
 import argparse
+import ast
 import copy
 from datetime import datetime, timezone
 import json
@@ -27,6 +28,100 @@ def write(path, value):
         output.write('\n')
 
 
+def telemetry_derivation(original, replacement):
+    """Permit only the reviewed progress reporter and its empty process cache."""
+    def unchanged_body(path, cache_allowed):
+        module = ast.parse(Path(path).read_text())
+        body, progress, caches = [], [], 0
+        for node in module.body:
+            if isinstance(node, ast.FunctionDef) and node.name == 'progress':
+                progress.append(node)
+                continue
+            if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                    and isinstance(node.targets[0], ast.Name) and node.targets[0].id == '_last_chirp_values'):
+                if not cache_allowed or not isinstance(node.value, ast.Dict) or node.value.keys:
+                    raise ValueError('Telemetry derivation requires one empty process-local cache')
+                caches += 1
+                continue
+            body.append(ast.dump(node, include_attributes=False))
+        if len(progress) != 1 or caches != int(cache_allowed):
+            raise ValueError('Telemetry derivation requires exactly its progress function and cache')
+        return body, progress[0]
+    before, original_progress = unchanged_body(original, False)
+    after, replacement_progress = unchanged_body(replacement, True)
+    if (before != after or ast.dump(original_progress.args) != ast.dump(replacement_progress.args)
+            or original_progress.decorator_list != replacement_progress.decorator_list):
+        raise ValueError('Telemetry derivation changed physics, configuration or audit code')
+    return dict(profile='deduplicated-chirp-v1', original_source=str(original),
+        original_sha256=sha256(original), replacement_source=str(replacement),
+        replacement_sha256=sha256(replacement),
+        allowed_ast_changes=['progress', '_last_chirp_values = {}'],
+        other_physics_configuration_and_audit_ast_unchanged=True)
+
+
+def freeze_detector_source(source, target):
+    """Keep qualified sources, allowing the reviewed telemetry-only sibling."""
+    source, target = Path(source), Path(target)
+    selected, derivation = source, None
+    replacement = Path(__file__).with_name('run_shift_gen_to_nano.py')
+    if target.name == replacement.name and sha256(source) != sha256(replacement):
+        derivation = telemetry_derivation(source, replacement)
+        selected = replacement
+    shutil.copy2(selected, target)
+    metadata = dict(source=str(selected), sha256=sha256(target))
+    if derivation is not None:
+        if metadata['sha256'] != derivation['replacement_sha256']:
+            raise ValueError('Derived telemetry helper changed while freezing')
+        metadata['telemetry_derivation'] = derivation
+    return metadata
+
+
+def declared_source_namespaces(previous):
+    """Validate reserved source identities without treating them as GEN events."""
+    if previous.get('schema') != 'shift-declared-source-namespace-reservation-v1':
+        raise ValueError('Declared source namespaces require their explicit reservation schema')
+    expected, authorities = set(), set()
+    pins = previous.get('source_authorities', [])
+    if not isinstance(pins, list):
+        raise ValueError('Declared source namespace authorities require explicit pins')
+    for authority in pins:
+        if (not isinstance(authority, dict) or set(authority) != {'path', 'sha256'}
+                or not isinstance(authority['path'], str)):
+            raise ValueError('Malformed declared source namespace authority')
+        path = Path(authority['path'])
+        if (not path.is_absolute() or '..' in path.parts or str(path) in authorities
+                or sha256(path) != authority['sha256']):
+            raise ValueError('Declared source namespace authority changed or is ambiguous')
+        authorities.add(str(path))
+        source = read(path)
+        rows = source.get('batches', []) + [row for wave in source.get('waves', []) for row in wave['batches']]
+        if not rows:
+            raise ValueError('Declared source namespace authority has no source worklist')
+        for row in rows:
+            expected.add((str(path), row['point'], row['seed'], row['run_number']))
+    actual, runs, seeds = set(), set(), set()
+    points = previous.get('points')
+    if not authorities or not isinstance(points, dict) or not points:
+        raise ValueError('Declared source namespaces require pinned nonempty source authorities')
+    required = {'declared_source_namespace_only', 'point', 'seed', 'run_number', 'source_configuration'}
+    for row in points.values():
+        if (not isinstance(row, dict) or set(row) != required
+                or row['declared_source_namespace_only'] is not True
+                or not isinstance(row['point'], str) or not re.fullmatch(r'[A-Za-z0-9_-]+', row['point'])
+                or type(row['seed']) is not int or not 1 <= row['seed'] < 900000000
+                or type(row['run_number']) is not int or not 1 <= row['run_number'] <= 4294967295
+                or row['run_number'] in runs or row['seed'] in seeds):
+            raise ValueError('Malformed declared source namespace; event/exposure fields are not allowed')
+        identity = (row['source_configuration'], row['point'], row['seed'], row['run_number'])
+        if identity not in expected:
+            raise ValueError('Declared source namespace differs from its pinned source worklist')
+        actual.add(identity)
+        runs.add(row['run_number']); seeds.add(row['seed'])
+    if actual != expected:
+        raise ValueError('Declared source namespace reservation omits part of its pinned worklists')
+    return runs, seeds
+
+
 def check_gen(plan, inventory, publication, prior_inventories):
     """Bind exact audited full GEN populations and reject reused identities."""
     names = {row['point'] for row in plan['points']}
@@ -38,7 +133,15 @@ def check_gen(plan, inventory, publication, prior_inventories):
     identities, runs, seeds, previous_ids, previous_runs, previous_seeds = set(), set(), set(), set(), set(), set()
     for path in prior_inventories:
         previous = read(path)
+        if (previous.get('schema') == 'shift-declared-source-namespace-reservation-v1'
+                or any('declared_source_namespace_only' in row for row in previous['points'].values())):
+            reserved_runs, reserved_seeds = declared_source_namespaces(previous)
+            previous_runs.update(reserved_runs)
+            previous_seeds.update(reserved_seeds)
+            continue
         for row in previous['points'].values():
+            if 'event_ids' not in row:
+                raise ValueError('Prior GEN inventory lacks audited event identities or explicit source declarations')
             previous_ids.update(map(tuple, row['event_ids']))
             previous_runs.update(event[0] for event in row['event_ids'])
             if 'seed' in row:
@@ -287,8 +390,7 @@ def prepare(args):
             if sha256(source) != item['sha256']:
                 raise ValueError('Native-qualified frozen dependency changed: ' + str(source))
             target = frozen / category / name
-            shutil.copy2(source, target)
-            dependencies[str(target)] = dict(source=str(source), sha256=sha256(target))
+            dependencies[str(target)] = freeze_detector_source(source, target)
     for name in ('chunk_worker.py', 'finalize_point.py', 'collect_inputs.py', 'preserve_failure.py',
                  'detector_worker.sh', 'finalizer_worker.sh', 'collect_worker.sh',
                  'detector.sub', 'finalizer.sub', 'collect.sub'):

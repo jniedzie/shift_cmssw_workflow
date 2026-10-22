@@ -55,19 +55,39 @@ def source_mechanism(config):
 
 
 def prior_meson_configuration(config):
-    """The original eta publisher owns each point until all its batches close."""
+    """The previous model owns each point until all its batches close."""
     if source_mechanism(config) != 'meson-radiative':
         return None
     previous = read_pinned(config['prior_meson_publication'])
     directory = Path(previous.get('directory', ''))
     batches = previous.get('batches')
     if (previous.get('schema') != 'shift-dp-meson-production-v1'
-            or source_mechanism(previous) != 'eta-etaprime-radiative'
             or not directory.is_absolute() or '..' in directory.parts
             or not isinstance(batches, list) or not batches
             or any(not isinstance(row, dict) or not row.get('batch') or not row.get('point') for row in batches)
             or len({row['batch'] for row in batches}) != len(batches)):
-        raise ValueError('Prior meson publication requires its pinned original eta production')
+        raise ValueError('Prior meson publication requires its pinned original production')
+    if source_mechanism(previous) == 'meson-radiative':
+        # A changed channel model replaces its predecessor. It is never another
+        # population of the old proposal for cross-section averaging.
+        for candidate in (previous, config):
+            pinned_path(candidate['conditions'])
+        if previous['conditions']['sha256'] != config['conditions']['sha256']:
+            raise ValueError('Prior meson model has different detector conditions')
+        completion_scope(previous)
+        scope = read_pinned(previous['meson_completion_scope'])
+        if scope.get('model_sha256') != durable.sha(previous['model_card']):
+            raise ValueError('Prior meson model differs from its pinned coverage audit')
+        gen_runtime(previous)
+        old_seeds = {row['seed'] for row in batches}
+        old_runs = {row['run_number'] for row in batches}
+        for row in config['batches']:
+            if row['seed'] in old_seeds or row['run_number'] in old_runs:
+                raise ValueError('Replacement meson sources reuse prior seeds or runs')
+            expected = reference_point(previous, row)
+            actual = reference_point(config, row)
+            if expected != actual:
+                raise ValueError('Replacement meson model changed its physical point or LAB reference')
     return previous
 
 
@@ -126,7 +146,25 @@ def prior_publication_ready(config, batch):
         if terminal:
             authority = config['prior_meson_publication']['controller_receipt']
             replacement = config.get('prior_meson_controller_replacement')
-            if replacement:
+            future = config.get('prior_meson_controller_directory')
+            expected_native = None
+            if future is not None:
+                # The successor registers this source's final config checksum.
+                # Pin its directory instead of creating a checksum cycle, then
+                # check its seal, unchanged physics and actual native identity.
+                if replacement:
+                    raise ValueError('Predecessor controller has competing ownership authorities')
+                owner = predecessor_controller_configuration(config, future)
+                directory, submit_path = Path(future), Path(owner['submit'])
+                receipt_path = directory/'submission.json'
+                if receipt_path.resolve() != receipt_path:
+                    raise ValueError('Future predecessor submission leaves its exact directory')
+                receipt = read(receipt_path)
+                if receipt.get('task') != str(directory) or receipt.get('submit_sha256') != durable.sha(submit_path):
+                    raise ValueError('Future predecessor submission receipt has different ownership')
+                receipt_hash = durable.sha(receipt_path)
+                expected_native = owner['native_execution']
+            elif replacement:
                 # Preserve the original physics authority, but follow the exact
                 # qualified supervisor that now closes its publication work.
                 path = pinned_path(replacement['config'])
@@ -151,11 +189,101 @@ def prior_publication_ready(config, batch):
                 ' || DAGManJobId == '+str(receipt['cluster'])+' || Iwd == '+json.dumps(receipt['task']))
             if durable.jobs(config, constraint) or native_status(config, receipt) != 'complete':
                 return False, dict(evidence, reason='prior_terminal_controller_is_still_live')
+            if expected_native is not None:
+                terminal_record = cached_terminal_record(config, receipt)
+                native = terminal_record.get('terminal_native_ad', {}) if terminal_record else {}
+                if any(native.get(key) != value for key, value in expected_native.items()):
+                    return False, dict(evidence, reason='prior_terminal_controller_execution_identity_changed')
             evidence.update(terminal_closure_verified=True,
                 prior_controller_receipt_sha256=receipt_hash, prior_controller_cluster=receipt['cluster'])
     except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         return False, dict(evidence, reason='prior_publication_evidence_unavailable', error=repr(error))
     return True, dict(evidence, complete=True)
+
+
+def predecessor_controller_configuration(config, directory):
+    """Validate a named operational owner without changing its science or state."""
+    previous = prior_meson_configuration(config)
+    return meson_controller_configuration(previous, directory)
+
+
+def meson_controller_configuration(previous, directory, allow_science=False):
+    """Check only this owner's seal and science, never its peers' locators."""
+    directory = Path(directory)
+    if (previous is None or not directory.is_absolute() or '..' in directory.parts
+            or (directory == Path(previous['directory']) and not allow_science)
+            or directory.resolve() != directory):
+        raise ValueError('Future predecessor controller needs one exact operational directory')
+    paths = [directory/name for name in ('config.json', 'seal.json', 'controller.sub', 'lcg_controller.sh')]
+    if any(path.resolve() != path for path in paths):
+        raise ValueError('Future predecessor controller files leave their exact directory')
+    path, seal_path, submit_path, wrapper = paths
+    seal_hash = durable.sha(seal_path)
+    if directory == Path(previous['directory']):
+        if verify(directory, seal_hash) != previous:
+            raise ValueError('Canonical meson terminal owner changed its pinned science')
+    else:
+        operational_configuration(previous, path, seal_hash)
+    descriptor = submit_path.read_text()
+    def setting(name):
+        values = re.findall(r'^'+re.escape(name)+r'\s*=\s*(.*?)\s*$', descriptor, re.MULTILINE)
+        if len(values) != 1:
+            raise ValueError('Future predecessor submit setting is ambiguous: '+name)
+        return values[0]
+    if (setting('initialdir') != str(directory) or setting('executable') != str(wrapper)
+            or setting('arguments') != seal_hash):
+        raise ValueError('Future predecessor submit descriptor has different execution settings')
+    return dict(submit=str(submit_path), native_execution=dict(Cmd=str(wrapper), Args=seal_hash))
+
+
+def validate_meson_peer_locators(config, names):
+    locators = config.get('meson_peer_controller_directories', {})
+    if not isinstance(locators, dict) or set(locators)-set(names):
+        raise ValueError('Meson completion owners must name existing protected peers')
+    for value in locators.values():
+        path = Path(value)
+        if not path.is_absolute() or '..' in path.parts or path.resolve() != path:
+            raise ValueError('Meson completion owner needs one exact persistent directory')
+    return locators
+
+
+def terminal_meson_peer_state(config, authority, observed):
+    """Keep published credit after a verified owner's final heartbeat stops."""
+    try:
+        previous = read_pinned(authority['worklist'])
+        root = Path(authority['directory'])
+        if previous.get('directory') != str(root):
+            return None
+        state = read(root/'state.json')
+        if (state.get('complete') is not True or state.get('error') or state.get('failures')
+                or set(state.get('batches', {})) != {row['batch'] for row in previous['batches']}):
+            return None
+        if not all(durable.meson_published_batch(root, row,
+                state['batches'][row['batch']].get('published'), observed) for row in previous['batches']):
+            return None
+        directory = Path(authority['controller_directory'])
+        owner = meson_controller_configuration(previous, directory, allow_science=True)
+        receipt = read(directory/'submission.json')
+        if (receipt.get('task') != str(directory) or type(receipt.get('cluster')) is not int
+                or receipt['cluster'] <= 0 or receipt.get('submit_sha256') != durable.sha(owner['submit'])):
+            return None
+        constraint = ('ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])+
+            ' || Iwd == '+json.dumps(str(directory))+' || regexp('+
+            json.dumps('^'+re.escape(str(root))+'/(batches|aggregates|coverage)/')+',Iwd)')
+        if durable.jobs(config, constraint):
+            return None
+        # Reuse the peer's pinned successful-native seed in the observer's own
+        # cache. This also works for statistics supervisors without a meson seed.
+        context = dict(config, reviewed_terminal_native_jobs=previous['reviewed_terminal_native_jobs'])
+        if native_status(context, receipt) != 'complete':
+            return None
+        record = cached_terminal_record(context, receipt)
+        native = record.get('terminal_native_ad', {}) if record else {}
+        if any(native.get(key) != value for key, value in owner['native_execution'].items()):
+            return None
+        return state
+    except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError):
+        return None
 
 
 def common_sample_anchor(config, batch, sample, sample_path, transport):
@@ -188,11 +316,24 @@ def common_sample_anchor(config, batch, sample, sample_path, transport):
         if (type(value) not in (int, float) or not math.isfinite(value)
                 or not math.isclose(value, sample[key], rel_tol=1.e-10, abs_tol=0.)):
             raise ValueError('Existing global sample anchor has a different physical lifetime/LAB reference')
-    previous = prior_meson_configuration(config)
     creator = existing.get('production_mechanism')
-    authority = (previous.get('calibration_authority') if creator == source_mechanism(previous)
-                 else config.get('calibration_authority') if creator == source_mechanism(config) else None)
-    if not authority or existing.get('calibration_sha256') != authority.get('sha256'):
+    candidate = config
+    visited = set()
+    matched = False
+    while candidate is not None:
+        authority = candidate.get('calibration_authority', {})
+        if (authority and authority.get('sha256') is not None
+                and creator == source_mechanism(candidate)
+                and existing.get('calibration_sha256') == authority.get('sha256')):
+            matched = True
+            break
+        predecessor = candidate.get('prior_meson_publication', {})
+        identity = predecessor.get('path')
+        if identity in visited or len(visited) >= 16:
+            raise ValueError('Common sample anchor has a cyclic or excessive predecessor chain')
+        visited.add(identity)
+        candidate = prior_meson_configuration(candidate)
+    if not matched:
         raise ValueError('Existing global sample anchor has no matching pinned creator/calibration authority')
     return dict(path=destination, bytes=size, sha256=durable.sha(path),
         readback_sha256=durable.sha(path), retained_existing=True, historical_creator_mechanism=creator,
@@ -378,9 +519,11 @@ def batch_directory(config, batch):
     return Path(config['directory']) / 'batches' / batch['batch']
 
 
-def operational_configuration(original,path,expected):
+def operational_configuration(original,path,expected,_reservation_chain=()):
     """Adopt a separately sealed controller without changing live GEN sources."""
     path=Path(path)
+    if str(path) in _reservation_chain or len(_reservation_chain) >= 32:
+        raise ValueError('Cyclic or excessive meson reservation registration history')
     seal_path=path.parent/'seal.json'
     if durable.sha(seal_path)!=expected:
         raise ValueError('Replacement controller seal changed')
@@ -394,7 +537,8 @@ def operational_configuration(original,path,expected):
     # Scheduling can use the complete already budgeted grid. Source exposure,
     # seeds, worklist order, physics and storage claims remain frozen.
     operational={'tools','simultaneous_sources','simultaneous_detector_points',
-                 'additional_reserved_worklists'}
+                 'additional_reserved_worklists','additional_reserved_meson_forecasts',
+                 'prior_meson_controller_directory', 'meson_peer_controller_directories'}
     immutable=set(original)-operational
     if any(config.get(key)!=original[key] for key in immutable):
         raise ValueError('Replacement controller changed frozen production settings')
@@ -407,14 +551,88 @@ def operational_configuration(original,path,expected):
             raise ValueError('Replacement controller changed protected peer storage claims')
     if set(config)-set(original)-{'physics_tools', 'reviewed_detector_recoveries',
                                    'additional_reserved_worklists', 'reviewed_terminal_native_jobs',
-                                   'adaptive_terminal_completion', 'prior_meson_controller_replacement'}:
+                                   'adaptive_terminal_completion', 'prior_meson_controller_replacement',
+                                   'additional_reserved_meson_forecasts', 'meson_reservation_registration',
+                                   'prior_meson_controller_directory', 'meson_peer_controller_directories'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
+    if config.get('prior_meson_controller_directory') != original.get('prior_meson_controller_directory'):
+        if (not config.get('prior_meson_controller_directory')
+                or config.get('prior_meson_controller_replacement')):
+            raise ValueError('A predecessor-owner rollover cannot remove or compete with its publication fence')
+        predecessor_controller_configuration(config, config['prior_meson_controller_directory'])
+    validate_meson_reservation_additions(original, config)
+    locators = validate_meson_peer_locators(config,
+        [row['name'] for row in config.get('additional_reserved_meson_forecasts', [])])
+    if set(original.get('meson_peer_controller_directories', {}))-set(locators):
+        raise ValueError('Replacement controller removed a protected peer completion owner')
+    registration = config.get('meson_reservation_registration')
+    if registration is not None:
+        previous = pinned_path(registration['previous_configuration'])
+        previous_seal = pinned_path(registration['previous_seal'])
+        if previous_seal != previous.parent/'seal.json':
+            raise ValueError('Meson registration predecessor is outside its sealed deployment')
+        predecessor = operational_configuration(original, previous, registration['previous_seal']['sha256'],
+                                                 (*_reservation_chain, str(path)))
+        additions = validate_meson_reservation_additions(predecessor, config)
+        if registration.get('added_peer_names') != [row['name'] for row in additions]:
+            raise ValueError('Meson registration changed its declared added peers')
     for key,maximum in [('simultaneous_sources',7),('simultaneous_detector_points',35)]:
         if key in original and (type(config.get(key)) is not int or not 1<=config[key]<=maximum):
             raise ValueError('Replacement controller scheduling limit is outside the reviewed grid: '+key)
     return config
+
+
+def validate_meson_forecast_peer(authority, owner=None):
+    """Bind a new positive reservation to every batch of one frozen peer."""
+    peer_pin = authority['peer_configuration']
+    peer = read_pinned(peer_pin)
+    directory = Path(peer.get('directory', ''))
+    batches = peer.get('batches', [])
+    forecast = read_pinned(authority['forecast'])
+    if (peer.get('schema') != 'shift-dp-meson-production-v1'
+            or not directory.is_absolute() or '..' in directory.parts
+            or Path(peer_pin['path']) != directory/'config.json'
+            or str(directory) == owner
+            or not batches or any(not isinstance(row, dict) or not row.get('batch') for row in batches)
+            or len({row['batch'] for row in batches}) != len(batches)
+            or forecast.get('worklist_sha256') != peer_pin['sha256']
+            or set(forecast.get('per_batch_forecast_bytes', {})) != {row['batch'] for row in batches}
+            or forecast.get('model_card_sha256') != durable.sha(peer['model_card'])):
+        raise ValueError('Added meson reservation differs from its frozen peer worklist or model')
+    source_mechanism(peer)
+    return str(directory)
+
+
+def validate_meson_reservation_additions(previous, candidate):
+    """Keep every existing claim byte-identical; only append qualified peers."""
+    before = previous.get('additional_reserved_meson_forecasts', [])
+    after = candidate.get('additional_reserved_meson_forecasts', [])
+    if not isinstance(before, list) or not isinstance(after, list):
+        raise ValueError('Meson reservations require explicit lists of pinned peers')
+    if any(row not in after for row in before):
+        raise ValueError('Meson registration removed or changed an existing protected claim')
+    names = [row.get('name') for row in after]
+    names.extend(row.get('name') for row in candidate.get('additional_reserved_worklists', []))
+    if any(not isinstance(name, str) or not name for name in names) or len(names) != len(set(names)):
+        raise ValueError('Meson reservations require unique nonempty peer names')
+    additions = [row for row in after if row not in before]
+    directories = set()
+    for row in before:
+        authority = row.get('peer_configuration', row.get('completion_authority', {}))
+        if authority.get('path'):
+            directories.add(read_pinned(authority).get('directory'))
+    for row in additions:
+        if row.get('completion_authority') is not None:
+            raise ValueError('New meson reservations keep their full positive allocation')
+        directory = validate_meson_forecast_peer(row, candidate.get('directory'))
+        if directory in directories:
+            raise ValueError('Meson registration repeats an existing peer production')
+        directories.add(directory)
+    # Reuse the production admission check for positive amounts and exact sums.
+    additional_reservations(dict(additional_reserved_meson_forecasts=additions))
+    return additions
 
 
 def adopted_row(batch, gen, config=None):
@@ -695,8 +913,15 @@ def handoff(config, batch):
         budget.update(events=plan['events'], detector_chunks=plan['detector_chunks'], points=1,
             external_reservations=[], fixed_reservation_bytes=config['minimum_eos_free_bytes'],
             gen_group_file_allowance=4000, safety_free_floor_files=5000)
-        durable.new(directory / 'storage_budget.json', budget)
-        durable.run_logged([os.sys.executable, Path(config['tools'])/'prepare_dark_photon_production.py',
+        budget_path = directory/'storage_budget.json'
+        if budget_path.exists():
+            if read(budget_path) != budget:
+                raise ValueError('Earlier detector storage budget changed; preserve the interrupted preparation')
+        else:
+            durable.new(budget_path, budget)
+        # The sealed operational deployment may repair orchestration while
+        # adopted GEN physics and its original source helpers stay unchanged.
+        durable.run_logged([os.sys.executable, Path(__file__).with_name('prepare_dark_photon_production.py'),
             '--preparation', directory/'preparation.json', '--template', config['qualified_template'],
             '--gen-inventory', directory/'gen_inventory.json', '--gen-publication', directory/'gen_publication.json',
             '--storage-budget', directory/'storage_budget.json', '--output', production,
@@ -841,7 +1066,7 @@ def terminal_peer_completion(config, authority, worklist=None):
 
 
 def additional_reservations(config):
-    """Protect complete newer allocations; completion never grants credit here."""
+    """Protect each full allocation until its published batches are verified."""
     total, claims = 0, []
     for authority in config.get('additional_reserved_worklists', []):
         allocation = read_pinned(authority['worklist'])
@@ -863,6 +1088,8 @@ def additional_reservations(config):
             claim['terminal_completion_verified'] = completed
         claims.append(claim)
     for authority in config.get('additional_reserved_meson_forecasts', []):
+        if authority.get('peer_configuration') is not None:
+            validate_meson_forecast_peer(authority, config.get('directory'))
         forecast = read_pinned(authority['forecast'])
         amounts = forecast.get('per_batch_forecast_bytes', {})
         amount = forecast.get('total_meson_forecast_bytes')
@@ -870,16 +1097,23 @@ def additional_reservations(config):
                 or not amounts or any(type(value) is not int or value <= 0 for value in amounts.values())
                 or sum(amounts.values()) != amount):
             raise ValueError('Additional meson forecast does not cover its complete source allocation')
-        completed = (terminal_peer_completion(config, authority['completion_authority'])
-                     if authority.get('completion_authority') else False)
-        if completed:
-            amount = 0
+        peer_pin = authority.get('peer_configuration') or authority.get('completion_authority')
+        detail = {}
+        if peer_pin is not None:
+            peer = read_pinned(peer_pin)
+            claim_authority = dict(kind='meson', name=authority['name'], directory=peer['directory'],
+                                   worklist=peer_pin, forecast=authority['forecast'])
+            locator = config.get('meson_peer_controller_directories', {}).get(authority['name'])
+            if locator:
+                claim_authority['controller_directory'] = locator
+            detail = durable.supplement_campaign_claim(claim_authority, time.time(), 1200, config)
+            amount = detail['remaining_bytes']
         total += amount
         claim = dict(name=authority['name'], reserved_bytes=amount,
                            forecast_sha256=authority['forecast']['sha256'],
-                           completed_peer_batches_release_no_credit=True)
-        if authority.get('completion_authority'):
-            claim['terminal_completion_verified'] = completed
+                           **{key:value for key,value in detail.items() if key != 'name'})
+        if peer_pin is None:
+            claim['completed_peer_batches_release_no_credit'] = True
         claims.append(claim)
     return total, claims
 

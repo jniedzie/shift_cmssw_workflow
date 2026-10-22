@@ -2,6 +2,7 @@
 """Check event reuse rejection, immutable external authorities and DAG barriers."""
 import copy
 import ast
+import importlib.util
 import json
 from pathlib import Path
 import sys
@@ -13,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from prepare_dark_photon_production import check_gen, dag_text, detector_timeout_settings, extend_worker
+import prepare_dark_photon_production as production_preparation
 
 
 def write(path, value):
@@ -106,6 +108,65 @@ class GenIsolation(unittest.TestCase):
         audit['event_rows'][1]['weight']=2.
         write(self.base/'validation.json',audit)
         with self.assertRaisesRegex(ValueError,'weights'):
+            check_gen(self.plan,self.inventory,self.publication,[self.previous])
+
+    def namespace_reservation(self, seed=9001, run=9001):
+        source = self.base/'source_worklist.json'
+        write(source, dict(batches=[dict(point='reserved',seed=seed,run_number=run)]))
+        reservation = dict(schema='shift-declared-source-namespace-reservation-v1',
+            source_authorities=[dict(path=str(source),sha256=sha256(source))],
+            points=dict(reserved=dict(declared_source_namespace_only=True,point='reserved',
+                seed=seed,run_number=run,source_configuration=str(source))))
+        path = self.base/'reserved_namespaces.json'
+        write(path,reservation)
+        return path,reservation
+
+    def test_declared_namespaces_reserve_identity_without_inventing_exposure(self):
+        path,reservation = self.namespace_reservation()
+        result = check_gen(self.plan,self.inventory,self.publication,[self.previous,path])
+        self.assertEqual(result['events'],2)
+        self.assertEqual(result['distinct_parent_events'],2)
+        self.assertEqual(result['new_runs'],[10001])
+        self.assertEqual(json.loads(path.read_text()),reservation)
+        self.assertNotIn('event_ids',reservation['points']['reserved'])
+
+    def test_declared_run_or_seed_overlap_is_rejected_without_prior_events(self):
+        for seed,run in ((10001,9001),(9001,10001)):
+            with self.subTest(seed=seed,run=run):
+                path,_ = self.namespace_reservation(seed,run)
+                with self.assertRaisesRegex(ValueError,'overlap'):
+                    check_gen(self.plan,self.inventory,self.publication,[path])
+
+    def test_malformed_or_unbound_namespace_declarations_are_rejected(self):
+        changes = ('schema','flag','run','seed','boolean','event_ids','events','source',
+                   'pin','duplicate','missing','omitted')
+        for change in changes:
+            with self.subTest(change=change):
+                path,reservation = self.namespace_reservation()
+                row = reservation['points']['reserved']
+                if change=='schema':reservation.pop('schema')
+                elif change=='flag':row['declared_source_namespace_only']=False
+                elif change=='run':row['run_number']=0
+                elif change=='seed':row['seed']=900000000
+                elif change=='boolean':row['seed']=True
+                elif change=='event_ids':row['event_ids']=[]
+                elif change=='events':row['events']=0
+                elif change=='source':row['source_configuration']='/unrelated/source.json'
+                elif change=='pin':reservation['source_authorities'][0]['sha256']='b'*64
+                elif change=='duplicate':reservation['points']['duplicate']=dict(row)
+                elif change=='missing':row.pop('run_number')
+                else:
+                    source=Path(row['source_configuration'])
+                    write(source,dict(batches=[dict(point='reserved',seed=9001,run_number=9001),
+                        dict(point='omitted',seed=9002,run_number=9002)]))
+                    reservation['source_authorities'][0]['sha256']=sha256(source)
+                write(path,reservation)
+                with self.assertRaises(ValueError):
+                    check_gen(self.plan,self.inventory,self.publication,[path])
+
+    def test_unmarked_prior_rows_cannot_silently_skip_event_validation(self):
+        write(self.previous,dict(points=dict(invalid=dict(seed=9001,run_number=9001))))
+        with self.assertRaisesRegex(ValueError,'lacks audited event identities'):
             check_gen(self.plan,self.inventory,self.publication,[self.previous])
 
 
@@ -226,6 +287,64 @@ class DetectorDeadlines(unittest.TestCase):
             self.assertEqual(command[command.index('--timeout')+1], '43200')
             self.assertEqual(launch.call_args.kwargs['timeout'], 43800)
             self.assertTrue(launch.call_args.kwargs['check'])
+
+
+class TelemetryWorkerDerivation(unittest.TestCase):
+    def original(self, root):
+        maintained=Path(production_preparation.__file__).with_name('run_shift_gen_to_nano.py')
+        module=ast.parse(maintained.read_text())
+        body=[]
+        for node in module.body:
+            if (isinstance(node,ast.Assign) and len(node.targets)==1
+                    and isinstance(node.targets[0],ast.Name) and node.targets[0].id=='_last_chirp_values'):
+                continue
+            if isinstance(node,ast.FunctionDef) and node.name=='progress':
+                node.body=[ast.Pass()]
+            body.append(node)
+        module.body=body
+        original=root/'qualified_original.py'
+        original.write_text(ast.unparse(module)+'\n')
+        return original,maintained
+
+    def test_freezes_only_telemetry_derivation_with_pinned_provenance_and_real_import(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            original,maintained=self.original(root)
+            original_sha=sha256(original)
+            target=root/'run_shift_gen_to_nano.py'
+            metadata=production_preparation.freeze_detector_source(original,target)
+            derivation=metadata['telemetry_derivation']
+            self.assertEqual(derivation['profile'],'deduplicated-chirp-v1')
+            self.assertEqual(derivation['original_sha256'],original_sha)
+            self.assertEqual(derivation['replacement_sha256'],sha256(maintained))
+            self.assertEqual(metadata['sha256'],sha256(target))
+            self.assertEqual(target.read_bytes(),maintained.read_bytes())
+            self.assertEqual(sha256(original),original_sha)
+            spec=importlib.util.spec_from_file_location('frozen_telemetry_worker',target)
+            frozen=importlib.util.module_from_spec(spec);spec.loader.exec_module(frozen)
+            self.assertEqual(frozen._last_chirp_values,{})
+            self.assertTrue(callable(frozen.progress))
+
+    def test_unrelated_physics_change_cannot_be_adopted_as_telemetry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            original,_=self.original(root)
+            original.write_text(original.read_text()+'\nUNRELATED_PHYSICS_SETTING = 17\n')
+            target=root/'run_shift_gen_to_nano.py'
+            with self.assertRaisesRegex(ValueError,'physics, configuration or audit'):
+                production_preparation.freeze_detector_source(original,target)
+            self.assertFalse(target.exists())
+
+    def test_extra_assignments_or_nonempty_cache_are_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            original,maintained=self.original(root)
+            replacement=root/'candidate.py'
+            for text in (maintained.read_text()+'\nEXTRA = True\n',
+                         maintained.read_text().replace('_last_chirp_values = {}',"_last_chirp_values = {'unsafe': 1}",1)):
+                replacement.write_text(text)
+                with self.assertRaises(ValueError):
+                    production_preparation.telemetry_derivation(original,replacement)
 
 
 if __name__=='__main__':
