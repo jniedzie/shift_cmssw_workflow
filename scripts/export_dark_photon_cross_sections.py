@@ -109,10 +109,28 @@ def same_number(actual, expected, name):
         raise ValueError("Meson source accounting differs: " + name)
 
 
-def same_signed_number(actual, expected, name):
+def same_signed_number(actual, expected, name, *, absolute_roundoff=0.):
     if (type(actual) not in (int, float) or not math.isfinite(actual) or
-            not math.isclose(actual, expected, rel_tol=1e-10, abs_tol=1e-100)):
+            not math.isclose(actual, expected, rel_tol=1e-10, abs_tol=max(1e-100,absolute_roundoff))):
         raise ValueError("Meson native precision accounting differs: " + name)
+
+
+def native_precision_roundoff(parent,checked,coefficient):
+    """Arithmetic budget only for subtraction-derived native diagnostics.
+
+    Positive physical coefficients still use the unchanged relative check.
+    The diagnostics subtract nearby masses/rates or subtract one from a
+    near-unit ratio. Reserve 32 ulps of those underlying operands for their
+    scalar evaluation, subtraction and division across supported runtimes.
+    This is a numerical acceptance bound, not a physical model uncertainty.
+    Aggregate difference sums receive the sum of their per-parent budgets.
+    """
+    scale=max(abs(coefficient),abs(coefficient+parent['coefficient_difference_from_kinematic_mass']),
+              abs(coefficient+checked['coefficient_difference_from_kinematic_mass']))
+    return dict(coefficient_relative_precision_shift=32*math.ulp(1.),
+        coefficient_difference_from_kinematic_mass=32*math.ulp(scale),
+        native_mass_shell_deviation=32*math.ulp(max(parent['native_mass_gev'],checked['kinematic_mass_gev']))/
+            max(parent['p4'][0],1.))
 
 
 def same_resolved_meson_model(stored, resolved, name='resolved exclusive meson model'):
@@ -352,6 +370,7 @@ def meson_source_exposure(contract, directory):
     if precision is not None:
         totals["coefficient_precision_difference_sum"] = [0., 0.]
     maximum_precision_shift = 0.
+    precision_difference_roundoff=0.
 
     def accumulate(name, value):
         # Compensated sums keep full-source ledgers bounded in memory.
@@ -402,11 +421,20 @@ def meson_source_exposure(contract, directory):
                     model = precision_models[pdg]
                     if not model["mass_min_gev"] <= mass <= model["mass_max_gev"]:
                         raise ValueError("Native generated mass violates its frozen support")
+                    from dark_photon_meson_source import parent_branching_coefficient
+                    nominal_coefficient=parent_branching_coefficient(mass,contract['mass_gev'],model,branching)
+                    roundoff=native_precision_roundoff(parent,checked_parent,nominal_coefficient)
                     for key in ("kinematic_mass_gev", "native_mass_shell_deviation",
                                 "coefficient_relative_precision_shift", "coefficient_difference_from_kinematic_mass"):
-                        same_signed_number(parent[key], checked_parent[key], key)
+                        same_signed_number(parent[key], checked_parent[key], key,
+                            absolute_roundoff=roundoff.get(key,0.))
+                    precision_difference_roundoff=math.fsum((precision_difference_roundoff,
+                        roundoff['coefficient_difference_from_kinematic_mass']))
                     if parent.get('native_parent_precision_report') != checked_parent.get('native_parent_precision_report'):
                         raise ValueError('Stored native parent precision report differs from its pinned model audit')
+                    for key in ('kaon_source_count_authority','leptonic_kinematic_precision'):
+                        if key in parent or key in checked_parent:
+                            same_resolved_meson_model(parent.get(key),checked_parent.get(key))
                     shift = parent["coefficient_relative_precision_shift"]
                     maximum_precision_shift = max(maximum_precision_shift, abs(shift))
                     accumulate("coefficient_precision_difference_sum", parent["coefficient_difference_from_kinematic_mass"])
@@ -465,13 +493,15 @@ def meson_source_exposure(contract, directory):
         if type(value) is int and type(exposure[name]) is not int:
             raise ValueError("Meson source counter must be an integer: " + name)
         if name == "coefficient_precision_difference_sum":
-            same_signed_number(exposure[name], value, name)
+            same_signed_number(exposure[name], value, name,absolute_roundoff=precision_difference_roundoff)
         else:
             same_number(exposure[name], value, name)
     if precision is not None:
-        same_number(exposure["maximum_coefficient_relative_precision_shift"], maximum_precision_shift, "maximum parent precision shift")
+        same_signed_number(exposure["maximum_coefficient_relative_precision_shift"], maximum_precision_shift,
+            "maximum parent precision shift",absolute_roundoff=32*math.ulp(1.))
         same_signed_number(exposure["relative_rate_precision_shift"],
-            expected["coefficient_precision_difference_sum"]/expected["coefficient_sum"], "full-source relative rate precision shift")
+            expected["coefficient_precision_difference_sum"]/expected["coefficient_sum"], "full-source relative rate precision shift",
+            absolute_roundoff=precision_difference_roundoff/expected['coefficient_sum'])
     if len(slots) != contract["requested_events"] or not slots:
         raise ValueError("Meson output count differs from its accepted source slots")
     sigma = positive(exposure["sigma_source_mb"], "unfiltered source cross section in mb")
@@ -646,6 +676,10 @@ def input_files(directory, manifest):
         if sha256(runtime) != manifest.get('runtime_provenance_sha256'):
             raise ValueError('Worker-local runtime provenance changed')
         names.add('runtime_provenance.json')
+    if manifest.get('native_source_configuration_sha256') is not None:
+        if sha256(directory/'source_configuration.json')!=manifest['native_source_configuration_sha256']:
+            raise ValueError('Initialized native source configuration changed')
+        names.add('source_configuration.json')
     contract=read(directory/'contract.json')
     if contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         names.update({"source_exposure.json", "meson_model.json"})

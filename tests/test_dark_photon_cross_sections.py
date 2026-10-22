@@ -515,6 +515,28 @@ class DurablePublication(unittest.TestCase):
 
 
 class NativeModelPortability(unittest.TestCase):
+    def test_cancellation_diagnostics_use_operand_ulps_without_relaxing_rates(self):
+        from export_dark_photon_cross_sections import (native_precision_roundoff,
+            same_number,same_signed_number)
+        parent=dict(native_mass_gev=.493677,kinematic_mass_gev=.493677,p4=[320.,0.,0.,-319.],
+            coefficient_difference_from_kinematic_mass=-3.6e-15)
+        checked=dict(parent,coefficient_difference_from_kinematic_mass=-3.6e-15+2*math.ulp(7.344250125485237e-5))
+        bounds=native_precision_roundoff(parent,checked,7.344250125485237e-5)
+        stored,replayed=-4.9714676819689885e-11,-4.971489886429481e-11
+        with self.assertRaises(ValueError):same_signed_number(stored,replayed,'ratio shift')
+        same_signed_number(stored,replayed,'ratio shift',
+            absolute_roundoff=bounds['coefficient_relative_precision_shift'])
+        with self.assertRaises(ValueError):
+            same_signed_number(stored,stored+64*math.ulp(1.),'ratio shift',
+                absolute_roundoff=bounds['coefficient_relative_precision_shift'])
+        same_signed_number(parent['coefficient_difference_from_kinematic_mass'],
+            checked['coefficient_difference_from_kinematic_mass'],'coefficient subtraction',
+            absolute_roundoff=bounds['coefficient_difference_from_kinematic_mass'])
+        # Physical coefficients keep their original relative precision. A
+        # caller receives no global absolute epsilon for rates or masses.
+        with self.assertRaises(ValueError):same_number(7.344250125485237e-5,7.344250125485237e-5*1.000001,'physical rate')
+        self.assertLess(bounds['native_mass_shell_deviation'],1e-16)
+
     def test_one_ulp_libm_difference_preserves_exact_channel_and_model_ownership(self):
         from export_dark_photon_cross_sections import same_resolved_meson_model
         expected = dict(exclusive_channels=[dict(channel='eta_prime_dipion',
