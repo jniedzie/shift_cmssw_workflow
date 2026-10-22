@@ -93,6 +93,14 @@ uncertainty. V1 policies retain their original result. No muon-pT cut or hard
 station veto is added. Keep positive random controls and exact cumulative W/p;
 validate actual Both-Both tails on independent originals before production.
 
+Pointing V3 (`shift-two-endcap-pointing-v3`) is a separate opt-in schema for
+muons born inside an endcap. It scores forward station projections on both
+sides from the actual birth position. A reference plane behind the birth no
+longer forces a zero score; only forward reference planes enter the broad
+radial score. V1/V2 and the common V2 campaign policy are unchanged. This is a
+ranking fix, with positive controls and exact W/p retained, not evidence of
+better detector efficiency or populated tails.
+
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
 The independent 7,935-original material response test completed with only one

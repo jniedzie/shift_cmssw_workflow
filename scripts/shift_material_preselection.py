@@ -70,7 +70,8 @@ def validate_policy(policy):
 
 def validate_pointing(config):
     """Bind the straight-ray ranking scale to an explicit geometry reference."""
-    if config['schema'] not in ('shift-two-endcap-pointing-v1', 'shift-two-endcap-pointing-v2'):
+    if config['schema'] not in ('shift-two-endcap-pointing-v1', 'shift-two-endcap-pointing-v2',
+                                'shift-two-endcap-pointing-v3'):
         raise ValueError('Unsupported two-endcap pointing policy')
     planes = config['z_planes_cm']
     if (len(planes) != 2 or any(isinstance(z, bool) or not math.isfinite(z) for z in planes)
@@ -82,7 +83,7 @@ def validate_pointing(config):
     if not isinstance(config['geometry_reference'], str) or not config['geometry_reference']:
         raise ValueError('Pointing needs an explicit geometry reference')
     sha256(config['geometry_sha256'], 'pointing geometry reference')
-    if config['schema'] == 'shift-two-endcap-pointing-v2':
+    if config['schema'] in ('shift-two-endcap-pointing-v2', 'shift-two-endcap-pointing-v3'):
         width = config['station_edge_scale_cm']
         if isinstance(width, bool) or not math.isfinite(width) or width <= 0:
             raise ValueError('Chamber edge scale must be finite and positive')
@@ -142,13 +143,17 @@ def two_endcap_pointing(muons, config):
     """Softly rank rays near both endcaps; never declare detector acceptance.
 
     V1 retains its original outer-envelope score. V2 also ranks proximity to
-    a CSC station on each side, including the central hole. Neither model
-    includes chamber gaps, magnetic bending or scattering. A ray missing the
-    envelope still has positive random control. Missing vertices stay unknown.
+    a CSC station on each side, including the central hole. These models omit
+    chamber gaps, magnetic bending and scattering. V3 allows an
+    endcap birth downstream of a reference plane when stations on both sides
+    are still ahead. Only forward reference planes enter its outer score.
+    A ray missing the envelope still has positive random control. Missing
+    vertices stay unknown.
     """
     validate_pointing(config)
     score, radii, unknown, forward = 1., [], False, True
     chamber_scores = []
+    station_forward = True
     for muon in muons:
         birth, momentum = muon.get('birth_cm'), muon.get('momentum_GeV')
         if birth is None or momentum is None:
@@ -173,19 +178,30 @@ def two_endcap_pointing(muons, config):
                 raise ValueError('Nonfinite straight-ray projection')
             leg.append(radius)
         radii.append(leg)
-        if None in leg:
+        if config['schema'] == 'shift-two-endcap-pointing-v3':
+            ahead = [radius for radius in leg if radius is not None]
+            if ahead:
+                score *= quartic_priority(max(ahead)/config['radial_scale_cm'])
+            else:
+                score = 0.
+        elif None in leg:
             score = 0.
         else:
             ratio = max(leg)/config['radial_scale_cm']
             score *= quartic_priority(ratio)
-        if config['schema'] == 'shift-two-endcap-pointing-v2':
+        if config['schema'] in ('shift-two-endcap-pointing-v2', 'shift-two-endcap-pointing-v3'):
             chambers = station_pointing(birth, momentum, config)
             score *= chambers['priority']
             chamber_scores.append(chambers)
+            if config['schema'] == 'shift-two-endcap-pointing-v3':
+                station_forward = station_forward and all(
+                    any(row is not None for row in side) for side in chambers['projected_stations'])
     result = dict(priority=None if unknown else score, unknown=unknown,
                   both_planes_forward=None if unknown else forward, projected_radii_cm=radii)
-    if config['schema'] == 'shift-two-endcap-pointing-v2':
+    if config['schema'] in ('shift-two-endcap-pointing-v2', 'shift-two-endcap-pointing-v3'):
         result['station_pointing'] = chamber_scores
+    if config['schema'] == 'shift-two-endcap-pointing-v3':
+        result['both_sides_have_forward_stations'] = None if unknown else station_forward
     return result
 
 

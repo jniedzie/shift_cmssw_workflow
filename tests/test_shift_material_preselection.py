@@ -66,7 +66,72 @@ def chamber_pointing():
     return config
 
 
+def birth_pointing():
+    config = chamber_pointing()
+    config['schema'] = 'shift-two-endcap-pointing-v3'
+    return config
+
+
 class MaterialAdmissionTests(unittest.TestCase):
+    def test_v3_endcap_birth_uses_forward_stations_and_mirrors_exactly(self):
+        # Small analogues of the census births between a station and the
+        # external reference plane: the near station remains ahead.
+        for z, pz in ((90., -40.), (-90., 40.)):
+            muon = dict(birth_cm=[7., 0., z], momentum_GeV=[0., 0., pz])
+            old = admission.two_endcap_pointing([muon], chamber_pointing())
+            new = admission.two_endcap_pointing([muon], birth_pointing())
+            self.assertEqual(old['priority'], 0.)
+            self.assertAlmostEqual(new['priority'], 1./(1.+.7**4))
+            self.assertFalse(new['both_planes_forward'])
+            self.assertTrue(new['both_sides_have_forward_stations'])
+            self.assertEqual(new['station_pointing'][0]['priority'], 1.)
+
+    def test_v3_preserves_ordinary_source_scores_and_missing_truth(self):
+        for z, pz in ((14800., -40.), (-14800., 40.)):
+            muon = dict(birth_cm=[7., 0., z], momentum_GeV=[0., 0., pz])
+            old = admission.two_endcap_pointing([muon], chamber_pointing())
+            new = admission.two_endcap_pointing([muon], birth_pointing())
+            self.assertTrue(new.pop('both_sides_have_forward_stations'))
+            self.assertEqual(new, old)
+        muon['birth_cm'] = None
+        unknown = admission.two_endcap_pointing([muon], birth_pointing())
+        self.assertTrue(unknown['unknown'])
+        self.assertIsNone(unknown['priority'])
+        self.assertIsNone(unknown['both_sides_have_forward_stations'])
+
+    def test_v3_central_away_and_wide_rays_retain_geometric_meaning(self):
+        for z, pz in ((0., 40.), (110., 40.), (90., 0.)):
+            muon = dict(birth_cm=[7., 0., z], momentum_GeV=[0., 0., pz])
+            result = admission.two_endcap_pointing([muon], birth_pointing())
+            self.assertEqual(result['priority'], 0.)
+            self.assertFalse(result['both_sides_have_forward_stations'])
+        wide = dict(birth_cm=[1000., 0., 90.], momentum_GeV=[0., 0., -40.])
+        result = admission.two_endcap_pointing([wide], birth_pointing())
+        self.assertTrue(result['both_sides_have_forward_stations'])
+        self.assertGreater(result['priority'], 0.)
+        self.assertLess(result['priority'], 1.e-20)
+        # Geometric priority never reads a separate muon-pT field.
+        wide.update(momentum_GeV=[0., 0., -400.], pt_GeV=1.e9)
+        self.assertEqual(admission.two_endcap_pointing([wide], birth_pointing()), result)
+
+    def test_v3_keeps_positive_controls_and_exact_inverse_sampling_weight(self):
+        rows = [event(1, native=-3.), event(2, native=2.)]
+        for row, radius in zip(rows, (7., 1000.)):
+            row['muons'][1]['pdg'] = -13
+            for muon in row['muons']:
+                muon.update(birth_cm=[radius, 0., 90.], momentum_GeV=[0., 0., -40.])
+                muon['material_to_CMS_entry'].update(
+                    complete=False, unknown_reason='muon born inside unmodelled central CMS region')
+        features, authority = inputs(rows)
+        config = policy()
+        config.update(two_endcap_pointing=birth_pointing(), require_opposite_sign=True,
+                      rank_partial_parent_paths=True, unknown_probability=.1)
+        good, wide = admission.prepare_selection(features, authority, config)['events']
+        self.assertGreater(good['conditional_sampling_probability'], wide['conditional_sampling_probability'])
+        for row in (good, wide):
+            self.assertGreaterEqual(row['conditional_sampling_probability'], .1)
+            self.assertEqual(row['proposal_gen_weight'], row['native_weight']/row['sampling_probability'])
+
     def test_chamber_pointing_downgrades_beam_hole_and_far_side_miss(self):
         config = chamber_pointing()
         covered = dict(birth_cm=[7., 0., -200.], momentum_GeV=[0., 0., 40.])
@@ -245,6 +310,12 @@ class MaterialAdmissionTests(unittest.TestCase):
         ranked = admission.two_endcap_pointing(energetic, config)
         self.assertGreater(ranked['priority'], .8)
         self.assertEqual([row['priority'] for row in ranked['station_pointing']], [1., 1.])
+        for control in (muons, energetic):
+            before = admission.two_endcap_pointing(control, config)
+            v3 = dict(config, schema='shift-two-endcap-pointing-v3')
+            after = admission.two_endcap_pointing(control, v3)
+            self.assertTrue(after.pop('both_sides_have_forward_stations'))
+            self.assertEqual(after, before)
 
     def test_depth_orders_but_shared_parent_is_counted_once(self):
         zero=admission.pair_priority(event(depth=0),20.)['priority']
