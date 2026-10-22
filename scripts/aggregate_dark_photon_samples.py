@@ -5,8 +5,11 @@
 This worker consumes a sealed additive plan. It never generates events, submits
 jobs, filters events or changes detector settings. Complete unscored Nano files
 are grouped before the existing frozen scoring/histogram pipeline is called.
-Recovery views of the same GEN ledger count once. Rate estimates are averaged,
-not summed; their technical trial counts are never interpreted as luminosity.
+Recovery views of the same GEN ledger count once. The worker averages repeated
+estimates of one proposal; technical trial counts are never luminosity. The
+separate accounting helper prepares sums of parent-disjoint component rates
+and keeps their individual GEN denominators. Composite publication still needs
+its own qualified execution path.
 Plans with histogram_only=true sum already-validated batch histograms while
 retaining their complete Nano groups at the original published locations.
 """
