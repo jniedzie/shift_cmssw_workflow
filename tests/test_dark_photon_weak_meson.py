@@ -144,6 +144,63 @@ class ChiralFormFactorTest(unittest.TestCase):
         self.assertIsNone(authority['fit_uncertainties']['total_a_b_covariance'])
         self.assertFalse(authority['physical_production_ready'])
 
+    def test_ks_benchmarks_close_both_published_dilepton_polynomials(self):
+        path = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_pi0_vector_na48_2004.json'
+        authority = json.loads(path.read_text())
+        constants = authority['explicit_conventions']
+        parent, recoil = constants['parent_mass_gev'], constants['neutral_pion_mass_gev']
+        for scenario in authority['normalization_scenarios'][:2]:
+            card = dict(authority['form_factor_model'], a=scenario['a'], b=scenario['b'],
+                valid_mass_range_gev=[0., parent-recoil])
+            a, b = card['a'], card['b']
+            for lepton in ('electron', 'muon'):
+                ml = constants[lepton+'_mass_gev']
+                low, high, count = (2*ml)**2, (parent-recoil)**2, 20000
+                step = (high-low)/count
+                integral = math.fsum(born_dilepton_differential_width(parent, recoil,
+                    math.sqrt(low+(i+.5)*step), ml, ALPHA,
+                    chiral_form_factor(parent, recoil, math.sqrt(low+(i+.5)*step), card))
+                    for i in range(count))*step
+                branching = integral*constants['kaon_lifetime_seconds']/constants['hbar_gev_seconds']
+                expected = ((.01-.76*a-.21*b+46.5*a*a+12.9*a*b+1.44*b*b)*1.e-10
+                    if lepton == 'electron' else
+                    (.07-4.52*a-1.50*b+98.7*a*a+57.7*a*b+8.95*b*b)*1.e-11)
+                # The primary coefficients are rounded and use historical
+                # constants. Their two lepton channels close within 0.5%.
+                self.assertLess(abs(branching/expected-1.), .006)
+
+    def test_ks_sign_ambiguity_retains_the_fixed_loop_interference(self):
+        path = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_pi0_vector_na48_2004.json'
+        authority = json.loads(path.read_text())
+        card = authority['form_factor_model']
+        parent, recoil, mass = .497611, .1349768, .3
+        positive = chiral_form_factor(parent, recoil, mass, card)
+        negative = chiral_form_factor(parent, recoil, mass,
+            dict(card, a=-card['a'], b=-card['b']))
+        self.assertNotEqual(abs(positive)**2, abs(negative)**2)
+        self.assertEqual(positive.imag, negative.imag)
+        self.assertLess(positive.imag, 0.)
+        # The fit errors belong to an assumed VMD shape. They do not become
+        # measured slope errors or a full confidence band for this model.
+        self.assertIsNone(authority['unconstrained_shape_diagnostics']['a_b_covariances'])
+        self.assertEqual(len(authority['normalization_scenarios']), 4)
+        self.assertFalse(authority['physical_production_ready'])
+
+    def test_neutral_weak_current_has_the_same_longitudinal_width(self):
+        parent, recoil_mass, mass = .497611, .1349768, .3
+        momentum = two_body_momentum(parent, recoil_mass, mass)
+        recoil = (math.hypot(momentum, recoil_mass), 0., 0., -momentum)
+        dark = (math.hypot(momentum, mass), 0., 0., momentum)
+        longitudinal = (momentum/mass, 0., 0., dark[0]/mass)
+        for coefficient in (1., 1.+2j):
+            matrix = amplitude((parent, 0., 0., 0.), recoil, longitudinal,
+                .001, ALPHA, coefficient)
+            direct = momentum*abs(matrix)**2/(8*math.pi*parent**2)
+            calculated = decay_width(parent, recoil_mass, mass, .001, ALPHA, coefficient)
+            self.assertAlmostEqual(direct/calculated, 1., places=12)
+            self.assertEqual(amplitude((parent, 0., 0., 0.), recoil, (0., 1., 0., 0.),
+                .001, ALPHA, coefficient), 0.)
+
     def test_missing_unqualified_or_out_of_domain_inputs_are_rejected(self):
         invalid = [dict(parent_pdg_id=130), dict(reference=''), dict(loop_reference=''),
             dict(a=None), dict(pion_vector_rv_squared=0.),

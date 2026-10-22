@@ -1,0 +1,73 @@
+{
+  "code_style": "AI-code. AI-generated attributed KS weak-current benchmarks; no production source is configured.",
+  "schema": "shift-ks-pi0-em-vector-reference-v1",
+  "publications": {
+    "electron_measurement": "https://arxiv.org/pdf/hep-ex/0309075",
+    "muon_measurement_and_joint_fit": "https://arxiv.org/pdf/hep-ex/0409011#page=11",
+    "current_loop_and_branching_polynomials": "https://arxiv.org/pdf/hep-ph/9808289#page=5"
+  },
+  "scope": "Leading long-distance single-electromagnetic-current KS to pi0 A-prime benchmark. The VMD shape is an explicit assumption, not a measured spectrum or a KL amplitude. Production branching excludes the A-prime dimuon branching fraction.",
+  "form_factor_model": {
+    "kind": "chpt-p6-kaon-em-vector",
+    "parent_pdg_id": 310,
+    "a": 1.06,
+    "b": 0.424,
+    "alpha_pipi": -5.2e-8,
+    "beta_pipi": -5.333333333333333e-9,
+    "fermi_constant_gev_minus2": 1.1663787e-5,
+    "loop_pion_mass_gev": 0.13957039,
+    "pion_vector_rv_squared": 2.5,
+    "valid_mass_range_gev": [0.211316751, 0.3626342],
+    "reference": "https://arxiv.org/pdf/hep-ex/0409011#page=11",
+    "loop_reference": "https://arxiv.org/pdf/hep-ph/9808289#page=5"
+  },
+  "normalization_scenarios": [
+    {"name": "ee-positive-VMD", "a": 1.06, "b": 0.424, "normalization": "electron"},
+    {"name": "ee-negative-VMD", "a": -1.06, "b": -0.424, "normalization": "electron"},
+    {"name": "mumu-positive-VMD", "a": 1.54, "b": 0.616, "normalization": "muon"},
+    {"name": "mumu-negative-VMD", "a": -1.54, "b": -0.616, "normalization": "muon"}
+  ],
+  "conditional_VMD_normalization_errors": {
+    "electron": {"absolute_a": 1.06, "statistical_plus": 0.26, "statistical_minus": 0.21, "systematic": 0.07},
+    "muon": {"absolute_a": 1.54, "statistical_plus": 0.40, "statistical_minus": 0.32, "systematic": 0.06},
+    "a_b_ratio": 0.4,
+    "joint_electron_muon_covariance": null,
+    "meaning": "Published |aS| extractions assume bS=0.4aS and an approximately negligible pion loop. The loop is retained here as an explicit small correction, without claiming a new fit. Vary |aS| and bS together at fixed sign and ratio. Statistical and systematic excursions remain separate; no combined confidence interval is invented."
+  },
+  "unconstrained_shape_diagnostics": {
+    "general_joint_fit_solutions": [
+      {"a": -1.6, "a_plus": 2.1, "a_minus": 1.8, "b": 10.8, "b_plus": 5.4, "b_minus": 7.7},
+      {"a": 1.9, "a_plus": 1.6, "a_minus": 2.4, "b": -11.3, "b_plus": 8.8, "b_minus": 4.5}
+    ],
+    "a_b_covariances": null,
+    "meaning": "NA48/1 does not significantly determine bS. These two correlated central solutions are shape diagnostics, not independent Gaussian parameter errors, confidence bands or omitted-yield bounds. Do not treat the VMD normalization errors as covering this shape uncertainty."
+  },
+  "pion_loop_authority": {
+    "reference": "https://arxiv.org/pdf/hep-ph/9808289#page=6",
+    "b2": -3.9e-8,
+    "b2_uncertainty": 0.4e-8,
+    "d2": 0.2e-8,
+    "d2_uncertainty": 0.5e-8,
+    "alpha_relation": "alphaS = 4 b2 / 3",
+    "beta_relation": "betaS = -8 d2 / 3",
+    "b2_d2_covariance": null,
+    "meaning": "Historical measured K to 3pi inputs used by the published branching polynomials. The charged pi+pi- loop threshold is distinct from the neutral recoil-pion mass. Modern input updates and higher chiral orders are not supplied as measured errors."
+  },
+  "explicit_conventions": {
+    "parent_mass_gev": 0.497611,
+    "neutral_pion_mass_gev": 0.1349768,
+    "muon_mass_gev": 0.1056583755,
+    "electron_mass_gev": 0.00051099895,
+    "alpha_em": 0.0072973525692838015,
+    "hbar_gev_seconds": 6.582119569e-25,
+    "kaon_lifetime_seconds": 8.9562e-11,
+    "lifetime_use": "Explicit BR conversion convention only. A native source must pin its own lifetime and preserve its existing sampled flight; no native lifetime is changed by this card."
+  },
+  "unqualified_terms": [
+    "VMD is a benchmark shape; the broad correlated general fit does not define a unique spectrum.",
+    "No KL direct/indirect CP-violating amplitude or interference sign is inferred from this KS card.",
+    "The single-current model does not qualify scalar, axial, weak-Z or two-photon contributions.",
+    "Native parent flight, material attenuation, regeneration and secondary sources remain separate."
+  ],
+  "physical_production_ready": false
+}
