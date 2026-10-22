@@ -190,6 +190,42 @@ def execute_events(directory):
         r'ULOG_EXECUTE[^\n]*\((\d+)\.(\d+)\.\d+\)', text)})
 
 
+def cached_execution_jobs(previous):
+    """Reuse observed child execute events, never migrated manager cluster IDs."""
+    result = set()
+    for stage in previous.get('stages', {}).values():
+        for job in stage.get('observed_execute_events', []):
+            if not isinstance(job, str) or not re.fullmatch(r'\d+\.\d+', job):
+                raise ValueError('Cached execution evidence needs exact cluster.proc strings')
+            result.add(job)
+    return result
+
+
+def polling_state(directory):
+    """Recover the last native cache when an older unknown report discarded it."""
+    directory = Path(directory)
+    path = directory / 'health.json'
+    previous = read(path) if path.is_file() else {}
+    verified_path = directory / 'last_verified_health.json'
+    if (previous.get('scheduler_state') == 'unknown' and 'terminal_history' not in previous
+            and verified_path.is_file()):
+        verified = read(verified_path)
+        if verified.get('scheduler_state') == 'verified':
+            for key in ('terminal_history', 'stages'):
+                previous[key] = verified.get(key, [] if key == 'terminal_history' else {})
+    return previous
+
+
+def unknown_report(previous, error):
+    # Keep native records and observed progress for the next poll. This cache
+    # gives no health/completion credit while the scheduler remains unknown.
+    return dict(schema='shift-dp-statistics-watchdog-health-v1', health='unknown', scheduler_state='unknown',
+                checked_utc=datetime.now(timezone.utc).isoformat(),
+                issues=[dict(code='unknown_state', severity='critical', message=str(error))],
+                terminal_history=previous.get('terminal_history', []),
+                stages=previous.get('stages', {}), no_job_mutations=True)
+
+
 def stage_counts(directory):
     directory = Path(directory)
     plan_path = directory / 'plan.json'
@@ -328,7 +364,7 @@ def reviewed_terminal_failures(config):
 def assess(config, previous, rows, history, receipts, now):
     root = Path(config['production_directory'])
     issues, stages = [], {}
-    known_execute = set(previous.get('executed_jobs', []))
+    known_execute = cached_execution_jobs(previous)
     reviewed = reviewed_terminal_failures(config)
 
     def issue(code, level, message, **details):
@@ -629,14 +665,11 @@ def main():
     with (directory / 'watchdog.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
-            previous = read(directory / 'health.json') if (directory / 'health.json').is_file() else {}
+            previous = polling_state(directory)
             try:
                 report, snapshot = poll(config, previous)
             except Exception as error:
-                report = dict(schema='shift-dp-statistics-watchdog-health-v1', health='unknown', scheduler_state='unknown',
-                              checked_utc=datetime.now(timezone.utc).isoformat(),
-                              issues=[dict(code='unknown_state', severity='critical', message=str(error))],
-                              no_job_mutations=True)
+                report = unknown_report(previous, error)
                 snapshot = dict(error=repr(error))
             record(config, previous, report, snapshot)
             if report['health'] != previous.get('health') or args.once:

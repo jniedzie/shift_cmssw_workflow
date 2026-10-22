@@ -351,6 +351,80 @@ class StatisticsWatchdogTest(unittest.TestCase):
             WATCH.scheduler_snapshot(self.config, receipts, dict(terminal_history=history))
             command.assert_not_called()
 
+    def test_migrated_manager_ids_are_not_child_execution_evidence(self):
+        previous = dict(executed_jobs=[100, 300], stages={
+            '100': dict(observed_execute_events=['105.0']),
+        })
+        report = self.assess([self.child(status=2)], events=['101.0'], previous=previous)
+        self.assertEqual(report['executed_jobs'], ['101.0', '105.0'])
+        self.assertTrue(report['stages']['100']['execution_verified'])
+        self.assertEqual(WATCH.cached_execution_jobs(dict(executed_jobs=[100])), set())
+        for invalid in (100, '100', '100.0.extra', True):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'cluster.proc'):
+                WATCH.cached_execution_jobs(dict(stages={
+                    '100': dict(observed_execute_events=[invalid]),
+                }))
+
+    def test_unknown_poll_preserves_success_and_failure_cache_without_health_credit(self):
+        ended = [dict(ClusterId=cluster, ProcId=0, JobStatus=4, ExitCode=exit_code)
+                 for cluster, exit_code in ((300, 0), (400, 1))]
+        previous = dict(scheduler_state='verified', terminal_history=ended,
+                        stages={'100': dict(observed_execute_events=['105.0'])})
+        unknown = WATCH.unknown_report(previous, RuntimeError('native history timeout'))
+        self.assertEqual(unknown['health'], 'unknown')
+        self.assertEqual(unknown['scheduler_state'], 'unknown')
+        self.assertNotIn('controller_finished', unknown)
+        self.assertEqual(unknown['terminal_history'], ended)
+        self.assertEqual(WATCH.cached_execution_jobs(unknown), {'105.0'})
+        receipts = dict(self.receipts)
+        receipts.update({cluster: dict(self.receipts[100]) for cluster in (300, 400)})
+        with patch.object(WATCH, 'scheduler_options', return_value=({}, [])), \
+                patch.object(WATCH, 'query', return_value=[dict(ClusterId=100, ProcId=0)]), \
+                patch.object(WATCH, 'run_condor') as command:
+            _, history, _ = WATCH.scheduler_snapshot(self.config, receipts, unknown)
+            self.assertEqual(history, ended)
+            command.assert_not_called()
+        # A fresh live record wins over immutable history, even after a timeout.
+        with patch.object(WATCH, 'scheduler_options', return_value=({}, [])), \
+                patch.object(WATCH, 'query', return_value=[dict(ClusterId=cluster, ProcId=0)
+                                                         for cluster in (100, 300)]), \
+                patch.object(WATCH, 'run_condor') as command:
+            _, history, _ = WATCH.scheduler_snapshot(self.config, receipts, unknown)
+            self.assertEqual(history, [ended[1]])
+            command.assert_not_called()
+
+    def test_old_unknown_health_restores_only_last_verified_cache(self):
+        previous = dict(health='unknown', scheduler_state='unknown', issues=[dict(code='timeout')])
+        verified = dict(health='ok', scheduler_state='verified', controller_finished=True,
+                        terminal_history=[dict(ClusterId=300, ProcId=0, JobStatus=4, ExitCode=0)],
+                        stages={'100': dict(observed_execute_events=['105.0'])})
+        (self.root/'health.json').write_text(json.dumps(previous))
+        (self.root/'last_verified_health.json').write_text(json.dumps(verified))
+        restored = WATCH.polling_state(self.root)
+        self.assertEqual(restored['health'], 'unknown')
+        self.assertEqual(restored['issues'], previous['issues'])
+        self.assertNotIn('controller_finished', restored)
+        self.assertEqual(restored['terminal_history'], verified['terminal_history'])
+        self.assertEqual(WATCH.cached_execution_jobs(restored), {'105.0'})
+        # Never substitute an unverified report for a verified cache.
+        verified['scheduler_state'] = 'unknown'
+        (self.root/'last_verified_health.json').write_text(json.dumps(verified))
+        self.assertEqual(WATCH.polling_state(self.root), previous)
+
+    def test_recorded_unknown_cache_survives_repeated_scheduler_errors(self):
+        self.config['state_directory'] = str(self.root)
+        verified = dict(health='ok', scheduler_state='verified', checked_utc='2026-10-21T12:00:00Z',
+                        issues=[], terminal_history=[dict(ClusterId=300, ProcId=0, JobStatus=4, ExitCode=0)],
+                        stages={'100': dict(observed_execute_events=['105.0'])})
+        WATCH.record(self.config, {}, verified, dict(queue=[], history=verified['terminal_history']))
+        for attempt in range(2):
+            previous = WATCH.polling_state(self.root)
+            unknown = WATCH.unknown_report(previous, RuntimeError('native history timeout'))
+            WATCH.record(self.config, previous, unknown, dict(error='native history timeout'))
+            self.assertEqual(WATCH.polling_state(self.root)['terminal_history'], verified['terminal_history'])
+        self.assertEqual(WATCH.read(self.root/'last_verified_health.json'), verified)
+        self.assertEqual(WATCH.read(self.root/'failure_capture.json')['health']['health'], 'unknown')
+
     def test_rollover_reads_the_new_supervisor_receipt_without_rewriting_the_old_one(self):
         old = self.root / 'submission.json'
         old.write_text(json.dumps(dict(cluster=200, utc='1970-01-01T00:00:00+00:00')))
