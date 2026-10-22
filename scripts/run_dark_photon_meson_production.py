@@ -272,9 +272,11 @@ def terminal_meson_peer_state(config, authority, observed):
             json.dumps('^'+re.escape(str(root))+'/(batches|aggregates|coverage)/')+',Iwd)')
         if durable.jobs(config, constraint):
             return None
-        # Reuse the peer's pinned successful-native seed in the observer's own
-        # cache. This also works for statistics supervisors without a meson seed.
-        context = dict(config, reviewed_terminal_native_jobs=previous['reviewed_terminal_native_jobs'])
+        # Legacy science configs predate the terminal cache. The sealed current
+        # owner carries its qualified cache authority; keep the observer's cache
+        # directory for newly verified terminal records.
+        owner_config = read(directory/'config.json')
+        context = dict(config, reviewed_terminal_native_jobs=owner_config['reviewed_terminal_native_jobs'])
         if native_status(context, receipt) != 'complete':
             return None
         record = cached_terminal_record(context, receipt)

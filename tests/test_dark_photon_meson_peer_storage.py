@@ -115,6 +115,7 @@ class MesonPeerStorage(unittest.TestCase):
         submit=owner/'controller.sub';submit.write_text('exact descriptor')
         receipt=dict(task=str(owner),cluster=123,submit_sha256=durable.sha(submit))
         (owner/'submission.json').write_text(json.dumps(receipt))
+        (owner/'config.json').write_text(json.dumps(self.config))
         execution=dict(Cmd=str(owner/'lcg_controller.sh'),Args='owner-seal')
         authority=dict(self.authority,controller_directory=str(owner))
         observer=dict(directory=str(self.root/'observer'),prior_meson_controller_directory='/wrong/main/owner')
@@ -136,6 +137,57 @@ class MesonPeerStorage(unittest.TestCase):
             queue.return_value=[]
             (owner/'submission.json').write_text(json.dumps(dict(receipt,task='/wrong/owner')))
             self.assertEqual(durable.supplement_campaign_claim(authority,self.observed,1200,observer)['remaining_bytes'],300)
+
+    def test_legacy_science_without_cache_uses_the_sealed_current_owner_cache(self):
+        self.published('b')
+        self.state.update(complete=True,checked_utc=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat())
+        self.save()
+        legacy=dict(self.config)
+        del legacy['reviewed_terminal_native_jobs']
+        worklist=self.pin(self.peer/'legacy_config.json',legacy)
+        forecast=self.pin(self.peer/'legacy_forecast.json',dict(complete=True,
+            worklist_sha256=worklist['sha256'],model_card_sha256=durable.sha(legacy['model_card']),
+            per_batch_forecast_bytes=dict(a=100,b=200),total_meson_forecast_bytes=300))
+        owner=self.root/'terminal_owner';owner.mkdir()
+        submit=owner/'controller.sub';submit.write_text('exact descriptor')
+        receipt=dict(task=str(owner),cluster=123,submit_sha256=durable.sha(submit))
+        (owner/'submission.json').write_text(json.dumps(receipt))
+        execution=dict(Cmd=str(owner/'lcg_controller.sh'),Args='owner-seal')
+        native=dict(execution,ClusterId=123,ProcId=0,Iwd=str(owner),JobStatus=4,ExitCode=0,ExitBySignal=False)
+        record=meson.terminal_record(receipt,native)
+        seed=self.pin(owner/'terminal_seed.json',dict(
+            schema='shift-reviewed-meson-successful-native-seed-v1',jobs={'123':record}))
+        (owner/'config.json').write_text(json.dumps(dict(legacy,reviewed_terminal_native_jobs=seed)))
+        authority=dict(self.authority,worklist=worklist,forecast=forecast,controller_directory=str(owner))
+        observer=dict(directory=str(self.root/'observer'))
+        with patch.object(meson,'meson_controller_configuration',return_value=dict(
+                submit=str(submit),native_execution=execution)) as validate, \
+             patch.object(durable,'jobs',return_value=[]) as queue, \
+             patch.object(durable,'run_condor') as history:
+            claim=durable.supplement_campaign_claim(authority,self.observed,1200,observer)
+            self.assertEqual(claim['remaining_bytes'],0)
+            self.assertTrue(claim['terminal_completion_verified'])
+            validate.assert_called_with(legacy,owner,allow_science=True)
+            history.assert_not_called()
+            self.assertIn(str(owner),queue.call_args.args[1])
+            for change in ('live','removed','wrong_iwd','wrong_submission','wrong_execution','unsealed_owner'):
+                with self.subTest(change=change):
+                    changed=copy.deepcopy(record)
+                    if change=='live':queue.return_value=[dict(ClusterId=123)]
+                    elif change=='removed':changed['terminal_native_ad']['JobStatus']=3
+                    elif change=='wrong_iwd':changed['terminal_native_ad']['Iwd']='/wrong/owner'
+                    elif change=='wrong_submission':changed['submission']['cluster']=999
+                    elif change=='wrong_execution':changed['terminal_native_ad']['Args']='stale-owner-seal'
+                    else:validate.side_effect=ValueError('Owner seal changed')
+                    fresh=self.pin(owner/'terminal_seed.json',dict(
+                        schema='shift-reviewed-meson-successful-native-seed-v1',jobs={'123':changed}))
+                    (owner/'config.json').write_text(json.dumps(dict(legacy,reviewed_terminal_native_jobs=fresh)))
+                    blocked=durable.supplement_campaign_claim(authority,self.observed,1200,observer)
+                    self.assertEqual(blocked['remaining_bytes'],300)
+                    self.assertFalse(blocked['terminal_completion_verified'])
+                    queue.return_value=[]
+                    validate.side_effect=None
+            history.assert_not_called()
 
     def test_owner_locators_only_name_protected_peers(self):
         for value in ({'unknown':str(self.root/'owner')},{'peer':'relative'},{'peer':str(self.root/'a/../owner')}):
