@@ -271,6 +271,8 @@ class SourceProposalTest(unittest.TestCase):
                     lower=20.,run=510230001,accepted=1,sumw=weight,sumw2=weight**2,initializations=1)
         saved=dict(event_ids=[[ledger['run'],1,1]],weights=[weight])
         report=source.audit_history([selected,outcome,final,zero],ledger,saved,proposal('disabled'),dict(saved,events=1))
+        ordinary=source.audit_history([selected,outcome,final,zero],ledger,saved,proposal('disabled'),dict(saved,events=1),generator_profile='ordinary')
+        self.assertEqual(ordinary,report)
         self.assertEqual(report['upstream_component_draws'],0)
         self.assertEqual(report['saved_events'],1)
 
@@ -284,6 +286,54 @@ class SourceProposalTest(unittest.TestCase):
         self.assertEqual(result['LD_PRELOAD'],'/frozen/source.so')
         disabled=source.generation_environment(env,proposal('disabled'))
         self.assertEqual([k for k in disabled if k.startswith('SHIFT_')],['SHIFT_MPI_HARD_CHANNEL_AUDIT'])
+
+    def test_ordinary_profile_accepts_disabled_and_mixture_with_the_same_bounds(self):
+        row=dict(stage='pilot',sample='qcd',trials=500)
+        for mode in ('disabled','mixture'):
+            manifest=dict(algorithm=source.ALGORITHM,generator_profile='ordinary',
+                maximum_publication_bytes_per_worker=160000000,source_proposal=proposal(mode),
+                inputs={'libShiftMpiTailProposal.so':'a'*64,'shift_first_mpi_source_proposal.py':'b'*64})
+            self.assertEqual(source.validate(manifest,row),proposal(mode))
+            for trials in (1,2001,True):
+                with self.subTest(mode=mode,trials=trials),self.assertRaises(ValueError):
+                    source.validate(manifest,dict(row,trials=trials))
+            for profile in ('production','unfiltered-muons',None):
+                with self.subTest(profile=profile),self.assertRaises(ValueError):
+                    source.validate(dict(manifest,generator_profile=profile),row)
+
+    def test_ordinary_profile_preserves_all_native_slots_and_exact_weights(self):
+        rows,ledger,saved,prefilter=two_tails()
+        ordinary=source.audit_history(rows,ledger,saved,proposal(),prefilter,generator_profile='ordinary')
+        previous=source.audit_history(rows,ledger,saved,proposal(),prefilter)
+        self.assertEqual(ordinary,previous)
+        subset=dict(event_ids=saved['event_ids'][:1],weights=saved['weights'][:1])
+        self.assertEqual(source.audit_history(rows,ledger,subset,proposal(),prefilter)['saved_events'],1)
+        with self.assertRaisesRegex(ValueError,'save every native accepted'):
+            source.audit_history(rows,ledger,subset,proposal(),prefilter,generator_profile='ordinary')
+        corrupt=copy.deepcopy(saved);corrupt['weights'][0]*=2
+        with self.assertRaisesRegex(ValueError,'Actual saved GEN source weight'):
+            source.audit_history(rows,ledger,corrupt,proposal(),prefilter,generator_profile='ordinary')
+
+    def test_uncensored_config_rejects_lifetime_cylinder_or_hidden_muon_selection(self):
+        from test_shift_weighted_gen_audit import fixture as native_fixture,configuration
+        ledger,_,_=native_fixture()
+        text=configuration(ledger)+"""
+process.ProductionFilterSequence=cms.Sequence(process.generator)
+process.generation_step=cms.Path(process.ProductionFilterSequence+process.pgen)
+process.FEVTDEBUGoutput=cms.OutputModule('PoolOutputModule',SelectEvents=cms.untracked.PSet(SelectEvents=cms.vstring('generation_step')))
+process.genstepfilter=cms.EDFilter('TriggerResultsFilter',triggerConditions=cms.vstring('generation_step'))
+"""
+        source.validate_uncensored_config(text,ledger)
+        bad=[text.replace('limitTau0 = on','limitTau0 = off'),
+             text.replace("'Check:abortIfVeto = on'","'Check:abortIfVeto = on','ParticleDecays:limitCylinder = on'"),
+             text.replace('cms.Sequence(process.generator)','cms.Sequence(process.generator+process.mugenfilter)'),
+             text.replace('cms.Path(process.ProductionFilterSequence+process.pgen)','cms.Path(process.ProductionFilterSequence+process.pgen+process.mugenfilter)'),
+             text+"\nprocess.mugenfilter=cms.EDFilter('MCSmartSingleParticleFilter')\n",
+             text.replace("triggerConditions=cms.vstring('generation_step')","triggerConditions=cms.vstring('muon_selected')"),
+             text.replace("SelectEvents=cms.vstring('generation_step')","SelectEvents=cms.vstring('muon_selected')")]
+        for i,changed in enumerate(bad):
+            with self.subTest(mutation=i),self.assertRaises(ValueError):
+                source.validate_uncensored_config(changed,ledger)
 
     def test_old_manifests_are_unchanged_and_new_policy_is_pilot_only(self):
         self.assertIsNone(source.validate({},{}))
@@ -300,6 +350,60 @@ class SourceProposalTest(unittest.TestCase):
                        lambda m,r:m.update(algorithm=source.BASE_ALGORITHM)):
             m,r=copy.deepcopy(manifest),dict(row);mutate(m,r)
             with self.assertRaises(ValueError):source.validate(m,r)
+
+
+class OrdinarySourceFileAuditTest(unittest.TestCase):
+    def test_ordinary_disabled_native_snapshot_and_censored_mutations(self):
+        from test_shift_weighted_gen_audit import fixture as native_fixture,configuration
+        import audit_shift_weighted_gen as native
+        for mutation in (None,'hidden_filter','cylinder_settings','saved_subset'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as temp:
+                previous=Path.cwd();os.chdir(temp)
+                try:
+                    ledger,records,weighted_run=native_fixture((10.,10.))
+                    ledger.update(proposal_calls=4,accounted_proposal_calls=4,max_proposal_calls_per_slot=1,
+                                  intrinsic_retry_slots=0,ordinary_proposal_calls=4,normalizer_trials=4,
+                                  handled_kinematic_failures=0)
+                    text=configuration(ledger)+"""
+process.ProductionFilterSequence=cms.Sequence(process.generator)
+process.generation_step=cms.Path(process.ProductionFilterSequence+process.pgen)
+process.FEVTDEBUGoutput=cms.OutputModule('PoolOutputModule',SelectEvents=cms.untracked.PSet(SelectEvents=cms.vstring('generation_step')))
+"""
+                    if mutation=='hidden_filter':text+="\nprocess.mugenfilter=cms.EDFilter('MCSmartSingleParticleFilter')\n"
+                    if mutation=='cylinder_settings':text=text.replace("'Check:abortIfVeto = on'","'Check:abortIfVeto = on','ParticleDecays:limitCylinder = on'")
+                    Path('resolved_gen_cfg.py').write_text(text);Path('proposal_ledger.json').write_text(json.dumps(ledger))
+                    Path('gen.root').write_bytes(b'native-source');Path('prefilter.root').write_bytes(b'prefilter-source')
+                    Path('libShiftMpiTailProposal.so').write_bytes(b'overlay')
+                    semantic=native.validate_snapshot(ledger,ledger,records,weighted_run)
+                    semantic.update(complete=True,healthy=True,ledger=ledger,algorithm=source.BASE_ALGORITHM,
+                        generator_profile='ordinary',input_sha256=source.digest('gen.root'),
+                        ledger_sha256=source.digest('proposal_ledger.json'),config_sha256=source.digest('resolved_gen_cfg.py'))
+                    if mutation=='saved_subset':
+                        semantic['event_ids']=semantic['event_ids'][:1];semantic['weights']=semantic['weights'][:1]
+                    Path('semantic_audit.json').write_text(json.dumps(semantic))
+                    history=[dict(type='first_complete',first_call=i,slot=i,component='original_below_L',
+                        normalizer_geometric_count=1,upstream_enabled=False,upstream_biased_component=False,
+                        raw_first_pT_GeV=1. if i<=2 else 6.,first_call_weight=10. if i<=2 else 0.,
+                        full_intrinsic_retry_path_weight=10. if i<=2 else 0.,selected_code=111) for i in range(1,5)]
+                    Path(source.HISTORY).write_text(''.join(json.dumps(row)+'\n' for row in history))
+                    prop=proposal('disabled');prop['overlay_sha256']=source.digest('libShiftMpiTailProposal.so')
+                    manifest=dict(algorithm=source.ALGORITHM,generator_profile='ordinary',
+                        maximum_publication_bytes_per_worker=160000000,source_proposal=prop,
+                        inputs={'libShiftMpiTailProposal.so':prop['overlay_sha256'],
+                                'shift_first_mpi_source_proposal.py':source.digest(source.__file__)})
+                    row=dict(stage='pilot',sample='qcd',trials=4,run=ledger['run'],bounds=[5.,10.])
+                    with patch.object(native,'read_edm',return_value=(records,ledger,weighted_run,{},{})):
+                        if mutation is None:
+                            report=source.audit_files(manifest,row)
+                            self.assertEqual((report['full_source_trials'],report['saved_events']), (4,2))
+                            self.assertEqual(report['generator_profile'],'ordinary')
+                            self.assertTrue(report['saved_events_equal_native_acceptance'])
+                            self.assertFalse(report['decay_dependent_filter'])
+                            self.assertTrue(report['requires_full_muon_completion'])
+                            self.assertEqual(report['source_proposal']['mode'],'disabled')
+                        else:
+                            with self.assertRaises(ValueError):source.audit_files(manifest,row)
+                finally:os.chdir(previous)
 
 
 class WorkerPublicationGateTest(unittest.TestCase):

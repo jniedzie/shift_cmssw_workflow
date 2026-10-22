@@ -5,9 +5,13 @@
 The original fixed-trial ledger keeps its native base-sampler identity. This
 separate audit checks the additional incoming/group/channel path likelihood,
 including unsuccessful candidates and intrinsic retries. Decays are untouched.
-It does not qualify differential physics rates or detector acceptance.
+The ordinary profile saves every native accepted event without a decay or
+muon filter; natural muon-parent completion happens after source placement.
+The legacy cylinder profile remains a separate conditional population.
+This audit does not qualify differential physics rates or detector acceptance.
 """
 import argparse
+import ast
 import gzip
 import hashlib
 import json
@@ -55,8 +59,8 @@ def validate(manifest, row):
             and proposal['base_sampler_algorithm'] == BASE_ALGORITHM,
             'Unsupported composite first-MPI source algorithm')
     require(row.get('stage') == 'pilot' and row['sample'] == 'qcd'
-            and manifest.get('generator_profile') == PROFILE,
-            'First-MPI HF source is restricted to mu-enriched QCD pilots')
+            and manifest.get('generator_profile') in ('ordinary', PROFILE),
+            'First-MPI HF source requires a declared ordinary or cylinder QCD pilot')
     require(type(row['trials']) is int and 2 <= row['trials'] <= 2000,
             'Source pilot requires 2--2000 fixed source slots')
     require(proposal['mode'] in ('disabled', 'mixture')
@@ -222,9 +226,10 @@ def channel_ratio(row, target, enabled):
     return ratio
 
 
-def audit_history(rows, ledger, semantic, proposal, prefilter):
+def audit_history(rows, ledger, semantic, proposal, prefilter, *, generator_profile=PROFILE):
     """Replay every source likelihood; GEN snapshot audit remains independent."""
     require(ledger['initializations'] == 1, 'Source coin audit requires one native initialization')
+    require(generator_profile in ('ordinary', PROFILE), 'Unsupported source population profile')
     enabled = proposal['mode'] == 'mixture'
     logs, begins, incoming, groups, selects, zeros, outcomes = {}, {}, {}, {}, {}, {}, {}
     completed, call_slots, slot_weights, slots_last, flags = {}, {}, {}, {}, []
@@ -374,6 +379,8 @@ def audit_history(rows, ledger, semantic, proposal, prefilter):
         code = str(slots_last[identity[2]]['selected_code'])
         counts[code] = counts.get(code, 0)+1
         sums[code] = sums.get(code, 0.)+weight
+    if generator_profile == 'ordinary':
+        require(identities == set(accepted), 'Ordinary source must save every native accepted event without a muon filter')
     return dict(complete=True, passed=True, full_source_trials=ledger['tried'],
                 first_scatter_calls=len(completed), upstream_component_draws=len(flags),
                 all_intrinsic_retry_paths_checked=True, source_only_native_weight_checked=True,
@@ -381,6 +388,34 @@ def audit_history(rows, ledger, semantic, proposal, prefilter):
                 saved_events_by_last_first_hard_code=counts,
                 saved_weight_by_last_first_hard_code=sums, natural_decays=True,
                 physics_valid=False, normalization_ready=False)
+
+
+def validate_uncensored_config(source, ledger):
+    """Bind the ordinary Pythia model and reject any extra GEN event filter."""
+    from audit_shift_weighted_gen import validate_config, _keyword, _strings
+    validate_config(source, ledger)
+    modules = {}
+    for node in ast.parse(source).body:
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Attribute) and isinstance(target.value, ast.Name) and target.value.id == 'process':
+                    modules[target.attr] = node.value
+    require(all(name in modules for name in ('ProductionFilterSequence','generation_step','FEVTDEBUGoutput')),
+            'Ordinary source is missing its resolved generation or output path')
+    require(ast.unparse(modules['ProductionFilterSequence']) == 'cms.Sequence(process.generator)',
+            'Ordinary source production sequence contains an additional filter')
+    require(ast.unparse(modules['generation_step']) == 'cms.Path(process.ProductionFilterSequence + process.pgen)',
+            'Ordinary source generation path contains an additional filter')
+    output_selection = _keyword(_keyword(modules['FEVTDEBUGoutput'], 'SelectEvents'), 'SelectEvents')
+    require(_strings(output_selection) == ['generation_step'], 'Ordinary source output uses a filtered path')
+    for name, module in modules.items():
+        if not isinstance(module, ast.Call) or not isinstance(module.func, ast.Attribute) or module.func.attr != 'EDFilter' or name == 'generator':
+            continue
+        # cmsDriver's summary filter counts the native generation decision;
+        # it is not a separate particle or decay selection.
+        require(name == 'genstepfilter' and ast.literal_eval(module.args[0]) == 'TriggerResultsFilter'
+                and _strings(_keyword(module, 'triggerConditions')) == ['generation_step'],
+                'Ordinary source contains an undeclared event or decay filter')
 
 
 def audit_files(manifest, row, history=HISTORY, output=AUDIT):
@@ -398,10 +433,12 @@ def audit_files(manifest, row, history=HISTORY, output=AUDIT):
             'Frozen first-MPI overlay or auditor changed')
     require(semantic['complete'] and semantic['healthy'] and semantic['ledger'] == ledger
             and semantic['algorithm'] == BASE_ALGORITHM and ledger['algorithm'] == BASE_ALGORITHM
-            and semantic['generator_profile'] == PROFILE, 'Missing native GEN audit or changed base sampler')
+            and semantic['generator_profile'] == manifest['generator_profile'], 'Missing native GEN audit or changed base sampler')
     require(semantic['input_sha256'] == digest('gen.root')
             and semantic['ledger_sha256'] == digest('proposal_ledger.json')
             and semantic['config_sha256'] == digest('resolved_gen_cfg.py'), 'Native GEN audit inputs changed')
+    if manifest['generator_profile'] == 'ordinary':
+        validate_uncensored_config(Path('resolved_gen_cfg.py').read_text(), ledger)
     from audit_shift_weighted_gen import read_edm, validate_snapshot
     prefilter_path = Path('prefilter.root')
     prefilter_before = digest(prefilter_path)
@@ -413,7 +450,8 @@ def audit_files(manifest, row, history=HISTORY, output=AUDIT):
         with opener(path, 'rt') as stream:
             for line in stream:
                 yield json.loads(line)
-    result = audit_history(rows(), ledger, semantic, proposal, prefilter)
+    result = audit_history(rows(), ledger, semantic, proposal, prefilter,
+                           generator_profile=manifest['generator_profile'])
     require(digest(path) == before and digest(prefilter_path) == prefilter_before,
             'Source history or prefilter GEN changed during audit')
     result.update(schema='shift-native-first-mpi-source-audit-v1', algorithm=ALGORITHM,
@@ -423,6 +461,9 @@ def audit_files(manifest, row, history=HISTORY, output=AUDIT):
                   prefilter_GEN_bytes=prefilter_path.stat().st_size,
                   GEN_sha256=semantic['input_sha256'], ledger_sha256=semantic['ledger_sha256'],
                   semantic_audit_sha256=digest('semantic_audit.json'), auditor_sha256=digest(__file__))
+    if manifest['generator_profile'] == 'ordinary':
+        result.update(generator_profile='ordinary', decay_dependent_filter=False,
+                      saved_events_equal_native_acceptance=True, requires_full_muon_completion=True)
     Path(output).write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
     return result
 
