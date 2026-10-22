@@ -32,6 +32,14 @@ import run_dark_photon_statistics as durable
 MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative')
 
 
+class MesonJobFailure(RuntimeError):
+    """A verified native failure belongs to one independent production batch."""
+
+    def __init__(self, message, jobs):
+        super().__init__(message)
+        self.jobs = jobs
+
+
 def read(path):
     return json.loads(Path(path).read_text())
 
@@ -1575,10 +1583,10 @@ def native_status(config, receipt):
         if len(managers)!=1 or managers[0].get('Iwd')!=receipt['task'] or managers[0].get('ProcId')!=0:
             raise RuntimeError('Meson manager has an unexpected native identity')
         if any(row['JobStatus'] in (3,5) for row in rows):
-            raise RuntimeError('Meson manager or child is removed or held: '+str(receipt['cluster']))
+            raise MesonJobFailure('Meson manager or child is removed or held: '+str(receipt['cluster']), rows)
         if managers[0]['JobStatus']==4:
             if managers[0].get('ExitBySignal') or managers[0].get('ExitCode')!=0:
-                raise RuntimeError('Meson manager completed unsuccessfully; no automatic retry')
+                raise MesonJobFailure('Meson manager completed unsuccessfully; no automatic retry', rows)
             return 'complete'
         if any(row.get('Iwd')!=receipt['task'] for row in children):
             raise RuntimeError('Meson child has an unexpected persistent working directory')
@@ -1603,9 +1611,10 @@ def native_status(config, receipt):
         str(receipt['cluster'])+'.0','-limit','1','-json'],timeout=45)
     rows=durable.parse_ads(output)
     if (len(rows)!=1 or rows[0].get('Iwd')!=receipt['task'] or rows[0].get('ProcId')!=0
-            or rows[0].get('ClusterId')!=receipt['cluster']
-            or rows[0].get('ExitBySignal') or rows[0].get('ExitCode')!=0):
+            or rows[0].get('ClusterId')!=receipt['cluster']):
         raise RuntimeError('Meson manager is missing or failed; no automatic retry: '+str(receipt['cluster']))
+    if rows[0].get('ExitBySignal') or rows[0].get('ExitCode')!=0:
+        raise MesonJobFailure('Meson manager completed unsuccessfully; no automatic retry', rows)
     if config.get('reviewed_terminal_native_jobs') is not None:
         record = validate_terminal_record(receipt, terminal_record(receipt, rows[0]))
         path = Path(config['directory'])/'native_terminal_cache'/f'{receipt["cluster"]}.json'
@@ -1620,6 +1629,25 @@ def existing_receipt(directory, description):
             or type(receipt.get('cluster')) is not int or receipt['cluster']<=0):
         raise ValueError('Existing meson submission receipt changed')
     return receipt
+
+
+def batch_job_status(config, state, batch, entry, receipt, stage):
+    """Keep a failed batch visible while independent batches can progress.
+
+    Only a verified native failure is isolated. Scheduler errors, changed
+    identities and missing receipts still stop the controller's poll.
+    No failed job is released, replaced or counted as completed here.
+    """
+    try:
+        return native_status(config, receipt)
+    except MesonJobFailure as error:
+        failure = dict(stage=stage, cluster=receipt['cluster'], error=str(error),
+                       native_jobs=error.jobs)
+        failures = state.setdefault('failed_batches', {}).setdefault(batch['batch'], [])
+        if failure not in failures:
+            failures.append(failure)
+        entry.update(stage=stage+'_failed', failure=failure)
+        return 'failed'
 
 
 def step(config,state):
@@ -1654,8 +1682,10 @@ def step(config,state):
             continue
         source_job=(existing_receipt(directory,directory/'source.sub') if source_receipt.is_file()
                     else durable.submission(config,directory,directory/'source.sub'))
-        status=native_status(config,source_job)
         entry.update(source_cluster=source_job['cluster'],stage='GEN')
+        status=batch_job_status(config,state,batch,entry,source_job,'GEN')
+        if status=='failed':
+            continue
         if status=='active':
             heartbeat=directory/'source_heartbeat.json'
             if heartbeat.is_file():
@@ -1685,7 +1715,10 @@ def step(config,state):
         entry.update(detector_cluster=detector_job['cluster'],stage='detector')
         if batch['batch'] in config.get('reviewed_detector_recoveries', {}):
             entry['reviewed_detector_recovery'] = config['reviewed_detector_recoveries'][batch['batch']]
-        if native_status(config,detector_job)=='active':
+        detector_status=batch_job_status(config,state,batch,entry,detector_job,'detector')
+        if detector_status=='failed':
+            continue
+        if detector_status=='active':
             detector_active+=1
         published=publish_batch(config,state,batch)
         if published:

@@ -386,6 +386,36 @@ class Admission(unittest.TestCase):
             submit.assert_not_called()
             self.assertTrue(result['canary_published'])
 
+    def test_one_verified_source_failure_does_not_block_an_independent_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            batches=[dict(batch='failed',operational_canary=False),
+                     dict(batch='next',operational_canary=False)]
+            failed=root/'batches/failed'
+            failed.mkdir(parents=True)
+            (failed/'submission.json').write_text('{}')
+            config=dict(directory=str(root),batches=batches,simultaneous_sources=2)
+            receipt=dict(cluster=123,task=str(failed))
+            native=[dict(ClusterId=123,ProcId=0,Iwd=str(failed),JobStatus=5,ExitCode=1)]
+            with patch.object(production,'existing_receipt',return_value=receipt), \
+                 patch.object(production.durable,'jobs',return_value=native), \
+                 patch.object(production.durable,'quota',return_value={}), \
+                 patch.object(production,'storage_gate',return_value=(True,{})), \
+                 patch.object(production.durable,'submission',return_value=dict(cluster=456)) as submit, \
+                 patch.object(production,'handoff') as handoff:
+                state=production.step(config,{})
+            self.assertEqual(state['batches']['failed']['stage'],'GEN_failed')
+            self.assertEqual(state['failed_batches']['failed'][0]['native_jobs'],native)
+            self.assertEqual(state['batches']['next']['source_cluster'],456)
+            self.assertFalse(state['complete'])
+            submit.assert_called_once()
+            handoff.assert_not_called()
+
+    def test_scheduler_failure_still_stops_the_poll_instead_of_quarantining(self):
+        with patch.object(production,'native_status',side_effect=RuntimeError('unknown schedd')):
+            with self.assertRaisesRegex(RuntimeError,'unknown schedd'):
+                production.batch_job_status({}, {},dict(batch='a'),{},dict(cluster=123),'GEN')
+
 
 class PublicationSafety(unittest.TestCase):
     def previous(self, root, complete=False, age=0):
