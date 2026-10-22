@@ -347,5 +347,77 @@ class TelemetryWorkerDerivation(unittest.TestCase):
                     production_preparation.telemetry_derivation(original,replacement)
 
 
+class PrivateDetectorProfile(unittest.TestCase):
+    def profile(self, root):
+        from dark_photon_detector_runtime import CORE_SOURCES
+        scripts = Path(production_preparation.__file__).parent
+        manifest = dict(schema='shift-kaon-complete-private-detector-capsule-v2',
+            default_configs_unchanged=True, explicit_optin_point_only=True,
+            private_geometry_payloads_included=False,
+            files={'workflow_helpers/' + name: dict(sha256=sha256(scripts/name))
+                   for name in CORE_SOURCES})
+        path = root/'manifest.json'
+        write(path, manifest)
+        return dict(schema='shift-predefined-signal-detector-runtime-v1',
+            runtime_url='root://eosuser.cern.ch//eos/user/j/jniedzie/shift_cmssw_support/test/runtime.tar.gz',
+            runtime_sha256='a'*64, runtime_bytes=1000,
+            manifest=dict(path=str(path), sha256=sha256(path)),
+            cmssw_relative='CMSSW_17_0_0_pre4', scram_arch='el9_amd64_gcc13',
+            transport_predefined_signal_decays=True)
+
+    def test_explicit_profile_freezes_only_qualified_core_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);profile=self.profile(root)
+            source=Path(production_preparation.__file__).with_name('run_shift_gen_to_nano.py')
+            target=root/source.name
+            record=production_preparation.freeze_detector_source(source,target,profile)
+            self.assertEqual(target.read_bytes(),source.read_bytes())
+            self.assertEqual(record['private_runtime_sha256'],profile['runtime_sha256'])
+            changed=root/'changed.py';changed.write_text(source.read_text()+'\nUNREVIEWED=True\n')
+            with self.assertRaisesRegex(ValueError,'qualified private capsule'):
+                production_preparation.freeze_detector_source(changed,target,profile)
+
+    def test_manifest_replacement_and_disabled_optin_fail_closed(self):
+        from dark_photon_detector_runtime import validate_profile
+        with tempfile.TemporaryDirectory() as temporary:
+            profile=self.profile(Path(temporary));validate_profile(profile)
+            disabled=dict(profile,transport_predefined_signal_decays=False)
+            with self.assertRaises(ValueError):validate_profile(disabled)
+            Path(profile['manifest']['path']).write_text('{}')
+            with self.assertRaisesRegex(ValueError,'manifest changed'):
+                validate_profile(profile)
+
+    def test_existing_worker_cache_cannot_hide_changed_library_or_helper(self):
+        from dark_photon_detector_runtime import validate_cached_files
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);profile=self.profile(root)
+            helper=root/'worker.py';helper.write_text('qualified bytes')
+            manifest=json.loads((root/'manifest.json').read_text())
+            manifest['files']={'worker.py':dict(bytes=helper.stat().st_size,sha256=sha256(helper))}
+            write(root/'manifest.json',manifest);profile['manifest']['sha256']=sha256(root/'manifest.json')
+            validate_cached_files(root,profile,manifest)
+            helper.write_text('mutated bytes')
+            with self.assertRaisesRegex(ValueError,'runtime member changed'):
+                validate_cached_files(root,profile,manifest)
+
+    def test_private_worker_imports_without_shared_runtime_or_mandatory_legacy_dependency(self):
+        base=Path(__file__).resolve().parents[2]/'validation/bsm_stage2_20261013/production'
+        # This is the same frozen qualified template used by the existing worker tests.
+        if not base.is_dir():
+            self.skipTest('Qualified worker template is not available')
+        original=(base/'chunk_worker.py').read_text()
+        legacy=extend_worker(original,'nano-metadata-v1')
+        private=extend_worker(original,'nano-metadata-v1',dict(explicit=True))
+        self.assertIn("Shared runtime changed",legacy)
+        self.assertNotIn('dark_photon_detector_runtime',legacy)
+        self.assertNotIn('Shared runtime changed',private)
+        self.assertIn("command.append('--transport-predefined-signal-decays')",private)
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'chunk_worker.py';path.write_text(private)
+            spec=importlib.util.spec_from_file_location('isolated_private_chunk',path)
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            self.assertTrue(callable(module.run))
+
+
 if __name__=='__main__':
     unittest.main()

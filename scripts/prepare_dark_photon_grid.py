@@ -31,7 +31,8 @@ SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'dark_photon
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
            'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
-           'pythia_generation_ledger.py', 'dark_photon_sample_names.py')
+           'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
+           'dark_photon_detector_runtime.py')
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
     'Compare measured <beta gamma> and lab-flight distributions with the reference estimate; do not condition on detector acceptance.',

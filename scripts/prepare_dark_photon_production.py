@@ -59,10 +59,21 @@ def telemetry_derivation(original, replacement):
         other_physics_configuration_and_audit_ast_unchanged=True)
 
 
-def freeze_detector_source(source, target):
+def freeze_detector_source(source, target, runtime_profile=None):
     """Keep qualified sources, allowing the reviewed telemetry-only sibling."""
     source, target = Path(source), Path(target)
     selected, derivation = source, None
+    if runtime_profile is not None:
+        from dark_photon_detector_runtime import CORE_SOURCES, validate_profile
+        manifest = validate_profile(runtime_profile)
+        if target.name in CORE_SOURCES:
+            expected = manifest['files']['workflow_helpers/' + target.name]['sha256']
+            if sha256(source) != expected:
+                raise ValueError('Detector source differs from its qualified private capsule: ' + target.name)
+        shutil.copy2(source, target)
+        return dict(source=str(source), sha256=sha256(target),
+                    runtime_profile=runtime_profile['schema'],
+                    private_runtime_sha256=runtime_profile['runtime_sha256'])
     replacement = Path(__file__).with_name('run_shift_gen_to_nano.py')
     if target.name == replacement.name and sha256(source) != sha256(replacement):
         derivation = telemetry_derivation(source, replacement)
@@ -222,7 +233,7 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
     return '\n'.join(lines) + '\n'
 
 
-def extend_worker(text, publication_profile):
+def extend_worker(text, publication_profile, runtime_profile=None):
     """Version the qualified worker's publication contract in its new copy."""
     old = "    paths = {tier: str(base / tier / name)\n             for tier in ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD')}\n"
     replacement = ("    profile = read(B/'plan.json')['publication_profile']\n"
@@ -280,6 +291,31 @@ def extend_worker(text, publication_profile):
         raise ValueError('Qualified detector timeout invocation changed; review before extending')
     text = text.replace(detector_limit, "'--timeout',str(plan['detector_timeout_seconds'])")
     text = text.replace(process_limit, "timeout=plan['detector_timeout_seconds']+600,check=True")
+    if runtime_profile is not None:
+        text = private_runtime_worker(text)
+    return text
+
+
+def private_runtime_worker(text):
+    """Use the independently pinned capsule only under the explicit new profile."""
+    original = """    fingerprint=read(B/'frozen/runtime_fingerprint.json')
+    for path,row in fingerprint['files'].items():
+        if sha(path)!=row['sha256']:raise ValueError('Shared runtime changed: '+path)
+"""
+    replacement = """    from dark_photon_detector_runtime import validate_profile
+    runtime = read(B/'frozen/detector_runtime.json')
+    if runtime != read(B/'plan.json')['detector_runtime']:
+        raise ValueError('Private detector runtime differs from its sealed plan')
+    validate_profile(runtime)
+"""
+    hook = "        with (work/'launch.log').open('x') as log:\n"
+    if text.count(original) != 1 or text.count(hook) != 1:
+        raise ValueError('Qualified worker runtime hooks changed; review the private deployment')
+    text = text.replace(original, replacement)
+    text = text.replace(hook, "        command.append('--transport-predefined-signal-decays')\n" + hook)
+    text = text.replace("'shared_runtime_fingerprint_sha256':sha(B/'frozen/runtime_fingerprint.json')",
+                        "'template_runtime_fingerprint_sha256':sha(B/'frozen/runtime_fingerprint.json'),\n"
+                        "             'private_detector_runtime_sha256':plan['detector_runtime']['runtime_sha256']")
     return text
 
 
@@ -339,6 +375,10 @@ def prepare(args):
         if sha256(path) != expected:
             raise ValueError('Qualified template dependency changed: ' + path)
     plan = copy.deepcopy(read(args.preparation))
+    runtime_profile = plan.get('detector_runtime')
+    if runtime_profile is not None:
+        from dark_photon_detector_runtime import validate_profile
+        validate_profile(runtime_profile)
     validate_physical_preflight(plan)
     if plan.get('detector_stage_prepared') is not True:
         raise ValueError('Production requires a prepared complete physical-width-qualified detector grid')
@@ -382,6 +422,14 @@ def prepare(args):
                         ignore=shutil.ignore_patterns('__pycache__', '*.pyc'))
     frozen = output / 'frozen'
     shutil.copy2(template / 'frozen/runtime_fingerprint.json', frozen / 'runtime_fingerprint.json')
+    if runtime_profile is not None:
+        authority = runtime_profile['manifest']
+        target = frozen / 'detector_runtime_manifest.json'
+        shutil.copy2(authority['path'], target)
+        runtime_profile['manifest'] = dict(path=str(target), sha256=sha256(target))
+        write(frozen / 'detector_runtime.json', runtime_profile)
+        shutil.copy2(Path(__file__).with_name('dark_photon_detector_runtime.py'),
+                     output / 'dark_photon_detector_runtime.py')
     dependencies = {}
     for category in ('sources', 'templates'):
         (frozen / category).mkdir()
@@ -390,7 +438,7 @@ def prepare(args):
             if sha256(source) != item['sha256']:
                 raise ValueError('Native-qualified frozen dependency changed: ' + str(source))
             target = frozen / category / name
-            dependencies[str(target)] = freeze_detector_source(source, target)
+            dependencies[str(target)] = freeze_detector_source(source, target, runtime_profile)
     for name in ('chunk_worker.py', 'finalize_point.py', 'collect_inputs.py', 'preserve_failure.py',
                  'detector_worker.sh', 'finalizer_worker.sh', 'collect_worker.sh',
                  'detector.sub', 'finalizer.sub', 'collect.sub'):
@@ -407,7 +455,12 @@ def prepare(args):
             text = re.sub(r'^REMOTE_BASE = .*$', 'REMOTE_BASE = ' + repr(args.failure_base), text,
                           flags=re.MULTILINE)
         if name == 'chunk_worker.py':
-            text = extend_worker(text, profile)
+            text = extend_worker(text, profile, runtime_profile)
+        elif name == 'detector_worker.sh' and runtime_profile is not None:
+            text = text[:text.index('unset PYTHONPATH')]
+            text += ('exec /usr/bin/python3 ' + str(output / 'dark_photon_detector_runtime.py')
+                     + ' --profile ' + str(frozen / 'detector_runtime.json')
+                     + ' --entry ' + str(output / 'chunk_worker.py') + ' -- "$@"\n')
         elif name == 'finalize_point.py':
             # Retain the exact qualified stage/weight/scoring validators in the
             # new namespace; the new entry point supports all bounded groups.
@@ -472,6 +525,8 @@ def prepare(args):
     common.extend(path for category in ('sources', 'templates')
                   for path in (frozen / category).rglob('*') if path.is_file())
     common.extend([frozen / 'runtime_fingerprint.json', args.preparation.resolve()])
+    if runtime_profile is not None:
+        common.extend([frozen / 'detector_runtime.json', frozen / 'detector_runtime_manifest.json'])
     if qualification is not None:
         common.extend(Path(item['path']) for item in qualification['dependencies'])
     scoring = [output / 'scoring_components.json']
