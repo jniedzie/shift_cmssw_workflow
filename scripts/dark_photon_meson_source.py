@@ -12,6 +12,7 @@ must be supplied by a separately pinned physical model card.
 """
 import math
 from itertools import product
+from pathlib import Path
 
 from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_form_factor_abs2
 import dark_photon_vector_meson as vector_meson
@@ -54,7 +55,7 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
     return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
 
 
-def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm):
+def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=None):
     """Resolve a constant current on exact stable-kaon native mass support.
 
     All reference inputs are explicit; no photon normalization is inferred
@@ -101,7 +102,12 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm):
             model['provenance'].update(transition=transition,normalization=parent['br_gamma_gamma_reference'])
         else:
             authority=parent['ks_dispersive_reference']
-            reference=KSDispersiveReference(authority['path'],authority['sha256'])
+            path=Path(authority['path'])
+            if not path.is_absolute():
+                if model_directory is None:
+                    raise ValueError('A relative KS reference requires the explicit model directory')
+                path=Path(model_directory)/path
+            reference=KSDispersiveReference(path,authority['sha256'])
             absolute=abs(reference.amplitude(signal_mass))**2 if opened else 0.
             model['provenance']['transition']=dict(authority,publication=reference.publication)
         model.update(recoil_pdg_id=22,recoil_mass_gev=0.,radiative_amplitude_abs2_gev_minus2=absolute)
@@ -295,7 +301,7 @@ def parent_form_factor_abs2(signal_mass, parent):
     return function(signal_mass, parent['transition_form_factor'])
 
 
-def resolved_parent_models(card, configuration, mass, *, epsilon=None):
+def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_directory=None):
     """Resolve only explicitly declared exclusive channels at native support."""
     if card.get('mechanism') == 'meson-radiative':
         expected = [parent.get('channel') for parent in card['parents']]
@@ -320,7 +326,7 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None):
         if kaon_channel(parent):
             if configuration.get('check_event') is not True:
                 raise ValueError('Kaon count authority requires the unchanged native event check')
-            model=_resolved_kaon_model(parent,native[pdg],mass,epsilon,configuration['ecm_gev'])
+            model=_resolved_kaon_model(parent,native[pdg],mass,epsilon,configuration['ecm_gev'],model_directory)
             if pdg not in models:
                 models[pdg]=model
             else:
