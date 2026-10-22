@@ -592,4 +592,5 @@ def sample_decay(parent, mass, proper_ctau_mm, rng, *, model, parent_pdg_id=321,
         production_proposal_trials=event['proposal_trials'], angular_proposal_trials=angular_trials,
         dark_photon_polarization='full-three-state-density', parent_polarization='spin-zero',
         cp_conjugate=parent_pdg_id == -321, unconditional_decay=True,
-        native_parent_flight_attached=False, material_transport_qualified=False)
+        parent_flight_included=False, native_parent_flight_attached=False,
+        material_transport_qualified=False)

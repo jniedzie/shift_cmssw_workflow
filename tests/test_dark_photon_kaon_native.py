@@ -15,6 +15,7 @@ import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_kaon import sample_radiative_decay,sample_weak_decay
+from dark_photon_kaon_leptonic import sample_decay as sample_leptonic_decay
 from dark_photon_meson_native import native_source,inject_decay,inject_undecayed_kaon_decay
 
 
@@ -68,6 +69,30 @@ std::string state(ShiftMesonNative::Source const& source,int index) {
   o<<'}';
   return o.str();
 }
+std::string daughter_records(ShiftMesonNative::Source const& source,int index) {
+  auto const* parent=source.current->barcode_to_particle(index);
+  if(!parent||!parent->end_vertex())throw std::runtime_error("Missing attached parent");
+  std::ostringstream o;o<<std::setprecision(17)<<'[';bool first=true;
+  auto row=[&](HepMC::GenParticle const* p) {
+    auto const& q=p->momentum();
+    o<<"{\"pdg_id\":"<<p->pdg_id()<<",\"status\":"<<p->status()
+     <<",\"mass_gev\":"<<p->generated_mass()<<",\"p4\":["
+     <<q.e()<<','<<q.px()<<','<<q.py()<<','<<q.pz()<<"]}";
+  };
+  auto const* vertex=parent->end_vertex();
+  for(auto p=vertex->particles_out_const_begin();p!=vertex->particles_out_const_end();++p) {
+    if(!first)o<<',';first=false;
+    o<<"{\"particle\":";row(*p);o<<",\"daughters\":[";bool next=false;
+    if((*p)->end_vertex()) {
+      auto const* end=(*p)->end_vertex();
+      for(auto child=end->particles_out_const_begin();child!=end->particles_out_const_end();++child) {
+        if(next)o<<',';next=true;row(*child);
+      }
+    }
+    o<<"]}";
+  }
+  o<<']';return o.str();
+}
 }
 '''
 
@@ -91,6 +116,20 @@ class NativeKaonGraphTest(unittest.TestCase):
 
     def state(self,index):
         return json.loads(str(self.ROOT.ShiftKaonBridgeTest.state(self.source,index)))
+
+    def lepton_tables(self):
+        data=self.source.pythia.particleData
+        return {pdg:dict(mass=data.m0(pdg),ctau=data.tau0(pdg),
+            can_decay=bool(data.canDecay(pdg)),may_decay=bool(data.mayDecay(pdg)))
+            for pdg in (11,12,13,14)}
+
+    def leptonic_model(self,record,lepton):
+        authority=json.loads((Path(__file__).resolve().parents[1]/
+            'config/physics/dark_photon_kl2_chpt_1993.json').read_text())
+        # This zero-collision fixture uses nominal initialized tables. Do not
+        # retune them to the physical-rate card or change that card itself.
+        return dict(authority['form_factor_model'],parent_mass_gev=record['native_mass_gev'],
+            lepton_mass_gev=authority['explicit_conventions'][lepton+'_mass_gev'])
 
     def test_old_snapshot_and_injection_require_existing_end_vertex(self):
         index,_=self.new_fixture(130)
@@ -156,6 +195,94 @@ class NativeKaonGraphTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'resampling'):
             inject_undecayed_kaon_decay(self.source,index,decay,native_parent_record=record)
         self.assertEqual(self.state(index)['parent_status'],1)
+
+    def test_leptonic_kaon_chains_preserve_native_flight_and_correlated_muons(self):
+        tables=self.lepton_tables()
+        for pdg in (321,-321):
+            for lepton in ('electron','muon'):
+                for seed in (12,106,871,4410):
+                    index,before=self.new_fixture(pdg)
+                    native_before=str(self.source.inventory_snapshot())
+                    summary_before=str(self.source.summary())
+                    record=json.loads(str(self.source.undecayed_kaon_record(index)))
+                    decay=sample_leptonic_decay(record['p4'],.25,12.,random.Random(seed),
+                        model=self.leptonic_model(record,lepton),parent_pdg_id=pdg)
+                    inject_undecayed_kaon_decay(self.source,index,decay,native_parent_record=record)
+                    self.assertTrue(decay['native_parent_flight_attached'])
+                    after=self.state(index)
+                    self.assertEqual(after['parent_status'],2)
+                    self.assertEqual(after['native_tau'],before['native_tau'])
+                    for key in ('ancestor_signature','spectator_signature','unit_weight'):
+                        self.assertEqual(after[key],before[key])
+                    self.assertEqual(str(self.source.inventory_snapshot()),native_before)
+                    self.assertEqual(str(self.source.summary()),summary_before)
+                    self.assertEqual(self.lepton_tables(),tables)
+                    self.assertEqual(json.loads(str(self.source.undecayed_kaon_record(index,False))),record)
+                    graph=json.loads(str(self.source.selected_parent_record(index)))
+                    self.assertEqual(graph['decay_position_mm'],record['stored_decay_position_mm'])
+                    expected=[a+b for a,b in zip(record['stored_decay_position_mm'],
+                        list(decay['decay_displacement_mm'])+[decay['decay_ct_mm']])]
+                    self.assertEqual(after['dark_decay_position_mm'],expected)
+                    self.assertLess(after['maximum_vertex_residual_gev'],1.e-12)
+                    rows=json.loads(str(self.ROOT.ShiftKaonBridgeTest.daughter_records(self.source,index)))
+                    by_id={row['particle']['pdg_id']:row for row in rows}
+                    dark=by_id[32]
+                    self.assertEqual(dark['particle']['p4'],list(decay['dark_photon_p4']))
+                    dimuons={row['pdg_id']:row['p4'] for row in dark['daughters']}
+                    self.assertEqual(dimuons,{13:list(decay['muon_p4']),-13:list(decay['antimuon_p4'])})
+                    for row,pdg_id,p4 in zip(decay['recoil_records'],decay['recoil_pdg_ids'],decay['recoil_p4s']):
+                        self.assertEqual(row['pdg_id'],pdg_id)
+                        self.assertEqual(row['p4'],list(p4))
+                        self.assertEqual(row['status'],1)
+                        self.assertFalse(row['natural_decay'])
+                        self.assertEqual(by_id[pdg_id]['daughters'],[])
+        self.assertEqual(json.loads(str(self.source.summary()))['source_calls'],0)
+
+    def test_primary_muon_stays_final_under_unchanged_nominal_decay_switch(self):
+        tables=self.lepton_tables()
+        self.assertTrue(tables[13]['can_decay'])
+        self.assertFalse(tables[13]['may_decay'])
+        previous=bool(self.source.pythia.settings.flag('ParticleDecays:limitTau0'))
+        try:
+            self.assertTrue(self.source.pythia.readString('ParticleDecays:limitTau0=off'))
+            for pdg in (321,-321):
+                index,before=self.new_fixture(pdg)
+                record=json.loads(str(self.source.undecayed_kaon_record(index)))
+                decay=sample_leptonic_decay(record['p4'],.25,12.,random.Random(781),
+                    model=self.leptonic_model(record,'muon'),parent_pdg_id=pdg)
+                inject_undecayed_kaon_decay(self.source,index,decay,native_parent_record=record)
+                rows=json.loads(str(self.ROOT.ShiftKaonBridgeTest.daughter_records(self.source,index)))
+                primary=next(row for row in rows if row['particle']['pdg_id']==decay['charged_lepton_pdg_id'])
+                # Nominal muon mayDecay=false remains authoritative even
+                # without the separate mean-lifetime cutoff. Do not force it.
+                self.assertEqual(primary['particle']['status'],1)
+                self.assertEqual(primary['daughters'],[])
+                self.assertEqual(primary['particle']['p4'],list(decay['charged_lepton_p4']))
+                self.assertLess(self.state(index)['maximum_vertex_residual_gev'],1.e-12)
+                self.assertEqual(self.lepton_tables(),tables)
+                for key in ('ancestor_signature','spectator_signature','unit_weight','native_tau'):
+                    self.assertEqual(self.state(index)[key],before[key])
+        finally:
+            self.source.pythia.readString('ParticleDecays:limitTau0='+('on' if previous else 'off'))
+
+    def test_invalid_leptonic_recoils_are_rejected_before_parent_attachment(self):
+        for pdgs,masses in (([13,14],[.1056583755,0.]),
+                            ([-13,-14],[.1056583755,0.]),
+                            ([-13,12],[.1056583755,0.]),
+                            ([-13,14,22],[.1056583755,0.,0.]),
+                            ([-13,14],[.1056583755,1.e-6]),
+                            ([-13,14],[float('nan'),0.])):
+            index,before=self.new_fixture(321)
+            record=json.loads(str(self.source.undecayed_kaon_record(index)))
+            decay=sample_leptonic_decay(record['p4'],.25,12.,random.Random(12),
+                model=self.leptonic_model(record,'muon'))
+            decay['recoil_pdg_ids']=pdgs
+            decay['recoil_masses_gev']=masses
+            if len(pdgs)==3:decay['recoil_p4s'].append((0.,0.,0.,0.))
+            with self.assertRaises(Exception):
+                inject_undecayed_kaon_decay(self.source,index,decay,native_parent_record=record)
+            self.assertEqual(self.state(index),before)
+            self.assertNotIn('native_parent_flight',decay)
 
 
 if __name__=='__main__':unittest.main()

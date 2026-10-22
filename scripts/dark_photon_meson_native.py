@@ -217,6 +217,9 @@ public:
     // The new recoil uses the ordinary source particle tables and RNG. Only a
     // private temporary Event is decayed; the original source record/counters
     // are restored, including when Pythia rejects the decay.
+    // Stable e/nu recoils have no natural decay or lifetime draw. Muons
+    // retain the same ordinary mayDecay/tau0 limits as the source tables.
+    if(!pythia.particleData.canDecay(recoil->pdg_id()))return;
     Pythia8::Event original=pythia.event;
     Pythia8::Event generated;
     try {
@@ -226,7 +229,7 @@ public:
       pythia.event[index].vProd(position.x(),position.y(),position.z(),position.t());
       pythia.event[index].tau(pythia.event[index].tau0()*pythia.rndm.exp());
       if(!pythia.moreDecays())
-        throw std::runtime_error("The physical pseudoscalar recoil decay failed");
+        throw std::runtime_error("The physical recoil decay failed");
       generated=pythia.event;
     } catch(...) {pythia.event=original;throw;}
     pythia.event=original;
@@ -269,23 +272,45 @@ public:
     if(attached.size()!=size_t(generated.size()-2))
       throw std::runtime_error("Recoil natural-decay graph lost a descendant");
   }
-  void inject(int index,std::vector<double> const& values,
-              std::vector<int> const& recoil_pdgs,std::vector<double> const& recoil_masses) {
-    if(!current||recoil_pdgs.empty()||recoil_pdgs.size()!=recoil_masses.size()||
-       values.size()!=18+4*recoil_pdgs.size())throw std::runtime_error("Invalid decay injection input");
+  void validate_recoils(int parent_pdg,std::vector<int> const& recoil_pdgs,
+                       std::vector<double> const& recoil_masses) const {
+    if(recoil_pdgs.empty()||recoil_pdgs.size()!=recoil_masses.size())
+      throw std::runtime_error("Missing or inconsistent exclusive recoils");
+    bool leptonic=false;
     for(size_t i=0;i<recoil_pdgs.size();++i) {
       auto id=std::abs(recoil_pdgs[i]);
-      if((id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321)||
-         (id==22?recoil_masses[i]!=0.:recoil_masses[i]<=0.))
-        throw std::runtime_error("Invalid exclusive electromagnetic recoil");
+      bool lepton=id==11||id==12||id==13||id==14;
+      leptonic=leptonic||lepton;
+      bool massless=id==22||id==12||id==14;
+      if((!lepton&&id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321)||
+         !std::isfinite(recoil_masses[i])||
+         (massless?recoil_masses[i]!=0.:recoil_masses[i]<=0.))
+        throw std::runtime_error("Invalid exclusive recoil identity or mass");
     }
+    if(leptonic) {
+      int charged=0,neutrino=0;
+      for(auto id:recoil_pdgs) {
+        if(std::abs(id)==11||std::abs(id)==13)charged=id;
+        if(std::abs(id)==12||std::abs(id)==14)neutrino=id;
+      }
+      int sign=parent_pdg>0?1:-1;
+      if(std::abs(parent_pdg)!=321||recoil_pdgs.size()!=2||
+         charged*sign>=0||neutrino*sign<=0||std::abs(neutrino)!=std::abs(charged)+1)
+        throw std::runtime_error("Require a charged-kaon lepton and matching neutrino pair");
+    }
+    int recoil_charge=0;
+    for(auto id:recoil_pdgs)recoil_charge+=pythia.particleData.chargeType(id);
+    if(recoil_charge!=pythia.particleData.chargeType(parent_pdg))
+      throw std::runtime_error("Exclusive decay violates charge conservation");
+  }
+  void inject(int index,std::vector<double> const& values,
+              std::vector<int> const& recoil_pdgs,std::vector<double> const& recoil_masses) {
+    if(!current||values.size()!=18+4*recoil_pdgs.size())
+      throw std::runtime_error("Invalid decay injection input");
     auto* parent=current->barcode_to_particle(index);
     if(!parent||std::find(parent_ids.begin(),parent_ids.end(),parent->pdg_id())==parent_ids.end()||!parent->end_vertex())
       throw std::runtime_error("Selected meson is absent from the source graph");
-    int recoil_charge=0;
-    for(auto id:recoil_pdgs)recoil_charge+=pythia.particleData.chargeType(id);
-    if(recoil_charge!=pythia.particleData.chargeType(parent->pdg_id()))
-      throw std::runtime_error("Exclusive electromagnetic decay violates charge conservation");
+    validate_recoils(parent->pdg_id(),recoil_pdgs,recoil_masses);
     auto position=parent->end_vertex()->position();
     std::set<HepMC::GenVertex*> vertices;
     std::set<HepMC::GenParticle*> descendants;
@@ -467,19 +492,32 @@ def resolved_meson_production_parameters(source):
         interpretation='Relative generator weights and switches, not measured inclusive production probabilities. Primary hard-process flags do not disable the separate NRQCD processes included by MPI processLevel=3. Zero configured fragmentation weight or zero MC count does not establish a zero physical rate.')
 
 
+def _sampled_recoils(sampled_decay):
+    """Read the shared exclusive-recoil contract before graph mutation."""
+    if 'recoil_p4s' in sampled_decay:
+        return [dict(pdg_id=pdg, mass_gev=mass, p4=momentum) for pdg, mass, momentum in
+            zip(sampled_decay['recoil_pdg_ids'], sampled_decay['recoil_masses_gev'],
+                sampled_decay['recoil_p4s'], strict=True)]
+    if 'recoils' in sampled_decay:
+        return sampled_decay['recoils']
+    key = 'recoil_p4' if 'recoil_p4' in sampled_decay else 'photon_p4'
+    return [dict(pdg_id=sampled_decay.get('recoil_pdg_id', 22),
+        mass_gev=sampled_decay.get('recoil_mass_gev', 0.), p4=sampled_decay[key])]
+
+
+def _native_recoil_vectors(recoils):
+    import ROOT
+    identifiers, masses = ROOT.std.vector('int')(), ROOT.std.vector('double')()
+    for recoil in recoils:
+        identifiers.push_back(recoil['pdg_id'])
+        masses.push_back(recoil['mass_gev'])
+    return identifiers, masses
+
+
 def inject_decay(source, parent_index, sampled_decay):
     import ROOT
     values = ROOT.std.vector('double')()
-    if 'recoil_p4s' in sampled_decay:
-        recoils = [dict(pdg_id=pdg, mass_gev=mass, p4=momentum) for pdg, mass, momentum in
-            zip(sampled_decay['recoil_pdg_ids'], sampled_decay['recoil_masses_gev'],
-                sampled_decay['recoil_p4s'], strict=True)]
-    elif 'recoils' in sampled_decay:
-        recoils = sampled_decay['recoils']
-    else:
-        key = 'recoil_p4' if 'recoil_p4' in sampled_decay else 'photon_p4'
-        recoils = [dict(pdg_id=sampled_decay.get('recoil_pdg_id', 22),
-            mass_gev=sampled_decay.get('recoil_mass_gev', 0.), p4=sampled_decay[key])]
+    recoils = _sampled_recoils(sampled_decay)
     momenta = [sampled_decay['dark_photon_p4']] + [row['p4'] for row in recoils] + [
         sampled_decay['muon_p4'], sampled_decay['antimuon_p4']]
     for momentum in momenta:
@@ -490,10 +528,7 @@ def inject_decay(source, parent_index, sampled_decay):
     values.push_back(sampled_decay['decay_ct_mm'])
     values.push_back(sampled_decay['dark_photon_mass_gev'])
     values.push_back(sampled_decay['muon_mass_gev'])
-    identifiers, masses = ROOT.std.vector('int')(), ROOT.std.vector('double')()
-    for recoil in recoils:
-        identifiers.push_back(recoil['pdg_id'])
-        masses.push_back(recoil['mass_gev'])
+    identifiers, masses = _native_recoil_vectors(recoils)
     source.inject(parent_index, values, identifiers, masses)
     # Pin the actual ordinary recoil outcome for the independent FWLite audit.
     sampled_decay['recoil_records'] = json.loads(str(source.recoil_record(parent_index)))
@@ -521,8 +556,13 @@ def inject_undecayed_kaon_decay(source, parent_index, sampled_decay, *, native_p
     if (record != native_parent_record or
             sampled_decay.get('parent_pdg_id') != record['pdg_id']):
         raise ValueError('The selected native kaon snapshot/lifetime or sampler identity changed')
+    # Reject an unsupported or wrong-flavor weak recoil before attaching an
+    # endvertex, rather than leaving an empty half-injected parent on failure.
+    identifiers,masses=_native_recoil_vectors(_sampled_recoils(sampled_decay))
+    source.validate_recoils(record['pdg_id'],identifiers,masses)
     attached=json.loads(str(source.attach_native_kaon_decay_vertex(parent_index)))
     if attached != record:
         raise RuntimeError('The native kaon record changed during decay attachment')
     sampled_decay['native_parent_flight']=record
     inject_decay(source,parent_index,sampled_decay)
+    sampled_decay['native_parent_flight_attached']=True
