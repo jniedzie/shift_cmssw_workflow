@@ -130,7 +130,9 @@ class NativeKaonGraphTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.source=native_source(['Beams:eCM=10.','SoftQCD:nonDiffractive=on',
-            'ParticleDecays:limitTau0=on','ParticleDecays:tau0Max=10.'],861022296,
+            'ParticleDecays:limitTau0=on','ParticleDecays:tau0Max=10.',
+            # The real K* recoil source changes flavour311, not KL/KS masses.
+            '311:m0=0.497611'],861022296,
             [130,310,321,-321])
         import ROOT
         cls.ROOT=ROOT
@@ -157,6 +159,26 @@ class NativeKaonGraphTest(unittest.TestCase):
         # retune them to the physical-rate card or change that card itself.
         return dict(authority['form_factor_model'],parent_mass_gev=record['native_mass_gev'],
             lepton_mass_gev=authority['explicit_conventions'][lepton+'_mass_gev'])
+
+    def test_initialized_neutral_mass_provenance_is_opt_in_and_exact(self):
+        configuration=json.loads(str(self.source.configuration()))
+        rows=configuration['native_kaon_mass_authorities']
+        self.assertEqual([row['pdg_id'] for row in rows],[130,310,311])
+        for row in rows:
+            entry=self.source.pythia.particleData.particleDataEntryPtr(row['pdg_id'])
+            self.assertEqual(row,dict(pdg_id=row['pdg_id'],mass_gev=entry.m0(),
+                mass_min_gev=entry.m0Min(),mass_max_gev=entry.m0Max(),mass_width_gev=entry.mWidth()))
+        self.assertNotEqual(rows[0]['mass_gev'],rows[2]['mass_gev'])
+        original=list(self.source.parent_ids)
+        try:
+            self.source.parent_ids.clear();self.source.parent_ids.push_back(221)
+            ordinary=json.loads(str(self.source.configuration()))
+            self.assertEqual(set(ordinary),{'ecm_gev','check_event','mass_tolerance','energy_tolerance','parents'})
+            self.assertNotIn('native_kaon_mass_authorities',ordinary)
+        finally:
+            self.source.parent_ids.clear()
+            for pdg in original:self.source.parent_ids.push_back(pdg)
+        self.assertEqual(json.loads(str(self.source.summary()))['source_calls'],0)
 
     def test_old_snapshot_and_injection_require_existing_end_vertex(self):
         index,_=self.new_fixture(130)

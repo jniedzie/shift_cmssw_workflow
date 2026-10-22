@@ -100,7 +100,20 @@ public:
       o<<"{\"pdg_id\":"<<pdg<<",\"mass_min_gev\":"<<entry->m0Min()
        <<",\"mass_max_gev\":"<<entry->m0Max()<<",\"mass_width_gev\":"<<entry->mWidth()<<'}';
     }
-    o<<"]}";return o.str();
+    o<<']';
+    if(std::find(parent_ids.begin(),parent_ids.end(),130)!=parent_ids.end()||
+       std::find(parent_ids.begin(),parent_ids.end(),310)!=parent_ids.end()) {
+      o<<",\"native_kaon_mass_authorities\":[";first=true;
+      for(auto pdg:{130,310,311}) {
+        auto entry=pythia.particleData.particleDataEntryPtr(pdg);
+        if(!first)o<<',';first=false;
+        o<<"{\"pdg_id\":"<<pdg<<",\"mass_gev\":"<<entry->m0()
+         <<",\"mass_min_gev\":"<<entry->m0Min()<<",\"mass_max_gev\":"<<entry->m0Max()
+         <<",\"mass_width_gev\":"<<entry->mWidth()<<'}';
+      }
+      o<<']';
+    }
+    o<<'}';return o.str();
   }
   std::string inventory_snapshot() const {
     // This diagnostic sees every meson, including undecayed long-lived ones.

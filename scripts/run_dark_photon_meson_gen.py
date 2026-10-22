@@ -197,9 +197,12 @@ def run(args):
         configuration = json.loads(str(source.configuration()))
         if not configuration['check_event']:
             raise ValueError('The native Pythia event quality check must remain enabled')
+        kaon_source=any(kaon_channel(parent) for parent in card['parents'])
+        if kaon_source:
+            (out/'source_configuration.json').write_text(json.dumps(configuration,indent=2)+'\n')
+            manifest['native_source_configuration_sha256']=digest(out/'source_configuration.json')
         models = resolved_parent_models(card, configuration, args.mass,epsilon=args.epsilon,
                                        model_directory=out)
-        kaon_source=any(kaon_channel(parent) for parent in card['parents'])
         precision_doc = Path(os.environ['PYTHIA8DATA']) / 'ErrorChecks.xml'
         precision = dict(configuration, reference=str(precision_doc), reference_sha256=digest(precision_doc),
             prescription='native generated mass for branching and bound; unchanged p4 invariant for decay',
