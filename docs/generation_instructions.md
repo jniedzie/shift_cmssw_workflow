@@ -1,6 +1,38 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Assumed jaw interaction depths (2026-10-22)
+
+The user selected inside-jaw collisions and authorized a simple front-heavy
+interaction-depth distribution. `shift_jaw_source.py` samples an exponential
+in integrated nuclear interaction lengths, conditional on a collision within
+the selected assembly. A supplied profile declares the jaw mixture, native
+material segments and their interaction-length scale. It is an assumed source
+model; never call it measured halo data or a material-survival correction.
+The current diagnostic profile uses both horizontal jaws equally and fixed
+transverse center lines, with the actual copper/core/copper paths. Keep the
+profile, source-only seed, exact original identity and drawn position together.
+The draw changes source coordinates; no inverse depth-density or additional
+material factor enters W or reconstruction W/p.
+
+`ShiftSourcePlacementProducer` and `shift_source_placement.py` support a fixed
+point or an explicit per-original point map for controlled canaries. They copy
+the whole HepMC graph, preserve momenta/edges/weights/relative vertex separations,
+and precede the nominal physical source-time producer. Its existing timing
+implementation expects MM inputs; the actual canary rejects other length units.
+Read the native unshifted input (`VtxSmeared` for ordinary DY), not a graph whose
+nominal time shift has already been applied. Compile canary plugins privately;
+do not rebuild a shared release used by live jobs.
+
+This does not qualify translating old decay-filtered GEN as a new production.
+Fresh source placement must occur before decay-dependent filtering, with full
+source exposure, lifetime support, positive reconstruction controls and exact
+cumulative probabilities retained. Qualify bounded material transport and
+Both-Both reconstruction for QCD, DY and J/psi separately before scaling.
+The active six-original GEN/timing canary and exact assumed profile are under
+`../../validation/sm_material_selection_20261022_v1/`; its native result and EOS
+readback, not a submission receipt or algorithm test, establish runtime closure.
+
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
 The independent 7,935-original material response test completed with only one
