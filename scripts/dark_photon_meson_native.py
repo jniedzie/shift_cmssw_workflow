@@ -203,6 +203,30 @@ public:
     }
     o<<"]}";return o.str();
   }
+  std::string production_snapshot() const {
+    // Opt-in combined inventory. Keep snapshot()'s naturally decayed-meson
+    // contract unchanged; physical kaons require their separate pinned final
+    // record and are counted after removing same-species generator copies.
+    std::ostringstream o;o<<std::setprecision(17)<<"{\"native_weight\":"<<pythia.info.weight()
+      <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"parents\":[";
+    bool first=true;
+    for(int i=1;i<pythia.event.size();++i) {
+      auto const& p=pythia.event[i];
+      if(std::find(parent_ids.begin(),parent_ids.end(),p.id())==parent_ids.end())continue;
+      auto daughters=p.daughterList();bool copy=false;
+      for(auto j:daughters)copy=copy||pythia.event[j].id()==p.id();
+      if(copy)continue;
+      if(!first)o<<',';first=false;
+      if(p.id()==130||p.id()==310||p.id()==321||p.id()==-321) {
+        o<<undecayed_kaon_record(i,false);
+      } else {
+        if(daughters.empty())throw std::runtime_error("An eligible non-kaon meson was not naturally decayed");
+        o<<"{\"index\":"<<i<<",\"pdg_id\":"<<p.id()<<",\"native_mass_gev\":"<<p.m()
+         <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]}";
+      }
+    }
+    o<<"]}";return o.str();
+  }
   std::string attach_native_kaon_decay_vertex(int index) {
     // The final native kaon already owns tau and vDec. Never draw again or
     // alter the Pythia record, momentum, production vertex or ancestors.

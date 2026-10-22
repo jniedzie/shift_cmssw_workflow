@@ -40,6 +40,18 @@ int make(ShiftMesonNative::Source& source,int pdg) {
   }
   source.current->add_vertex(vertex);return index;
 }
+int append_natural_eta_with_copy(ShiftMesonNative::Source& source) {
+  auto& event=source.pythia.event;
+  double mass=source.pythia.particleData.m0(221);
+  auto copy=event.append(221,-51,0,0,0.,0.,0.,mass,mass);
+  auto physical=event.append(221,-91,0,0,0.,0.,0.,mass,mass);
+  auto first=event.append(22,1,0,0,0.,0.,mass/2,mass/2,0.);
+  auto second=event.append(22,1,0,0,0.,0.,-mass/2,mass/2,0.);
+  event[copy].daughters(physical,physical);event[physical].mothers(copy,copy);
+  event[physical].daughters(first,second);
+  event[first].mothers(physical,physical);event[second].mothers(physical,physical);
+  return physical;
+}
 std::string state(ShiftMesonNative::Source const& source,int index) {
   auto const* parent=source.current->barcode_to_particle(index);
   double residual=0.;
@@ -139,6 +151,33 @@ class NativeKaonGraphTest(unittest.TestCase):
         decay=sample_radiative_decay(130,record['p4'],.25,12.,random.Random(1))
         with self.assertRaises(Exception):inject_decay(self.source,index,decay)
         self.assertEqual(self.state(index)['parent_status'],1)
+
+    def test_production_snapshot_mixes_natural_mesons_and_pinned_final_kaons(self):
+        for pdg in (130,310,321,-321):
+            index,_=self.new_fixture(pdg)
+            record=json.loads(str(self.source.undecayed_kaon_record(index)))
+            self.source.parent_ids.push_back(221)
+            try:
+                eta_index=int(self.ROOT.ShiftKaonBridgeTest.append_natural_eta_with_copy(self.source))
+                summary_before=str(self.source.summary())
+                mixed=json.loads(str(self.source.production_snapshot()))
+                self.assertEqual(mixed['native_weight'],1.)
+                self.assertEqual(mixed['ecm_gev'],10.)
+                self.assertEqual(len(mixed['parents']),2)
+                self.assertEqual(mixed['parents'][0],record)
+                eta=mixed['parents'][1]
+                self.assertEqual(eta['index'],eta_index)
+                self.assertEqual(eta['pdg_id'],221)
+                mass=self.source.pythia.particleData.m0(221)
+                self.assertEqual(eta['native_mass_gev'],mass)
+                self.assertEqual(eta['p4'],[mass,0.,0.,0.])
+                self.assertEqual(str(self.source.summary()),summary_before)
+                with self.assertRaises(Exception):self.source.snapshot()
+                self.source.pythia.event[index].status(-91)
+                self.source.pythia.event[index].daughters(3,3)
+                with self.assertRaises(Exception):self.source.production_snapshot()
+            finally:
+                self.source.parent_ids.pop_back()
 
     def test_existing_native_lifetime_point_and_ancestors_survive_every_qualified_chain(self):
         for pdg,recoil_mass in ((130,0.),(310,0.),(321,.13957039),(-321,.13957039),(310,.1349768)):
