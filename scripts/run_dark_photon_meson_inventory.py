@@ -56,14 +56,22 @@ def run(request_path, expected):
         raise ValueError('The immutable census request changed')
     request = json.loads(request_path.read_text())
     directory = Path(request['directory'])
-    if (request['schema'] != 'shift-dp-parent-census-request-v1' or not directory.is_absolute()
-            or directory != request_path.parent or directory != Path.cwd()
-            or str(directory).startswith(('/tmp/','/pool/')) or sha(__file__) != request['worker_sha256']
-            or type(request['source_collisions']) is not int or not 2<=request['source_collisions']<=100000
-            or type(request['seed']) is not int or not 1<=request['seed']<=899999800
-            or not 0<request['source_timeout_seconds']<request['worker_timeout_seconds']<=5400
-            or not 0<request['maximum_result_bytes']<=4*1024*1024):
-        raise ValueError('Invalid frozen census worker identity, exposure or persistent working directory')
+    initial_cwd = str(Path.cwd())
+    checks = dict(schema=request['schema']=='shift-dp-parent-census-request-v1',
+        persistent_directory=directory.is_absolute() and not str(directory).startswith(('/tmp/','/pool/')),
+        directory_matches_absolute_request=request_path.is_absolute() and directory==request_path.parent,
+        directory_exists=directory.is_dir(),worker_sha256=sha(__file__)==request['worker_sha256'],
+        source_exposure=type(request['source_collisions']) is int and 2<=request['source_collisions']<=100000,
+        seed=type(request['seed']) is int and 1<=request['seed']<=899999800,
+        timeout_budget=0<request['source_timeout_seconds']<request['worker_timeout_seconds']<=5400,
+        result_budget=0<request['maximum_result_bytes']<=4*1024*1024)
+    failures = [name for name,passed in checks.items() if not passed]
+    if failures:
+        raise ValueError('Invalid frozen census identity fields '+repr(failures)+'; '+json.dumps(dict(
+            request=str(request_path),directory=str(directory),initial_process_cwd=initial_cwd)))
+    # CERN may start a transferred vanilla payload in scratch even when its
+    # queued Iwd is the correct persistent directory. Keep those two distinct.
+    os.chdir(directory)
     model, tools_archive = pin(request['model']), pin(request['tools_archive'])
     runtime_provenance = pin(request['gen_runtime']['provenance'])
     status_path = directory/'status.json'
@@ -74,7 +82,8 @@ def run(request_path, expected):
         status = dict(schema='shift-dp-parent-census-status-v1',complete=False,request_sha256=expected,
             started_utc=datetime.now(timezone.utc).isoformat(),seed=request['seed'],
             requested_source_collisions=request['source_collisions'],no_scheduler_mutations=True,
-            no_canonical_data_writes=True)
+            no_canonical_data_writes=True,initial_process_cwd=initial_cwd,
+            persistent_working_directory=str(directory))
         save(status_path,status)
         started = time.monotonic()
         try:
