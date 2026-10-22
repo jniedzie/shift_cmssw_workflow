@@ -7,7 +7,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_parent_flight import parent_flight, neutral_kaon_chain_ownership
+from dark_photon_parent_flight import (
+    parent_flight, neutral_kaon_chain_ownership, native_two_body_decay_mass_budget)
 
 
 class ParentFlightTest(unittest.TestCase):
@@ -153,6 +154,52 @@ class ParentFlightTest(unittest.TestCase):
     def test_extreme_finite_inputs_cannot_overflow_flight_accounting(self):
         with self.assertRaises(ValueError):
             self.flight(parent_p4=(1.e308, 0., 0., 0.))
+
+
+class NativeDecayPrecisionTest(unittest.TestCase):
+    def test_explicit_mass_boost_inherits_the_rank_one_mother_metric_defect(self):
+        # Deliberately visible native mass defect makes the analytic relation
+        # independently testable without tuning to one floating-point example.
+        mother_mass, momentum, relative_defect = 1., 5., 1.e-5
+        energy = math.sqrt(momentum**2+mother_mass**2*(1+relative_defect))
+        gamma, beta = energy/mother_mass, momentum/energy
+        for cosine in (-1., -.5, 0., .7, 1.):
+            rest_momentum, child_mass = .3, .4
+            rest_energy = math.hypot(rest_momentum, child_mass)
+            longitudinal = rest_momentum*cosine
+            transverse = rest_momentum*math.sqrt(1-cosine*cosine)
+            scalar = gamma*(gamma*beta*longitudinal/(1+gamma)+rest_energy)
+            child = (gamma*(rest_energy+beta*longitudinal),
+                     transverse, 0., longitudinal+scalar*beta)
+            actual = math.fsum([child[0]**2]+[-value**2 for value in child[1:]])-child_mass**2
+            expected = relative_defect*(rest_energy+gamma/(gamma+1)*beta*longitudinal)**2
+            self.assertLess(abs(actual-expected), 2.e-14)
+            self.assertLessEqual(abs(actual), relative_defect*mother_mass**2)
+
+    def test_actual_charged_kaon_control_uses_its_mother_budget_without_rescaling(self):
+        child = [23.454448484376616, -.049655855109822435,
+                 .05774005408487776, -23.449128706801698]
+        mother = [49.604108029692405, -.05285897247649058,
+                  .647072468760367, -49.59177378122383]
+        budget = native_two_body_decay_mass_budget(child, .493677, mother, .89555)
+        actual = abs(math.fsum([child[0]**2]+[-value**2 for value in child[1:]])-.493677**2)
+        self.assertGreater(actual, 8*math.ulp(max(value*value for value in child)))
+        self.assertLess(actual, budget['inherited_child_mass_defect_bound_gev2'])
+        row = parent_flight(child, .493677, (0., 0., 0., 0.), 3713.,
+            mass_authority='Native control plus explicit two-body ancestry precision',
+            lifetime_authority='Native Pythia table', uniform=.5,
+            mass_shell_relative_tolerance=budget['extra_mass_shell_relative_tolerance'])
+        self.assertEqual(row['parent_p4'], child)
+        self.assertTrue(budget['requires_rate_and_kinematic_precision_check'])
+        self.assertFalse(budget['physical_publication_ready'])
+
+    def test_budget_requires_a_physical_native_decay_context(self):
+        for child, child_mass, mother, mother_mass in (
+                ((2., 0., 0., 0.), .4, (1., 0., 0., 0.), 1.),
+                ((1., 0., 0., 0.), 1., (2., 0., 0., 0.), 1.),
+                ((1., 0., 0., 0.), .4, (2., 0., 0., 3.), 1.)):
+            with self.subTest(child=child), self.assertRaises(ValueError):
+                native_two_body_decay_mass_budget(child, child_mass, mother, mother_mass)
 
 
 class NeutralKaonOwnershipTest(unittest.TestCase):

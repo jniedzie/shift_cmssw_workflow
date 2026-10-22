@@ -51,6 +51,59 @@ def _native_displacement(origin, endpoint, expected):
     return actual, residual, tolerance
 
 
+def native_two_body_decay_mass_budget(child_p4, child_mass_gev,
+                                      mother_p4, mother_mass_gev):
+    """Numerical ancestry budget for Pythia's explicit-mass two-body boost.
+
+    Pythia 8.317 Basics.cc Vec4::bst(parent,m) has 22 scalar arithmetic
+    operations. ParticleDecays.cc applies it to rest-frame two-body daughters.
+    The boost uses gamma=E/m and beta=p/E; it inherits an off-shell mother's
+    metric defect rather than repairing its momentum. In exact arithmetic,
+      delta(child mass^2) = delta_mother *
+          [E* + gamma/(gamma+1) beta.p*]^2,
+    where delta_mother=(mother_p4^2-mother_mass^2)/mother_mass^2.
+    The bracket is bounded by the mother's mass for positive-energy two-body
+    daughters, hence its inherited absolute defect is at most the mother's.
+
+    The gamma_n floating-point bounds also cover the boost expression and a
+    32-operation rest-frame construction envelope. This is a numerical policy,
+    not a measured physics uncertainty: the caller must separately bound the
+    resulting changes in rates/kinematics before physical admission.
+    """
+    child, mother = _four(child_p4, 'child momentum'), _four(mother_p4, 'mother momentum')
+    mass = _positive(child_mass_gev, 'child mass')
+    parent_mass = _positive(mother_mass_gev, 'mother mass')
+    if (child[0] < mass or mother[0] < parent_mass or mass >= parent_mass or
+            child[0] > mother[0]+8*math.ulp(mother[0])):
+        raise ValueError('Require an actual physical two-body daughter and its native mother')
+    parent_squared = math.fsum([mother[0]**2]+[-value**2 for value in mother[1:]])
+    if parent_squared <= 0:
+        raise ValueError('Native mother must remain timelike')
+    unit_roundoff = 2.**-53
+    boost_operations, rest_operations = 22, 32
+    boost_gamma = boost_operations*unit_roundoff/(1-boost_operations*unit_roundoff)
+    rest_gamma = rest_operations*unit_roundoff/(1-rest_operations*unit_roundoff)
+    inherited = abs(parent_squared-parent_mass**2)
+    component_error = 2*mother[0]*boost_gamma
+    arithmetic = (2*component_error*math.fsum(abs(value) for value in child)
+                  +4*component_error**2+rest_gamma*parent_mass**2)
+    extra = inherited+arithmetic
+    if not math.isfinite(extra) or extra >= mass**2:
+        raise ValueError('Ancestry cannot be treated as a small numerical mass defect')
+    return dict(schema='shift-native-two-body-boost-precision-v1',
+        authority='Pythia8.317 explicit-mass Vec4::bst and ParticleDecays two-body path',
+        reference='https://gitlab.com/Pythia8/releases/-/raw/pythia8317/src/Basics.cc',
+        child_p4=list(child), mother_p4=list(mother), child_mass_gev=mass,
+        mother_mass_gev=parent_mass, boost_scalar_operations=boost_operations,
+        rest_construction_operation_envelope=rest_operations,
+        mother_mass_shell_residual_gev2=inherited,
+        inherited_child_mass_defect_bound_gev2=inherited,
+        floating_arithmetic_mass_defect_bound_gev2=arithmetic,
+        extra_mass_shell_relative_tolerance=extra/mass**2,
+        requires_rate_and_kinematic_precision_check=True,
+        physical_publication_ready=False)
+
+
 def parent_flight(parent_p4, parent_mass_gev, production_position_mm,
                   mean_proper_ctau_mm, *, mass_authority, lifetime_authority,
                   uniform=None, native_decay_position_mm=None,
