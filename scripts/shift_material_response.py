@@ -194,6 +194,8 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
     """
     from audit_shift_weighted_gen import ALGORITHM, close, validate_config, validate_ledger
     from generation_publication import sha256
+    from shift_first_mpi_source_proposal import ALGORITHM as hf_algorithm
+    from shift_first_mpi_source_proposal import validate, validate_uncensored_config
     if family not in ('jpsi', 'qcd_ordinary'):
         raise ValueError('Ordinary fixed-trial adapter supports jpsi or qcd_ordinary')
     label = 'J/psi' if family == 'jpsi' else 'Raw ordinary QCD'
@@ -203,13 +205,20 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
                     if family == 'jpsi' else 'none')
     path = Path(receipt_path).resolve()
     record = json.loads(path.read_text())
+    composite = family == 'qcd_ordinary' and record.get('algorithm') == hf_algorithm
+    if composite and (record.get('generator_profile') != 'ordinary'
+            or not isinstance(record.get('source_proposal'), dict)
+            or not isinstance(record.get('source_proposal_audit'), dict)):
+        raise ValueError('Raw ordinary QCD needs its explicit ordinary profile and first-MPI proof')
     if (record.get('schema') != 'shift-weighted-gen-receipt-v3'
             or not all(record.get(key) is True for key in ('complete', 'generated_edm', 'publication_complete'))
-            or record.get('generator_profile', 'ordinary') != 'ordinary' or record.get('algorithm') != ALGORITHM
-            or record.get('source_proposal') is not None
+            or record.get('generator_profile', 'ordinary') != 'ordinary'
+            or (not composite and (record.get('algorithm') != ALGORITHM or record.get('source_proposal') is not None))
             or record.get('physics_valid') is not False or record.get('normalization_ready') is not False):
         raise ValueError(label+' needs a complete ordinary fixed-trial diagnostic source')
     request, ledger, audit = record['request'], record['ledger'], record['semantic_audit']
+    if composite and audit.get('generator_profile') != 'ordinary':
+        raise ValueError('Raw ordinary QCD needs an explicit unfiltered native semantic audit')
     trials = validate_ledger(ledger)
     if (request['sample'] != sample or ledger['sample'] != ledger_sample
             or request['trials'] != trials or request['run'] != ledger['run']
@@ -235,6 +244,8 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
         return item
 
     names = ('semantic_audit.json', 'proposal_ledger.json', 'resolved_gen_cfg.py')
+    if composite:
+        names += ('source_proposal_audit.json',)
     if audit_directory is None:
         with zipfile.ZipFile(path.with_name('artifacts.zip')) as archive:
             payloads = {name: archive.read(name) for name in names}
@@ -255,6 +266,8 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
             or hashlib.sha256(config).hexdigest() != artifact('resolved_gen_cfg.py')['sha256']):
         raise ValueError(label+' resolved configuration differs from publication')
     model = validate_config(config.decode(), ledger)
+    if composite:
+        validate_uncensored_config(config.decode(), ledger)
     gen = artifact('gen.root')
     if gen_path is not None:
         local = Path(gen_path)
@@ -304,7 +317,7 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
         saved_events=count, full_source_trials=trials, sigma_nd_pb=ledger['sigma_nd_mb']*1.e9,
         denominator_kind='fixed_source_trials', mean_abs_native_weight=sumw/count,
         original_receipt=str(path), original_receipt_sha256=sha256(path),
-        generator_profile='ordinary', generator_algorithm=ALGORITHM,
+        generator_profile='ordinary', generator_algorithm=record['algorithm'],
         timing_input_label='generatorSmeared',
         decay_dependent_filter=False, saved_decays_unchanged=True,
         forced_decay=audit['forced_decay'], forced_decay_branching_convention_ready=family == 'qcd_ordinary',
@@ -314,6 +327,40 @@ def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path
     if family == 'qcd_ordinary':
         source.update(requires_full_muon_completion=True, muon_enhancement_complete=False,
             muon_enhancement_scope='Raw unfiltered hadronization; natural weak-decay completion not yet applied.')
+    if composite:
+        manifest = dict(algorithm=hf_algorithm, generator_profile='ordinary',
+            source_proposal=record['source_proposal'], inputs=record['source_inputs'],
+            maximum_publication_bytes_per_worker=record['publication_size_guard']['reserved_bytes'])
+        proposal = validate(manifest, request)
+        proof = record['source_proposal_audit']
+        published = artifact('source_proposal_audit.json')
+        proof_bytes = payloads['source_proposal_audit.json']
+        if (len(proof_bytes) != published['bytes'] or hashlib.sha256(proof_bytes).hexdigest() != published['sha256']
+                or json.loads(proof_bytes) != proof):
+            raise ValueError('Raw ordinary QCD full source-path proof differs from native returned bytes')
+        if (proof.get('schema') != 'shift-native-first-mpi-source-audit-v1'
+                or any(proof.get(key) is not True for key in ('complete', 'passed', 'natural_decays',
+                    'all_intrinsic_retry_paths_checked', 'source_only_native_weight_checked',
+                    'saved_events_equal_native_acceptance', 'requires_full_muon_completion'))
+                or proof.get('generator_profile') != 'ordinary' or proof.get('decay_dependent_filter') is not False
+                or proof.get('physics_valid') is not False or proof.get('normalization_ready') is not False
+                or proof['algorithm'] != hf_algorithm or proof['base_sampler_algorithm'] != ALGORITHM
+                or proof['source_proposal'] != proposal or proof['full_source_trials'] != trials
+                or proof['first_scatter_calls'] != ledger['proposal_calls']
+                or proof['prefilter_accepted_events'] != count or proof['saved_events'] != count):
+            raise ValueError('Raw ordinary QCD needs the complete uncensored first-MPI source-path proof')
+        history, prefilter = artifact('hard_channel_history.jsonl'), artifact('prefilter.root')
+        if (proof['GEN_sha256'] != gen['sha256'] or proof['ledger_sha256'] != audit['ledger_sha256']
+                or proof['semantic_audit_sha256'] != artifact('semantic_audit.json')['sha256']
+                or proof['history_sha256'] != history['sha256'] or proof['history_bytes'] != history['bytes']
+                or not 0 < history['bytes'] <= proposal['maximum_history_bytes']
+                or proof['prefilter_GEN_sha256'] != prefilter['sha256']
+                or proof['prefilter_GEN_bytes'] != prefilter['bytes'] or prefilter['bytes'] <= 0
+                or proof['auditor_sha256'] != record['source_inputs']['shift_first_mpi_source_proposal.py']):
+            raise ValueError('Raw ordinary QCD proof is not bound to full published GEN/history/accounting')
+        source.update(base_sampler_algorithm=ALGORITHM, source_proposal=proposal,
+            source_proposal_audit=published, native_weight_already_contains_source_correction=True,
+            detector_weight_formula='Native W / reconstruction inclusion probability; no second HF or filter factor.')
     return source
 
 

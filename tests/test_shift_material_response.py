@@ -133,6 +133,60 @@ def dy_receipt_fixture(directory):
     return path, record
 
 
+def ordinary_hf_receipt_fixture(directory, mode='mixture'):
+    """Synthetic unfiltered fixed-trial receipt using the native HF proof fields."""
+    from shift_first_mpi_source_proposal import ALGORITHM, BASE_ALGORITHM, SCHEMA
+    path, record = jpsi_receipt_fixture(directory, family='qcd_ordinary')
+    with zipfile.ZipFile(path.with_name('artifacts.zip')) as archive:
+        payloads = {name: archive.read(name) for name in archive.namelist()}
+    payloads['resolved_gen_cfg.py'] += b"""
+process.ProductionFilterSequence=cms.Sequence(process.generator)
+process.generation_step=cms.Path(process.ProductionFilterSequence+process.pgen)
+process.FEVTDEBUGoutput=cms.OutputModule('PoolOutputModule',SelectEvents=cms.untracked.PSet(SelectEvents=cms.vstring('generation_step')))
+"""
+    digest = lambda data: hashlib.sha256(data).hexdigest()
+    record['semantic_audit']['config_sha256'] = digest(payloads['resolved_gen_cfg.py'])
+    payloads['semantic_audit.json'] = json.dumps(record['semantic_audit']).encode()
+    payloads.update({'hard_channel_history.jsonl': b'complete native first-MPI history',
+                     'prefilter.root': b'complete unfiltered native accepted GEN'})
+    proposal = dict(schema=SCHEMA, algorithm=ALGORITHM, base_sampler_algorithm=BASE_ALGORITHM,
+        mode=mode, target='heavy', component_seed=123, overlay_sha256='a'*64,
+        natural_decays=True, maximum_history_bytes=1024*1024)
+    ledger = record['ledger']
+    proof = dict(schema='shift-native-first-mpi-source-audit-v1', complete=True, passed=True,
+        natural_decays=True, all_intrinsic_retry_paths_checked=True, source_only_native_weight_checked=True,
+        generator_profile='ordinary', decay_dependent_filter=False, saved_events_equal_native_acceptance=True,
+        requires_full_muon_completion=True, physics_valid=False, normalization_ready=False,
+        algorithm=ALGORITHM, base_sampler_algorithm=BASE_ALGORITHM, source_proposal=proposal,
+        full_source_trials=ledger['tried'], first_scatter_calls=ledger['proposal_calls'],
+        prefilter_accepted_events=ledger['accepted'], saved_events=record['event_count'],
+        GEN_sha256=digest(payloads['gen.root']), ledger_sha256=digest(payloads['proposal_ledger.json']),
+        semantic_audit_sha256=digest(payloads['semantic_audit.json']),
+        history_sha256=digest(payloads['hard_channel_history.jsonl']),
+        history_bytes=len(payloads['hard_channel_history.jsonl']),
+        prefilter_GEN_sha256=digest(payloads['prefilter.root']), prefilter_GEN_bytes=len(payloads['prefilter.root']),
+        auditor_sha256='c'*64)
+    record.update(algorithm=ALGORITHM, source_proposal=proposal, source_proposal_audit=proof,
+                  publication_size_guard={'reserved_bytes':160000000})
+    record['request']['stage'] = 'pilot'
+    record['source_inputs'].update({'shift_first_mpi_source_proposal.py':'c'*64,
+                                     'libShiftMpiTailProposal.so':'a'*64})
+    write_ordinary_hf_fixture(path, record, payloads)
+    return path, record, payloads
+
+
+def write_ordinary_hf_fixture(path, record, payloads):
+    payloads['semantic_audit.json'] = json.dumps(record['semantic_audit']).encode()
+    payloads['source_proposal_audit.json'] = json.dumps(record['source_proposal_audit']).encode()
+    record['artifacts'] = {name:dict(bytes=len(data),sha256=hashlib.sha256(data).hexdigest())
+                           for name,data in payloads.items()}
+    record['publication'] = [dict(name=name,path=record['publication_directory']+'/'+name,
+        independent_sha256_readback=True,**record['artifacts'][name]) for name in payloads]
+    path.write_text(json.dumps(record))
+    with zipfile.ZipFile(path.with_name('artifacts.zip'),'w') as archive:
+        for name,data in payloads.items():archive.writestr(name,data)
+
+
 def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights, payload=b'prepared GEN'):
     """Use the real full-GEN canary receipt fields, with no physical simulation."""
     metadata = dict(runs=[dict(run=event_ids[0][0], original='full source run')],
@@ -284,6 +338,73 @@ class PreparedSourceTests(unittest.TestCase):
 
 
 class SourceRecordTest(unittest.TestCase):
+    def test_ordinary_HF_and_disabled_control_keep_all_acceptance_native_W_and_full_trials(self):
+        for mode in ('mixture','disabled'):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                path, record, _ = ordinary_hf_receipt_fixture(directory,mode)
+                source = source_record(path,family='qcd_ordinary')
+                self.assertEqual(source['saved_events'],record['ledger']['accepted'])
+                self.assertEqual(source['full_source_trials'],4)
+                self.assertAlmostEqual(source['mean_abs_native_weight'],.3)
+                self.assertEqual(source_rate_weight(source,.2),.2*65.e9/4)
+                self.assertEqual(source['source_proposal']['mode'],mode)
+                self.assertEqual(source['generator_algorithm'],record['algorithm'])
+                self.assertTrue(source['native_weight_already_contains_source_correction'])
+                self.assertTrue(source['requires_full_muon_completion'])
+                self.assertFalse(source['muon_enhancement_complete'])
+                self.assertFalse(source['decay_dependent_filter'])
+                self.assertFalse(source['physics_normalization_ready'])
+                with self.assertRaises(ValueError):source_record(path)
+                with self.assertRaises(ValueError):source_record(path,family='jpsi')
+
+    def test_ordinary_HF_requires_full_native_proof_even_with_rehashed_returned_bytes(self):
+        changes = [lambda r:r['source_proposal_audit'].update(passed=False),
+            lambda r:r.pop('generator_profile'),
+            lambda r:r['semantic_audit'].pop('generator_profile'),
+            lambda r:r.update(source_proposal=None),
+            lambda r:r['source_proposal_audit'].pop('saved_events_equal_native_acceptance'),
+            lambda r:r['source_proposal_audit'].update(decay_dependent_filter=True),
+            lambda r:r['source_proposal_audit'].update(generator_profile='mu_enriched'),
+            lambda r:r['source_proposal_audit'].update(requires_full_muon_completion=False),
+            lambda r:r['source_proposal_audit'].update(full_source_trials=2),
+            lambda r:r['source_proposal_audit'].update(prefilter_accepted_events=1,saved_events=1),
+            lambda r:r['source_proposal_audit'].update(history_sha256='d'*64),
+            lambda r:r['source_proposal_audit'].update(history_bytes=1),
+            lambda r:r['source_proposal_audit'].update(prefilter_GEN_sha256='d'*64),
+            lambda r:r['source_proposal_audit'].update(auditor_sha256='d'*64),
+            lambda r:r['request'].update(stage='production')]
+        for change in changes:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                path,record,payloads=ordinary_hf_receipt_fixture(directory)
+                change(record);write_ordinary_hf_fixture(path,record,payloads)
+                with self.assertRaises(ValueError):source_record(path,family='qcd_ordinary')
+
+    def test_ordinary_HF_rejects_rehashed_hidden_filters_and_cylinder_or_censored_sources(self):
+        for change in ('hidden_filter','filter_sequence','cylinder','subset'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                path,record,payloads=ordinary_hf_receipt_fixture(directory)
+                config=payloads['resolved_gen_cfg.py']
+                if change=='hidden_filter':config+=b"\nprocess.extra=cms.EDFilter('MCSmartSingleParticleFilter')\n"
+                elif change=='filter_sequence':config=config.replace(b'cms.Sequence(process.generator)',b'cms.Sequence(process.generator+process.extra)')
+                elif change=='cylinder':config=config.replace(b'ParticleDecays:tau0Max = 10',b'ParticleDecays:limitCylinder = on')
+                else:
+                    record['semantic_audit']['event_ids']=record['semantic_audit']['event_ids'][:1]
+                    record['semantic_audit']['weights']=record['semantic_audit']['weights'][:1]
+                payloads['resolved_gen_cfg.py']=config
+                record['semantic_audit']['config_sha256']=hashlib.sha256(config).hexdigest()
+                record['source_proposal_audit']['semantic_audit_sha256']=hashlib.sha256(json.dumps(record['semantic_audit']).encode()).hexdigest()
+                write_ordinary_hf_fixture(path,record,payloads)
+                with self.assertRaises(ValueError):source_record(path,family='qcd_ordinary')
+
+    def test_ordinary_HF_proof_requires_the_actual_returned_SHA_bound_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path,_,payloads=ordinary_hf_receipt_fixture(directory)
+            payloads['source_proposal_audit.json']=b'{"passed":true}'
+            with zipfile.ZipFile(path.with_name('artifacts.zip'),'w') as archive:
+                for name,data in payloads.items():archive.writestr(name,data)
+            with self.assertRaisesRegex(ValueError,'native returned bytes'):
+                source_record(path,family='qcd_ordinary')
+
     def test_raw_ordinary_QCD_is_explicit_and_requires_full_natural_muon_completion(self):
         with tempfile.TemporaryDirectory() as directory:
             path, _ = jpsi_receipt_fixture(directory, family='qcd_ordinary')
