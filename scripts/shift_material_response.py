@@ -25,6 +25,8 @@ SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 
 
 GENPARTICLE_PERSISTENCE_SCHEMA_SHA256 = '66c6124fc1d1580acefe469c404ac143c95ba833aed9fcd8117698c2dcec62fa'
 GENPARTICLE_ENCODING = 'native reco::GenParticle constructed from newly timed HepMC, then stock ROOT dictionary roundtrip'
+GENPARTICLE_CONDITIONING_SCHEMA = 'shift-genparticles-conditioning-v2'
+GENPARTICLE_ROUNDOFF_ALGORITHM = 'gamma8-signed-mass2-float32-stock-polar-energy-v1'
 
 
 def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=None):
@@ -535,14 +537,43 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
                 'timing did not consume the completed unshifted graph')
         truth = row['genParticles']
         # The stock dictionary stores polar p4 and vertices as Double32_t.
-        # Compare the actual persisted candidate to an independently encoded
-        # expected candidate, not to the raw HepMC doubles or a loose tolerance.
-        require(truth.get('stock_persistence_encoding_exact') is True
-                and truth.get('exact_PDG_status_and_barcode_ancestry') is True
+        # Keep legacy exact matching strict. V2 permits only the separately
+        # audited cancellation in mass2 and derived energy; coordinates stay exact.
+        mode = truth.get('stock_persistence_audit_schema')
+        if mode is None:
+            encoding_valid = (truth.get('stock_persistence_encoding_exact') is True
+                and type(truth.get('expected_encoded_p4_residual_GeV')) in (int, float)
+                and truth['expected_encoded_p4_residual_GeV'] == 0.)
+        elif mode == GENPARTICLE_CONDITIONING_SCHEMA:
+            residuals = ('expected_encoded_p4_residual_GeV',
+                'maximum_signed_mass2_residual_GeV2', 'maximum_signed_mass2_bound_GeV2',
+                'maximum_signed_mass2_bound_fraction', 'maximum_energy2_residual_GeV2',
+                'maximum_energy2_bound_GeV2', 'maximum_energy2_bound_fraction')
+            encoding_valid = (truth.get('stock_persistence_encoding_exact') is False
+                and truth.get('exact_encoded_pt_eta_phi_xyz_vertex') is True
+                and truth.get('mass_shell_roundoff_checks_passed') is True
+                and truth.get('roundoff_algorithm') == GENPARTICLE_ROUNDOFF_ALGORITHM
+                and type(truth.get('roundoff_operations')) is int and truth['roundoff_operations'] == 8
+                and truth.get('roundoff_unit') == 2.**-53
+                and truth.get('mass_float32_unit') == 2.**-24
+                and truth.get('mass_float32_min_subnormal') == 2.**-149
+                and type(truth.get('expected_encoded_xyz_residual_GeV')) in (int, float)
+                and truth['expected_encoded_xyz_residual_GeV'] == 0.
+                and all(type(truth.get(key)) in (int, float) and math.isfinite(truth[key])
+                        and truth[key] >= 0. for key in residuals))
+            if encoding_valid:
+                for prefix in ('maximum_signed_mass2', 'maximum_energy2'):
+                    residual, bound, fraction = (truth[prefix+suffix] for suffix in
+                        ('_residual_GeV2', '_bound_GeV2', '_bound_fraction'))
+                    encoding_valid = (encoding_valid and residual <= bound and fraction <= 1.
+                                      and (bound > 0. or (residual == 0. and fraction == 0.)))
+        else:
+            encoding_valid = False
+        require(encoding_valid and truth.get('exact_PDG_status_and_barcode_ancestry') is True
                 and truth.get('stock_persistence_schema_sha256') == GENPARTICLE_PERSISTENCE_SCHEMA_SHA256
                 and truth.get('encoding') == GENPARTICLE_ENCODING
-                and all(type(truth.get(key)) in (int, float) and truth[key] == 0.
-                        for key in ('expected_encoded_p4_residual_GeV', 'expected_encoded_vertex_residual_cm'))
+                and type(truth.get('expected_encoded_vertex_residual_cm')) in (int, float)
+                and truth['expected_encoded_vertex_residual_cm'] == 0.
                 and all(type(truth.get(key)) in (int, float) and math.isfinite(truth[key]) and truth[key] >= 0.
                         for key in ('maximum_p4_raw_to_encoded_residual_GeV', 'maximum_vertex_residual_cm'))
                 and truth.get('rebuilt_process') == 'SHIFTFULLGEN'

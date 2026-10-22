@@ -13,7 +13,8 @@ from shift_material_response import (compare, bootstrap_comparison, shape_compar
                                      retained_tail_counts, response_reporting_scope, source_record, TARGETS,
                                      source_normalization, source_exposures, source_rate_weight,
                                      source_timing_input, prepared_source_record, validate_prepared_source,
-                                     source_origin_sha256)
+                                     source_origin_sha256, GENPARTICLE_CONDITIONING_SCHEMA,
+                                     GENPARTICLE_ROUNDOFF_ALGORITHM)
 from shift_material_preselection import admission_probability
 
 
@@ -232,6 +233,17 @@ def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights
 
 
 class PreparedSourceTests(unittest.TestCase):
+    def conditioned_truth(self, truth):
+        truth.update(stock_persistence_audit_schema=GENPARTICLE_CONDITIONING_SCHEMA,
+            roundoff_algorithm=GENPARTICLE_ROUNDOFF_ALGORITHM, stock_persistence_encoding_exact=False,
+            exact_encoded_pt_eta_phi_xyz_vertex=True, expected_encoded_xyz_residual_GeV=0.,
+            expected_encoded_p4_residual_GeV=1.11e-16, mass_shell_roundoff_checks_passed=True,
+            roundoff_operations=8, roundoff_unit=2.**-53, mass_float32_unit=2.**-24,
+            mass_float32_min_subnormal=2.**-149, maximum_signed_mass2_residual_GeV2=1.11e-16,
+            maximum_signed_mass2_bound_GeV2=1.5e-15, maximum_signed_mass2_bound_fraction=.7,
+            maximum_energy2_residual_GeV2=2.22e-16, maximum_energy2_bound_GeV2=1.e-15,
+            maximum_energy2_bound_fraction=.4)
+
     def make_raw(self, directory, family='qcd_ordinary'):
         if family == 'dy':
             path, record = dy_receipt_fixture(directory)
@@ -313,6 +325,57 @@ class PreparedSourceTests(unittest.TestCase):
                 self.assertEqual(source_rate_weight(source, weights[0]), source_rate_weight(raw, weights[0]))
                 self.assertEqual(source['prepared_event_ids'], ids)
                 self.assertEqual(source['prepared_native_weights'], weights)
+
+    def test_conditioning_V2_preserves_each_family_identity_weights_and_native_exposure(self):
+        for family in ('qcd_ordinary', 'dy', 'jpsi'):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
+                raw, ids, weights = self.make_raw(directory, family)
+                path, audit = preparation_receipt_fixture(directory, raw, ids, weights)
+                self.conditioned_truth(audit['units'][0]['events'][0]['genParticles'])
+                path.write_text(json.dumps(audit))
+                source = prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                self.assertEqual(source['prepared_event_ids'], ids)
+                self.assertEqual(source['prepared_native_weights'], weights)
+                self.assertEqual(source_normalization(source), source_normalization(raw))
+                self.assertEqual(source_rate_weight(source, weights[0]), source_rate_weight(raw, weights[0]))
+                validate_prepared_source(source, dict(indices=[0], event_ids=ids,
+                    native_weights=weights, probabilities=[.25]))
+
+    def test_conditioning_V2_requires_exact_coordinates_pinned_algorithm_and_per_particle_bounds(self):
+        changes = [
+            lambda t:t.pop('stock_persistence_audit_schema'),
+            lambda t:t.update(stock_persistence_audit_schema='unknown'),
+            lambda t:t.update(stock_persistence_encoding_exact=True),
+            lambda t:t.update(exact_encoded_pt_eta_phi_xyz_vertex=False),
+            lambda t:t.update(exact_PDG_status_and_barcode_ancestry=False),
+            lambda t:t.update(expected_encoded_xyz_residual_GeV=1.e-16),
+            lambda t:t.update(expected_encoded_vertex_residual_cm=1.e-16),
+            lambda t:t.update(stock_persistence_schema_sha256='e'*64),
+            lambda t:t.update(encoding='raw doubles'),
+            lambda t:t.update(mass_shell_roundoff_checks_passed=False),
+            lambda t:t.update(roundoff_algorithm='loose tolerance'),
+            lambda t:t.update(roundoff_operations=9),
+            lambda t:t.update(roundoff_unit=2.**-52),
+            lambda t:t.update(mass_float32_unit=2.**-23),
+            lambda t:t.update(mass_float32_min_subnormal=0.),
+            lambda t:t.update(expected_encoded_p4_residual_GeV=float('nan')),
+            lambda t:t.update(maximum_signed_mass2_bound_fraction=1.01),
+            lambda t:t.update(maximum_energy2_bound_fraction=1.01),
+            lambda t:t.update(maximum_signed_mass2_residual_GeV2=2.),
+            lambda t:t.update(maximum_energy2_residual_GeV2=2.),
+            lambda t:t.update(maximum_signed_mass2_bound_GeV2=-1.),
+            lambda t:t.update(maximum_energy2_bound_GeV2=float('inf')),
+            lambda t:t.update(maximum_energy2_bound_fraction=float('nan')),
+            lambda t:t.update(maximum_signed_mass2_bound_fraction=-.1),
+            lambda t:t.pop('maximum_energy2_residual_GeV2')]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                raw, ids, weights = self.make_raw(directory)
+                path, audit = preparation_receipt_fixture(directory, raw, ids, weights)
+                truth = audit['units'][0]['events'][0]['genParticles']
+                self.conditioned_truth(truth);change(truth);path.write_text(json.dumps(audit))
+                with self.assertRaises(ValueError):
+                    prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
     def test_prepared_event_must_match_original_native_census_not_just_internal_proof(self):
         with tempfile.TemporaryDirectory() as directory:
