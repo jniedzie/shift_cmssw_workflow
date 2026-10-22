@@ -349,7 +349,7 @@ def _validated_parent_rate_model(key, context_key):
 
 def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
                                    native_energy_gev, native_mass_tolerance,
-                                   native_parent_rate_model):
+                                   native_parent_rate_model, defer_to_full_source=False):
     """Recompute a <=0.1% bound on one physical parent's total contribution.
 
     The usual isolated-channel relative test remains strict. Near a kinematic
@@ -361,6 +361,13 @@ def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
     Neither nominal production probabilities nor native p4 are modified.
     This bounds the added rare-channel contribution; it does not establish
     the missing hadronic model or a general sibling-shape uncertainty.
+
+    An explicitly deferred report does not pass this parent. It provides an
+    absolute bound for an independent fixed-source audit: the sum of both
+    nonnegative parent measures bounds their L1 difference, even if their
+    conditional distributions have disjoint support. The runner must retain
+    every parent and collision and pass the unchanged full-source 0.1% budget
+    before accepting or publishing the sample. Default callers remain strict.
     """
     key = _model_key(model)
     inputs = _validated_model(key)
@@ -393,7 +400,10 @@ def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
     conditional_bound = (channel_fraction if abs(relative_channel_shift) >
                          NATIVE_KINEMATIC_RATE_PRECISION_LIMIT else 0.)
     combined_bound = l1_shift+conditional_bound
-    if combined_bound > NATIVE_KINEMATIC_RATE_PRECISION_LIMIT:
+    if type(defer_to_full_source) is not bool:
+        raise ValueError('Full-source deferral must be explicitly boolean')
+    deferred = combined_bound > NATIVE_KINEMATIC_RATE_PRECISION_LIMIT
+    if deferred and not defer_to_full_source:
         raise ValueError('Native charged-rho parent rate plus conditional-shape bound exceeds 0.1%')
     return dict(schema='shift-charged-rho-native-parent-precision-v1',
                 parent_pdg_id=context['parent_pdg_id'], signal_mass_gev=mass,
@@ -405,12 +415,17 @@ def native_parent_precision_report(parent_mass, mass, model, *, native_mass_gev,
                 parent_l1_relative_rate_shift=l1_shift,
                 conditional_distribution_fraction_bound=conditional_bound,
                 parent_total_relative_bound=combined_bound,
+                deferred_full_source_check=deferred,
+                scope='deferred-full-source' if deferred else 'same-parent',
+                nominal_parent_coefficient=total,
+                conservative_absolute_parent_measure_bound=(total+shifted+companion_shifted
+                                                            if deferred else 0.),
                 required_relative_bound=NATIVE_KINEMATIC_RATE_PRECISION_LIMIT)
 
 
 def branching_coefficient(parent_mass, mass, model, *, native_mass_gev=None,
                           native_energy_gev=None, native_mass_tolerance=None,
-                          native_parent_rate_model=None):
+                          native_parent_rate_model=None, defer_to_full_source=False):
     """BR(rho+- -> pi+- pi0 A')/epsilon², excluding the A' dimuon BR.
 
     Production probability must use the native pole. Explicit native context
@@ -438,12 +453,15 @@ def branching_coefficient(parent_mass, mass, model, *, native_mass_gev=None,
     coefficient = _interpolated_or_exact_coefficient(parent_mass, mass, key)
     if native_parent_rate_model is not None and not context:
         raise ValueError('Owned parent rate context requires complete native mass and tolerance context')
+    if defer_to_full_source and (native_parent_rate_model is None or not context):
+        raise ValueError('Full-source deferral requires the complete owned native parent context')
     if context:
         if native_parent_rate_model is not None:
             native_parent_precision_report(parent_mass, mass, model,
                 native_mass_gev=native_mass_gev, native_energy_gev=native_energy_gev,
                 native_mass_tolerance=native_mass_tolerance,
-                native_parent_rate_model=native_parent_rate_model)
+                native_parent_rate_model=native_parent_rate_model,
+                defer_to_full_source=defer_to_full_source)
         else:
             nominal = _interpolated_or_exact_coefficient(native_mass_gev, mass, key)
             if abs(coefficient/nominal-1) > NATIVE_KINEMATIC_RATE_PRECISION_LIMIT:
@@ -461,7 +479,7 @@ def photon_branching_above_cut(cut_energy_gev, model):
 
 
 def _parent_mass(parent, model, *, signal_mass=None, native_mass_gev=None, native_mass_tolerance=None,
-                 native_parent_rate_model=None):
+                 native_parent_rate_model=None, defer_to_full_source=False):
     if native_parent_rate_model is not None and (native_mass_gev is None or native_mass_tolerance is None):
         raise ValueError('Owned parent rate context requires complete native mass and tolerance context')
     if len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0:
@@ -475,17 +493,19 @@ def _parent_mass(parent, model, *, signal_mass=None, native_mass_gev=None, nativ
     if native_mass_gev is not None or native_mass_tolerance is not None:
         branching_coefficient(result, signal_mass, model, native_mass_gev=native_mass_gev,
                               native_energy_gev=parent[0], native_mass_tolerance=native_mass_tolerance,
-                              native_parent_rate_model=native_parent_rate_model)
+                              native_parent_rate_model=native_parent_rate_model,
+                              defer_to_full_source=defer_to_full_source)
     return result
 
 
 def mean_lab_beta_gamma(parent, mass, model, *, native_mass_gev=None, native_mass_tolerance=None,
-                        native_parent_rate_model=None):
+                        native_parent_rate_model=None, defer_to_full_source=False):
     key = _model_key(model)
     inputs = _validated_model(key)
     parent_mass = _parent_mass(parent, inputs, signal_mass=mass,
                               native_mass_gev=native_mass_gev, native_mass_tolerance=native_mass_tolerance,
-                              native_parent_rate_model=native_parent_rate_model)
+                              native_parent_rate_model=native_parent_rate_model,
+                              defer_to_full_source=defer_to_full_source)
     _check_mass(mass, inputs)
     threshold = inputs['charged_pion_mass_gev']+inputs['neutral_pion_mass_gev']
     if mass <= 2*MUON_MASS_GEV or mass >= parent_mass-threshold:
@@ -576,7 +596,8 @@ def _sample_invariants(parent_mass, mass, key, rng):
 
 
 def sample_decay(parent, mass, proper_ctau_mm, rng, *, model, charge=1,
-                 native_mass_gev=None, native_mass_tolerance=None, native_parent_rate_model=None):
+                 native_mass_gev=None, native_mass_tolerance=None, native_parent_rate_model=None,
+                 defer_to_full_source=False):
     """Unconditional correlated charged-rho decay, with rho charge ±1."""
     if charge not in (-1, 1):
         raise ValueError('Charged rho must have charge +1 or -1')
@@ -587,7 +608,8 @@ def sample_decay(parent, mass, proper_ctau_mm, rng, *, model, charge=1,
     inputs = _validated_model(key)
     parent_mass = _parent_mass(parent, inputs, signal_mass=mass,
                               native_mass_gev=native_mass_gev, native_mass_tolerance=native_mass_tolerance,
-                              native_parent_rate_model=native_parent_rate_model)
+                              native_parent_rate_model=native_parent_rate_model,
+                              defer_to_full_source=defer_to_full_source)
     _positive(proper_ctau_mm, 'proper decay length')
     _check_mass(mass, inputs)
     charged_mass, neutral_mass = inputs['charged_pion_mass_gev'], inputs['neutral_pion_mass_gev']

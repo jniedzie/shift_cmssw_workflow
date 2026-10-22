@@ -335,6 +335,44 @@ class ChargedRhoRadiativeTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'complete native'):
             rho.mean_lab_beta_gamma((.77511, 0., 0., 0.), .5, MODEL, native_parent_rate_model=owned)
 
+    def test_actual_low_mass_failure_needs_a_separate_full_source_audit(self):
+        # Exact native seed861022007, trial80634, rho- index44. Replaying the
+        # accepted recoil decays is essential: those consume the Pythia RNG.
+        parent=(460.427513549071,.038970672533656964,.8268151790297367,-460.4261162975049)
+        parent_mass=math.sqrt(minkowski(parent,parent))
+        context=dict(native_mass_gev=.77511,native_energy_gev=parent[0],native_mass_tolerance=.001,
+                     native_parent_rate_model=parent_rate_context(.22,charge=-1))
+        with self.assertRaisesRegex(ValueError,'conditional-shape'):
+            rho.native_parent_precision_report(parent_mass,.22,MODEL,**context)
+        report=rho.native_parent_precision_report(parent_mass,.22,MODEL,
+                    defer_to_full_source=True,**context)
+        self.assertTrue(report['deferred_full_source_check'])
+        self.assertEqual(report['scope'],'deferred-full-source')
+        self.assertGreater(report['parent_l1_relative_rate_shift'],.001)
+        # No claim that this parent passes. Its whole nominal and continued
+        # measures are charged, without assuming any conditional-shape match.
+        expected=(2*report['nominal_parent_coefficient']+
+                  report['kinematic_channel_coefficient']-report['nominal_channel_coefficient'])
+        self.assertGreater(report['conservative_absolute_parent_measure_bound'],
+                           report['nominal_parent_coefficient'])
+        self.assertAlmostEqual(report['conservative_absolute_parent_measure_bound'],expected,delta=2.e-6)
+        coefficient=rho.branching_coefficient(parent_mass,.22,MODEL,defer_to_full_source=True,**context)
+        self.assertEqual(coefficient,report['kinematic_channel_coefficient'])
+        sample_context={key:value for key,value in context.items() if key!='native_energy_gev'}
+        row=rho.sample_decay(parent,.22,37.,random.Random(861022007),model=MODEL,charge=-1,
+                             defer_to_full_source=True,**sample_context)
+        for index in range(4):
+            self.assertAlmostEqual(math.fsum(v[index] for v in
+                [row['dark_photon_p4']]+row['recoil_p4s']),parent[index],delta=2.e-7)
+        self.assertTrue(math.isfinite(rho.mean_lab_beta_gamma(parent,.22,MODEL,
+                         defer_to_full_source=True,**sample_context)))
+        with self.assertRaisesRegex(ValueError,'complete owned'):
+            rho.branching_coefficient(parent_mass,.22,MODEL,defer_to_full_source=True,
+                **{key:value for key,value in context.items() if key!='native_parent_rate_model'})
+        invalid=dict(context,native_mass_tolerance=1.e-10)
+        with self.assertRaisesRegex(ValueError,'unchanged Pythia'):
+            rho.native_parent_precision_report(parent_mass,.22,MODEL,defer_to_full_source=True,**invalid)
+
     def test_cubic_interpolation_meets_unchanged_checks_and_never_extrapolates(self):
         key = rho._model_key(MODEL)
         for mass in (.22, .25, .3, .4, .49, .5):
