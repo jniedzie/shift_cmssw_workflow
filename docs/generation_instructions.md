@@ -271,6 +271,15 @@ reproduced once. Weighted J/psi and existing QCD keep their original untimed
 `generatorSmeared` input. Compare full nominal graph signatures before SIM.
 These historical-source checks do not qualify a collision inside a collimator
 jaw: bind the new source position/material and generator-model audit separately.
+The additional explicit `family='qcd_ordinary'` imports an unfiltered ordinary
+weighted QCD source with its complete fixed-trial proof. It declares
+`requires_full_muon_completion: true` and `muon_enhancement_complete: false`;
+the detector response worker rejects that raw input before any download. This
+is the input to jaw placement followed by full natural weak-decay completion,
+nominal timing and regenerated genParticles, not a renamed mu-enhanced sample.
+Keep its original W and trial exposure through that separately audited GEN
+preparation. The default mu-enriched QCD adapter is unchanged. Do not substitute
+older unit-weight accepted-event records for the required fixed-trial ledger.
 
 ## Streaming mu-enhanced QCD (2026-10-16)
 

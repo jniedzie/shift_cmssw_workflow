@@ -68,24 +68,27 @@ def source_receipt_fixture(directory, composite=True):
     return path, record
 
 
-def jpsi_receipt_fixture(directory):
+def jpsi_receipt_fixture(directory, family='jpsi'):
     from test_shift_weighted_gen_audit import fixture, configuration
     from audit_shift_weighted_gen import ALGORITHM, validate_config, validate_snapshot
-    ledger, events, run = fixture(sample='direct_jpsi')
+    sample = 'direct_jpsi' if family == 'jpsi' else 'qcd'
+    ledger, events, run = fixture(sample=sample)
     config = configuration(ledger)
     audit = validate_snapshot(ledger, ledger, events, run)
     payloads = {'gen.root': b'GEN', 'resolved_gen_cfg.py': config.encode(),
                 'proposal_ledger.json': json.dumps(ledger).encode()}
     sha = lambda value: hashlib.sha256(value).hexdigest()
     audit.update(schema='shift-weighted-gen-semantic-audit-v1', complete=True, healthy=True,
-        sample='direct_jpsi', generator_profile='ordinary', requested=4, tried=4, bounds=[5., 10.],
+        sample=sample, generator_profile='ordinary', requested=4, tried=4, bounds=[5., 10.],
         ledger=ledger, algorithm=ALGORITHM, weighted_run_info=run,
-        forced_decay='443 -> 13 -13; branching convention remains an independent gate',
+        forced_decay=('443 -> 13 -13; branching convention remains an independent gate'
+                      if family == 'jpsi' else 'none'),
         input_sha256=sha(payloads['gen.root']), ledger_sha256=sha(payloads['proposal_ledger.json']),
         config_sha256=sha(payloads['resolved_gen_cfg.py']), auditor_sha256='b'*64,
         source_model_settings_sha256=validate_config(config, ledger))
     payloads['semantic_audit.json'] = json.dumps(audit).encode()
-    request = dict(id='native_jpsi', sample='jpsi', stratum='jpsi_5to10', bounds=[5., 10.],
+    source_sample = 'jpsi' if family == 'jpsi' else 'qcd'
+    request = dict(id='native_'+source_sample, sample=source_sample, stratum=source_sample+'_5to10', bounds=[5., 10.],
                    trials=4, run=ledger['run'])
     record = dict(schema='shift-weighted-gen-receipt-v3', complete=True, generated_edm=True,
         publication_complete=True, physics_valid=False, normalization_ready=False,
@@ -130,6 +133,54 @@ def dy_receipt_fixture(directory):
 
 
 class SourceRecordTest(unittest.TestCase):
+    def test_raw_ordinary_QCD_is_explicit_and_requires_full_natural_muon_completion(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = jpsi_receipt_fixture(directory, family='qcd_ordinary')
+            source = source_record(path, family='qcd_ordinary')
+            self.assertEqual(source['generator_profile'], 'ordinary')
+            self.assertEqual(source['source_family'], 'qcd_ordinary')
+            self.assertEqual(source['forced_decay'], 'none')
+            self.assertFalse(source['decay_dependent_filter'])
+            self.assertTrue(source['requires_full_muon_completion'])
+            self.assertFalse(source['muon_enhancement_complete'])
+            self.assertTrue(source['diagnostic_only'])
+            self.assertFalse(source['physics_normalization_ready'])
+            self.assertEqual(source_normalization(source), ('fixed_source_trials', 4, 65.e9))
+            self.assertEqual(source_rate_weight(source, .2), .2*65.e9/4)
+            with self.assertRaisesRegex(ValueError, 'Muon-enriched'):
+                source_record(path)
+
+    def test_raw_ordinary_QCD_does_not_accept_filtered_or_wrong_process_sources(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = source_receipt_fixture(directory, composite=False)
+            with self.assertRaises(ValueError): source_record(path, family='qcd_ordinary')
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = jpsi_receipt_fixture(directory)
+            with self.assertRaises(ValueError): source_record(path, family='qcd_ordinary')
+        with tempfile.TemporaryDirectory() as directory:
+            path, _ = dy_receipt_fixture(directory)
+            with self.assertRaises(ValueError): source_record(path, family='qcd_ordinary')
+
+    def test_raw_ordinary_QCD_cannot_hide_a_cylinder_change_behind_ordinary_profile(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path, record = jpsi_receipt_fixture(directory, family='qcd_ordinary')
+            with zipfile.ZipFile(path.with_name('artifacts.zip')) as archive:
+                payloads = {name: archive.read(name) for name in archive.namelist()}
+            data = payloads['resolved_gen_cfg.py'].replace(b'ParticleDecays:tau0Max = 10',
+                                                        b'ParticleDecays:limitCylinder = on')
+            payloads['resolved_gen_cfg.py'] = data
+            digest = hashlib.sha256(data).hexdigest()
+            record['semantic_audit']['config_sha256'] = digest
+            payloads['semantic_audit.json'] = json.dumps(record['semantic_audit']).encode()
+            for name in ('resolved_gen_cfg.py', 'semantic_audit.json'):
+                native = dict(bytes=len(payloads[name]), sha256=hashlib.sha256(payloads[name]).hexdigest())
+                record['artifacts'][name] = native
+                next(item for item in record['publication'] if item['name'] == name).update(native)
+            path.write_text(json.dumps(record))
+            with zipfile.ZipFile(path.with_name('artifacts.zip'), 'w') as archive:
+                for name, payload in payloads.items(): archive.writestr(name, payload)
+            with self.assertRaisesRegex(ValueError, 'Ordered source model'):
+                source_record(path, family='qcd_ordinary')
     def test_weighted_jpsi_uses_full_trials_not_saved_count_and_does_not_guess_BR(self):
         with tempfile.TemporaryDirectory() as directory:
             path, _ = jpsi_receipt_fixture(directory)
@@ -301,7 +352,7 @@ class ResponseTest(unittest.TestCase):
         self.assertNotIn('Random', scope['reference_label'])
 
     def test_native_DY_and_jpsi_reporting_do_not_claim_QCD_cylinder_filter(self):
-        for family in ('dy', 'jpsi'):
+        for family in ('dy', 'jpsi', 'qcd_ordinary'):
             plan = dict(sources={'a': dict(source_family=family)},
                 samples=[dict(source_id='a', event_ids=[[1, 1, 1]], probability=1.)])
             scope = response_reporting_scope(plan)

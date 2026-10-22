@@ -89,6 +89,8 @@ def main():
     request = json.loads(request_path.read_text())
     diagnostic_outputs = diagnostic_edm_outputs(request)
     source, sample = request['source'], request['sample']
+    if source.get('requires_full_muon_completion', False):
+        raise ValueError('Raw ordinary QCD requires audited full natural muon completion before detector response')
     timing_input = source_timing_input(source)
     source_normalization(source)
     inclusion = sampling_probabilities(sample)

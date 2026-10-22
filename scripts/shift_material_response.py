@@ -25,7 +25,7 @@ SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 
 
 
 def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=None):
-    """Import one audited mu-enriched source without changing W or exposure.
+    """Import an audited GEN source without changing native W or exposure.
 
     The explicit family selects its native accounting adapter. QCD remains
     the default. DY needs staged receipt-bound artifacts; J/psi accepts either
@@ -34,13 +34,15 @@ def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=
     additionally needs its SHA-bound full source-path
     proof. This admits a conditional detector diagnostic, not a production
     normalization or an extra correction to the native generator weight.
+    Raw qcd_ordinary is an explicit opt-in and requires full natural muon
+    completion before detector response; it is not the default muon profile.
     """
-    if family == 'jpsi':
-        return weighted_jpsi_source_record(receipt_path, audit_directory, gen_path)
+    if family in ('jpsi', 'qcd_ordinary'):
+        return ordinary_weighted_source_record(receipt_path, audit_directory, gen_path, family=family)
     if family == 'dy':
         return dy_source_record(receipt_path, audit_directory, gen_path)
     if family != 'qcd':
-        raise ValueError('Declare the supported source family: qcd, jpsi or dy')
+        raise ValueError('Declare the supported source family: qcd, qcd_ordinary, jpsi or dy')
     from audit_shift_weighted_gen import ALGORITHM as base_algorithm, close, validate_ledger
     from qcd_mu_enrichment import PROFILE
     from shift_first_mpi_source_proposal import ALGORITHM as hf_algorithm, validate
@@ -178,8 +180,24 @@ def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=
 
 def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=None):
     """Keep the native fixed-trial forced-J/psi convention, without a BR guess."""
+    return ordinary_weighted_source_record(receipt_path, audit_directory, gen_path, family='jpsi')
+
+
+def ordinary_weighted_source_record(receipt_path, audit_directory=None, gen_path=None, *, family):
+    """Import an ordinary fixed-trial source before any muon-dependent filter.
+
+    Raw QCD must pass full natural muon-parent decay completion later. Keeping
+    its source denominator here does not call it a muon-enhanced population.
+    """
     from audit_shift_weighted_gen import ALGORITHM, close, validate_config, validate_ledger
     from generation_publication import sha256
+    if family not in ('jpsi', 'qcd_ordinary'):
+        raise ValueError('Ordinary fixed-trial adapter supports jpsi or qcd_ordinary')
+    label = 'J/psi' if family == 'jpsi' else 'Raw ordinary QCD'
+    sample = 'jpsi' if family == 'jpsi' else 'qcd'
+    ledger_sample = 'direct_jpsi' if family == 'jpsi' else 'qcd'
+    forced_decay = ('443 -> 13 -13; branching convention remains an independent gate'
+                    if family == 'jpsi' else 'none')
     path = Path(receipt_path).resolve()
     record = json.loads(path.read_text())
     if (record.get('schema') != 'shift-weighted-gen-receipt-v3'
@@ -187,30 +205,30 @@ def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=Non
             or record.get('generator_profile', 'ordinary') != 'ordinary' or record.get('algorithm') != ALGORITHM
             or record.get('source_proposal') is not None
             or record.get('physics_valid') is not False or record.get('normalization_ready') is not False):
-        raise ValueError('J/psi needs a complete ordinary fixed-trial diagnostic source')
+        raise ValueError(label+' needs a complete ordinary fixed-trial diagnostic source')
     request, ledger, audit = record['request'], record['ledger'], record['semantic_audit']
     trials = validate_ledger(ledger)
-    if (request['sample'] != 'jpsi' or ledger['sample'] != 'direct_jpsi'
+    if (request['sample'] != sample or ledger['sample'] != ledger_sample
             or request['trials'] != trials or request['run'] != ledger['run']
             or request['bounds'] != [ledger['lower'], ledger['upper']]
             or audit.get('schema') != 'shift-weighted-gen-semantic-audit-v1'
-            or audit.get('sample') != 'direct_jpsi' or audit.get('generator_profile', 'ordinary') != 'ordinary'
+            or audit.get('sample') != ledger_sample or audit.get('generator_profile', 'ordinary') != 'ordinary'
             or audit.get('complete') is not True or audit.get('healthy') is not True
             or audit.get('ledger') != ledger or audit.get('algorithm') != ALGORITHM
             or audit.get('requested') != trials or audit.get('tried') != trials
             or audit.get('bounds') != request['bounds']
-            or audit.get('forced_decay') != '443 -> 13 -13; branching convention remains an independent gate'):
-        raise ValueError('J/psi request, full-trial ledger or forced-decay audit differs')
+            or audit.get('forced_decay') != forced_decay):
+        raise ValueError(label+' request, full-trial ledger or forced-decay audit differs')
     publications = {item['name']: item for item in record['publication']}
     if len(publications) != len(record['publication']):
-        raise ValueError('Repeated J/psi publication')
+        raise ValueError('Repeated '+label+' publication')
 
     def artifact(name):
         item = publications[name]
         if (item.get('independent_sha256_readback') is not True
                 or item['path'] != record['publication_directory']+'/'+name
                 or {key: item[key] for key in ('bytes', 'sha256')} != record['artifacts'][name]):
-            raise ValueError('J/psi publication differs from native artifact: '+name)
+            raise ValueError(label+' publication differs from native artifact: '+name)
         return item
 
     names = ('semantic_audit.json', 'proposal_ledger.json', 'resolved_gen_cfg.py')
@@ -222,23 +240,23 @@ def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=Non
         for name in names:
             local = Path(audit_directory)/name
             if local.is_symlink():
-                raise ValueError('J/psi staged native audit must be an actual file')
+                raise ValueError(label+' staged native audit must be an actual file')
             payloads[name] = local.read_bytes()
     for name, expected in (('semantic_audit.json', audit), ('proposal_ledger.json', ledger)):
         data = payloads[name]
         if (len(data) != artifact(name)['bytes']
                 or hashlib.sha256(data).hexdigest() != artifact(name)['sha256'] or json.loads(data) != expected):
-            raise ValueError('J/psi returned native accounting bytes differ')
+            raise ValueError(label+' returned native accounting bytes differ')
     config = payloads['resolved_gen_cfg.py']
     if (len(config) != artifact('resolved_gen_cfg.py')['bytes']
             or hashlib.sha256(config).hexdigest() != artifact('resolved_gen_cfg.py')['sha256']):
-        raise ValueError('J/psi resolved configuration differs from publication')
+        raise ValueError(label+' resolved configuration differs from publication')
     model = validate_config(config.decode(), ledger)
     gen = artifact('gen.root')
     if gen_path is not None:
         local = Path(gen_path)
         if local.is_symlink() or local.stat().st_size != gen['bytes'] or sha256(local) != gen['sha256']:
-            raise ValueError('Relocated J/psi GEN differs from the native publication')
+            raise ValueError('Relocated '+label+' GEN differs from the native publication')
         gen_url = 'root://eosuser.cern.ch/'+str(local) if str(local).startswith('/eos/') else str(local)
     else:
         gen_url = 'root://eosuser.cern.ch/'+gen['path']
@@ -247,11 +265,11 @@ def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=Non
             or audit['config_sha256'] != hashlib.sha256(config).hexdigest()
             or audit['auditor_sha256'] != record['source_inputs']['audit_shift_weighted_gen.py']
             or audit['source_model_settings_sha256'] != model):
-        raise ValueError('J/psi native GEN/accounting/configuration binding differs')
+        raise ValueError(label+' native GEN/accounting/configuration binding differs')
     count = ledger['accepted']
     arrays = [audit[key] for key in ('event_ids', 'weights', 'scale', 'charged')]
     if count < 1 or audit['events'] != count or record['event_count'] != count or any(len(x) != count for x in arrays):
-        raise ValueError('J/psi needs the complete saved GEN census')
+        raise ValueError(label+' needs the complete saved GEN census')
     identities = set()
     for identity, weight, scale, charged in zip(*arrays):
         if (len(identity) != 3 or any(type(x) is not int for x in identity)
@@ -260,25 +278,25 @@ def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=Non
                 or not math.isfinite(scale) or scale < ledger['lower']
                 or (ledger['upper'] != -1 and scale >= ledger['upper'])
                 or type(charged) is not int or charged < 0):
-            raise ValueError('Invalid J/psi original identity, weight or direct-state scale')
+            raise ValueError('Invalid '+label+' original identity, weight or source scale')
         identities.add(tuple(identity))
     sumw, sumw2 = math.fsum(arrays[1]), math.fsum(w*w for w in arrays[1])
     sigma = ledger['sigma_nd_mb']*sumw/trials
     error = ledger['sigma_nd_mb']*math.sqrt(max(0., sumw2-sumw*sumw/trials)/(trials*(trials-1)))
-    for actual, expected, label in (
-            (sumw, ledger['sumw'], 'J/psi full accepted weights'),
-            (sumw2, ledger['sumw2'], 'J/psi full accepted squared weights'),
-            (audit['sumw'], sumw, 'J/psi audited weight sum'),
-            (audit['sumw2'], sumw2, 'J/psi audited squared-weight sum'),
-            (ledger['sigma_mb'], sigma, 'J/psi fixed-trial cross section'),
-            (ledger['sigma_error_mb'], error, 'J/psi fixed-trial uncertainty'),
-            (audit['sigma_weighted_mb'], sigma, 'J/psi audited cross section'),
-            (audit['error_weighted_mb'], error, 'J/psi audited uncertainty'),
-            (audit['weighted_run_info']['internal_xsec_pb'], sigma*1.e9, 'J/psi named run cross section'),
-            (audit['weighted_run_info']['error_pb'], error*1.e9, 'J/psi named run uncertainty'),
-            (audit['weighted_run_info']['filter_efficiency'], 1., 'J/psi no external efficiency')):
-        close(actual, expected, label)
-    return dict(source_id=request['id'], stratum=request['stratum'], source_family='jpsi',
+    for actual, expected, quantity in (
+            (sumw, ledger['sumw'], 'full accepted weights'),
+            (sumw2, ledger['sumw2'], 'full accepted squared weights'),
+            (audit['sumw'], sumw, 'audited weight sum'),
+            (audit['sumw2'], sumw2, 'audited squared-weight sum'),
+            (ledger['sigma_mb'], sigma, 'fixed-trial cross section'),
+            (ledger['sigma_error_mb'], error, 'fixed-trial uncertainty'),
+            (audit['sigma_weighted_mb'], sigma, 'audited cross section'),
+            (audit['error_weighted_mb'], error, 'audited uncertainty'),
+            (audit['weighted_run_info']['internal_xsec_pb'], sigma*1.e9, 'named run cross section'),
+            (audit['weighted_run_info']['error_pb'], error*1.e9, 'named run uncertainty'),
+            (audit['weighted_run_info']['filter_efficiency'], 1., 'no external efficiency')):
+        close(actual, expected, label+' '+quantity)
+    source = dict(source_id=request['id'], stratum=request['stratum'], source_family=family,
         url=gen_url, gen_sha256=gen['sha256'],
         saved_events=count, full_source_trials=trials, sigma_nd_pb=ledger['sigma_nd_mb']*1.e9,
         denominator_kind='fixed_source_trials', mean_abs_native_weight=sumw/count,
@@ -286,10 +304,14 @@ def weighted_jpsi_source_record(receipt_path, audit_directory=None, gen_path=Non
         generator_profile='ordinary', generator_algorithm=ALGORITHM,
         timing_input_label='generatorSmeared',
         decay_dependent_filter=False, saved_decays_unchanged=True,
-        forced_decay=audit['forced_decay'], forced_decay_branching_convention_ready=False,
+        forced_decay=audit['forced_decay'], forced_decay_branching_convention_ready=family == 'qcd_ordinary',
         additional_branching_factor_applied=False, physics_normalization_ready=False,
         diagnostic_only=True, config_sha256=audit['config_sha256'],
         source_model_scope='Unchanged native source; jaw/source-material qualification remains separate.')
+    if family == 'qcd_ordinary':
+        source.update(requires_full_muon_completion=True, muon_enhancement_complete=False,
+            muon_enhancement_scope='Raw unfiltered hadronization; natural weak-decay completion not yet applied.')
+    return source
 
 
 def dy_source_record(receipt_path, audit_directory, gen_path=None):
@@ -447,7 +469,7 @@ def response_reporting_scope(plan):
             design = 'Uniform inclusion within each declared saved source; not the full production.'
         else:
             design = 'Per-original inclusion probabilities declared in the response plan.'
-    ordinary = any(source.get('source_family') in ('dy', 'jpsi') for source in sources.values())
+    ordinary = any(source.get('source_family') in ('dy', 'jpsi', 'qcd_ordinary') for source in sources.values())
     population = plan.get('source_scope',
         ('Saved native GEN; unchanged source and decays. Forced-decay and inclusive material rates unvalidated.'
          if ordinary else

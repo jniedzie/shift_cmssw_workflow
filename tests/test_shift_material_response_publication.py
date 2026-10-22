@@ -166,6 +166,17 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                     command.assert_not_called()
                 self.assertFalse(Path('report.json').exists())
 
+    def test_raw_ordinary_QCD_is_rejected_before_io_or_detector_response(self):
+        self.request['source'].update(source_family='qcd_ordinary', requires_full_muon_completion=True,
+                                      muon_enhancement_complete=False)
+        Path('request.json').write_text(json.dumps(self.request))
+        with mock.patch.object(sys, 'argv', ['worker', 'request.json']), \
+                mock.patch.object(worker, 'command') as command:
+            with self.assertRaisesRegex(ValueError, 'full natural muon completion'):
+                worker.main()
+            command.assert_not_called()
+        self.assertFalse(Path('report.json').exists())
+
     def test_registered_bound_includes_edm_and_prevents_any_remote_publication(self):
         self.request.update(diagnostic_edm_tiers=['SIM', 'RECO'], publication_bound_bytes=70000)
         with self.assertRaisesRegex(ValueError, 'registered storage allocation'):
