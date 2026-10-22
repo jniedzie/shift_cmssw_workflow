@@ -1,0 +1,65 @@
+{
+  "code_style": "AI-code. AI-generated attributed rate-only leading-model inputs.",
+  "schema": "shift-neutral-vector-dipion-leading-reference-v1",
+  "publications": {
+    "primary_loop_scalar_vmd": "https://arxiv.org/pdf/hep-ph/0105179",
+    "alternative_chiral_unitary_and_vector_currents": "https://arxiv.org/pdf/hep-ph/0111308",
+    "kaon_rescattering": "https://arxiv.org/pdf/hep-ph/0204339",
+    "more_complete_scalar_flavor_models": "https://arxiv.org/pdf/hep-ph/0606314",
+    "snd_photon_measurement": "https://arxiv.org/pdf/hep-ex/0205068",
+    "cmd2_photon_measurement": "https://arxiv.org/pdf/hep-ex/0310012"
+  },
+  "scope": "Rate-only coherent local VVP exchange plus minimally gauged pion/kaon loop with one on-shell-factorized scalar rescattering amplitude and rho-omega mixing. No production source, sampler, normalization replacement or universal omitted-yield bound.",
+  "virtual_vertex_prescription": "constant-local-lagrangian",
+  "conventions": {
+    "g_primary": 4.27,
+    "fpi_gev": 0.0924,
+    "fkaon_gev": 0.0924,
+    "alpha_em": 0.0072973525692838015,
+    "charged_pion_mass_gev": 0.13957,
+    "neutral_pion_mass_gev": 0.13498,
+    "charged_kaon_mass_gev": 0.49368,
+    "fkaon_note": "The 2001 SU(3) comparison uses fK=fpi. The 2002 refinement s/(4 fpi fK), fK=1.22 fpi, is a separate declared numerical scenario, not an independent error bar."
+  },
+  "rho": {
+    "mass_gev": 0.77,
+    "width_gev": 0.1502,
+    "pion_mass_gev": 0.13957,
+    "width_prescription": "rho-pipi-running-primary-2003"
+  },
+  "omega": {
+    "mass_gev": 0.782,
+    "width_gev": 0.00849,
+    "width_prescription": "constant-primary-2001"
+  },
+  "pole_conventions": "Rounded era pole inputs are explicit; the original exact numerical pole card was not printed. Photon comparisons retain this small input difference instead of tuning a rate normalization.",
+  "mixing_mass_squared_gev2": -0.0038,
+  "mixing_mass_squared_quoted_error_gev2": 0.00037,
+  "scalar_scenarios": {
+    "chiral": {"kind": "chpt-pion-leading"},
+    "sigma478_324": {"kind": "linear-sigma-pion", "sigma_mass_gev": 0.478, "sigma_width_gev": 0.324, "width_prescription": "constant-primary-2001"},
+    "sigma478_263": {"kind": "linear-sigma-pion", "sigma_mass_gev": 0.478, "sigma_width_gev": 0.263, "width_prescription": "constant-primary-2001"},
+    "sigma555_540": {"kind": "linear-sigma-pion", "sigma_mass_gev": 0.555, "sigma_width_gev": 0.54, "width_prescription": "constant-primary-2001"}
+  },
+  "photon_controls_gev": {
+    "rho_chiral_loop": 0.00000155,
+    "rho_local_vmd": 0.00000188,
+    "rho_sigma478_324_plus_vmd": 0.00000577,
+    "omega_running_rho_vmd": 0.0000003
+  },
+  "experimental_photon_branching_fractions": {
+    "rho_snd": {"central": 0.000041, "stat_plus": 0.00001, "stat_minus": 0.000009, "syst": 0.000003},
+    "omega_snd": {"central": 0.000066, "stat_plus": 0.000014, "stat_minus": 0.000008, "syst": 0.000006},
+    "rho_cmd2": {"central": 0.000052, "stat_plus": 0.000015, "stat_minus": 0.000013, "syst": 0.000006},
+    "omega_cmd2": {"central": 0.000064, "stat_plus": 0.000024, "stat_minus": 0.00002, "syst": 0.000008}
+  },
+  "limitations": [
+    "Minimal gauging fixes both loop tensors within this Lagrangian. It does not determine additional higher-derivative local timelike operators or hadronic form factors.",
+    "The selected linear-sigma rescattering scenario replaces the chiral term; adding an independent sigma amplitude would double count it. Zero scalar flavor mixing and a constant sigma width are explicit benchmark assumptions.",
+    "Kaon rescattering uses its leading chiral term. Flavor breaking, scalar kaon rescattering, empirical FV minus 2GV contact structures and higher chiral orders are not covered by the scalar scenarios.",
+    "Photon measurements test normalization and interference at q2=0. They do not bound virtual-only currents.",
+    "Natural rho/omega ancestors in the collision source are included in the parent inventory. Future exclusive replacement needs a source/ancestry audit and coherent sibling handling before any admission.",
+    "No detector, trigger, material, dimuon branching, production uncertainty or acceptance claim follows from this rate kernel."
+  ],
+  "physical_production_ready": false
+}
