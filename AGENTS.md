@@ -123,13 +123,28 @@ the change.
 
 ## Workflow safety
 
+- Optimize validation for time to a useful result. Run independent events and
+  variants in parallel, using one event per job when that shortens iteration.
+  Thousands of jobs are acceptable within actual site and storage limits;
+  do not add a small worker cap just to reduce job submissions. Publish each
+  completed comparison without waiting for unrelated tests. Size short worker
+  wall-time requests separately from longer controller lifetimes.
+- Allocate signal production for comparable numbers of events passing the
+  actual reconstruction and plot selections, not equal GEN counts. Measure
+  efficiency and its uncertainty, credit ready and queued events, and give
+  inefficient mass/lifetime points more exposure. Use a bounded follow-up
+  sample when no events pass; do not assume zero acceptance.
 - Read `docs/generation_instructions.md` and the relevant timing/overlay note
   before launching or modifying a campaign.
 - Do not edit live campaign configuration or rebuild the shared CMSSW release
   while jobs using it are running. Documentation-only edits are safe.
 - Keep timing, occupancy, trigger-candidate, electronics-response, and offline
   reconstruction conclusions clearly separated in code, metadata, and reports.
-- Follow the workspace section "Detached production must be checked after
-  handoff". In particular, set a persistent `initialdir`, submit with that
+- Follow the workspace section "Detached production and handoff".
+  In particular, set a persistent `initialdir`, submit with that
   directory as `cwd`, inspect the queued `Iwd`, and verify actual downstream
   execution. See the October 14–15 DP incident in `../SHIFT_BSM.md`.
+- After stable controller and worker operation and the required downstream
+  handoff are verified, stop manual monitoring. Leave detached supervision
+  active; check again only at the user's request, on a reported failure, or
+  to validate a specific intervention.
