@@ -57,3 +57,40 @@ def configure_source_placement(process, point_cm, input_label, *, test_scope, ev
             luminosityBlock=cms.uint32(row["event_id"][1]), event=cms.uint64(row["event_id"][2]),
             targetPositionCm=cms.vdouble(row["target_position_cm"])) for row in contract["event_positions"]]))
     return process.shiftSourcePlacement
+
+
+def configure_complete_source(process, input_label, *, seed, event_positions, test_scope):
+    """Prepare the complete natural graph and rebuild truth at its new source.
+
+    The caller must provide an audited uncensored ordinary GEN source. Already
+    cylinder-filtered mu-enriched input is not an interchangeable population.
+    This only prepares GEN; hadron transport and detector response remain
+    separate. No material or decay-likelihood correction is applied.
+    """
+    if type(seed) is not int or not 1 <= seed <= 899999922:
+        raise ValueError("Source completion needs a seed with room for its fixed +77 offset")
+    import FWCore.ParameterSet.Config as cms
+    from IOMC.ShiftEventTiming.shiftEventTime_cfi import shiftEventTime
+    from GeneratorInterface.Core.generatorSmeared_cfi import generatorSmeared
+    from PhysicsTools.HepMCCandAlgos.genParticles_cfi import genParticles
+    # Rebuilt generatorSmeared below must never shadow the raw input label.
+    placement_contract(None, input_label, test_scope=test_scope, event_positions=event_positions)
+    process.shiftRawSource = generatorSmeared.clone(
+        currentTag=cms.untracked.InputTag(input_label, "", "@skipCurrentProcess"))
+    configure_source_placement(process, None, "shiftRawSource", test_scope=test_scope,
+                               event_positions=event_positions)
+    process.load("SimGeneral.HepPDTESSource.pythiapdt_cfi")
+    process.shiftFullMuonDecays = cms.EDProducer(
+        "CompleteShiftMuonDecayProducer", src=cms.InputTag("shiftSourcePlacement"),
+        decayCylinderRadiusMm=cms.double(8000.), decayCylinderHalfLengthMm=cms.double(151000.),
+        ordinaryFraction=cms.double(1.), eligiblePionBarcodes=cms.vint32(),
+        maximumProperLifetimeMm=cms.vdouble(), smoothLifetimeComponents=cms.VPSet())
+    if not hasattr(process, "RandomNumberGeneratorService"):
+        process.RandomNumberGeneratorService = cms.Service("RandomNumberGeneratorService")
+    process.RandomNumberGeneratorService.shiftFullMuonDecays = cms.PSet(
+        initialSeed=cms.untracked.uint32(seed + 77), engineName=cms.untracked.string("HepJamesRandom"))
+    process.shiftEventTime = shiftEventTime.clone(src=cms.InputTag("shiftFullMuonDecays"))
+    process.generatorSmeared = generatorSmeared.clone(currentTag=cms.untracked.InputTag("shiftEventTime"))
+    process.genParticles = genParticles.clone(src=cms.InputTag("generatorSmeared"))
+    return cms.Sequence(process.shiftRawSource + process.shiftSourcePlacement + process.shiftFullMuonDecays
+                        + process.shiftEventTime + process.generatorSmeared + process.genParticles)
