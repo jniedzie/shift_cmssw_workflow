@@ -105,6 +105,12 @@ def prior_publication_ready(config, batch):
     if not expected:
         return False, dict(evidence, reason='prior_point_is_not_declared')
     try:
+        if config.get('reviewed_prior_meson_retirement'):
+            retired = reviewed_meson_retirement(config, config['reviewed_prior_meson_retirement'],
+                                                config['prior_meson_publication'])
+            return True, dict(evidence, complete=True, reviewed_retirement_verified=True,
+                allowed_previous_campaigns=retired['campaigns'].get(batch['point'], []),
+                retirement_authority=config['reviewed_prior_meson_retirement'])
         state_bytes = (root/'state.json').read_bytes()
         state = json.loads(state_bytes)
         age = time.time()-datetime.fromisoformat(state['checked_utc']).timestamp()
@@ -199,6 +205,143 @@ def prior_publication_ready(config, batch):
     except (OSError, KeyError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         return False, dict(evidence, reason='prior_publication_evidence_unavailable', error=repr(error))
     return True, dict(evidence, complete=True)
+
+
+def reviewed_meson_retirement(config, authority, expected, check_queue=True):
+    """Review a stopped allocation without calling its partial output complete."""
+    proof = read_pinned(authority)
+    replacement = read_pinned(proof['replacement_configuration'])
+    if (proof.get('schema') != 'shift-reviewed-meson-retirement-v1'
+            or proof.get('allocation_canceled') is not True
+            or proof['replacement_configuration']['path'] != str(Path(config['directory'])/'config.json')
+            or replacement.get('directory') != config['directory']):
+        raise ValueError('Meson retirement does not name this exact replacement allocation')
+    productions = proof.get('productions', [])
+    roots, owners, submitted, campaigns, published_batches = set(), set(), {}, {}, {}
+    owner_execution = {}
+    found = False
+    for entry in productions:
+        previous = read_pinned(entry['configuration'])
+        root = Path(previous['directory'])
+        seal = read_pinned(entry['seal'])
+        if (entry['configuration']['path'] != str(root/'config.json')
+                or entry['seal']['path'] != str(root/'seal.json')
+                or seal.get('files', {}).get(str(root/'config.json')) != entry['configuration']['sha256']
+                or not root.is_absolute() or root.resolve() != root or str(root) in roots
+                or str(root) == config['directory']):
+            raise ValueError('Retirement repeats or changes a frozen original production')
+        roots.add(str(root))
+        found |= all(entry['configuration'].get(key) == expected.get(key) for key in ('path', 'sha256'))
+        final = entry.get('final_state')
+        state = read_pinned(final) if final else {}
+        if ((root/'state.json').is_file() != bool(final)
+                or (final and durable.sha(root/'state.json') != final['sha256'])):
+            raise ValueError('Retired production differs from its frozen final state')
+        declared = {row['batch']: row for row in previous['batches']}
+        if not set(state.get('batches', {})).issubset(declared):
+            raise ValueError('Retired final state contains an undeclared source batch')
+        records = entry.get('batches', [])
+        if len(records) != len(declared) or {row['batch'] for row in records} != set(declared):
+            raise ValueError('Retirement omits or repeats a source batch')
+        published_batches[str(root)] = []
+        for record in records:
+            batch = declared[record['batch']]
+            directory = root/'batches'/batch['batch']
+            status_path = directory/'source_status.json'
+            status_pin = record.get('source_status')
+            source = read_pinned(status_pin) if status_pin else {}
+            if status_path.is_file() != bool(status_pin) or (status_pin and status_pin['path'] != str(status_path)):
+                raise ValueError('Retirement omitted the exact source status')
+            if source and (source.get('batch') != batch['batch'] or source.get('point') != batch['point']
+                           or source.get('source_collisions') != batch['source_collisions']):
+                raise ValueError('Retirement changed source exposure or point identity')
+            retained = {key: source[key] for key in ('ledger_publication', 'metadata_archive', 'publication') if key in source}
+            if record.get('retained_source', {}) != retained:
+                raise ValueError('Retirement omitted original GEN, ledger or metadata publication receipts')
+            statuses = []
+            for pin in record.get('additional_statuses', []):
+                if not Path(pin['path']).is_relative_to(directory):
+                    raise ValueError('Retirement status leaves its source batch')
+                statuses.append(read_pinned(pin))
+            published = state.get('batches', {}).get(batch['batch'], {}).get('published')
+            disposition = record.get('disposition')
+            if published:
+                if (disposition != 'published' or record.get('point_receipt') != dict(
+                        path=published['point_receipt_path'], sha256=published['point_receipt_sha256'])
+                        or not durable.meson_published_batch(root, batch, published, time.time())):
+                    raise ValueError('Retirement changed a published histogram or its source population')
+                published_batches[str(root)].append(batch['batch'])
+                campaigns.setdefault(batch['point'], [])
+                if published['campaign'] not in campaigns[batch['point']]:
+                    campaigns[batch['point']].append(published['campaign'])
+            elif disposition == 'unsubmitted':
+                if source or (directory/'submission.json').exists() or (directory/'production/submission.json').exists():
+                    raise ValueError('Retirement calls an attempted batch unsubmitted')
+            elif disposition == 'failed':
+                if not source.get('error') and not any(row.get('error') for row in statuses):
+                    raise ValueError('Retirement has no preserved failure status')
+            elif disposition == 'gen_only':
+                if source.get('complete') is not True or record.get('detector_output_used') is not False:
+                    raise ValueError('Retained GEN needs explicit unused detector accounting')
+            else:
+                raise ValueError('Retirement needs an explicit disposition for every batch')
+        receipt_paths = [root/'submission.json', root/'coverage/submission.json']
+        receipt_paths += list((root/'batches').glob('*/submission.json'))
+        receipt_paths += list((root/'batches').glob('*/production/submission.json'))
+        receipt_paths += list((root/'aggregates').glob('*/v*/submission.json'))
+        for owner in entry.get('controllers', []):
+            receipt_path = pinned_path(owner['submission'])
+            directory = receipt_path.parent
+            if (pinned_path(owner['configuration']) != directory/'config.json'
+                    or pinned_path(owner['seal']) != directory/'seal.json'):
+                raise ValueError('Retired controller is outside its pinned configuration and seal')
+            identity = meson_controller_configuration(previous, directory, allow_science=True)
+            receipt = read(receipt_path)
+            if receipt.get('task') != str(directory) or receipt.get('submit_sha256') != durable.sha(identity['submit']):
+                raise ValueError('Retired controller differs from its sealed native launch')
+            owners.add(str(directory))
+            owner_execution[receipt['cluster']] = identity['native_execution']
+            receipt_paths.append(receipt_path)
+        for path in receipt_paths:
+            if path.is_file():
+                receipt = read(path)
+                if type(receipt.get('cluster')) is not int or receipt.get('task') != str(path.parent):
+                    raise ValueError('Retired submission changed its exact job identity')
+                submitted[(receipt['cluster'], 0)] = receipt['task']
+    if not found:
+        raise ValueError('Retirement does not include the expected predecessor allocation')
+    native = read_pinned(proof['native_snapshot'])
+    records = native.get('jobs', [])
+    identities = {(row.get('ClusterId'), row.get('ProcId')) for row in records}
+    if (native.get('schema') != 'shift-reviewed-meson-retirement-native-v1'
+            or native.get('queue_absent') is not True or len(identities) != len(records)
+            or not set(submitted).issubset(identities)):
+        raise ValueError('Retirement lacks exact terminal records for submitted managers')
+    for row in records:
+        iwd = row.get('Iwd', '')
+        if (type(row.get('ClusterId')) is not int or row['ClusterId'] <= 0
+                or type(row.get('ProcId')) is not int or row['ProcId'] < 0
+                or row.get('JobStatus') not in (3, 4)
+                or not isinstance(iwd, str)
+                or not any(iwd == path or iwd.startswith(path+'/') for path in roots | owners)):
+            raise ValueError('Retirement native record is active or outside its exact original owners')
+        expected_iwd = submitted.get((row['ClusterId'], row['ProcId']))
+        execution = owner_execution.get(row['ClusterId'], {})
+        if ((expected_iwd is not None and iwd != expected_iwd)
+                or any(row.get(key) != value for key, value in execution.items())):
+            raise ValueError('Retirement native job differs from its exact submission or sealed launch')
+    for pin in native.get('retirement_receipts', []):
+        read_pinned(pin)
+    alternatives = []
+    for directory in sorted(roots | owners):
+        alternatives.append('regexp('+json.dumps('^'+re.escape(directory)+'(/|$)')+',Iwd)')
+        alternatives.append('regexp('+json.dumps(re.escape(directory)) + ',Args)')
+    for cluster in sorted({row['ClusterId'] for row in records}):
+        alternatives += ['ClusterId == '+str(cluster), 'DAGManJobId == '+str(cluster)]
+    if check_queue and durable.jobs(config, ' || '.join(alternatives)):
+        raise RuntimeError('Retired meson controller, publisher or worker is still live')
+    return dict(campaigns=campaigns, published_batches=published_batches,
+                retired_directories=sorted(roots), allocation_canceled=True)
 
 
 def predecessor_controller_configuration(config, directory):
@@ -555,7 +698,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'additional_reserved_worklists', 'reviewed_terminal_native_jobs',
                                    'adaptive_terminal_completion', 'prior_meson_controller_replacement',
                                    'additional_reserved_meson_forecasts', 'meson_reservation_registration',
-                                   'prior_meson_controller_directory', 'meson_peer_controller_directories'}:
+                                   'prior_meson_controller_directory', 'meson_peer_controller_directories',
+                                   'reviewed_prior_meson_retirement'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
@@ -608,25 +752,34 @@ def validate_meson_forecast_peer(authority, owner=None):
 
 
 def validate_meson_reservation_additions(previous, candidate):
-    """Keep every existing claim byte-identical; only append qualified peers."""
+    """Keep claims intact; append peers or pin an explicitly canceled future."""
     before = previous.get('additional_reserved_meson_forecasts', [])
     after = candidate.get('additional_reserved_meson_forecasts', [])
     if not isinstance(before, list) or not isinstance(after, list):
         raise ValueError('Meson reservations require explicit lists of pinned peers')
-    if any(row not in after for row in before):
-        raise ValueError('Meson registration removed or changed an existing protected claim')
     names = [row.get('name') for row in after]
     names.extend(row.get('name') for row in candidate.get('additional_reserved_worklists', []))
     if any(not isinstance(name, str) or not name for name in names) or len(names) != len(set(names)):
         raise ValueError('Meson reservations require unique nonempty peer names')
-    additions = [row for row in after if row not in before]
+    for old in before:
+        matches = [row for row in after if row['name'] == old['name']]
+        if len(matches) != 1:
+            raise ValueError('Meson registration removed or changed an existing protected claim')
+        row = matches[0]
+        if row != old:
+            if ('retirement_authority' in old or 'retirement_authority' not in row
+                    or {key:value for key,value in row.items() if key != 'retirement_authority'} != old):
+                raise ValueError('Meson registration changed or repeated an existing protected claim')
+            expected = row.get('peer_configuration') or row.get('completion_authority')
+            reviewed_meson_retirement(candidate, row['retirement_authority'], expected, check_queue=False)
+    additions = [row for row in after if row['name'] not in {old['name'] for old in before}]
     directories = set()
     for row in before:
         authority = row.get('peer_configuration', row.get('completion_authority', {}))
         if authority.get('path'):
             directories.add(read_pinned(authority).get('directory'))
     for row in additions:
-        if row.get('completion_authority') is not None:
+        if row.get('completion_authority') is not None or row.get('retirement_authority') is not None:
             raise ValueError('New meson reservations keep their full positive allocation')
         directory = validate_meson_forecast_peer(row, candidate.get('directory'))
         if directory in directories:
@@ -1089,6 +1242,7 @@ def additional_reservations(config):
         if authority.get('completion_authority'):
             claim['terminal_completion_verified'] = completed
         claims.append(claim)
+    retired_peers = set()
     for authority in config.get('additional_reserved_meson_forecasts', []):
         if authority.get('peer_configuration') is not None:
             validate_meson_forecast_peer(authority, config.get('directory'))
@@ -1101,7 +1255,20 @@ def additional_reservations(config):
             raise ValueError('Additional meson forecast does not cover its complete source allocation')
         peer_pin = authority.get('peer_configuration') or authority.get('completion_authority')
         detail = {}
-        if peer_pin is not None:
+        if authority.get('retirement_authority'):
+            if peer_pin is None:
+                raise ValueError('Canceled meson allocation lacks its exact original science')
+            peer = read_pinned(peer_pin)
+            if peer['directory'] in retired_peers:
+                raise ValueError('Meson future allocation was canceled more than once')
+            retired = reviewed_meson_retirement(config, authority['retirement_authority'], peer_pin)
+            retired_peers.add(peer['directory'])
+            credited = sum(amounts[name] for name in retired['published_batches'][peer['directory']])
+            detail = dict(remaining_bytes=0, credited_bytes=credited,
+                canceled_future_bytes=amount-credited, peer_healthy=False,
+                terminal_completion_verified=False, reviewed_retirement_verified=True)
+            amount = 0
+        elif peer_pin is not None:
             peer = read_pinned(peer_pin)
             claim_authority = dict(kind='meson', name=authority['name'], directory=peer['directory'],
                                    worklist=peer_pin, forecast=authority['forecast'])

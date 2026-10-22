@@ -24,7 +24,7 @@ def scheduling_configuration(original, previous, sources, detector_points):
 
 def prepare(directory, original_seal, template, template_seal, output, sources=7, detector_points=35,
             additional_meson_forecasts=(), prior_meson_controller_directory=None,
-            meson_peer_controllers=()):
+            meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=()):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -49,6 +49,18 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if reviewed_prior_meson_retirement is not None:
+        path = Path(reviewed_prior_meson_retirement).resolve()
+        config['reviewed_prior_meson_retirement'] = dict(path=str(path), sha256=production.durable.sha(path))
+        production.reviewed_meson_retirement(config, config['reviewed_prior_meson_retirement'],
+                                            config['prior_meson_publication'], check_queue=False)
+    for name, manifest in retired_meson_forecasts:
+        matches = [row for row in config.get('additional_reserved_meson_forecasts', []) if row['name'] == name]
+        if len(matches) != 1 or matches[0].get('retirement_authority'):
+            raise ValueError('Retirement needs one existing uncanceled meson forecast: '+name)
+        path = Path(manifest).resolve()
+        matches[0]['retirement_authority'] = dict(path=str(path), sha256=production.durable.sha(path))
+    production.validate_meson_reservation_additions(previous, config)
     if prior_meson_controller_directory is not None:
         locator = str(Path(prior_meson_controller_directory).resolve())
         config.pop('prior_meson_controller_replacement', None)
@@ -135,6 +147,12 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
     for path in (directory/'config.json', directory/'seal.json', template/'seal.json',
                  output/'config.json', output/'rollover.json', output/'lcg_controller.sh', output/'controller.sub.in'):
         seal_files[str(path)] = production.durable.sha(path)
+    retirement_pins = [row['retirement_authority'] for row in config.get('additional_reserved_meson_forecasts', [])
+                       if row.get('retirement_authority')]
+    if config.get('reviewed_prior_meson_retirement'):
+        retirement_pins.append(config['reviewed_prior_meson_retirement'])
+    for pin in retirement_pins:
+        seal_files[str(production.pinned_path(pin))] = pin['sha256']
     production.durable.new(output/'seal.json', dict(schema='shift-meson-controller-seal-v1', files=seal_files))
     digest = production.durable.sha(output/'seal.json')
     (output/'controller.sub').write_text((output/'controller.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST', digest))
@@ -159,11 +177,16 @@ def main():
         help='Follow a sealed operational successor of the unchanged pinned predecessor science')
     parser.add_argument('--meson-peer-controller', action='append', nargs=2, default=[],
         metavar=('NAME', 'DIRECTORY'), help='Exact terminal owner of an existing protected meson peer')
+    parser.add_argument('--reviewed-prior-meson-retirement', type=Path,
+        help='Pinned review of stopped predecessor allocations; does not declare them complete')
+    parser.add_argument('--retired-meson-forecast', action='append', nargs=2, default=[],
+        metavar=('NAME', 'MANIFEST'), help='Cancel only the reviewed remaining future writes of an existing peer')
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
                              args.additional_meson_forecast, args.prior_meson_controller_directory,
-                             args.meson_peer_controller), sort_keys=True))
+                             args.meson_peer_controller, args.reviewed_prior_meson_retirement,
+                             args.retired_meson_forecast), sort_keys=True))
 
 
 if __name__ == '__main__':
