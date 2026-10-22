@@ -19,7 +19,7 @@ import time
 
 from shift_material_preselection import admission_probability
 from shift_material_response import (bootstrap_comparison, shape_comparison, TARGETS,
-                                     source_exposures, source_rate_weight)
+                                     source_exposures, source_rate_weight, source_origin_sha256)
 
 
 def sha(path):
@@ -79,7 +79,8 @@ def run(directory, authority):
         if [r['event_id'] for r in response['events']] != sample['event_ids']:
             raise ValueError('Response original identities differ')
         source = plan['sources'][sample['source_id']]
-        if (response['source_GEN_sha256'] != source['gen_sha256']
+        if (response['source_GEN_sha256'] != source_origin_sha256(source)
+                or response.get('prepared_input_GEN_sha256', response['source_GEN_sha256']) != source['gen_sha256']
                 or not response['saved_decays_unchanged'] or not response['no_second_filter_efficiency']
                 or response['candidate_gate_applied_to_detector_sample']):
             raise ValueError('Invalid independent saved-decay response sample')

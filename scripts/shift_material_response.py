@@ -14,7 +14,7 @@ import random
 import zipfile
 from bisect import bisect_right
 
-from shift_material_preselection import uniform, probability
+from shift_material_preselection import uniform, probability, sha256 as checked_sha256
 
 
 TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
@@ -391,6 +391,186 @@ def dy_source_record(receipt_path, audit_directory, gen_path=None):
         diagnostic_only=True, contract_sha256=artifacts['contract.json']['sha256'])
 
 
+def _prepared_source_descriptor(raw_source, receipt_json, expected_sha256):
+    try:
+        return _prepared_source_fields(raw_source, receipt_json, expected_sha256)
+    except (KeyError, TypeError, IndexError, json.JSONDecodeError) as error:
+        raise ValueError('Prepared GEN: missing or invalid native preparation fields') from error
+
+
+def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
+    """Bind one source to the existing full-GEN audit, without inventing exposure."""
+    def require(condition, message):
+        if not condition:
+            raise ValueError('Prepared GEN: '+message)
+
+    checked_sha256(expected_sha256, 'preparation receipt')
+    require(isinstance(receipt_json, str)
+            and hashlib.sha256(receipt_json.encode()).hexdigest() == expected_sha256,
+            'native completion receipt SHA differs')
+    audit = json.loads(receipt_json)
+    require(audit.get('schema') == 'shift-assumed-jaw-full-GEN-canary-v1'
+            and audit.get('complete') is True and audit.get('publication_sha256_readback_verified') is True
+            and audit.get('new_GEN_exposure') == 0 and audit.get('generator_run') is False
+            and audit.get('SIM_or_detector_run') is False and audit.get('physics_normalization_ready') is False
+            and audit.get('source_distribution_qualified') is False and audit.get('full_production_ready') is False,
+            'needs complete published GEN preparation, with no added source exposure')
+    checked_sha256(audit['target_map_sha256'], 'preparation target map')
+    require(audit.get('source_assumption') and not raw_source.get('source_preparation_receipt_json')
+            and raw_source.get('source_family') in ('qcd_ordinary', 'jpsi', 'dy')
+            and raw_source.get('generator_profile') == 'ordinary'
+            and raw_source.get('decay_dependent_filter') is False,
+            'needs the original uncensored ordinary source and an explicit placement assumption')
+    matches = [unit for unit in audit['units'] if unit['source']['source_id'] == raw_source['source_id']]
+    require(len(matches) == 1, 'original source must occur exactly once')
+    unit = matches[0]
+    require(unit['source'] == raw_source and unit['source_GEN_sha256'] == raw_source['gen_sha256'],
+            'original source descriptor or SHA differs')
+    require(unit['family'] == ('qcd' if raw_source['source_family'] == 'qcd_ordinary' else raw_source['source_family']),
+            'prepared source family differs')
+    kind, denominator, sigma = source_normalization(raw_source)
+    require((unit['native_denominator_kind'], unit['native_denominator'], unit['native_source_cross_section_pb'])
+            == (kind, denominator, sigma), 'original source denominator or cross section differs')
+    require(unit.get('full_Run_Lumi_preserved') is True and unit.get('complete_natural_decays') is True
+            and unit.get('GENParticles_rebuilt') is True and unit.get('prepared_process') == 'SHIFTFULLGEN'
+            and unit.get('completed_unshifted_label') == 'shiftFullMuonDecays'
+            and unit.get('raw_unshifted_label') == 'shiftRawSource',
+            'missing complete decay, rebuilt truth, full accounting or exact unshifted product')
+    exposure = unit['source_full_accounting']
+    require(exposure.get('runs') and exposure.get('lumis'), 'missing full original Run/Lumi accounting')
+    rows, identities = unit['events'], set()
+    require(rows, 'missing prepared original-event census')
+    for row in rows:
+        identity = row['event_id']
+        require(isinstance(identity, list) and len(identity) == 3
+                and all(type(x) is int and x > 0 for x in identity)
+                and tuple(identity) not in identities
+                and type(row['native_weight']) in (int, float) and math.isfinite(row['native_weight']),
+                'invalid or repeated original identity/native weight')
+        identities.add(tuple(identity))
+        position = row['target_position_cm']
+        require(len(position) == 3 and all(type(x) in (int, float) and math.isfinite(x) for x in position),
+                'missing finite source position')
+        for name in ('placement', 'nominal_timing'):
+            closure = row[name]
+            require(closure.get('exact_p4_graph_identity_weights_units_RNG') is True
+                    and type(closure.get('maximum_vertex_residual_mm')) in (int, float)
+                    and 0 <= closure['maximum_vertex_residual_mm'] <= 1.e-8
+                    and all(type(closure.get(key)) is int and closure[key] > 0 for key in ('particles', 'vertices')),
+                    'placement/timing graph closure failed')
+            for field in ('before_graph_sha256', 'after_graph_sha256'):
+                checked_sha256(closure[field], 'prepared graph')
+        completion = row['completion']
+        require(completion.get('all_original_p4_and_ancestry_preserved') is True
+                and all(type(completion.get(key)) in (int, float) and completion[key] == 1.
+                        for key in ('ordinary_fraction', 'proposal_density_ratio', 'proposal_correction')),
+                'full natural completion changed original graph or introduced a decay weight')
+        parents = completion['parent_barcodes']
+        pdgs, lifetimes, means = (completion[key] for key in
+            ('parent_PDG_ids', 'sampled_proper_lifetime_mm', 'nominal_proper_lifetime_mm'))
+        require(len(parents) == len(set(parents)) == len(pdgs) == len(lifetimes) == len(means)
+                and all(type(x) is int and x != 0 for x in parents+pdgs)
+                and all(type(x) in (int, float) and math.isfinite(x) and x >= 0 for x in lifetimes)
+                and all(type(x) in (int, float) and math.isfinite(x) and x > 0 for x in means)
+                and completion['decayed_parents'] == len(parents), 'natural parent lifetime ledger differs')
+        require(completion['enabled_PDG_ids'] and all(type(x) is int and x != 0 for x in completion['enabled_PDG_ids'])
+                and all(type(completion.get(key)) is int and completion[key] >= 0
+                        for key in ('added_stable_muons', 'added_particles', 'added_vertices'))
+                and all(type(completion.get(key)) in (int, float) and math.isfinite(completion[key])
+                        and completion[key] >= 0 for key in ('maximum_p4_residual_GeV', 'maximum_proper_clock_residual_mm')),
+                'missing full natural-decay species/counts/closure evidence')
+        checked_sha256(completion['completed_unshifted_graph_sha256'], 'completed unshifted graph')
+        require(completion['completed_unshifted_graph_sha256'] == row['nominal_timing']['before_graph_sha256'],
+                'timing did not consume the completed unshifted graph')
+        truth = row['genParticles']
+        require(truth.get('exact_p4_PDG_status_vertices_and_barcode_ancestry') is True
+                and truth.get('rebuilt_process') == 'SHIFTFULLGEN'
+                and truth.get('maximum_vertex_residual_cm') == 0.
+                and truth.get('particles') == row['nominal_timing']['particles']
+                and row['nominal_timing']['particles']-row['placement']['particles'] == completion['added_particles']
+                and row['nominal_timing']['vertices']-row['placement']['vertices'] == completion['added_vertices'],
+                'rebuilt genParticles or completed graph inventory differs')
+        if unit['family'] == 'dy':
+            require(row.get('DY_existing_nominal_graph_exact') is True, 'native DY nominal timing did not close')
+        timing = row['timing_metadata']
+        require(all(type(timing.get(key)) in (int, float) and math.isfinite(timing[key])
+                    for key in ('sourceXmm', 'sourceYmm', 'sourceZmm', 'sourceCtBeforeMm', 'appliedShiftCtMm'))
+                and all(abs(timing[key]-10.*position[i]) <= 1.e-8
+                        for i, key in enumerate(('sourceXmm', 'sourceYmm', 'sourceZmm')))
+                and timing['appliedShiftCtMm'] == -timing['sourceZmm'],
+                'nominal physical source time or source position differs')
+    require(audit['events'] == sum(len(item['events']) for item in audit['units']),
+            'complete preparation event census differs')
+    publications = [item for item in audit['published'] if item['name'] == unit['family']+'_full_GEN.root']
+    require(len(publications) == 1, 'prepared GEN publication must occur exactly once')
+    published = publications[0]
+    checked_sha256(unit['output_sha256'], 'prepared GEN')
+    require(published.get('independent_sha256_readback') is True
+            and published['sha256'] == unit['output_sha256'] != raw_source['gen_sha256']
+            and type(published['bytes']) is int and published['bytes'] == unit['output_bytes'] > 0
+            and isinstance(published['path'], str) and published['path'].startswith('/eos/'),
+            'published prepared input differs from the audited output')
+    source = dict(raw_source)
+    source.update(raw_source=json.loads(json.dumps(raw_source, allow_nan=False)),
+        original_source_sha256=raw_source['gen_sha256'], original_saved_events=raw_source['saved_events'],
+        gen_sha256=unit['output_sha256'], url='root://eosuser.cern.ch/'+published['path'],
+        saved_events=len(rows), prepared_event_ids=[row['event_id'] for row in rows],
+        prepared_native_weights=[row['native_weight'] for row in rows],
+        original_full_Run_Lumi_metadata=exposure, timing_input_label='shiftFullMuonDecays',
+        timing_input_process='SHIFTFULLGEN', requires_full_muon_completion=False, muon_enhancement_complete=True,
+        source_preparation_receipt_json=receipt_json, source_preparation_receipt_sha256=expected_sha256,
+        source_model_scope='Assumed jaw placement and full natural decays; source distribution remains provisional.')
+    return source
+
+
+def prepared_source_record(raw_source, complete_json_path, *, expected_sha256):
+    """Read the real preparation receipt and bind every original to its native census."""
+    text = Path(complete_json_path).read_text()
+    source = _prepared_source_descriptor(raw_source, text, expected_sha256)
+    original = Path(raw_source['original_receipt']).read_bytes()
+    if hashlib.sha256(original).hexdigest() != raw_source['original_receipt_sha256']:
+        raise ValueError('Prepared GEN: original native source receipt SHA differs')
+    native = json.loads(original)
+    if raw_source['source_family'] == 'dy':
+        identities, weights = native['event_ids'], [1.]*native['events']
+    else:
+        identities, weights = native['semantic_audit']['event_ids'], native['semantic_audit']['weights']
+    census = {tuple(identity): weight for identity, weight in zip(identities, weights)}
+    if any(census.get(tuple(identity)) != weight for identity, weight in
+           zip(source['prepared_event_ids'], source['prepared_native_weights'])):
+        raise ValueError('Prepared GEN: prepared identities/native weights differ from the original source census')
+    return source
+
+
+def validate_prepared_source(source, sample=None):
+    """Check the frozen preparation binding before any detector-worker I/O."""
+    prepared = 'source_preparation_receipt_json' in source
+    if not prepared:
+        if ('original_source_sha256' in source or source.get('timing_input_label') == 'shiftFullMuonDecays'
+                or source.get('muon_enhancement_complete') is True):
+            raise ValueError('Prepared GEN: missing bound native preparation receipt')
+        return
+    expected = _prepared_source_descriptor(source['raw_source'], source['source_preparation_receipt_json'],
+                                           source['source_preparation_receipt_sha256'])
+    if source != expected:
+        raise ValueError('Prepared GEN: input/source fields differ from the bound native preparation')
+    if sample is not None:
+        indices = sample['indices']
+        if (len(indices) != len(set(indices)) or any(type(i) is not int or i < 0 or i >= source['saved_events'] for i in indices)
+                or sample['event_ids'] != [source['prepared_event_ids'][i] for i in indices]
+                or sample['native_weights'] != [source['prepared_native_weights'][i] for i in indices]):
+            raise ValueError('Prepared GEN: detector sample identities/native weights differ from prepared input')
+
+
+def source_origin_sha256(source):
+    """Keep the original hard-source identity when the input has been prepared."""
+    if 'source_preparation_receipt_json' in source:
+        validate_prepared_source(source)
+    elif 'original_source_sha256' in source:
+        raise ValueError('Prepared GEN: original-source SHA needs its bound preparation')
+    return checked_sha256(source.get('original_source_sha256', source['gen_sha256']), 'original GEN source')
+
+
 def source_normalization(source):
     """Return the declared native denominator and cross section without conflation."""
     kind = source.get('denominator_kind', 'fixed_source_trials')
@@ -416,6 +596,9 @@ def source_timing_input(source):
     detector electronics, integration windows, BX rules or trigger settings.
     """
     label = source.get('timing_input_label', 'generatorSmeared')
+    if label == 'shiftFullMuonDecays':
+        validate_prepared_source(source)
+        return label
     if label not in ('generatorSmeared', 'VtxSmeared'):
         raise ValueError('Unsupported native source timing input')
     if source.get('source_family') == 'dy' and label != 'VtxSmeared':
@@ -427,11 +610,13 @@ def source_exposures(sources):
     """Pool repeated sources by stratum; never mix accepted events and source trials."""
     exposures, kinds, seen = {}, {}, set()
     for source in sources:
+        validate_prepared_source(source)
         kind, count, _ = source_normalization(source)
         key = source['stratum']
-        if source['gen_sha256'] in seen:
+        original = source_origin_sha256(source)
+        if original in seen:
             raise ValueError('Repeated original source exposure')
-        seen.add(source['gen_sha256'])
+        seen.add(original)
         if kinds.setdefault(key, kind) != kind:
             raise ValueError('Different native denominator conventions share one stratum')
         exposures[key] = exposures.get(key, 0)+count

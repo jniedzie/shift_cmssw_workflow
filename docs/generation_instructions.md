@@ -293,6 +293,21 @@ Keep its original W and trial exposure through that separately audited GEN
 preparation. The default mu-enriched QCD adapter is unchanged. Do not substitute
 older unit-weight accepted-event records for the required fixed-trial ledger.
 
+For the controlled jaw/full-decay preparation, `prepared_source_record` reads
+the existing native full-GEN `complete.json`, pinned by its exact SHA. It checks
+placement, full natural decays, nominal timing, rebuilt genParticles, original
+event weights and full Run/Lumi accounting, together with the published input
+checksum. The prepared descriptor retains the raw source and its denominator;
+its `gen_sha256` identifies the prepared input, while `original_source_sha256`
+still identifies the original hard source. The response's `source_GEN_sha256`
+keeps that original meaning; `prepared_input_GEN_sha256` records the new input.
+Workers reject an unbound or changed preparation before I/O. They reproduce
+nominal physical source time only from `shiftFullMuonDecays:SHIFTFULLGEN` and
+require exact graph equality with the prepared timed graph before SIM. Recorded
+reconstruction probabilities and W/p stay unchanged. Repeated prepared versions
+do not add original GEN exposure. This binding is canary support, not approval
+of the assumed jaw distribution or full production.
+
 ## Streaming mu-enhanced QCD (2026-10-16)
 
 The new stream consumes only completed, published true-production GEN receipts.

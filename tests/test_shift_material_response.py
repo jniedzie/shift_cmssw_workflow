@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_material_response import (compare, bootstrap_comparison, shape_comparison,
                                      retained_tail_counts, response_reporting_scope, source_record, TARGETS,
                                      source_normalization, source_exposures, source_rate_weight,
-                                     source_timing_input)
+                                     source_timing_input, prepared_source_record, validate_prepared_source,
+                                     source_origin_sha256)
 from shift_material_preselection import admission_probability
 
 
@@ -130,6 +131,126 @@ def dy_receipt_fixture(directory):
         for name in ('gen.root', 'contract.json', 'validation.json')]
     path = directory/'receipt.json'; path.write_text(json.dumps(record))
     return path, record
+
+
+def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights, payload=b'prepared GEN'):
+    """Use the real full-GEN canary receipt fields, with no physical simulation."""
+    metadata = dict(runs=[dict(run=event_ids[0][0], original='full source run')],
+                    lumis=[dict(run=event_ids[0][0], lumi=1, original='full source luminosity')])
+    family = 'qcd' if raw_source['source_family'] == 'qcd_ordinary' else raw_source['source_family']
+    events = []
+    for identity, weight in zip(event_ids, native_weights):
+        closure = dict(exact_p4_graph_identity_weights_units_RNG=True, maximum_vertex_residual_mm=0.,
+                       before_graph_sha256='a'*64, after_graph_sha256='b'*64, particles=2, vertices=1)
+        completion = dict(all_original_p4_and_ancestry_preserved=True, ordinary_fraction=1.,
+            proposal_density_ratio=1., proposal_correction=1., completed_unshifted_graph_sha256='c'*64,
+            enabled_PDG_ids=[211,321], parent_barcodes=[], parent_PDG_ids=[], sampled_proper_lifetime_mm=[],
+            nominal_proper_lifetime_mm=[], decayed_parents=0, added_stable_muons=0, added_particles=0,
+            added_vertices=0, maximum_p4_residual_GeV=0., maximum_proper_clock_residual_mm=0.)
+        events.append(dict(event_id=identity, native_weight=weight, target_position_cm=[-6., 0., 14840.],
+            placement=dict(closure), completion=completion,
+            genParticles=dict(exact_p4_PDG_status_vertices_and_barcode_ancestry=True,
+                              rebuilt_process='SHIFTFULLGEN', maximum_vertex_residual_cm=0., particles=2),
+            nominal_timing=dict(closure, before_graph_sha256='c'*64, after_graph_sha256='d'*64),
+            timing_metadata=dict(sourceXmm=-60.,sourceYmm=0.,sourceZmm=148400.,sourceCtBeforeMm=0.,
+                                 appliedShiftCtMm=-148400.), DY_existing_nominal_graph_exact=family == 'dy'))
+    kind, count, sigma = source_normalization(raw_source)
+    prepared_sha = hashlib.sha256(payload).hexdigest()
+    unit = dict(family=family, source=raw_source, source_GEN_sha256=raw_source['gen_sha256'],
+        source_full_accounting=metadata, native_denominator_kind=kind, native_denominator=count,
+        native_source_cross_section_pb=sigma, full_Run_Lumi_preserved=True, complete_natural_decays=True,
+        GENParticles_rebuilt=True, prepared_process='SHIFTFULLGEN', completed_unshifted_label='shiftFullMuonDecays',
+        raw_unshifted_label='shiftRawSource', events=events, output_sha256=prepared_sha, output_bytes=len(payload))
+    audit = dict(schema='shift-assumed-jaw-full-GEN-canary-v1', complete=True,
+        publication_sha256_readback_verified=True, new_GEN_exposure=0, generator_run=False,
+        SIM_or_detector_run=False, physics_normalization_ready=False, source_distribution_qualified=False,
+        full_production_ready=False, target_map_sha256='f'*64, source_assumption={'diagnostic': True},
+        units=[unit], events=len(events), published=[dict(name=family+'_full_GEN.root',
+        path='/eos/synthetic/'+family+'_full_GEN.root', sha256=prepared_sha, bytes=len(payload),
+        independent_sha256_readback=True)])
+    path = Path(directory)/'complete.json';path.write_text(json.dumps(audit))
+    return path, audit
+
+
+class PreparedSourceTests(unittest.TestCase):
+    def make_raw(self, directory, family='qcd_ordinary'):
+        if family == 'dy':
+            path, record = dy_receipt_fixture(directory)
+            source = source_record(path, family=family, audit_directory=directory)
+            return source, record['event_ids'][:1], [1.]
+        path, record = jpsi_receipt_fixture(directory, family=family)
+        source = source_record(path, family=family)
+        return source, record['semantic_audit']['event_ids'][:1], record['semantic_audit']['weights'][:1]
+
+    def test_all_native_families_keep_raw_exposure_weights_and_distinct_prepared_input(self):
+        for family in ('qcd_ordinary', 'dy', 'jpsi'):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
+                raw, ids, weights = self.make_raw(directory, family)
+                path, _ = preparation_receipt_fixture(directory, raw, ids, weights)
+                prepared = prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                self.assertEqual(source_origin_sha256(prepared), raw['gen_sha256'])
+                self.assertNotEqual(prepared['gen_sha256'], raw['gen_sha256'])
+                self.assertEqual(source_normalization(prepared), source_normalization(raw))
+                self.assertEqual(source_rate_weight(prepared, weights[0]), source_rate_weight(raw, weights[0]))
+                self.assertEqual(prepared['prepared_event_ids'], ids)
+                self.assertEqual(prepared['prepared_native_weights'], weights)
+                self.assertEqual(prepared['timing_input_process'], 'SHIFTFULLGEN')
+                self.assertEqual(source_timing_input(prepared), 'shiftFullMuonDecays')
+                self.assertTrue(prepared['muon_enhancement_complete'])
+                self.assertFalse(prepared['requires_full_muon_completion'])
+                self.assertFalse(prepared['physics_normalization_ready'])
+                sample = dict(indices=[0], event_ids=ids, native_weights=weights, probabilities=[.25])
+                validate_prepared_source(prepared, sample)
+                self.assertEqual(sample['probabilities'], [.25])
+                with self.assertRaises(ValueError): validate_prepared_source(prepared, dict(sample, native_weights=[99.]))
+                with self.assertRaises(ValueError): validate_prepared_source(prepared, dict(sample, indices=[1]))
+                with self.assertRaises(ValueError): validate_prepared_source(dict(prepared, gen_sha256='e'*64))
+
+    def test_semantic_mutations_fail_even_with_updated_native_receipt_SHA(self):
+        changes = [lambda a:a.update(complete=False), lambda a:a.update(new_GEN_exposure=1),
+            lambda a:a.update(publication_sha256_readback_verified=False),
+            lambda a:a['units'][0].update(source_GEN_sha256='e'*64),
+            lambda a:a['units'][0].update(native_denominator=2),
+            lambda a:a['units'][0].update(full_Run_Lumi_preserved=False),
+            lambda a:a['units'][0].update(source_full_accounting={}),
+            lambda a:a['units'][0].update(complete_natural_decays=False),
+            lambda a:a['units'][0].update(completed_unshifted_label='generatorSmeared'),
+            lambda a:a['units'][0].update(prepared_process='OLDGEN'),
+            lambda a:a['units'][0]['events'][0]['completion'].update(proposal_correction=2.),
+            lambda a:a['units'][0]['events'][0]['completion'].pop('parent_barcodes'),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(exact_p4_PDG_status_vertices_and_barcode_ancestry=False),
+            lambda a:a['units'][0]['events'][0]['nominal_timing'].update(before_graph_sha256='e'*64),
+            lambda a:a['units'][0]['events'][0]['timing_metadata'].update(appliedShiftCtMm=-296800.),
+            lambda a:a['published'][0].update(sha256='e'*64)]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as directory:
+                raw, ids, weights = self.make_raw(directory)
+                path, audit = preparation_receipt_fixture(directory, raw, ids, weights)
+                change(audit);path.write_text(json.dumps(audit))
+                with self.assertRaises(ValueError):
+                    prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_prepared_event_must_match_original_native_census_not_just_internal_proof(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw, ids, weights = self.make_raw(directory)
+            path, _ = preparation_receipt_fixture(directory, raw, ids, [weights[0]*2.])
+            with self.assertRaisesRegex(ValueError, 'original source census'):
+                prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_preparation_is_required_and_original_exposure_is_not_repeated(self):
+        with tempfile.TemporaryDirectory() as directory:
+            raw, ids, weights = self.make_raw(directory)
+            with self.assertRaises(ValueError): validate_prepared_source(dict(raw, timing_input_label='shiftFullMuonDecays'))
+            path, _ = preparation_receipt_fixture(directory, raw, ids, weights)
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            prepared = prepared_source_record(raw, path, expected_sha256=digest)
+            with self.assertRaises(ValueError): prepared_source_record(raw, path, expected_sha256='0'*64)
+            with self.assertRaises(ValueError): validate_prepared_source(dict(prepared, original_source_sha256='e'*64))
+            path, _ = preparation_receipt_fixture(directory, raw, ids, weights, payload=b'another prepared serialization')
+            other = prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertNotEqual(prepared['gen_sha256'], other['gen_sha256'])
+            with self.assertRaisesRegex(ValueError, 'Repeated original source exposure'):
+                source_exposures([prepared, other])
 
 
 class SourceRecordTest(unittest.TestCase):

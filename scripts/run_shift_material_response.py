@@ -22,7 +22,8 @@ from run_shift_gen_to_nano import audit_edm, audit_nano, command, event_progress
 from shift_gen_material_features import event_features, hepmc_unit_names, read_hepmc
 from shift_material_preselection import admission_probability, pair_priority
 from shift_material_response import (retained_tail_counts, sampling_probabilities,
-                                     source_normalization, source_rate_weight, source_timing_input)
+                                     source_normalization, source_rate_weight, source_timing_input,
+                                     source_origin_sha256, validate_prepared_source)
 from shift_event_weights import annotate_proposal_weights
 
 
@@ -89,20 +90,24 @@ def main():
     request = json.loads(request_path.read_text())
     diagnostic_outputs = diagnostic_edm_outputs(request)
     source, sample = request['source'], request['sample']
+    validate_prepared_source(source, sample)
     if source.get('requires_full_muon_completion', False):
         raise ValueError('Raw ordinary QCD requires audited full natural muon completion before detector response')
     timing_input = source_timing_input(source)
+    original_sha = source_origin_sha256(source)
     source_normalization(source)
     inclusion = sampling_probabilities(sample)
     tools = Path(__file__).resolve().parent.parent
     report = dict(schema='shift-material-response-worker-v1', complete=False,
                   request_sha256=digest(request_path), source_id=source['source_id'],
-                  original_source_sha256=source['gen_sha256'], stages=[],
+                  original_source_sha256=original_sha, prepared_input_GEN_sha256=source['gen_sha256'], stages=[],
                   source_stratum=source['stratum'],
                   saved_decays_unchanged=True, material_survival_weight_applied=False,
                   physics_normalization_ready=False, started_epoch=time.time())
     report['sampling_design'] = request.get('sampling_design', 'uniform within saved source')
     report['diagnostic_edm_outputs'] = diagnostic_outputs
+    if 'source_preparation_receipt_sha256' in source:
+        report['source_preparation_receipt_sha256'] = source['source_preparation_receipt_sha256']
 
     def save():
         dump('report.json', report)
@@ -132,6 +137,9 @@ def main():
             if digest(path) != expected:
                 raise ValueError('Private input changed: '+path)
         exposure = metadata('gen.root')
+        if ('source_preparation_receipt_json' in source
+                and exposure != source['original_full_Run_Lumi_metadata']):
+            raise ValueError('Prepared input changed full original source Run/Lumi accounting')
         report['full_source_exposure'] = exposure
         # Reproduce the nominal source time once from its native unshifted
         # graph. Ordinary DY already timed generatorSmeared, so its adapter
@@ -143,7 +151,7 @@ def main():
 import FWCore.ParameterSet.Config as cms
 p=cms.Process('SHIFTTIMING')
 p.load('IOMC.ShiftEventTiming.shiftEventTime_cfi')
-p.shiftEventTime.src=cms.InputTag(sys.argv[4])
+p.shiftEventTime.src=cms.InputTag(sys.argv[4], '', sys.argv[5])
 p.source=cms.Source('PoolSource',fileNames=cms.untracked.vstring('file:'+sys.argv[1]),eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))]))
 p.maxEvents=cms.untracked.PSet(input=cms.untracked.int32(int(sys.argv[3])))
 p.path=cms.Path(p.shiftEventTime)
@@ -152,7 +160,8 @@ p.end=cms.EndPath(p.out)
 open('timing_cfg.py','w').write(p.dumpPython())
 '''
         command([sys.executable, '-c', timing, str(Path('gen.root').resolve()),
-                 str(Path('timed_gen.root').resolve()), str(len(selected_rows)), timing_input], timeout=600)
+                 str(Path('timed_gen.root').resolve()), str(len(selected_rows)), timing_input,
+                 source.get('timing_input_process', '')], timeout=600)
         before = signatures(Path('gen.root'), 0, len(selected_rows), indices=sample['indices'])
         run_stage('TIMING', ['cmsRun', 'timing_cfg.py'], 1800)
         after = signatures(Path('timed_gen.root'), 0, len(selected_rows))
@@ -191,7 +200,8 @@ open('timing_cfg.py','w').write(p.dumpPython())
                                     request['policy'].get('two_endcap_pointing'),
                                     request['policy'].get('muon_column_priority'))
             p = admission_probability(ranking, weight, source['mean_abs_native_weight'], request['policy'])
-            feat.update(candidate_probability=p, ranking=ranking)
+            feat.update(candidate_probability=p, ranking=ranking, original_source_sha256=original_sha,
+                        prepared_input_GEN_sha256=source['gen_sha256'])
             features.append(feat)
             original_rows.append(dict(id=eid, weight=weight))
         feature_cpu = cpu()-started
@@ -240,13 +250,13 @@ open('sim_cfg.py','w').write(p.dumpPython())
         answers = response('step4.root')
         if [x['event_id'] for x in answers] != [x['id'] for x in original_rows]:
             raise ValueError('Response identity/order mismatch')
-        weight_rows = [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
+        weight_rows = [dict(source_id=source['source_id'], original_source_sha256=original_sha,
             event_id=x['id'], proposal_draw_id=sample['id']+':'+str(x['id']), native_weight=x['weight'],
             sampling_probability=p, sampling_gen_weight=x['weight']/p,
             proposal_density_ratio=1., proposal_correction=1.,
             proposal_gen_weight=x['weight']/p, admitted=True) for x, p in zip(original_rows, inclusion)]
         kind, denominator, _ = source_normalization(source)
-        source_exposure = dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
+        source_exposure = dict(source_id=source['source_id'], original_source_sha256=original_sha,
                                original_full_Run_Lumi_metadata=exposure)
         if kind == 'fixed_source_trials':
             source_exposure['full_source_trials'] = denominator
@@ -257,13 +267,15 @@ open('sim_cfg.py','w').write(p.dumpPython())
             expected_nano_sha256=digest('step4.root'))
         detector_cpu = sum(x['cpu_seconds'] for x in report['stages'])
         for answer, feat, original, p in zip(answers, features, original_rows, inclusion):
-            answer.update(original_source_sha256=source['gen_sha256'], source_id=source['source_id'],
+            answer.update(original_source_sha256=original_sha, prepared_input_GEN_sha256=source['gen_sha256'],
+                source_id=source['source_id'],
                 stratum=source['stratum'], native_weight=original['weight'],
                 benchmark_probability=p, candidate_probability=feat['candidate_probability'],
                 rate_weight=source_rate_weight(source, original['weight']),
                 detector_cpu_seconds=detector_cpu/len(answers), feature_cpu_seconds=feature_cpu/len(answers))
         dump('response.json', dict(schema='shift-material-response-v1', events=answers,
-             source_id=source['source_id'], source_GEN_sha256=source['gen_sha256'],
+             source_id=source['source_id'], source_GEN_sha256=original_sha,
+             prepared_input_GEN_sha256=source['gen_sha256'],
              normalization=source, full_source_exposure=exposure,
              no_second_filter_efficiency=True, saved_decays_unchanged=True,
              sampling_design=report['sampling_design'],

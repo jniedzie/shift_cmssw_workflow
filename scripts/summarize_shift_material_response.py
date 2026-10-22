@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 from shift_material_response import (bootstrap_comparison, shape_comparison, response_reporting_scope,
-                                     source_exposures, source_rate_weight)
+                                     source_exposures, source_rate_weight, source_origin_sha256)
 
 
 def summarize(directory, canary=False):
@@ -32,7 +32,9 @@ def summarize(directory, canary=False):
             response = json.load(archive.extractfile('response.json'))
         if [r['event_id'] for r in response['events']] != sample['event_ids']:
             raise ValueError('Returned original identities differ')
-        if response['source_GEN_sha256'] != plan['sources'][sample['source_id']]['gen_sha256']:
+        source = plan['sources'][sample['source_id']]
+        if (response['source_GEN_sha256'] != source_origin_sha256(source)
+                or response.get('prepared_input_GEN_sha256', response['source_GEN_sha256']) != source['gen_sha256']):
             raise ValueError('Source hash mismatch')
         if not response['saved_decays_unchanged'] or not response['no_second_filter_efficiency']:
             raise ValueError('Unsupported source/decay normalization')

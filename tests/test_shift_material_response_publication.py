@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]/'tea_shift_cmssw/utils'))
 import run_shift_material_response as worker
 from summarize_shift_material_response import summarize
+from shift_material_response import source_record, prepared_source_record
+from test_shift_material_response import jpsi_receipt_fixture, preparation_receipt_fixture
 
 
 class MaterialResponsePublicationTest(unittest.TestCase):
@@ -29,6 +31,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.commands = []
         self.annotations = []
         self.corrupt_readback = None
+        self.timing_signature_mismatch = False
         self.source_bytes = b'original GEN'
         self.exposure = {'full_source_trials': 100}
         self.original = dict(id=[1, 2, 3], weight=2.)
@@ -71,12 +74,14 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                 mock.patch.object(worker, 'command', side_effect=self.command), \
                 mock.patch.object(worker, 'progress'), mock.patch.object(worker, 'event_progress'), \
                 mock.patch.object(worker, 'metadata', return_value=self.exposure), \
-                mock.patch.object(worker, 'signatures', return_value=[dict(self.original, hepmc_sha256='a'*64)]), \
+                mock.patch.object(worker, 'signatures', side_effect=lambda path, *args, **kwargs:
+                    [dict(self.original, hepmc_sha256=('b' if self.timing_signature_mismatch
+                          and Path(path).name == 'timed_gen.root' else 'a')*64)]), \
                 mock.patch.object(worker, 'audit_edm', return_value={'passed': True}), \
                 mock.patch.object(worker, 'audit_nano', return_value={'passed': True}), \
                 mock.patch.object(worker, 'audit', return_value=dict(passed=True,
                     full_original_run_lumi_metadata=self.exposure)), \
-                mock.patch('audit_shift_material_scout.identity', return_value=(1, 2, 3)), \
+                mock.patch('audit_shift_material_scout.identity', return_value=tuple(self.original['id'])), \
                 mock.patch.object(worker, 'hepmc_unit_names'), \
                 mock.patch.object(worker, 'read_hepmc', return_value=([], self.original['weight'],
                                                                       [self.original['weight']], [])), \
@@ -85,7 +90,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                 mock.patch.object(worker, 'admission_probability', return_value=.2), \
                 mock.patch.object(worker, 'annotate_proposal_weights',
                                   side_effect=lambda *args, **kwargs: self.annotations.append((args, kwargs)) or {'passed': True}), \
-                mock.patch.object(worker, 'response', return_value=[dict(event_id=[1, 2, 3],
+                mock.patch.object(worker, 'response', return_value=[dict(event_id=self.original['id'],
                     retained_pairs=[], tail_counts={'pairs': 0})]), \
                 mock.patch('builtins.print'):
             worker.main()
@@ -111,7 +116,7 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         report = self.run_worker()
         timing = next(args for args in self.commands if len(args) > 3 and args[1] == '-c'
                       and 'timing_cfg.py' in args[2])
-        self.assertEqual(timing[-1], 'VtxSmeared')
+        self.assertEqual(timing[-2:], ['VtxSmeared', ''])
         rows, exposure = self.annotations[0][0][1:3]
         self.assertEqual(rows[0]['sampling_gen_weight'], 2.)
         self.assertEqual(exposure[0]['full_source_events'], 100)
@@ -121,6 +126,63 @@ class MaterialResponsePublicationTest(unittest.TestCase):
             response = json.load(archive.extractfile('response.json'))
         self.assertEqual(response['events'][0]['rate_weight'], .1)
         self.check_downstream(report)
+
+    def prepare_completed_input(self):
+        native_path, native = jpsi_receipt_fixture(Path.cwd(), family='qcd_ordinary')
+        raw = source_record(native_path, family='qcd_ordinary')
+        identity = native['semantic_audit']['event_ids'][0]
+        weight = native['semantic_audit']['weights'][0]
+        self.original = dict(id=identity, weight=weight)
+        self.source_bytes = b'prepared GEN'
+        receipt, _ = preparation_receipt_fixture(Path.cwd(), raw, [identity], [weight], self.source_bytes)
+        prepared = prepared_source_record(raw, receipt, expected_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
+        self.request['source'] = prepared
+        self.request['sample'].update(event_ids=[identity], native_weights=[weight], probabilities=[.25])
+        self.exposure = prepared['original_full_Run_Lumi_metadata']
+        return raw, prepared
+
+    def test_prepared_source_keeps_raw_SHA_weights_and_exact_unshifted_timing_product(self):
+        raw, prepared = self.prepare_completed_input()
+        report = self.run_worker()
+        timing = next(args for args in self.commands if len(args) > 3 and args[1] == '-c'
+                      and 'timing_cfg.py' in args[2])
+        self.assertEqual(timing[-2:], ['shiftFullMuonDecays', 'SHIFTFULLGEN'])
+        self.assertEqual(report['original_source_sha256'], raw['gen_sha256'])
+        self.assertEqual(report['prepared_input_GEN_sha256'], prepared['gen_sha256'])
+        rows, exposures = self.annotations[0][0][1:3]
+        self.assertEqual(rows[0]['original_source_sha256'], raw['gen_sha256'])
+        self.assertEqual(rows[0]['sampling_probability'], .25)
+        self.assertEqual(rows[0]['sampling_gen_weight'], .8)
+        self.assertEqual(exposures[0]['full_source_trials'], 4)
+        with tarfile.open(fileobj=io.BytesIO(self.remote['root://eosuser.cern.ch/'+
+                                                       self.request['publication_directory']+'/evidence.tar.gz']), mode='r:gz') as archive:
+            response = json.load(archive.extractfile('response.json'))
+        self.assertEqual(response['source_GEN_sha256'], raw['gen_sha256'])
+        self.assertEqual(response['prepared_input_GEN_sha256'], prepared['gen_sha256'])
+        self.assertEqual(response['events'][0]['original_source_sha256'], raw['gen_sha256'])
+        self.assertLess(len(json.dumps(report).encode()), 65536)
+        self.check_downstream(report)
+
+    def test_prepared_source_accounting_mismatch_stops_before_any_detector_stage(self):
+        self.prepare_completed_input()
+        self.exposure = {'changed_full_source_accounting': True}
+        with self.assertRaisesRegex(ValueError, 'full original source Run/Lumi'):
+            self.run_worker()
+        self.assertFalse(any(args[0] == 'cmsRun' for args in self.commands))
+
+    def test_prepared_source_requires_exact_graph_equality_after_physical_timing(self):
+        self.prepare_completed_input()
+        self.timing_signature_mismatch = True
+        with self.assertRaisesRegex(ValueError, 'timing translation changed particle graph'):
+            self.run_worker()
+        self.assertEqual([args[1] for args in self.commands if args[0] == 'cmsRun'], ['timing_cfg.py'])
+
+    def test_prepared_source_cannot_silently_time_generatorSmeared_again(self):
+        self.prepare_completed_input()
+        self.request['source']['timing_input_label'] = 'generatorSmeared'
+        with self.assertRaisesRegex(ValueError, 'bound native preparation'):
+            self.run_worker()
+        self.assertFalse(self.commands)
 
     def test_all_edm_tiers_are_hash_verified_before_cleanup_and_declared_in_evidence(self):
         self.request['diagnostic_edm_tiers'] = ['SIM', 'DIGIHLT', 'RECO']
