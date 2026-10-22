@@ -17,6 +17,7 @@ from audit_dark_photon_gen import validate_meson_radiative_record
 from run_dark_photon_meson_gen import SOURCES,freeze_meson_model,sample_kaon_decay
 from run_dark_photon_meson_production import compact_files
 from prepare_dark_photon_meson_production import TOOLS
+from export_dark_photon_cross_sections import input_files
 
 
 class KaonRunnerTest(unittest.TestCase):
@@ -33,9 +34,11 @@ class KaonRunnerTest(unittest.TestCase):
             for relative,expected in inputs.items():
                 self.assertTrue(relative.startswith('physics_inputs/'))
                 self.assertEqual(hashlib.sha256((second/relative).read_bytes()).hexdigest(),expected)
-            (second/'contract.json').write_text(json.dumps(dict(meson_physics_inputs_sha256=inputs)))
+            (second/'contract.json').write_text(json.dumps(dict(meson_physics_inputs_sha256=inputs,
+                meson_model_card=card,production_mechanism='meson-radiative')))
             kept={str(path.relative_to(second)) for path in compact_files(second)}
             self.assertTrue(set(inputs)<=kept)
+            self.assertTrue(set(inputs)<=set(input_files(second,{})))
             relative,=inputs
             (second/relative).write_text('changed')
             with self.assertRaisesRegex(ValueError,'Pinned rate input changed'):compact_files(second)

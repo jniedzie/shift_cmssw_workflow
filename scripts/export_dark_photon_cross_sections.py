@@ -230,6 +230,21 @@ def resolve_meson_ledger(directory, contract):
     return path
 
 
+def meson_physics_input_files(directory,contract):
+    """Only explicitly declared frozen rate inputs belong to retained metadata."""
+    inputs={parent['ks_dispersive_reference']['path']:parent['ks_dispersive_reference']['sha256']
+            for parent in contract['meson_model_card']['parents'] if 'ks_dispersive_reference' in parent}
+    if inputs!=contract.get('meson_physics_inputs_sha256',{}):
+        raise ValueError('Declared meson rate inputs differ from their contract manifest')
+    for relative,expected in inputs.items():
+        path=Path(relative)
+        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='physics_inputs':
+            raise ValueError('Meson rate inputs require explicit frozen relative paths')
+        if sha256(Path(directory)/path)!=expected:
+            raise ValueError('Pinned meson rate input changed: '+relative)
+    return inputs
+
+
 def meson_source_exposure(contract, directory):
     """Reconstruct the fixed collision exposure, including failures and zeroes.
 
@@ -250,16 +265,7 @@ def meson_source_exposure(contract, directory):
     exposure, card = read(exposure_path), read(model_path)
     if exposure != contract.get("source_exposure") or card != contract.get("meson_model_card"):
         raise ValueError("Frozen meson source/model differs from its contract")
-    physics_inputs={parent['ks_dispersive_reference']['path']:parent['ks_dispersive_reference']['sha256']
-                    for parent in card['parents'] if 'ks_dispersive_reference' in parent}
-    if physics_inputs!=contract.get('meson_physics_inputs_sha256',{}):
-        raise ValueError('Declared meson rate inputs differ from their contract manifest')
-    for relative,expected in physics_inputs.items():
-        path=Path(relative)
-        if path.is_absolute() or '..' in path.parts or not path.parts or path.parts[0]!='physics_inputs':
-            raise ValueError('Meson rate inputs require explicit frozen relative paths')
-        if sha256(directory/path)!=expected:
-            raise ValueError('Pinned meson rate input changed: '+relative)
+    meson_physics_input_files(directory,contract)
     if exposure.get("schema") != "shift-meson-source-exposure-v1":
         raise ValueError("Unknown meson source exposure schema")
     if card.get("schema") != "shift-dark-photon-meson-model-v1":
@@ -640,8 +646,10 @@ def input_files(directory, manifest):
         if sha256(runtime) != manifest.get('runtime_provenance_sha256'):
             raise ValueError('Worker-local runtime provenance changed')
         names.add('runtime_provenance.json')
-    if read(directory / "contract.json").get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
+    contract=read(directory/'contract.json')
+    if contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         names.update({"source_exposure.json", "meson_model.json"})
+        names.update(meson_physics_input_files(directory,contract))
         if (directory / "meson_source_ledger.jsonl").is_file():
             names.add("meson_source_ledger.jsonl")
         else:
