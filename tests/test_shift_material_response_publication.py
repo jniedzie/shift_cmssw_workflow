@@ -27,6 +27,8 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         previous = Path.cwd()
         self.addCleanup(os.chdir, previous)
         os.chdir(directory.name)
+        self.tools = Path.cwd()/'frozen/tools'
+        self.runtime = Path.cwd()/'runtime/CMSSW_17_0_0_pre4'
         self.remote = {}
         self.commands = []
         self.annotations = []
@@ -70,9 +72,11 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         fwlite = types.SimpleNamespace(Events=lambda _: events)
         with mock.patch.dict(sys.modules, {'ROOT': root, 'DataFormats': types.ModuleType('DataFormats'),
                                           'DataFormats.FWLite': fwlite}), \
+                mock.patch.dict(os.environ, {'_CONDOR_SCRATCH_DIR': str(Path.cwd()),
+                    'CMSSW_BASE': str(self.runtime), 'SCRAM_ARCH': 'test_arch'}), \
+                mock.patch.multiple(worker, __file__=str(self.tools/'scripts/run_shift_material_response.py'),
+                    command=mock.Mock(side_effect=self.command), progress=mock.Mock(), event_progress=mock.Mock()), \
                 mock.patch.object(sys, 'argv', ['worker', 'request.json']), \
-                mock.patch.object(worker, 'command', side_effect=self.command), \
-                mock.patch.object(worker, 'progress'), mock.patch.object(worker, 'event_progress'), \
                 mock.patch.object(worker, 'metadata', return_value=self.exposure), \
                 mock.patch.object(worker, 'signatures', side_effect=lambda path, *args, **kwargs:
                     [dict(self.original, hepmc_sha256=('b' if self.timing_signature_mismatch
@@ -103,6 +107,10 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.assertEqual([Path(item['url']).name for item in report['published']], ['nano.root', 'evidence.tar.gz'])
         self.assertFalse(Path('step1.root').exists())
         self.assertFalse(Path('step3.root').exists())
+        self.assertNotIn('prepared_hepmc2_copy_plugin', report)
+        self.assertFalse(any(args[0] == 'edmPluginRefresh' for args in self.commands))
+        sim = next(args[2] for args in self.commands if len(args) > 3 and args[1] == '-c' and 'sim_cfg.py' in args[2])
+        self.assertNotIn('ShiftHepMC2CopyProducer', sim)
         self.check_downstream(report)
 
     def test_native_DY_uses_untimed_input_accepted_denominator_and_exact_inverse_sampling(self):
@@ -137,6 +145,10 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         receipt, _ = preparation_receipt_fixture(Path.cwd(), raw, [identity], [weight], self.source_bytes)
         prepared = prepared_source_record(raw, receipt, expected_sha256=hashlib.sha256(receipt.read_bytes()).hexdigest())
         self.request['source'] = prepared
+        plugin = self.tools/'plugin/pluginShiftHepMC2CopyProducer.so'
+        plugin.parent.mkdir(parents=True)
+        plugin.write_bytes(b'synthetic pinned HepMC2 copy plugin')
+        self.request['hepmc2_copy_plugin_sha256'] = hashlib.sha256(plugin.read_bytes()).hexdigest()
         self.request['sample'].update(event_ids=[identity], native_weights=[weight], probabilities=[.25])
         self.exposure = prepared['original_full_Run_Lumi_metadata']
         return raw, prepared
@@ -147,6 +159,12 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         timing = next(args for args in self.commands if len(args) > 3 and args[1] == '-c'
                       and 'timing_cfg.py' in args[2])
         self.assertEqual(timing[-2:], ['shiftFullMuonDecays', 'SHIFTFULLGEN'])
+        sim = next(args[2] for args in self.commands if len(args) > 3 and args[1] == '-c' and 'sim_cfg.py' in args[2])
+        self.assertIn("p.generatorSmeared=cms.EDProducer('ShiftHepMC2CopyProducer',src=cms.InputTag('shiftEventTime','','SHIFTTIMING'))", sim)
+        self.assertEqual(report['prepared_hepmc2_copy_plugin']['sha256'], self.request['hepmc2_copy_plugin_sha256'])
+        installed = self.runtime/'lib/test_arch/pluginShiftHepMC2CopyProducer.so'
+        self.assertEqual(hashlib.sha256(installed.read_bytes()).hexdigest(), self.request['hepmc2_copy_plugin_sha256'])
+        self.assertEqual(self.commands[0], ['edmPluginRefresh', str(installed.parent)])
         self.assertEqual(report['original_source_sha256'], raw['gen_sha256'])
         self.assertEqual(report['prepared_input_GEN_sha256'], prepared['gen_sha256'])
         rows, exposures = self.annotations[0][0][1:3]
@@ -183,6 +201,43 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'bound native preparation'):
             self.run_worker()
         self.assertFalse(self.commands)
+
+    def test_prepared_source_rejects_missing_or_changed_plugin_before_GEN_download(self):
+        self.prepare_completed_input()
+        del self.request['hepmc2_copy_plugin_sha256']
+        with self.assertRaisesRegex(ValueError, 'copy plugin must be a lowercase SHA'):
+            self.run_worker()
+        self.assertFalse(self.commands)
+        self.request['hepmc2_copy_plugin_sha256'] = 'e'*64
+        with self.assertRaisesRegex(ValueError, 'copy plugin SHA differs'):
+            self.run_worker()
+        self.assertFalse(self.commands)
+
+    def test_plugin_install_rejects_shared_runtime_and_symlink_escape_without_writing(self):
+        self.prepare_completed_input()
+        with tempfile.TemporaryDirectory() as outside:
+            shared = Path(outside)/'shared/CMSSW'
+            with mock.patch.dict(os.environ, {'_CONDOR_SCRATCH_DIR': str(Path.cwd()),
+                    'CMSSW_BASE': str(shared), 'SCRAM_ARCH': 'test_arch'}):
+                with self.assertRaisesRegex(ValueError, 'outside worker-local'):
+                    worker.install_prepared_hepmc2_copy(self.request, self.tools)
+            self.assertFalse(shared.exists())
+            library = self.runtime/'lib/test_arch'
+            library.mkdir(parents=True)
+            (library/'pluginShiftHepMC2CopyProducer.so').symlink_to(Path(outside)/'outside.so')
+            with mock.patch.dict(os.environ, {'_CONDOR_SCRATCH_DIR': str(Path.cwd()),
+                    'CMSSW_BASE': str(self.runtime), 'SCRAM_ARCH': 'test_arch'}):
+                with self.assertRaisesRegex(ValueError, 'outside worker-local'):
+                    worker.install_prepared_hepmc2_copy(self.request, self.tools)
+            self.assertFalse((Path(outside)/'outside.so').exists())
+
+    def test_plugin_install_requires_explicit_Condor_scratch(self):
+        self.prepare_completed_input()
+        environment = dict(os.environ)
+        environment.pop('_CONDOR_SCRATCH_DIR', None)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            with self.assertRaisesRegex(ValueError, 'worker-local Condor runtime'):
+                worker.install_prepared_hepmc2_copy(self.request, self.tools)
 
     def test_all_edm_tiers_are_hash_verified_before_cleanup_and_declared_in_evidence(self):
         self.request['diagnostic_edm_tiers'] = ['SIM', 'DIGIHLT', 'RECO']

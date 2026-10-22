@@ -320,6 +320,18 @@ exact equality to those independently encoded values, exact PDG/status/barcode
 ancestry, the pinned dictionary SHA, and zero encoded-reference residuals. It
 also records the raw-to-stored deviations; it does not accept a loose momentum
 or vertex tolerance. The HepMC placement, decay and timing checks stay strict.
+Validated prepared sources also require the frozen
+`plugin/pluginShiftHepMC2CopyProducer.so` and request field
+`hepmc2_copy_plugin_sha256`. The response worker verifies this checksum and
+installs the plugin only into a runtime beneath the real Condor scratch path;
+it refuses shared releases and escaping symlinks. After `edmPluginRefresh`, the
+prepared SIM config replaces `generatorSmeared` with `ShiftHepMC2CopyProducer`
+reading `shiftEventTime::SHIFTTIMING`. This fixed HepMC2 deep copy avoids the
+stock producer's duplicate HepMC3 product registration when both old and new
+timing products are present. Prepared inputs must already have passed the
+explicit native HepMC2 graph audit; there is no HepMC3 conversion or fallback.
+The physical timing step, detector settings, particles and W/p do not change.
+Legacy inputs keep their previous SIM copy and require no new plugin.
 
 ## Streaming mu-enhanced QCD (2026-10-16)
 

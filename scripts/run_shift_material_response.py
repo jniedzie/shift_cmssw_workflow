@@ -12,6 +12,7 @@ import math
 import os
 from pathlib import Path
 import resource
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -21,6 +22,7 @@ from audit_shift_material_scout import audit, digest, metadata
 from run_shift_gen_to_nano import audit_edm, audit_nano, command, event_progress, progress, signatures
 from shift_gen_material_features import event_features, hepmc_unit_names, read_hepmc
 from shift_material_preselection import admission_probability, pair_priority
+from shift_material_preselection import sha256 as checked_sha256
 from shift_material_response import (retained_tail_counts, sampling_probabilities,
                                      source_normalization, source_rate_weight, source_timing_input,
                                      source_origin_sha256, validate_prepared_source)
@@ -34,6 +36,43 @@ def dump(path, value):
 def cpu():
     values = [resource.getrusage(which) for which in (resource.RUSAGE_SELF, resource.RUSAGE_CHILDREN)]
     return sum(x.ru_utime+x.ru_stime for x in values)
+
+
+def install_prepared_hepmc2_copy(request, tools):
+    """Install one pinned plugin into this Condor worker's private runtime."""
+    expected = checked_sha256(request.get('hepmc2_copy_plugin_sha256'), 'prepared HepMC2 copy plugin')
+    plugin = tools/'plugin/pluginShiftHepMC2CopyProducer.so'
+    if digest(plugin) != expected:
+        raise ValueError('Prepared HepMC2 copy plugin SHA differs')
+    if not all(os.environ.get(key) for key in ('_CONDOR_SCRATCH_DIR', 'CMSSW_BASE', 'SCRAM_ARCH')):
+        raise ValueError('Prepared HepMC2 copy requires an explicit worker-local Condor runtime')
+    scratch = Path(os.environ['_CONDOR_SCRATCH_DIR']).resolve()
+    library = (Path(os.environ['CMSSW_BASE'])/'lib'/os.environ['SCRAM_ARCH']).resolve()
+    target = (library/plugin.name).resolve()
+    if not library.is_relative_to(scratch) or not target.is_relative_to(scratch):
+        raise ValueError('Prepared HepMC2 copy target is outside worker-local Condor scratch')
+    library.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(plugin, target)
+    if digest(target) != expected:
+        raise ValueError('Installed prepared HepMC2 copy plugin SHA differs')
+    command(['edmPluginRefresh', str(library)], timeout=120)
+    return dict(type='ShiftHepMC2CopyProducer', sha256=expected, input='shiftEventTime::SHIFTTIMING')
+
+
+def material_sim_config_script(prepared):
+    """Use the fixed HepMC2 copy only after the prepared-source proof passes."""
+    script = '''import json,runpy,sys
+import FWCore.ParameterSet.Config as cms
+p=runpy.run_path(sys.argv[1])['process']
+p.source.fileNames=cms.untracked.vstring('file:'+sys.argv[2])
+p.source.eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))])
+p.maxEvents.input=cms.untracked.int32(int(sys.argv[4]))
+p.RandomNumberGeneratorService.g4SimHits.initialSeed=cms.untracked.uint32(int(sys.argv[5]))
+p.FEVTDEBUGoutput.fileName=cms.untracked.string('file:'+sys.argv[3])
+'''
+    if prepared:
+        script += "p.generatorSmeared=cms.EDProducer('ShiftHepMC2CopyProducer',src=cms.InputTag('shiftEventTime','','SHIFTTIMING'))\n"
+    return script+"open('sim_cfg.py','w').write(p.dumpPython())\n"
 
 
 def diagnostic_edm_outputs(request):
@@ -94,6 +133,7 @@ def main():
     if source.get('requires_full_muon_completion', False):
         raise ValueError('Raw ordinary QCD requires audited full natural muon completion before detector response')
     timing_input = source_timing_input(source)
+    prepared = 'source_preparation_receipt_json' in source
     original_sha = source_origin_sha256(source)
     source_normalization(source)
     inclusion = sampling_probabilities(sample)
@@ -130,6 +170,9 @@ def main():
 
     save()
     try:
+        if prepared:
+            report['prepared_hepmc2_copy_plugin'] = install_prepared_hepmc2_copy(request, tools)
+            save()
         command(['xrdcp', '--silent', '--cksum', 'adler32', source['url'], 'gen.root'])
         if digest('gen.root') != source['gen_sha256']:
             raise ValueError('Source GEN hash changed')
@@ -212,16 +255,7 @@ open('timing_cfg.py','w').write(p.dumpPython())
         dump('event_ids.json', [x['id'] for x in original_rows])
         # Generate every stage in a fresh interpreter; CMSSW era modifiers are global.
         # The SIM template already schedules the saved, complete HepMC directly.
-        script = '''import json,runpy,sys
-import FWCore.ParameterSet.Config as cms
-p=runpy.run_path(sys.argv[1])['process']
-p.source.fileNames=cms.untracked.vstring('file:'+sys.argv[2])
-p.source.eventsToProcess=cms.untracked.VEventRange([':'.join(map(str,x))+'-'+':'.join(map(str,x)) for x in json.load(open('event_ids.json'))])
-p.maxEvents.input=cms.untracked.int32(int(sys.argv[4]))
-p.RandomNumberGeneratorService.g4SimHits.initialSeed=cms.untracked.uint32(int(sys.argv[5]))
-p.FEVTDEBUGoutput.fileName=cms.untracked.string('file:'+sys.argv[3])
-open('sim_cfg.py','w').write(p.dumpPython())
-'''
+        script = material_sim_config_script(prepared)
         command([sys.executable, '-c', script, str(tools/'templates/material_sim.py'),
                  str(Path('timed_gen.root').resolve()), str(Path('step1.root').resolve()),
                  str(len(original_rows)), str(sample['seed'])], timeout=600)
