@@ -215,7 +215,55 @@ def signatures(path, skip, count, indices=None):
     return rows
 
 
-def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None, complete_muon_decays=False):
+def signal_transport_contract(contract):
+    """Validate an explicit physical point for the optional preassigned decay path."""
+    if contract is None:
+        return None
+    if contract.get('schema') != 'shift-predefined-dark-photon-transport-v1':
+        raise ValueError('Unsupported predefined signal transport contract')
+    mass, ctau = contract.get('mass_gev'), contract.get('proper_ctau_mm')
+    if any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+           not math.isfinite(value) or value <= 0 for value in (mass, ctau)):
+        raise ValueError('Signal transport requires positive physical mass and proper c-tau')
+    support = contract.get('generated_mass_support_gev')
+    if (not isinstance(support, list) or len(support) != 2 or
+            any(isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value) or value <= 0 for value in support) or
+            not support[0] <= mass <= support[1]):
+        raise ValueError('Signal transport requires a finite generated-mass interval containing the point')
+    return dict(contract)
+
+
+def configure_signal_transport(process, contract):
+    """Keep nominal CMS settings and explicitly transport nested A-prime decays."""
+    import FWCore.ParameterSet.Config as cms
+    from IOMC.ShiftDarkPhoton.shiftDarkPhotonHepMC_cfi import shiftDarkPhotonHepMC
+    contract = signal_transport_contract(contract)
+    nominal = process.g4SimHits.Physics.type.value()
+    if nominal not in ('SimG4Core/Physics/FTFP_BERT_EMM', 'SimG4Core/Physics/FTFP_BERT_EMH'):
+        raise ValueError('Predefined signal transport requires its qualified nominal EMM or EMH list')
+    if hasattr(process, 'shiftDarkPhotonHepMC'):
+        raise ValueError('Predefined signal transport was already configured')
+    process.shiftDarkPhotonHepMC = shiftDarkPhotonHepMC.clone(
+        src=process.g4SimHits.Generator.HepMCProductLabel,
+        massGeV=cms.double(contract['mass_gev']),
+        generatedMassMinGeV=cms.double(contract['generated_mass_support_gev'][0]),
+        generatedMassMaxGeV=cms.double(contract['generated_mass_support_gev'][1]),
+        transportPredefinedSignalDecays=cms.untracked.bool(True))
+    process.simulation_step.replace(process.generatorSmeared,
+                                   process.generatorSmeared + process.shiftDarkPhotonHepMC)
+    process.g4SimHits.Generator.HepMCProductLabel = cms.InputTag('shiftDarkPhotonHepMC')
+    tracked = list(getattr(process.g4SimHits.Generator, 'AlwaysTrackDecaysTo', []))
+    if 32 not in tracked:
+        tracked.append(32)
+    process.g4SimHits.Generator.AlwaysTrackDecaysTo = cms.untracked.vint32(*tracked)
+    process.g4SimHits.Physics.type = cms.string(nominal + '_DarkPhoton')
+    process.g4SimHits.Physics.DarkPhoton = cms.PSet(
+        massGeV=cms.double(contract['mass_gev']), properCTauMm=cms.double(contract['proper_ctau_mm']))
+    process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftDarkPhotonHepMC_*_SHIFTSIM')
+
+
+def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None, complete_muon_decays=False, predefined_signal_decays=None):
     import FWCore.ParameterSet.Config as cms
     process = runpy.run_path(str(template))['process']
     process.source = cms.Source('PoolSource', fileNames=cms.untracked.vstring('file:' + str(input_file)),
@@ -253,6 +301,10 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
         if complete_muon_decays:
             from shift_muon_decay_replay import configure_decays
             configure_decays(process, seed, timing_persisted)
+        if predefined_signal_decays is not None:
+            if complete_muon_decays:
+                raise ValueError('Natural completion and predefined signal replay need a separately qualified composition')
+            configure_signal_transport(process, predefined_signal_decays)
         process.FEVTDEBUGoutput.SelectEvents = cms.untracked.PSet(SelectEvents=cms.vstring('simulation_step'))
         process.FEVTDEBUGoutput.outputCommands.extend(['drop *_g4SimHits_*_*', 'keep *_g4SimHits_*_SHIFTSIM'])
     outputs = process.outputModules_()
@@ -463,6 +515,7 @@ def main():
     if first_event_limit < args.event_stall_timeout:
         raise ValueError('First-event stall timeout must be at least the normal event-stall timeout')
     descriptor = json.loads(args.source.read_text())
+    predefined_signal_decays = signal_transport_contract(descriptor.get('predefined_signal_decays'))
     complete_muon_decays = descriptor.get('complete_muon_decays', False)
     population_indices = descriptor.get('selected_indices')
     population_size = len(population_indices) if population_indices is not None else len(descriptor['event_ids'])
@@ -509,6 +562,8 @@ def main():
               'canary': args.canary,
               'normalization_record': descriptor.get('normalization_record'),
               'recipe': 'Frozen archived Steps 1-4; persisted GEN replay; resolved configuration hashes recorded per stage'}
+    if predefined_signal_decays is not None:
+        report['predefined_signal_decays'] = predefined_signal_decays
     if probabilities is not None:
         report.update(source_indices=indices, sampling_probabilities=probabilities,
                       sampling_plan_sha256=descriptor['sampling']['plan_sha256'],
@@ -560,12 +615,14 @@ def main():
                      str(args.skip if stage == 1 else 0), str(args.count), str(report['seed'] + stage * 10),
                      str(int(report['timing_persisted_in_gen'])), str(int(descriptor.get(
                          'missing_filter_lumi', descriptor['stratum'].startswith('dy_')))), str(cfg)]
-                if stage == 1 and probabilities is not None:
-                    config_arguments.append(str(selection))
-                if complete_muon_decays:
-                    if len(config_arguments) == 13:
-                        config_arguments.append('-')
-                    config_arguments.append('1')
+                if probabilities is not None or complete_muon_decays or predefined_signal_decays is not None:
+                    config_arguments.append(str(selection) if stage == 1 and probabilities is not None else '-')
+                    config_arguments.append(str(int(complete_muon_decays)))
+                if predefined_signal_decays is not None:
+                    transport_path = work / 'predefined_signal_decays.json'
+                    if not transport_path.exists():
+                        transport_path.write_text(json.dumps(predefined_signal_decays, indent=2) + '\n')
+                    config_arguments.append(str(transport_path))
                 command(config_arguments,
                      timeout=args.config_timeout, stdout=config_log, stderr=subprocess.STDOUT)
             config_seconds = time.monotonic() - config_start
@@ -670,8 +727,9 @@ if __name__ == '__main__':
         template, stage, source, target, skip, count, seed, timed, missing_filter, cfg = sys.argv[2:12]
         event_ids = json.loads(Path(sys.argv[12]).read_text()) if len(sys.argv) > 12 and sys.argv[12] != '-' else None
         complete_muon_decays = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
+        predefined_signal_decays = json.loads(Path(sys.argv[14]).read_text()) if len(sys.argv) > 14 else None
         process = build_config(Path(template), int(stage), Path(source), Path(target),
-                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids, complete_muon_decays)
+                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids, complete_muon_decays, predefined_signal_decays)
         Path(cfg).write_text(process.dumpPython())
     else:
         main()

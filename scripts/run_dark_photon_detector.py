@@ -13,7 +13,7 @@ import shutil
 import subprocess
 import sys
 
-from run_shift_gen_to_nano import sha
+from run_shift_gen_to_nano import sha, signal_transport_contract
 
 
 def main():
@@ -30,6 +30,8 @@ def main():
                         help='Extra bounded startup/first-event time for lazy material-table initialization')
     parser.add_argument('--audit-timeout',type=int,default=600,
                         help='Wall-time deadline for exact selected-event graph audits; no selection changes')
+    parser.add_argument('--transport-predefined-signal-decays',action='store_true',
+                        help='Use the qualified optional physics/adapter for the explicit physical GEN point')
     args=parser.parse_args()
     if not 1 <= args.count <= 20 or args.skip < 0 or min(args.timeout,args.audit_timeout) <= 0:
         parser.error('Require 1..20 events, nonnegative skip and positive timeouts')
@@ -70,6 +72,12 @@ def main():
         output_base=str(out),complete_muon_decays=False,missing_filter_lumi=True,
         signal_contract_sha256=sha(gen_dir/'contract.json'),
         source_full_graph_sha256=[row['full_graph_sha256'] for row in audit['event_rows']])
+    if args.transport_predefined_signal_decays:
+        proper_ctau = contract.get('proper_ctau_mm', contract.get('physical_width_table', {}).get('ctau_mm'))
+        descriptor['predefined_signal_decays'] = signal_transport_contract(dict(
+            schema='shift-predefined-dark-photon-transport-v1',mass_gev=contract['mass_gev'],
+            proper_ctau_mm=proper_ctau,
+            generated_mass_support_gev=contract['generated_mass_support_gev']))
     (out/'source.json').write_text(json.dumps(descriptor,indent=2)+'\n')
     wrapper=dict(schema='shift-dark-photon-detector-pilot-v1',complete=False,
         physics_valid=False,normalization_ready=False,signal_contract=contract,

@@ -21,6 +21,17 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_predefined_transport_requires_explicit_physical_point_and_mass_support(self):
+        point = dict(schema='shift-predefined-dark-photon-transport-v1', mass_gev=.3,
+                     proper_ctau_mm=58.55432679904731, generated_mass_support_gev=[.2999997, .3000003])
+        self.assertIsNone(worker.signal_transport_contract(None))
+        self.assertEqual(worker.signal_transport_contract(point), point)
+        for key, value in [('proper_ctau_mm', 0.), ('proper_ctau_mm', float('nan')),
+                           ('mass_gev', True), ('generated_mass_support_gev', [.4, .5]),
+                           ('schema', 'lab-flight-in-metres')]:
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                worker.signal_transport_contract(dict(point, **{key: value}))
+
     def test_consumed_scratch_input_has_a_deletion_receipt_and_rejects_external_paths(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -45,14 +56,18 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(canonical.read_bytes(), b'preserve')
 
     def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
-        for mechanism, mass, name in ((None, 15., 'dy'), ('eta-etaprime-radiative', .3, 'eta_etaprime'),
-                                      ('meson-radiative', .3, 'meson_radiative')):
+        for mechanism, mass, name, transport in ((None, 15., 'dy', False),
+                ('eta-etaprime-radiative', .3, 'eta_etaprime', False),
+                ('meson-radiative', .3, 'meson_radiative', False),
+                ('meson-radiative', .3, 'meson_radiative', True)):
             with self.subTest(mechanism=mechanism), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); gen = root/'gen'; gen.mkdir()
                 (gen/'gen.root').write_bytes(b'synthetic GEN payload')
                 (gen/'manifest.json').write_text(json.dumps(dict(
                     status='GEN runtime audit passed fixture', output_sha256=worker.sha(gen/'gen.root'))))
-                (gen/'contract.json').write_text(json.dumps(dict(mass_gev=mass, production_mechanism=mechanism)))
+                (gen/'contract.json').write_text(json.dumps(dict(mass_gev=mass, production_mechanism=mechanism,
+                    physical_width_table=dict(ctau_mm=58.55432679904731),
+                    generated_mass_support_gev=[mass*.999999, mass*1.000001])))
                 identities = [[123, 1, event] for event in range(1, 6)]
                 (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
                     event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))
@@ -75,6 +90,8 @@ class HandoffTests(unittest.TestCase):
                 arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
                              '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600',
                              '--audit-timeout', '900']
+                if transport:
+                    arguments.append('--transport-predefined-signal-decays')
                 with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
                         patch.object(signal_runner.shutil, 'which', return_value='cmsRun'), \
                         patch.object(signal_runner.subprocess, 'run', side_effect=run), redirect_stdout(io.StringIO()):
@@ -83,6 +100,11 @@ class HandoffTests(unittest.TestCase):
                 self.assertTrue(descriptor['gen_path_resolved'])
                 self.assertEqual(descriptor['event_ids'], identities)
                 self.assertEqual(descriptor['stratum'], 'darkphoton_'+name+'_m'+str(mass))
+                if transport:
+                    self.assertEqual(descriptor['predefined_signal_decays']['proper_ctau_mm'], 58.55432679904731)
+                    self.assertEqual(descriptor['predefined_signal_decays']['mass_gev'], mass)
+                else:
+                    self.assertNotIn('predefined_signal_decays', descriptor)
                 self.assertTrue((output/'shift_storage_paths.py').is_file())
                 self.assertEqual(launched[0][launched[0].index('--event-stall-timeout') + 1], '1800')
                 self.assertEqual(launched[0][launched[0].index('--first-event-stall-timeout') + 1], '3600')
