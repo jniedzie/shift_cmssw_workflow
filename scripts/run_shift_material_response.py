@@ -107,21 +107,30 @@ def nano_missing_filter_lumi(source, exposure):
     return not any(present)
 
 
-def publish_outputs(publication, request):
+def publish_outputs(publication, request, existing=()):
     """Apply one registered bound and SHA readback to every retained output."""
     if sum(Path(local).stat().st_size for local, _ in publication)+65536 > request['publication_bound_bytes']:
         raise ValueError('Publication exceeds registered storage allocation')
     base = request['publication_directory']
+    previous = {item['url']:item for item in existing}
+    if (len(previous) != len(existing)
+            or not set(previous).issubset({'root://eosuser.cern.ch/'+base+'/'+remote for _, remote in publication})):
+        raise ValueError('Retained checkpoint is not part of the final publication')
     command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', base])
     published = []
     for local, remote in publication:
         url = 'root://eosuser.cern.ch/'+base+'/'+remote
-        command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', local, url])
+        item = dict(url=url, bytes=Path(local).stat().st_size, sha256=digest(local))
+        if url in previous:
+            if previous[url] != item:
+                raise ValueError('Audited checkpoint differs from final local tier')
+        else:
+            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', local, url])
         command(['xrdcp', '--silent', '--cksum', 'adler32', url, 'readback.bin'])
         if digest('readback.bin') != digest(local):
             raise ValueError('Publication readback differs')
         Path('readback.bin').unlink()
-        published.append(dict(url=url, bytes=Path(local).stat().st_size, sha256=digest(local)))
+        published.append(item)
     return published
 
 
@@ -353,7 +362,8 @@ open('timing_cfg.py','w').write(p.dumpPython())
                 archive.add(name, arcname=name)
         publication = [('step4.root', 'nano.root'), ('evidence.tar.gz', 'evidence.tar.gz')]
         publication.extend((item['local_filename'], item['published_filename']) for item in diagnostic_outputs)
-        published = publish_outputs(publication, request)
+        published = publish_outputs(publication, request,
+            existing=report.get('validated_reco_checkpoint', {}).get('published', []))
         base = request['publication_directory']
         report.update(complete=True, published=published, finished_epoch=time.time(),
                       wall_seconds=time.time()-report['started_epoch'])

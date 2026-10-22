@@ -58,6 +58,8 @@ class MaterialResponsePublicationTest(unittest.TestCase):
                 data = self.remote[source]
                 Path(target).write_bytes(b'corrupted' if source.endswith('/'+str(self.corrupt_readback)) else data)
             else:
+                if target in self.remote:
+                    raise FileExistsError('Synthetic EOS output already exists')
                 self.remote[target] = Path(source).read_bytes()
         elif argv[0] == 'cmsRun':
             if argv[1] == 'step4_cfg.py' and self.fail_nano:
@@ -288,6 +290,10 @@ class MaterialResponsePublicationTest(unittest.TestCase):
             self.assertEqual(item['sha256'], hashlib.sha256(data).hexdigest())
             self.assertEqual(item['bytes'], len(data))
             self.assertFalse(Path(item['local_filename']).exists())
+        checkpoint = report['validated_reco_checkpoint']['published'][0]
+        self.assertEqual(checkpoint, next(item for item in report['published'] if item['url'].endswith('/reco.root')))
+        uploads = [args for args in self.commands if args[0]=='xrdcp' and args[-1]==checkpoint['url']]
+        self.assertEqual(len(uploads), 1)
         self.check_downstream(report)
 
     def check_downstream(self, report):
