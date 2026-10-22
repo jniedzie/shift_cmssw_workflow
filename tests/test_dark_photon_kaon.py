@@ -85,6 +85,47 @@ class NeutralKaonTest(unittest.TestCase):
                            for a in transverse for b in transverse)
         self.assertEqual(interference, 0.)
 
+    def test_cp_interference_vanishes_at_fixed_muon_momenta_for_vector_current(self):
+        # At fixed observed muon momenta the unpolarized vector-current trace
+        # is symmetric in its two Lorentz indices. Summing the unobserved real
+        # photon polarization contracts it with an antisymmetric CP-even/odd
+        # cross tensor, so the interference vanishes before any angular or
+        # lifetime integration. This test retains finite muon mass and phases.
+        def dot(first, second):
+            return first[0]*second[0]-sum(a*b for a, b in zip(first[1:], second[1:]))
+
+        for mass in [.22, .3, .4]:
+            photon, dark, transverse, longitudinal = rest_vectors(mass)
+            muon_energy = mass/2
+            muon_momentum = math.sqrt(muon_energy**2-MUON_MASS**2)
+            for cosine, phi in [(-.8, .3), (-.2, 1.2), (.4, 2.1), (.9, .7)]:
+                direction = (math.sqrt(1-cosine**2)*math.cos(phi),
+                             math.sqrt(1-cosine**2)*math.sin(phi), cosine)
+                minus = (muon_energy,)+tuple(muon_momentum*x for x in direction)
+                plus = (muon_energy,)+tuple(-muon_momentum*x for x in direction)
+                pair_beta = tuple(x/dark[0] for x in dark[1:])
+                minus, plus = boost(minus, pair_beta), boost(plus, pair_beta)
+                for beta in [(0., 0., 0.), (.2, -.3, .7)]:
+                    k, q = boost(photon, beta), boost(dark, beta)
+                    mu_minus, mu_plus = boost(minus, beta), boost(plus, beta)
+                    photons = [boost(e, beta) for e in transverse]
+                    darks = [boost(e, beta) for e in transverse+[longitudinal]]
+                    trace = [[4*(dot(b, mu_minus)*dot(c, mu_plus)
+                                 +dot(b, mu_plus)*dot(c, mu_minus)
+                                 -dot(b, c)*(dot(mu_minus, mu_plus)+MUON_MASS**2))
+                              for c in darks] for b in darks]
+                    interference, scale = 0j, 0.
+                    for a in photons:
+                        even = [amplitude(310, k, q, a, b, 1+2j) for b in darks]
+                        odd = [amplitude(130, k, q, a, b, 3-4j) for b in darks]
+                        for b in range(3):
+                            for c in range(3):
+                                term = even[b]*odd[c].conjugate()*trace[b][c]
+                                interference += term
+                                scale += abs(term)
+                    self.assertGreater(scale, 0.)
+                    self.assertLess(abs(interference)/scale, 1.e-11)
+
     def test_spin_sum_and_identical_photon_phase_space_determine_branching(self):
         photon_momentum = PARENT_MASS/2
         for pdg in (130, 310):

@@ -18,8 +18,12 @@ excludes BR(A' -> mu mu), parent yields, kaon flight and detector acceptance.
 No source or complete production model is qualified by this library alone.
 """
 import cmath
+import bisect
+import hashlib
 from itertools import permutations
+import json
 import math
+from pathlib import Path
 
 from dark_photon_meson import radiative_branching as spin_zero_radiative_branching
 
@@ -29,6 +33,98 @@ REFERENCES = {
     'kl_measured_shapes': 'https://arxiv.org/pdf/hep-ex/0702039#page=1',
     'ks_dispersive_amplitude': 'https://arxiv.org/pdf/1609.03574#page=3',
 }
+
+KS_REFERENCE_FIGURE_SHA256 = '3026ba71009e40a849fca5220f61a14656a47b82bc4bf1f2be3d57202fc2e6c0'
+
+
+class KSDispersiveReference:
+    """Explicit, hash-pinned complex KS amplitude from published Figure 8.
+
+    The source is the original vector drawing, not a newly solved dispersion
+    relation. Bands retain the paper's pointwise systematic variation; their
+    correlations and statistical coverage are unavailable. In particular, a
+    rectangle enclosing these bands is not a model-independent upper bound.
+    The table stops before the physical endpoint and is never extrapolated.
+    """
+    def __init__(self, path, expected_sha256):
+        payload = Path(path).read_bytes()
+        if (not isinstance(expected_sha256, str) or len(expected_sha256) != 64
+                or hashlib.sha256(payload).hexdigest() != expected_sha256):
+            raise ValueError('An exact pinned KS reference-table SHA-256 is required')
+        table = json.loads(payload)
+        if (table.get('schema') != 'shift-ks-dispersive-figure-reference-v1'
+                or table.get('source', {}).get('figure_sha256') != KS_REFERENCE_FIGURE_SHA256
+                or table.get('units') != dict(q2='GeV^2', amplitude='GeV^-1')
+                or table.get('columns') != ['q2', 'real', 'imaginary', 'real_low',
+                                           'real_high', 'imaginary_low', 'imaginary_high']):
+            raise ValueError('Unsupported KS reference-table identity or units')
+        rows = table.get('rows', [])
+        if len(rows) < 2 or any(len(row) != 7 or any(type(value) not in (int, float)
+                or not math.isfinite(value) for value in row) for row in rows):
+            raise ValueError('A finite KS amplitude and its pointwise bands are required')
+        if (rows[0][0] != 0. or any(a[0] >= b[0] for a, b in zip(rows, rows[1:]))
+                or table.get('domain_q2_gev2') != [rows[0][0], rows[-1][0]]
+                or any(not row[3] <= row[1] <= row[4] or not row[5] <= row[2] <= row[6]
+                       for row in rows)):
+            raise ValueError('KS grid, domain or published-band ordering is invalid')
+        self.rows = tuple(tuple(row) for row in rows)
+        self.q2 = tuple(row[0] for row in rows)
+        self.sha256 = expected_sha256
+        self.publication = table['publication']
+
+    def _at_mass(self, mass):
+        _real(mass, 'dark-photon mass')
+        q2 = mass**2
+        if mass < 0 or not self.q2[0] <= q2 <= self.q2[-1]:
+            raise ValueError('Requested mass lies outside the drawn KS reference domain')
+        right = min(max(bisect.bisect_right(self.q2, q2), 1), len(self.q2)-1)
+        first, second = self.rows[right-1:right+1]
+        fraction = (q2-first[0])/(second[0]-first[0])
+        return tuple(a+fraction*(b-a) for a, b in zip(first[1:], second[1:]))
+
+    def amplitude(self, mass):
+        """Full CP-even coefficient A_gamma_gamma*(m^2), in GeV^-1."""
+        row = self._at_mass(mass)
+        return complex(row[0], row[1])
+
+    def form_factor(self, mass):
+        """Central A(m^2)/A(0), retaining the complex phase."""
+        return self.amplitude(mass)/self.amplitude(0.)
+
+    def amplitude_abs2_range(self, mass):
+        """Extrema over the rectangle of published Re/Im bands, GeV^-2.
+
+        These may vary the two components independently. They enclose the
+        plotted band and do not assign it a probability or unknown covariance.
+        """
+        _, _, real_low, real_high, imaginary_low, imaginary_high = self._at_mass(mass)
+        minimum = sum(0. if low <= 0 <= high else min(low**2, high**2)
+                      for low, high in [(real_low, real_high), (imaginary_low, imaginary_high)])
+        maximum = max(real_low**2, real_high**2)+max(imaginary_low**2, imaginary_high**2)
+        return minimum, maximum
+
+    def gamma_gamma_width(self, parent_mass):
+        """Gamma(KS -> gamma gamma), GeV, from the same absolute amplitude."""
+        _real(parent_mass, 'parent mass', positive=True)
+        return parent_mass**3*abs(self.amplitude(0.))**2/(64*math.pi)
+
+    def radiative_width(self, parent_mass, mass, epsilon, *, band=False):
+        """Leading Gamma(KS -> gamma A'), GeV; excludes A' decay and flight.
+
+        If band=True, return the pointwise published rectangle envelope.
+        No measured photon branching ratio is used to rescale this amplitude.
+        """
+        _real(parent_mass, 'parent mass', positive=True)
+        _real(mass, 'dark-photon mass')
+        _real(epsilon, 'kinetic mixing')
+        if mass < 0 or epsilon < 0:
+            raise ValueError('Nonnegative mass and kinetic mixing are required')
+        if mass >= parent_mass:
+            return (0., 0.) if band else 0.
+        factor = epsilon**2*parent_mass**3/(32*math.pi)*(1-mass**2/parent_mass**2)**3
+        if band:
+            return tuple(factor*value for value in self.amplitude_abs2_range(mass))
+        return factor*abs(self.amplitude(mass))**2
 
 
 def _kaon(parent_pdg_id):
