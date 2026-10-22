@@ -117,6 +117,15 @@ class MesonRetirement(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'unknown scheduler'):
                 meson.reviewed_meson_retirement(self.config,self.authority,self.old_pin)
 
+    def test_ambiguous_source_or_detector_intent_is_not_an_unsubmitted_batch(self):
+        for relative in ('submission_intent.json','production/submission_intent.json'):
+            with self.subTest(relative=relative):
+                path=self.old/'batches/unsubmitted'/relative
+                self.pin(path,dict(pending_native_submission=True))
+                with self.assertRaisesRegex(ValueError,'attempted batch unsubmitted'):
+                    self.evaluate()
+                path.unlink()
+
     def test_missing_batch_changed_pin_or_faked_histogram_is_rejected(self):
         for change in ('missing_batch','changed_status','fake_receipt','lost_ledger','unused_gen','changed_replacement'):
             with self.subTest(change=change):

@@ -275,7 +275,9 @@ def reviewed_meson_retirement(config, authority, expected, check_queue=True):
                 if published['campaign'] not in campaigns[batch['point']]:
                     campaigns[batch['point']].append(published['campaign'])
             elif disposition == 'unsubmitted':
-                if source or (directory/'submission.json').exists() or (directory/'production/submission.json').exists():
+                attempts = [directory/name for name in ('submission.json', 'submission_intent.json')]
+                attempts += [directory/'production'/name for name in ('submission.json', 'submission_intent.json')]
+                if source or any(path.exists() for path in attempts):
                     raise ValueError('Retirement calls an attempted batch unsubmitted')
             elif disposition == 'failed':
                 if not source.get('error') and not any(row.get('error') for row in statuses):
