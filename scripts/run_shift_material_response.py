@@ -25,7 +25,7 @@ from shift_material_preselection import admission_probability, pair_priority
 from shift_material_preselection import sha256 as checked_sha256
 from shift_material_response import (retained_tail_counts, sampling_probabilities,
                                      source_normalization, source_rate_weight, source_timing_input,
-                                     source_origin_sha256, validate_prepared_source)
+                                     source_origin_sha256, validate_prepared_source, response_source)
 from shift_event_weights import annotate_proposal_weights
 
 
@@ -157,7 +157,8 @@ def main():
     request_path = Path(sys.argv[1])
     request = json.loads(request_path.read_text())
     diagnostic_outputs = diagnostic_edm_outputs(request)
-    source, sample = request['source'], request['sample']
+    tools = Path(__file__).resolve().parent.parent
+    source, sample = response_source(request, tools), request['sample']
     validate_prepared_source(source, sample)
     if source.get('requires_full_muon_completion', False):
         raise ValueError('Raw ordinary QCD requires audited full natural muon completion before detector response')
@@ -166,7 +167,6 @@ def main():
     original_sha = source_origin_sha256(source)
     source_normalization(source)
     inclusion = sampling_probabilities(sample)
-    tools = Path(__file__).resolve().parent.parent
     report = dict(schema='shift-material-response-worker-v1', complete=False,
                   request_sha256=digest(request_path), source_id=source['source_id'],
                   original_source_sha256=original_sha, prepared_input_GEN_sha256=source['gen_sha256'], stages=[],

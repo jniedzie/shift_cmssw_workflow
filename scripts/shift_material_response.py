@@ -29,6 +29,33 @@ GENPARTICLE_CONDITIONING_SCHEMA = 'shift-genparticles-conditioning-v2'
 GENPARTICLE_ROUNDOFF_ALGORITHM = 'gamma8-signed-mass2-float32-stock-polar-energy-v1'
 
 
+def response_source(request, tools):
+    """Read one explicit frozen source, or preserve an existing inline source."""
+    if 'source' in request:
+        if 'source_descriptor' in request or not isinstance(request['source'], dict):
+            raise ValueError('Response source must be declared exactly once')
+        return request['source']
+    descriptor = request.get('source_descriptor')
+    if not isinstance(descriptor, dict) or set(descriptor) != {'path', 'sha256'}:
+        raise ValueError('Missing explicit frozen response source descriptor')
+    relative = descriptor['path']
+    if (not isinstance(relative, str) or not relative or Path(relative).is_absolute()
+            or '..' in Path(relative).parts):
+        raise ValueError('Response source path must stay inside frozen tools')
+    root = Path(tools).resolve()
+    path = root/relative
+    if path.is_symlink() or not path.resolve().is_relative_to(root) or not path.is_file():
+        raise ValueError('Response source path must be a regular file inside frozen tools')
+    data = path.read_bytes()
+    expected = checked_sha256(descriptor['sha256'], 'frozen response source')
+    if hashlib.sha256(data).hexdigest() != expected:
+        raise ValueError('Frozen response source descriptor SHA differs')
+    source = json.loads(data)
+    if not isinstance(source, dict):
+        raise ValueError('Frozen response source descriptor must contain one object')
+    return source
+
+
 def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=None):
     """Import an audited GEN source without changing native W or exposure.
 

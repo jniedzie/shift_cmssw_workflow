@@ -119,6 +119,17 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.assertNotIn('ShiftHepMC2CopyProducer', sim)
         self.check_downstream(report)
 
+    def test_shared_frozen_source_keeps_worker_identity_weights_and_full_exposure(self):
+        path=self.tools/'sources/prepared_source.json';path.parent.mkdir(parents=True)
+        source=self.request.pop('source');path.write_text(json.dumps(source))
+        self.request['source_descriptor']=dict(path='sources/prepared_source.json',
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+        report=self.run_worker()
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['original_source_sha256'], source['gen_sha256'])
+        self.assertEqual(report['full_source_exposure'], self.exposure)
+        self.assertEqual(self.annotations[0][0][1][0]['sampling_gen_weight'], 4.)
+
     def test_native_DY_uses_untimed_input_accepted_denominator_and_exact_inverse_sampling(self):
         source = self.request['source']
         del source['sigma_nd_pb'], source['full_source_trials']

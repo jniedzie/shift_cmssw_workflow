@@ -14,7 +14,7 @@ from shift_material_response import (compare, bootstrap_comparison, shape_compar
                                      source_normalization, source_exposures, source_rate_weight,
                                      source_timing_input, prepared_source_record, validate_prepared_source,
                                      source_origin_sha256, GENPARTICLE_CONDITIONING_SCHEMA,
-                                     GENPARTICLE_ROUNDOFF_ALGORITHM)
+                                     GENPARTICLE_ROUNDOFF_ALGORITHM, response_source)
 from shift_material_preselection import admission_probability
 
 
@@ -233,6 +233,30 @@ def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights
 
 
 class PreparedSourceTests(unittest.TestCase):
+    def test_response_source_supports_exact_inline_or_frozen_source_without_path_escape(self):
+        source = {'source_id':'synthetic', 'native_weight':.25}
+        self.assertIs(response_source({'source':source}, '/not/used'), source)
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root=Path(directory);path=root/'sources/prepared.json';path.parent.mkdir()
+            path.write_text(json.dumps(source));descriptor=dict(path='sources/prepared.json',
+                sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+            self.assertEqual(response_source({'source_descriptor':descriptor}, root), source)
+            invalid=[{}, {'source':source,'source_descriptor':descriptor},
+                {'source_descriptor':dict(descriptor,sha256='e'*64)},
+                {'source_descriptor':dict(descriptor,path=str(path))},
+                {'source_descriptor':dict(descriptor,path='../outside.json')},
+                {'source_descriptor':dict(descriptor,path='missing.json')},
+                {'source_descriptor':dict(descriptor,path=[])},
+                {'source_descriptor':dict(descriptor,extra=True)}]
+            escaped=Path(outside)/'source.json';escaped.write_bytes(path.read_bytes())
+            (root/'escaped.json').symlink_to(escaped)
+            (root/'escaped_directory').symlink_to(Path(outside),target_is_directory=True)
+            invalid.extend([{'source_descriptor':dict(descriptor,path='escaped.json')},
+                {'source_descriptor':dict(descriptor,path='escaped_directory/source.json')}])
+            for request in invalid:
+                with self.subTest(request=request), self.assertRaises(ValueError):
+                    response_source(request, root)
+
     def conditioned_truth(self, truth):
         truth.update(stock_persistence_audit_schema=GENPARTICLE_CONDITIONING_SCHEMA,
             roundoff_algorithm=GENPARTICLE_ROUNDOFF_ALGORITHM, stock_persistence_encoding_exact=False,
