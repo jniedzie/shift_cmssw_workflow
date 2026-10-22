@@ -193,7 +193,9 @@ def mean_lab_beta_gamma(parent, recoil_mass, mass, *, polarization):
     if len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0:
         raise ValueError('Invalid parent four-vector')
     p2 = dot(parent[1:],parent[1:])
-    squared = math.fsum((parent[0]**2, *(-component**2 for component in parent[1:])))
+    # Match the dipion kernels' product-based invariant exactly. At high boosts
+    # even an ulp from pow(x, 2) can close their final physical quadrature node.
+    squared = math.fsum((parent[0]*parent[0], *(-component*component for component in parent[1:])))
     if squared <= 0 or mass <= 0:
         raise ValueError('A timelike parent and positive signal mass are required')
     parent_mass = math.sqrt(squared)

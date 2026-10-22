@@ -272,6 +272,25 @@ class ChargedRhoRadiativeTest(unittest.TestCase):
             expected += weight*angular_mean
         self.assertAlmostEqual(actual/(expected/total_weight), 1., delta=2.e-12)
 
+    def test_squared_power_rounding_cannot_close_a_physical_boost_node(self):
+        # Multiplication and **2 differ by one ulp for this fixed boosted p4.
+        # The older vector helper rejected the last valid .5-GeV node.
+        parent=(5303.244325910366,1.1108397199943827,.3301258848788584,5303.244142650515)
+        parent_mass=math.sqrt(rho._minkowski(parent,parent))
+        nodes=rho._quadrature(MODEL['reference_parent_mass_gev'],.5,rho._model_key(MODEL))
+        self.assertLess(nodes[-1][0],(parent_mass-.5)**2)
+        predicted=[]
+        for s,weight in nodes:
+            energy=(parent_mass**2+.5**2-s)/(2*parent_mass)
+            momentum=math.sqrt((energy-.5)*(energy+.5))
+            a=parent[0]*energy/parent_mass
+            b=math.sqrt(math.fsum(v*v for v in parent[1:]))*momentum/parent_mass
+            angular=math.fsum(w*math.sqrt((a+b*c)**2-.5**2)/.5
+                             for c,w in rho._gauss_legendre(64))/2
+            predicted.append(weight*angular)
+        expected=math.fsum(predicted)/math.fsum(w for _,w in nodes)
+        self.assertAlmostEqual(rho.mean_lab_beta_gamma(parent,.5,MODEL)/expected,1.,delta=2.e-12)
+
     def test_actual_native_endpoint_failure_uses_audited_parent_rate_bound(self):
         # Exact seed841220001 trial6663, rho+ index52. The original isolated
         # 0.1% channel check correctly rejects its 1.67% relative endpoint shift.
