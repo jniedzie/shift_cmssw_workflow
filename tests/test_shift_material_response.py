@@ -149,8 +149,12 @@ def preparation_receipt_fixture(directory, raw_source, event_ids, native_weights
             added_vertices=0, maximum_p4_residual_GeV=0., maximum_proper_clock_residual_mm=0.)
         events.append(dict(event_id=identity, native_weight=weight, target_position_cm=[-6., 0., 14840.],
             placement=dict(closure), completion=completion,
-            genParticles=dict(exact_p4_PDG_status_vertices_and_barcode_ancestry=True,
-                              rebuilt_process='SHIFTFULLGEN', maximum_vertex_residual_cm=0., particles=2),
+            genParticles=dict(stock_persistence_encoding_exact=True, exact_PDG_status_and_barcode_ancestry=True,
+                stock_persistence_schema_sha256='66c6124fc1d1580acefe469c404ac143c95ba833aed9fcd8117698c2dcec62fa',
+                encoding='native reco::GenParticle constructed from newly timed HepMC, then stock ROOT dictionary roundtrip',
+                expected_encoded_p4_residual_GeV=0., expected_encoded_vertex_residual_cm=0.,
+                maximum_p4_raw_to_encoded_residual_GeV=0., maximum_vertex_residual_cm=0.,
+                rebuilt_process='SHIFTFULLGEN', particles=2),
             nominal_timing=dict(closure, before_graph_sha256='c'*64, after_graph_sha256='d'*64),
             timing_metadata=dict(sourceXmm=-60.,sourceYmm=0.,sourceZmm=148400.,sourceCtBeforeMm=0.,
                                  appliedShiftCtMm=-148400.), DY_existing_nominal_graph_exact=family == 'dy'))
@@ -222,7 +226,16 @@ class PreparedSourceTests(unittest.TestCase):
             lambda a:a['units'][0].update(prepared_process='OLDGEN'),
             lambda a:a['units'][0]['events'][0]['completion'].update(proposal_correction=2.),
             lambda a:a['units'][0]['events'][0]['completion'].pop('parent_barcodes'),
-            lambda a:a['units'][0]['events'][0]['genParticles'].update(exact_p4_PDG_status_vertices_and_barcode_ancestry=False),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(exact_PDG_status_and_barcode_ancestry=False),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(stock_persistence_encoding_exact=False),
+            lambda a:a['units'][0]['events'][0]['genParticles'].pop('stock_persistence_encoding_exact'),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(stock_persistence_schema_sha256='e'*64),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(encoding='raw HepMC doubles'),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(expected_encoded_p4_residual_GeV=1.e-12),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(expected_encoded_vertex_residual_cm=1.e-12),
+            lambda a:a['units'][0]['events'][0]['genParticles'].pop('maximum_vertex_residual_cm'),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(maximum_vertex_residual_cm=-1.),
+            lambda a:a['units'][0]['events'][0]['genParticles'].update(maximum_p4_raw_to_encoded_residual_GeV=float('nan')),
             lambda a:a['units'][0]['events'][0]['nominal_timing'].update(before_graph_sha256='e'*64),
             lambda a:a['units'][0]['events'][0]['timing_metadata'].update(appliedShiftCtMm=-296800.),
             lambda a:a['published'][0].update(sha256='e'*64)]
@@ -233,6 +246,19 @@ class PreparedSourceTests(unittest.TestCase):
                 change(audit);path.write_text(json.dumps(audit))
                 with self.assertRaises(ValueError):
                     prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def test_stock_encoding_can_change_raw_doubles_but_expected_persisted_values_must_match_exactly(self):
+        for family in ('qcd_ordinary', 'dy', 'jpsi'):
+            with self.subTest(family=family), tempfile.TemporaryDirectory() as directory:
+                raw, ids, weights = self.make_raw(directory, family)
+                path, audit = preparation_receipt_fixture(directory, raw, ids, weights)
+                truth = audit['units'][0]['events'][0]['genParticles']
+                truth.update(maximum_vertex_residual_cm=.0007, maximum_p4_raw_to_encoded_residual_GeV=.002)
+                path.write_text(json.dumps(audit))
+                source = prepared_source_record(raw, path, expected_sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                self.assertEqual(source_rate_weight(source, weights[0]), source_rate_weight(raw, weights[0]))
+                self.assertEqual(source['prepared_event_ids'], ids)
+                self.assertEqual(source['prepared_native_weights'], weights)
 
     def test_prepared_event_must_match_original_native_census_not_just_internal_proof(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -312,6 +312,14 @@ of the assumed jaw distribution or full production.
 The native raw-copy audit uses `shiftSourcePlacement:original:SHIFTFULLGEN`.
 Placement reads the prior process directly; it does not schedule a second
 GeneratorSmearedProducer, which would create a product-registration cycle.
+The stock GenParticle dictionary persists polar momentum and vertices as
+`Double32_t`, so those stored values need not equal the original HepMC doubles.
+The prepared-source audit constructs expected GenParticles directly from the
+newly timed HepMC and passes them through the stock ROOT dictionary. It requires
+exact equality to those independently encoded values, exact PDG/status/barcode
+ancestry, the pinned dictionary SHA, and zero encoded-reference residuals. It
+also records the raw-to-stored deviations; it does not accept a loose momentum
+or vertex tolerance. The HepMC placement, decay and timing checks stay strict.
 
 ## Streaming mu-enhanced QCD (2026-10-16)
 

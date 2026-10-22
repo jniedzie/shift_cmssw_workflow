@@ -23,6 +23,9 @@ TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
 SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 150., 200.],
                'pt': [0., 1., 2., 3., 4., 5., 7.5, 10., 15., 20., 30., 50., 100.]}
 
+GENPARTICLE_PERSISTENCE_SCHEMA_SHA256 = '66c6124fc1d1580acefe469c404ac143c95ba833aed9fcd8117698c2dcec62fa'
+GENPARTICLE_ENCODING = 'native reco::GenParticle constructed from newly timed HepMC, then stock ROOT dictionary roundtrip'
+
 
 def source_record(receipt_path, *, family='qcd', audit_directory=None, gen_path=None):
     """Import an audited GEN source without changing native W or exposure.
@@ -484,9 +487,18 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
         require(completion['completed_unshifted_graph_sha256'] == row['nominal_timing']['before_graph_sha256'],
                 'timing did not consume the completed unshifted graph')
         truth = row['genParticles']
-        require(truth.get('exact_p4_PDG_status_vertices_and_barcode_ancestry') is True
+        # The stock dictionary stores polar p4 and vertices as Double32_t.
+        # Compare the actual persisted candidate to an independently encoded
+        # expected candidate, not to the raw HepMC doubles or a loose tolerance.
+        require(truth.get('stock_persistence_encoding_exact') is True
+                and truth.get('exact_PDG_status_and_barcode_ancestry') is True
+                and truth.get('stock_persistence_schema_sha256') == GENPARTICLE_PERSISTENCE_SCHEMA_SHA256
+                and truth.get('encoding') == GENPARTICLE_ENCODING
+                and all(type(truth.get(key)) in (int, float) and truth[key] == 0.
+                        for key in ('expected_encoded_p4_residual_GeV', 'expected_encoded_vertex_residual_cm'))
+                and all(type(truth.get(key)) in (int, float) and math.isfinite(truth[key]) and truth[key] >= 0.
+                        for key in ('maximum_p4_raw_to_encoded_residual_GeV', 'maximum_vertex_residual_cm'))
                 and truth.get('rebuilt_process') == 'SHIFTFULLGEN'
-                and truth.get('maximum_vertex_residual_cm') == 0.
                 and truth.get('particles') == row['nominal_timing']['particles']
                 and row['nominal_timing']['particles']-row['placement']['particles'] == completion['added_particles']
                 and row['nominal_timing']['vertices']-row['placement']['vertices'] == completion['added_vertices'],
