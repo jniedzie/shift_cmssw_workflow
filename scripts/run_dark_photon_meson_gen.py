@@ -251,6 +251,7 @@ def run(args):
             updated = total + adjusted
             sums[name] = [updated, (updated - total) - adjusted]
 
+        source_started=time.monotonic()
         with (out/'meson_source_ledger.jsonl').open('x') as ledger:
             for trial in range(1, 10*args.source_collisions+1):
                 if time.monotonic()-started > args.timeout:
@@ -357,6 +358,7 @@ def run(args):
                 if collisions == args.source_collisions:
                     break
         writer.close()
+        source_seconds=time.monotonic()-source_started
         if collisions != args.source_collisions:
             raise ValueError('Fixed unfiltered source exposure was not completed')
         native = json.loads(str(source.summary()))
@@ -369,6 +371,8 @@ def run(args):
             sum_native_weights_squared=float(collisions), **{name: value[0] for name, value in sums.items()},
             accepted_signal_events=slots,
             analytic_coefficient_bound=bound, coefficient_includes_br_mumu=True,
+            source_generation_wall_seconds=source_seconds,
+            source_collisions_per_second=collisions/source_seconds,
             maximum_coefficient_relative_precision_shift=max_precision_shift,
             coefficient_excludes_epsilon_squared=True, unit_output_gen_weights=True,
             source_ledger_sha256=digest(out/'meson_source_ledger.jsonl'))
