@@ -75,7 +75,24 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
         return sample_radiative_decay(parent['pdg_id'],parent['p4'],mass,proper_ctau_mm,rng)
     if kind=='weak-kaon-pion':
         return sample_weak_decay(parent['pdg_id'],parent['p4'],model['recoil_mass_gev'],mass,proper_ctau_mm,rng)
+    if kind=='weak-kaon-leptonic':
+        from dark_photon_kaon_leptonic import sample_decay as sample_leptonic
+        limit=model['native_kinematic_precision']['relative_mass_limit']
+        return sample_leptonic(parent['p4'],mass,proper_ctau_mm,rng,
+            model=model['leptonic_form_factor_model'],parent_pdg_id=parent['pdg_id'],
+            parent_mass_relative_tolerance=2*limit+limit**2)
     raise ValueError('Kaon sampler has no qualified source current for this decay type')
+
+
+def kaon_mean_beta_gamma(parent,model,mass):
+    """The new source's rate-weighted mean; never retune its physical lifetime."""
+    if model['decay_type']=='weak-kaon-leptonic':
+        from dark_photon_kaon_leptonic import mean_lab_beta_gamma as leptonic_mean
+        return leptonic_mean(parent['p4'],mass,model=model['leptonic_form_factor_model'],
+            quadrature_order=model['leptonic_rate_numerics']['order'],
+            native_kinematic_precision=model['native_kinematic_precision'])
+    return vector_meson.mean_lab_beta_gamma(parent['p4'],model['recoil_mass_gev'],
+        mass,polarization='unpolarized')
 
 
 def remaining_timeout(started, timeout):
@@ -302,9 +319,8 @@ def run(args):
                                         native_precision['native_parent_rate_model'] = owned_rates
                                 mean = dipion_kernel(channel).mean_lab_beta_gamma(parent['p4'], args.mass,
                                     channel, **native_precision)
-                            elif channel.get('decay_type')=='weak-kaon-pion':
-                                mean=vector_meson.mean_lab_beta_gamma(parent['p4'],channel['recoil_mass_gev'],
-                                    args.mass,polarization='unpolarized')
+                            elif kaon_channel(channel):
+                                mean=kaon_mean_beta_gamma(parent,channel,args.mass)
                             elif vector_parent(channel):
                                 mean = vector_meson.mean_lab_beta_gamma(parent['p4'], channel['recoil_mass_gev'],
                                     args.mass, polarization=channel['parent_polarization'])
@@ -409,7 +425,9 @@ def run(args):
             mean_beta_gamma_reference=reference,
             mean_beta_gamma_reference_standard_error=reference_error,
             mean_beta_gamma_reference_error_method='Fixed-source collision covariance; first-order delta method for ratio of means',
-            mean_beta_gamma_reference_method='Full-source exclusive-rate-weighted isotropic angular mean; dipion spectrum quadrature where applicable',
+            mean_beta_gamma_reference_method=('Full-source exclusive-rate-weighted isotropic angular mean; dipion spectrum quadrature where applicable'
+                +('; K_l2 uses the full three-body IB+SD spectrum with explicit native-mass continuation'
+                  if any(parent.get('decay_type')=='weak-kaon-leptonic' for parent in card['parents']) else '')),
             mean_beta_gamma_accepted_closure=math.fsum(boosts)/len(boosts) if boosts else None,
             mean_lab_flight_reference_estimate_m=reference*width['ctau_mm']/1000. if reference is not None else None,
             target_cross_section_pb=source_cross_section_pb(native['sigma_source_mb'],args.epsilon,sums['coefficient_sum'][0],collisions),

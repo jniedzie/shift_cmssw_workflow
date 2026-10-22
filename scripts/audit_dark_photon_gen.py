@@ -218,6 +218,7 @@ def validate_meson_radiative_record(record, selected):
     sample = selected['sampled_decay']
     recoil_pdg = sample.get('recoil_pdg_id', 22)
     model = selected.get('resolved_model')
+    leptonic=model and model.get('decay_type')=='weak-kaon-leptonic'
     if parent['pdg_id'] in (130,310,321,-321):
         from dark_photon_meson_source import kaon_channel
         native=sample.get('native_parent_flight')
@@ -227,14 +228,22 @@ def validate_meson_radiative_record(record, selected):
                 or any(parent.get(key)!=value for key,value in native.items())
                 or native.get('stored_decay_position_mm')!=graph['decay_position_mm']
                 or native.get('production_position_mm')!=graph['production_position_mm']
-                or model.get('recoil_pdg_id')!=recoil_pdg):
+                or not leptonic and model.get('recoil_pdg_id')!=recoil_pdg):
             raise ValueError('Kaon source changed its pinned native flight, current or recoil')
-        polarization='transverse' if model['decay_type']=='neutral-kaon-photon' else 'longitudinal'
+        polarization=('full-three-state-density' if leptonic else
+                      'transverse' if model['decay_type']=='neutral-kaon-photon' else 'longitudinal')
         if (sample.get('dark_photon_polarization')!=polarization
                 or sample.get('parent_polarization')!='spin-zero'
                 or model['decay_type']=='weak-kaon-pion' and
                     sample.get('recoil_mass_gev')!=model['recoil_mass_gev']):
             raise ValueError('Kaon spin/recoil differs from its qualified current')
+        if leptonic and (sample.get('recoil_pdg_ids')!=model['recoil_pdg_ids']
+                or sample.get('recoil_masses_gev')!=model['recoil_masses_gev']
+                or sample.get('charged_lepton_pdg_id')!=model['charged_lepton_pdg_id']
+                or sample.get('neutrino_pdg_id')!=model['neutrino_pdg_id']
+                or sample.get('cp_conjugate')!=(parent['pdg_id']<0)
+                or len(sample.get('recoil_p4s',[]))!=2):
+            raise ValueError('Leptonic kaon charges/recoils differ from its qualified current')
     vector_dipion = model and vector_dipion_channel(model)
     if abs(parent['pdg_id']) in (113,213,223,333,313,323) and not vector_dipion:
         if (not model or model.get('decay_type') != 'vector-pseudoscalar' or
@@ -244,7 +253,9 @@ def validate_meson_radiative_record(record, selected):
                 type(sample.get('recoil_natural_decay_required')) is not bool or
                 recoil_pdg in (111,221) and sample.get('recoil_natural_decay_required') is not True):
             raise ValueError('Vector-meson recoil/spin convention differs from its explicit source model')
-    if model and dipion_channel(model):
+    if leptonic:
+        expected=list(zip(sample['recoil_pdg_ids'],sample['recoil_p4s']))
+    elif model and dipion_channel(model):
         charged = model.get('decay_type') == 'charged-vector-dipion'
         if (charged and abs(parent['pdg_id']) != 213 or
                 model.get('decay_type') == 'vector-dipion' and parent['pdg_id'] != 113):
