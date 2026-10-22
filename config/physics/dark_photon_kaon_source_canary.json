@@ -248,7 +248,7 @@
       "211:m0=0.13957038999999999",
       "111:m0=0.13497680000000001"
     ],
-    "cross_section_model": "Unchanged CP5 fixed-target non-diffractive pp benchmark; kaon-only rare-channel inventory",
+    "cross_section_model": "Pythia 8.317 energy-dependent SaS/Donnachie-Landshoff non-diffractive pp; CP5 hadronization/MPI settings retained",
     "condition_note": "The explicit tail retains all initialized narrow-meson mass settings used by the qualified ND source. Additional kaon m0 commands repeat their unchanged native values.",
     "baseline_resolved_commands_sha256": "4bf0d25c02c494ee681aab4d595274e9c7380845febc07e1826d276618c5a926"
   },
