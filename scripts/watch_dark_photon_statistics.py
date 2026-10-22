@@ -113,6 +113,7 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
     paths += sorted((root / 'waves').glob('w*/gen_stage/submission.json'))
     paths += sorted((root / 'waves').glob('w*/production/submission.json'))
     paths += sorted((root / 'batches').glob('*/submission.json'))
+    paths += sorted((root / 'batches').glob('*/handoff/submission.json'))
     paths += sorted((root / 'batches').glob('*/production/submission.json'))
     paths += sorted((root / 'aggregates').glob('*/v*/submission.json'))
     external = {Path(directory) for directory in external_productions}
@@ -505,6 +506,11 @@ def assess(config, previous, rows, history, receipts, now):
     if active_failures:
         issue('supervisor_failure_records', 'warning', 'Supervisor has failure records requiring reconciliation',
               records=sorted(active_failures))
+    failed_batches=[name for name in controller.get('failed_batches',{})
+                    if not controller.get('batches',{}).get(name,{}).get('published')]
+    if failed_batches:
+        issue('meson_batch_failure_records','warning','Independent meson batches need reviewed recovery',
+              records=sorted(failed_batches))
     worklist = read(config['worklist'])
     published = {point: row.get('events', 0) for point, row in controller.get('published', {}).items()}
     meson = worklist.get('schema') == 'shift-dp-meson-production-v1'

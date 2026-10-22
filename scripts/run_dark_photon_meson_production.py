@@ -665,6 +665,10 @@ def verify(directory, seal_digest):
         path=batch_directory(config,batch)
         if (path/'source.sub').read_text()!=(path/'source.sub.in').read_text().replace('SEAL_DIGEST',seal_digest):
             raise ValueError('Source submit description differs from its frozen template')
+        if config.get('parallel_handoffs') is True:
+            handoff_path=path/'handoff'
+            if (handoff_path/'worker.sub').read_text()!=(handoff_path/'worker.sub.in').read_text().replace('SEAL_DIGEST',seal_digest):
+                raise ValueError('Handoff submit description differs from its frozen template')
     if source_mechanism(config) == 'meson-radiative':
         path = directory / 'coverage'
         if (path/'coverage.sub').read_text() != (path/'coverage.sub.in').read_text().replace('SEAL_DIGEST', seal_digest):
@@ -739,7 +743,9 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
         additions = validate_meson_reservation_additions(predecessor, config)
         if registration.get('added_peer_names') != [row['name'] for row in additions]:
             raise ValueError('Meson registration changed its declared added peers')
-    for key,maximum in [('simultaneous_sources',7),('simultaneous_detector_points',35)]:
+    from prepare_dark_photon_meson_production import source_execution_limits
+    source_limit=source_execution_limits(original)['maximum_simultaneous_sources']
+    for key,maximum in [('simultaneous_sources',source_limit),('simultaneous_detector_points',35)]:
         if key in original and (type(config.get(key)) is not int or not 1<=config[key]<=maximum):
             raise ValueError('Replacement controller scheduling limit is outside the reviewed grid: '+key)
     return config
@@ -1012,6 +1018,9 @@ def adopt(config, batch):
         events_per_job=chunk_size, group_events=config['group_events'],
         detector_job_base=batch['detector_job_base'])
     plan['runtime'] = dict(cmssw_base=config['cmssw_base'])
+    if config.get('detector_runtime') is not None:
+        # The ordinary preparer validates this separately qualified capsule.
+        plan['detector_runtime']=copy.deepcopy(config['detector_runtime'])
     from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
     sources=set(grid.SOURCES)|set(MESON_SOURCES)
     plan['frozen_dependencies'] = dict(sources={name: dict(frozen_copy=str(Path(config['tools'])/name),
@@ -1123,6 +1132,70 @@ def handoff(config, batch):
     if authority is not None:
         return reviewed_detector_recovery(config, batch, receipt, authority)
     return receipt
+
+
+def prepare_handoff_worker(config, batch):
+    """Freeze an independent preparation worker before the science seal exists."""
+    directory=batch_directory(config,batch)/'handoff'
+    directory.mkdir()
+    script=Path(config['tools'])/'run_dark_photon_meson_production.py'
+    wrapper=directory/'run.sh'
+    wrapper.write_text('''#!/bin/bash
+# Code style: AI-code. AI-generated independent meson detector preparation.
+set -eo pipefail
+unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD ROOTSYS
+export PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
+source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
+exec python3 '''+shlex.quote(str(script))+' --directory '+shlex.quote(config['directory'])+
+        ' --seal "$1" --action handoff --batch '+shlex.quote(batch['batch'])+'\n')
+    wrapper.chmod(0o755)
+    descriptor=f'''# Code style: AI-code. AI-generated independent meson handoff worker.
+universe = vanilla
+executable = {wrapper}
+arguments = SEAL_DIGEST
+initialdir = {directory}
+getenv = False
+should_transfer_files = YES
+transfer_output_files = ""
+request_cpus = 1
+request_memory = 3000MB
+request_disk = 4000MB
++JobFlavour = "tomorrow"
++MaxRuntime = 86400
++SendCredential = True
++ShiftDPStatisticsTask = "{directory}"
++JobBatchName = "SHIFT_DP_meson_detector_preparation"
+output = {directory}/worker.$(ClusterId).$(ProcId).out
+error = {directory}/worker.$(ClusterId).$(ProcId).err
+log = {directory}/events.log
+on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+periodic_release = False
+queue
+'''
+    (directory/'worker.sub.in').write_text(descriptor)
+    return [wrapper,directory/'worker.sub.in']
+
+
+def parallel_handoff(config,state,batch,entry,queue_snapshot):
+    directory=batch_directory(config,batch)/'handoff'
+    description=directory/'worker.sub'
+    receipt=(existing_receipt(directory,description) if (directory/'submission.json').is_file()
+             else durable.submission(config,directory,description))
+    entry.update(handoff_cluster=receipt['cluster'],stage='detector_preparation')
+    status=batch_job_status(config,state,batch,entry,receipt,'detector_preparation',queue_snapshot)
+    if status!='complete':
+        return status,None
+    production=batch_directory(config,batch)/'production'
+    detector=existing_receipt(production,production/'pipeline.dag.condor.sub')
+    rates=batch_directory(config,batch)/'rates.json'
+    if (not rates.is_file() or read(rates)!=dict(complete=True,
+            production_plan_sha256=durable.sha(production/'plan.json'))):
+        raise RuntimeError('Preparation worker exited without its complete rate export')
+    if batch['batch'] in config.get('reviewed_detector_recoveries',{}):
+        detector=reviewed_detector_recovery(config,batch,detector,
+                                           config['reviewed_detector_recoveries'][batch['batch']])
+    return status,detector
 
 
 def reviewed_detector_recovery(config, batch, original, authority):
@@ -1572,11 +1645,37 @@ def cached_terminal_record(config, receipt):
     return validate_terminal_record(receipt, read(path)) if path.is_file() else None
 
 
-def native_status(config, receipt):
+def production_queue_snapshot(config):
+    """Read a large campaign once per poll, including its native DAG links."""
+    if config.get('batch_native_queries') is not True:
+        return None
+    root=re.escape(str(Path(config['directory'])))
+    constraint='regexp('+json.dumps('^'+root+'/(batches|aggregates|coverage)(/|$)')+',Iwd)'
+    before=time.time()
+    output=durable.run_condor(['/usr/bin/condor_q',*durable.scheduler_arguments(config),
+        '-constraint',constraint,'-json','-attributes',
+        'ClusterId,ProcId,DAGManJobId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask'],
+        timeout=45)
+    return dict(before_epoch=before,rows=durable.parse_ads(output))
+
+
+def native_status(config, receipt, queue_snapshot=None):
     constraint = 'ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])
     if config.get('reviewed_terminal_native_jobs') is not None:
         constraint += ' || Iwd == '+json.dumps(receipt['task'])
-    rows=durable.jobs(config, constraint)
+    # New submissions and external recovery directories need their own fresh
+    # query. A snapshot from before submission cannot establish queue absence.
+    submitted=receipt.get('utc')
+    in_scope=Path(receipt['task']).is_relative_to(Path(config.get('directory','/nonexistent')))
+    use_snapshot=(queue_snapshot is not None and in_scope and submitted is not None
+        and datetime.fromisoformat(submitted).timestamp()<queue_snapshot['before_epoch'])
+    if use_snapshot:
+        rows=[row for row in queue_snapshot['rows'] if row['ClusterId']==receipt['cluster']
+              or row.get('DAGManJobId')==receipt['cluster']
+              or (config.get('reviewed_terminal_native_jobs') is not None
+                  and row.get('Iwd')==receipt['task'])]
+    else:
+        rows=durable.jobs(config, constraint)
     if rows:
         managers=[row for row in rows if row['ClusterId']==receipt['cluster']]
         children=[row for row in rows if row['ClusterId']!=receipt['cluster']]
@@ -1631,7 +1730,7 @@ def existing_receipt(directory, description):
     return receipt
 
 
-def batch_job_status(config, state, batch, entry, receipt, stage):
+def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot=None):
     """Keep a failed batch visible while independent batches can progress.
 
     Only a verified native failure is isolated. Scheduler errors, changed
@@ -1639,7 +1738,8 @@ def batch_job_status(config, state, batch, entry, receipt, stage):
     No failed job is released, replaced or counted as completed here.
     """
     try:
-        return native_status(config, receipt)
+        return (native_status(config,receipt,queue_snapshot) if queue_snapshot is not None
+                else native_status(config,receipt))
     except MesonJobFailure as error:
         failure = dict(stage=stage, cluster=receipt['cluster'], error=str(error),
                        native_jobs=error.jobs)
@@ -1671,6 +1771,7 @@ def step(config,state):
         if native_status(config, receipt) == 'active':
             return state
         state['coverage_audit'] = dict(cluster=receipt['cluster'], **coverage_result(config))
+    queue_snapshot=production_queue_snapshot(config)
     source_active, detector_active=0,0
     for batch in config['batches']:
         entry=entries.setdefault(batch['batch'],{})
@@ -1683,7 +1784,7 @@ def step(config,state):
         source_job=(existing_receipt(directory,directory/'source.sub') if source_receipt.is_file()
                     else durable.submission(config,directory,directory/'source.sub'))
         entry.update(source_cluster=source_job['cluster'],stage='GEN')
-        status=batch_job_status(config,state,batch,entry,source_job,'GEN')
+        status=batch_job_status(config,state,batch,entry,source_job,'GEN',queue_snapshot)
         if status=='failed':
             continue
         if status=='active':
@@ -1711,11 +1812,17 @@ def step(config,state):
                 if not allowed:
                     entry['stage'] = 'waiting_for_detector_storage'
                     continue
-        detector_job=handoff(config,batch)
+        if config.get('parallel_handoffs') is True:
+            handoff_status,detector_job=parallel_handoff(config,state,batch,entry,queue_snapshot)
+            if handoff_status!='complete':
+                detector_active+=int(handoff_status=='active')
+                continue
+        else:
+            detector_job=handoff(config,batch)
         entry.update(detector_cluster=detector_job['cluster'],stage='detector')
         if batch['batch'] in config.get('reviewed_detector_recoveries', {}):
             entry['reviewed_detector_recovery'] = config['reviewed_detector_recoveries'][batch['batch']]
-        detector_status=batch_job_status(config,state,batch,entry,detector_job,'detector')
+        detector_status=batch_job_status(config,state,batch,entry,detector_job,'detector',queue_snapshot)
         if detector_status=='failed':
             continue
         if detector_status=='active':
@@ -1753,7 +1860,7 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--directory',type=Path,required=True)
     parser.add_argument('--seal',required=True)
-    parser.add_argument('--action',choices=('source','controller','coverage'),required=True)
+    parser.add_argument('--action',choices=('source','controller','coverage','handoff'),required=True)
     parser.add_argument('--batch')
     parser.add_argument('--controller-config',type=Path)
     parser.add_argument('--controller-seal')
@@ -1764,11 +1871,16 @@ def main():
         if args.action!='controller' or args.controller_seal is None:
             raise ValueError('Only the controller may adopt a separately sealed operational configuration')
         config=operational_configuration(config,args.controller_config.resolve(),args.controller_seal)
-    if args.action=='source':
+    if args.action in ('source','handoff'):
         rows=[row for row in config['batches'] if row['batch']==args.batch]
         if len(rows)!=1:
             raise ValueError('Source batch has no unique frozen owner')
-        source(config,args.seal,rows[0])
+        if args.action=='source':
+            source(config,args.seal,rows[0])
+        else:
+            if config.get('parallel_handoffs') is not True:
+                raise ValueError('This campaign has no frozen parallel handoff policy')
+            handoff(config,rows[0])
         return
     if args.action == 'coverage':
         coverage(config)

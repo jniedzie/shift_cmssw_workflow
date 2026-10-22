@@ -416,6 +416,51 @@ class Admission(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError,'unknown schedd'):
                 production.batch_job_status({}, {},dict(batch='a'),{},dict(cluster=123),'GEN')
 
+    def test_preparation_runs_as_an_independent_worker_instead_of_blocking_the_poll(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            batch=dict(batch='a',operational_canary=True)
+            directory=root/'batches/a';directory.mkdir(parents=True)
+            (directory/'submission.json').write_text('{}')
+            (directory/'source_status.json').write_text(json.dumps(dict(complete=True)))
+            config=dict(directory=str(root),batches=[batch],simultaneous_sources=1,
+                        simultaneous_detector_points=1,parallel_handoffs=True)
+            with patch.object(production,'existing_receipt',return_value=dict(cluster=123)), \
+                 patch.object(production,'native_status',return_value='complete'), \
+                 patch.object(production.durable,'quota',return_value={}), \
+                 patch.object(production,'storage_gate',return_value=(True,{})), \
+                 patch.object(production,'parallel_handoff',return_value=('active',None)) as submit, \
+                 patch.object(production,'handoff') as synchronous:
+                state=production.step(config,{})
+            synchronous.assert_not_called()
+            submit.assert_called_once()
+            self.assertFalse(state['complete'])
+
+    def test_handoff_submit_freezes_credentials_persistent_directory_and_failure_hold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            batch=dict(batch='a');(root/'batches/a').mkdir(parents=True)
+            config=dict(directory=str(root),tools='/frozen/tools')
+            files=production.prepare_handoff_worker(config,batch)
+            self.assertEqual(len(files),2)
+            text=(root/'batches/a/handoff/worker.sub.in').read_text()
+            for required in ('initialdir = '+str(root/'batches/a/handoff'),
+                             '+SendCredential = True','arguments = SEAL_DIGEST',
+                             'periodic_release = False','on_exit_hold ='):
+                self.assertIn(required,text)
+            wrapper=(root/'batches/a/handoff/run.sh').read_text()
+            self.assertIn('--action handoff --batch a',wrapper)
+            self.assertIn('unset PYTHONPATH',wrapper)
+
+    def test_preparation_success_without_rates_cannot_start_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);directory=root/'batches/a/handoff';directory.mkdir(parents=True)
+            (directory/'submission.json').write_text('{}')
+            with patch.object(production,'existing_receipt',return_value=dict(cluster=123)), \
+                 patch.object(production,'batch_job_status',return_value='complete'):
+                with self.assertRaisesRegex(RuntimeError,'complete rate export'):
+                    production.parallel_handoff(dict(directory=str(root)),{},dict(batch='a'),{},None)
+
 
 class PublicationSafety(unittest.TestCase):
     def previous(self, root, complete=False, age=0):
@@ -1062,6 +1107,41 @@ class NativeHealth(unittest.TestCase):
                 production.native_status({},receipt)
             self.assertIn('123.0',command.call_args.args[0])
             self.assertNotIn('condor_submit',command.call_args.args[0][0])
+
+    def test_one_queue_snapshot_keeps_native_DAG_children_and_isolates_other_batches(self):
+        config=dict(directory='/production',batch_native_queries=True)
+        receipt=dict(cluster=123,task='/production/batches/a',utc='1970-01-01T00:00:00+00:00')
+        rows=[dict(ClusterId=123,ProcId=0,Iwd=receipt['task'],JobStatus=2),
+              dict(ClusterId=124,ProcId=0,DAGManJobId=123,Iwd=receipt['task'],JobStatus=5),
+              dict(ClusterId=999,ProcId=0,Iwd='/production/batches/b',JobStatus=5)]
+        with patch.object(production.durable,'scheduler_arguments',return_value=[]), \
+             patch.object(production.durable,'run_condor',return_value=json.dumps(rows)) as command, \
+             patch.object(production.durable,'jobs') as query:
+            snapshot=production.production_queue_snapshot(config)
+            with self.assertRaises(production.MesonJobFailure) as caught:
+                production.native_status(config,receipt,snapshot)
+            self.assertEqual([row['ClusterId'] for row in caught.exception.jobs],[123,124])
+            query.assert_not_called()
+            command.assert_called_once()
+            self.assertIn('DAGManJobId',command.call_args.args[0][-1])
+
+    def test_new_submission_or_external_recovery_cannot_use_an_earlier_snapshot(self):
+        config=dict(directory='/production')
+        snapshot=dict(before_epoch=1,rows=[])
+        for task,utc in [('/production/batches/a','1970-01-01T00:00:02+00:00'),
+                         ('/recovery/batches/a','1970-01-01T00:00:00+00:00')]:
+            receipt=dict(cluster=123,task=task,utc=utc)
+            row=dict(ClusterId=123,ProcId=0,Iwd=task,JobStatus=2)
+            with self.subTest(task=task), \
+                 patch.object(production.durable,'jobs',return_value=[row]) as query:
+                self.assertEqual(production.native_status(config,receipt,snapshot),'active')
+                query.assert_called_once()
+
+    def test_unknown_snapshot_is_not_empty_success(self):
+        with patch.object(production.durable,'scheduler_arguments',return_value=[]), \
+             patch.object(production.durable,'run_condor',side_effect=RuntimeError('schedd unavailable')):
+            with self.assertRaisesRegex(RuntimeError,'schedd unavailable'):
+                production.production_queue_snapshot(dict(directory='/production',batch_native_queries=True))
 
 
 if __name__=='__main__':

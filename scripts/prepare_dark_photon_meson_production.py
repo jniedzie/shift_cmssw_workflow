@@ -12,7 +12,7 @@ import shutil
 
 from dark_photon_sample_names import physical_point_name
 from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES
-from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES, freeze_meson_model
+from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
 from run_dark_photon_statistics import sha, new
 from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
     additional_reservations, gen_runtime, coverage_request, prior_meson_configuration)
@@ -27,10 +27,46 @@ TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + (
     'audit_dark_photon_meson_coverage.py'))))
 
 
+def source_execution_limits(config):
+    """Read explicit frozen source limits; old campaigns retain their bounds."""
+    defaults = dict(schema='shift-meson-source-execution-policy-v1',
+        maximum_simultaneous_sources=7, maximum_batches=100,
+        maximum_source_collisions_per_batch=10000000,
+        maximum_canary_source_collisions=10000000,
+        detector_job_capacity_per_batch=1000)
+    if 'source_execution_policy' not in config:
+        return defaults
+    policy = config['source_execution_policy']
+    if (not isinstance(policy, dict) or set(policy) != set(defaults)
+            or policy.get('schema') != defaults['schema']):
+        raise ValueError('Require a complete explicit frozen source execution policy')
+    limits = dict(maximum_simultaneous_sources=10000, maximum_batches=100000,
+                  maximum_source_collisions_per_batch=10000000,
+                  maximum_canary_source_collisions=10000000,
+                  detector_job_capacity_per_batch=1000)
+    for name, maximum in limits.items():
+        if type(policy[name]) is not int or not 1 <= policy[name] <= maximum:
+            raise ValueError('Invalid frozen source execution limit: ' + name)
+    if policy['maximum_canary_source_collisions'] > policy['maximum_source_collisions_per_batch']:
+        raise ValueError('Canary exposure cannot exceed the frozen source-batch limit')
+    return copy.deepcopy(policy)
+
+
+def split_source_exposure(collisions, maximum):
+    """Balance independent fixed-exposure shards without a one-collision tail."""
+    if type(collisions) is not int or type(maximum) is not int or not 2 <= maximum or collisions < 2:
+        raise ValueError('Source exposure and shard limit require integer counts of at least two')
+    shards = math.ceil(collisions / maximum)
+    count, remainder = divmod(collisions, shards)
+    return [count + (index < remainder) for index in range(shards)]
+
+
 def validate_batches(rows, prior_inventories, seed_base=761216001,
                      run_base=1761216001, detector_job_base=5500000,
-                     mechanism='eta-etaprime-radiative'):
-    if not isinstance(rows, list) or not 2 <= len(rows) <= 100:
+                     mechanism='eta-etaprime-radiative', execution_limits=None):
+    limits = source_execution_limits({}) if execution_limits is None else source_execution_limits(
+        dict(source_execution_policy=execution_limits))
+    if not isinstance(rows, list) or not 2 <= len(rows) <= limits['maximum_batches']:
         raise ValueError('Require two canaries and a bounded fixed-source worklist')
     old_seeds, old_runs = set(), set()
     for path in prior_inventories:
@@ -48,8 +84,9 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
         if not 2*.1056583755 < mass < .958 or not math.isfinite(epsilon) or not 0 < epsilon <= .01:
             raise ValueError('Require an open dimuon meson mass and physical epsilon')
         count = row['source_collisions']
-        if type(count) is not int or not 2 <= count <= 10000000:
-            raise ValueError('Source M is a fixed collision exposure, bounded at ten million')
+        maximum = limits['maximum_canary_source_collisions'] if row.get('operational_canary', False) else limits['maximum_source_collisions_per_batch']
+        if type(count) is not int or not 2 <= count <= maximum:
+            raise ValueError('Fixed source exposure exceeds the frozen per-batch limit')
         if type(row.get('events_per_job',20)) is not int or not 1<=row.get('events_per_job',20)<=20:
             raise ValueError('Detector chunks require1..20 actual signal events')
         target = row.get('target_mean_lab_flight_m')
@@ -64,12 +101,14 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
         if (type(seed) is not int or not 1 <= seed <= 899999800 or seed in seeds | old_seeds or
                 type(run) is not int or not 1 <= run <= 4294967295 or run in runs | old_runs):
             raise ValueError('Independent meson seeds or runs overlap existing populations')
-        # Reserve 1000 detector jobs per random-N source, including its audit.
-        job = detector_job_base + 1000*index
-        if 230000000 + (job + 999)*100 + 40 > 899999900:
+        # Small source shards can reserve fewer IDs. Actual detector preparation
+        # still fails closed if a random-N source exceeds its frozen capacity.
+        capacity = limits['detector_job_capacity_per_batch']
+        job = detector_job_base + capacity*index
+        if 230000000 + (job + capacity - 1)*100 + 40 > 899999900:
             raise ValueError('Detector namespace exceeds the unchanged RNG bounds')
         row.update(batch=batch, point=point, seed=seed, run_number=run,
-                   detector_job_base=job, detector_job_capacity=1000,
+                   detector_job_base=job, detector_job_capacity=capacity,
                    operational_canary=row.get('operational_canary', False))
         result.append(row)
         identifiers.add(batch); seeds.add(seed); runs.add(run)
@@ -87,12 +126,17 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
 
 
 def prepare(configuration, output, scripts=None):
+    # Controller-only imports must work with old pinned GEN runners. This newer
+    # model-freezing API is needed only while preparing new science.
+    from run_dark_photon_meson_gen import freeze_meson_model
     output = Path(output).resolve()
     if output.exists():
         raise FileExistsError('Refuse to overwrite a meson deployment')
     config = json.loads(Path(configuration).read_text())
     if config.get('schema') != 'shift-dp-meson-production-request-v1':
         raise ValueError('Unsupported meson production request')
+    if type(config.get('parallel_handoffs', False)) is not bool:
+        raise ValueError('Parallel handoffs require an explicit boolean')
     mechanism = source_mechanism(config)
     requirements = ''
     if mechanism == 'meson-radiative':
@@ -103,14 +147,16 @@ def prepare(configuration, output, scripts=None):
         if hosts:
             requirements = 'requirements = ' + ' && '.join(
                 '(TARGET.Machine != ' + json.dumps(host) + ')' for host in hosts) + '\n'
+    execution_limits = source_execution_limits(config)
     batches = validate_batches(config['batches'], config['prior_inventories'],
         config.get('seed_base',761216001),config.get('run_base',1761216001),
-        config.get('detector_job_base',5500000), mechanism)
+        config.get('detector_job_base',5500000), mechanism, execution_limits)
     campaign_pattern = (r'[A-Za-z0-9_-]*20[0-9]{6}[A-Za-z0-9_-]*'
                         if mechanism == 'meson-radiative' else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
     if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
-            not 1 <= config.get('simultaneous_sources', 2) <= 7 or
+            type(config.get('simultaneous_sources', 2)) is not int or
+            not 1 <= config.get('simultaneous_sources', 2) <= execution_limits['maximum_simultaneous_sources'] or
             not 1 <= config.get('simultaneous_detector_points', 2) <= 35):
         raise ValueError('Require explicit production namespaces and bounded concurrency')
     if mechanism == 'meson-radiative':
@@ -321,6 +367,10 @@ queue
         path = directory / 'source.sub.in'
         path.write_text(text)
         files[str(path)] = sha(path)
+        if config.get('parallel_handoffs', False):
+            from run_dark_photon_meson_production import prepare_handoff_worker
+            for path in prepare_handoff_worker(config, row):
+                files[str(path)] = sha(path)
     new(output / 'config.json', config)
     files[str(output / 'config.json')] = sha(output / 'config.json')
     wrapper = output / 'lcg_controller.sh'
@@ -341,6 +391,9 @@ exec python3 {tools}/run_dark_photon_meson_production.py --directory {output} --
     for row in batches:
         path = output / 'batches' / row['batch']
         (path / 'source.sub').write_text((path / 'source.sub.in').read_text().replace('SEAL_DIGEST', seal))
+        if config.get('parallel_handoffs', False):
+            handoff = path / 'handoff'
+            (handoff / 'worker.sub').write_text((handoff / 'worker.sub.in').read_text().replace('SEAL_DIGEST', seal))
     if mechanism == 'meson-radiative':
         path = output / 'coverage'
         (path / 'coverage.sub').write_text((path / 'coverage.sub.in').read_text().replace('SEAL_DIGEST', seal))

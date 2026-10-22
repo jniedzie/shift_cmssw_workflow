@@ -9,6 +9,19 @@ import shlex
 import shutil
 
 import run_dark_photon_meson_production as production
+from prepare_dark_photon_meson_production import source_execution_limits
+
+
+REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
+                     'prepare_dark_photon_production.py',
+                     'prepare_dark_photon_meson_production.py')
+
+
+def replacement_tool_names(original):
+    # Legacy science keeps its qualified detector runner and AST telemetry guard.
+    if original.get('detector_runtime') is not None:
+        return (*REPLACEMENT_TOOLS, 'run_shift_gen_to_nano.py')
+    return REPLACEMENT_TOOLS
 
 
 def scheduling_configuration(original, previous, sources, detector_points):
@@ -89,7 +102,8 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             [row['name'] for row in config.get('additional_reserved_meson_forecasts', [])])
     # Validate scheduling bounds before creating anything, using a small private
     # candidate seal in the new output only after all source authorities passed.
-    limits = {'simultaneous_sources': 7, 'simultaneous_detector_points': 35}
+    limits = {'simultaneous_sources': source_execution_limits(original)['maximum_simultaneous_sources'],
+              'simultaneous_detector_points': 35}
     for key, maximum in limits.items():
         if type(config[key]) is not int or not 1 <= config[key] <= maximum:
             raise ValueError('Scheduling limit exceeds the reviewed grid: '+key)
@@ -107,8 +121,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         seal_files[str(target)] = production.durable.sha(target)
         if seal_files[str(target)] != digest:
             raise ValueError('Verified template tool changed during copying: '+name)
-    changed_tools = ['run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
-                     'prepare_dark_photon_production.py', 'run_shift_gen_to_nano.py']
+    changed_tools = list(replacement_tool_names(original))
     for name in changed_tools:
         maintained = Path(__file__).with_name(name)
         shutil.copy2(maintained, tools/name)

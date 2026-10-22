@@ -468,11 +468,14 @@ class StatisticsWatchdogTest(unittest.TestCase):
         source = self.root / 'batches/b000'
         detector = source / 'production'
         detector.mkdir(parents=True)
-        for path, cluster in ((source, 101), (detector, 102)):
+        handoff=source/'handoff'
+        handoff.mkdir()
+        for path, cluster in ((source, 101), (detector, 102), (handoff,103)):
             (path/'submission.json').write_text(json.dumps(dict(cluster=cluster, utc='1970-01-01T00:00:00+00:00')))
         receipts = WATCH.manager_receipts(self.root)
         self.assertEqual(receipts[101]['kind'], 'meson_source')
         self.assertEqual(receipts[102]['kind'], 'production')
+        self.assertEqual(receipts[103]['kind'],'handoff')
         (source/'source_status.json').write_text(json.dumps(dict(source_collisions=10000, complete=True, events=23)))
         counts = WATCH.stage_counts(source)
         self.assertEqual(counts['completed_events'], 23)
