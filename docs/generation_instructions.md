@@ -24,6 +24,18 @@ Read the native unshifted input (`VtxSmeared` for ordinary DY), not a graph whos
 nominal time shift has already been applied. Compile canary plugins privately;
 do not rebuild a shared release used by live jobs.
 
+`configure_complete_source` prepares uncensored ordinary GEN in this order:
+retain the original graph through an explicit `@skipCurrentProcess` proxy,
+place it, complete natural muon-producing hadron decays, apply nominal source
+time, rebuild `generatorSmeared`, then rebuild `genParticles`. Keep the
+unshifted completed graph as `shiftFullMuonDecays`. Drop old persisted timing
+and derived truth collections when saving the prepared input. The first
+placement-only canary deliberately does not satisfy this full-input contract.
+Ordinary completion uses natural branching fractions and unrestricted
+lifetimes; it adds no proposal correction, survival factor or GEN exposure.
+A prepared-input file hash differs from the original source hash. Retain both,
+with source normalization bound to the original complete source, once.
+
 This does not qualify translating old decay-filtered GEN as a new production.
 Fresh source placement must occur before decay-dependent filtering, with full
 source exposure, lifetime support, positive reconstruction controls and exact
