@@ -24,6 +24,8 @@ and truncation limitations. It is not a precision fit or a transport model.
 import itertools
 import math
 import bisect
+import json
+from functools import lru_cache
 
 import numpy as np
 
@@ -294,6 +296,68 @@ def decay_width(model, mass, *, epsilon, quadrature_order=24):
     result['transverse'] = float(sums['total'][0, 0].real+sums['total'][1, 1].real)
     result['longitudinal'] = float(sums['total'][2, 2].real)
     return result
+
+
+@lru_cache(maxsize=128)
+def _normalized_boost_spectrum(model_json,mass,quadrature_order):
+    """Nominal-M0 O(p4) rest-spectrum authority; no parent-specific quadrature."""
+    model=json.loads(model_json)
+    low,high=model['lepton_mass_gev']**2,(model['parent_mass_gev']-mass)**2
+    nodes,weights=np.polynomial.legendre.leggauss(quadrature_order)
+    spectrum=[]
+    for node,weight in zip(nodes,weights):
+        fraction=float((node+1)/2)
+        squared=low+(high-low)*fraction
+        angular=math.fsum(float(angular_weight*np.trace(differential_width(
+            model,mass,squared,float(cosine),epsilon=.001)['total']).real)
+            for cosine,angular_weight in zip(nodes,weights))
+        value=float(weight*(high-low)/2*angular)
+        if not math.isfinite(value) or value<0:
+            raise ValueError('Finite nonnegative full IB+SD rest-spectrum weight required')
+        spectrum.append((fraction,value))
+    total=math.fsum(value for _,value in spectrum)
+    if not math.isfinite(total) or total<=0:
+        raise ValueError('Open positive leptonic-kaon spectrum required')
+    return tuple((fraction,value/total) for fraction,value in spectrum)
+
+
+def mean_lab_beta_gamma(parent,mass,*,model,quadrature_order=24,
+                        native_kinematic_precision=None):
+    """Rate-weighted LAB mean for the full three-body IB+SD spectrum.
+
+    The spin-zero parent's overall direction is isotropic. At each W² node
+    its angular mean is analytic; the W² weights integrate the full lepton
+    angle and interference. The reference rest spectrum is cached at the
+    declared model M0. The actual unchanged p4 invariant sets the boost and
+    each node's physical endpoint. This tiny numerical mass continuation is
+    accepted only within separately declared relative mass/endpoint limits;
+    it is not a new source-rate or physical model-uncertainty prescription.
+    """
+    from dark_photon_vector_meson import mean_lab_beta_gamma as angular_mean
+    parent=_p4(parent)
+    _number(mass,'vector mass',positive=True)
+    if type(quadrature_order) is not int or not 4<=quadrature_order<=128:
+        raise ValueError('Explicit quadrature order between four and128 required')
+    squared=math.fsum([parent[0]**2]+[-component**2 for component in parent[1:]])
+    if parent[0]<=0 or squared<=0:
+        raise ValueError('Future-directed timelike kaon required')
+    event_mass=math.sqrt(squared);nominal=model['parent_mass_gev'];ml=model['lepton_mass_gev']
+    limits=(dict(relative_mass_limit=1.e-7,relative_endpoint_limit=1.e-6)
+        if native_kinematic_precision is None else native_kinematic_precision)
+    if any(type(limits.get(key)) not in (int,float) or not math.isfinite(limits[key])
+           or not 0<limits[key]<=1.e-5 for key in ('relative_mass_limit','relative_endpoint_limit')):
+        raise ValueError('Explicit small numerical mass/endpoint continuation limits required')
+    gap=nominal-mass-ml
+    if gap<=0 or event_mass<=mass+ml:
+        raise ValueError('Open leptonic-kaon channel required')
+    delta=abs(event_mass-nominal)
+    if delta/nominal>limits['relative_mass_limit'] or delta/gap>limits['relative_endpoint_limit']:
+        raise ValueError('Mean-boost native/invariant mass or endpoint precision gate failed')
+    key=json.dumps(model,sort_keys=True,separators=(',',':'),allow_nan=False)
+    spectrum=_normalized_boost_spectrum(key,mass,quadrature_order)
+    low,high=ml**2,(event_mass-mass)**2
+    return math.fsum(weight*angular_mean(parent,math.sqrt(low+(high-low)*fraction),mass,
+        polarization='unpolarized') for fraction,weight in spectrum)
 
 
 def distinguishable_dilepton_differential_width(model, pair_mass, pair_lepton_mass,

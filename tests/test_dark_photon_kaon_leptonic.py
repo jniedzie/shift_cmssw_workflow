@@ -13,7 +13,7 @@ from dark_photon_meson import boost
 from dark_photon_kaon_leptonic import (
     GAMMA, GAMMA5, METRIC, current_operators, decay_width, differential_width,
     distinguishable_dilepton_differential_width, equal_mass_h_over_q2,
-    form_factors, polarization_basis, rest_kinematics, spin_density,
+    form_factors, polarization_basis, rest_kinematics, spin_density,mean_lab_beta_gamma,
     LeptonicProductionProposal, production_cell_bound, sample_decay,
     sample_vector_muon_direction, slash, IDENTITY)
 from dark_photon_meson import MUON_MASS_GEV
@@ -205,6 +205,48 @@ class LeptonicRateTest(unittest.TestCase):
             authority['explicit_conventions']['hbar_gev_seconds'])
         expected = authority['independent_controls']['old_nonidentical_virtual_prediction']['born_branching_full']
         self.assertLess(abs(integral*conversion/expected-1.), .007)
+
+
+class LeptonicBoostMeanTest(unittest.TestCase):
+    def test_rest_and_boosted_mean_converge_for_both_lepton_spectra(self):
+        for lepton,mass in (('muon',.22),('muon',.3),('electron',.22),('electron',.4)):
+            card=model(lepton);M=card['parent_mass_gev']
+            for momentum in (0.,40.):
+                parent=[math.hypot(M,momentum),0.,0.,momentum]
+                low=mean_lab_beta_gamma(parent,mass,model=card,quadrature_order=16)
+                high=mean_lab_beta_gamma(parent,mass,model=card,quadrature_order=32)
+                self.assertGreater(high,0.)
+                self.assertLess(abs(low/high-1),1.e-4)
+
+    def test_independent_unit_weight_events_and_isotropic_angle_match_mean(self):
+        rng=random.Random(660193)
+        for lepton,mass in (('muon',.25),('electron',.3)):
+            card=model(lepton);M=card['parent_mass_gev'];momentum=20.
+            parent=[math.hypot(M,momentum),0.,0.,momentum]
+            predicted=mean_lab_beta_gamma(parent,mass,model=card,quadrature_order=24)
+            proposal=LeptonicProductionProposal(card,mass);values=[]
+            for _ in range(1200):
+                dark=proposal.sample(rng)['point'][3]
+                cosine=2*rng.random()-1
+                energy=(parent[0]*dark[0]+momentum*dark[3]*cosine)/M
+                values.append(math.sqrt((energy-mass)*(energy+mass))/mass)
+            mean=math.fsum(values)/len(values)
+            error=math.sqrt(math.fsum((value-mean)**2 for value in values)/(len(values)*(len(values)-1)))
+            self.assertLess(abs(mean-predicted),4.5*error)
+
+    def test_mass_continuation_is_separate_small_and_fail_closed(self):
+        for lepton,mass in (('muon',.22),('muon',.387),('electron',.4)):
+            card=model(lepton);M=card['parent_mass_gev'];gap=M-mass-card['lepton_mass_gev']
+            for sign in (-1,1):
+                delta=sign*.8*min(M*1.e-7,gap*1.e-6)
+                actual=M+delta;parent=[math.hypot(actual,2.),0.,0.,2.]
+                continued=mean_lab_beta_gamma(parent,mass,model=card,quadrature_order=24)
+                exact=mean_lab_beta_gamma(parent,mass,model=dict(card,parent_mass_gev=actual),quadrature_order=24)
+                self.assertLess(abs(continued/exact-1),1.e-6)
+            with self.assertRaisesRegex(ValueError,'precision gate'):
+                mean_lab_beta_gamma([M+2.e-6,0.,0.,0.],mass,model=card)
+        with self.assertRaises(ValueError):mean_lab_beta_gamma([1.,0.,0.,2.],.3,model=model())
+        with self.assertRaises(ValueError):mean_lab_beta_gamma([.493677,0.,0.,0.],.4,model=model())
 
 
 class LeptonicEventTest(unittest.TestCase):
