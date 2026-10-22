@@ -127,11 +127,26 @@ must contain the complete matching Generators, Application and application-plugi
 library inventory. Install all three only in Condor worker-local runtime,
 refresh its plugin cache and omit the old incoming-overlay preload. Existing
 requests retain their previous behavior. Native graph/stacking/BSM controls
-and actual frozen-runtime config/library-loading checks pass; the common
-eight-original real-event test has not been submitted. This mode does not
-establish inclusive material response, normalization or better tail precision.
-Read `../../SHIFT_RECONSTRUCTION.md` and the current material-study handoff
-before preparing that bounded test; do not rebuild a live shared release.
+and actual frozen-runtime config/library-loading checks pass. The common
+eight-original test ran as sixteen parallel one-event jobs, with a separate
+comparison for each original. Six old/new pairs have independently verified
+EOS reports, source graphs, weights and full source exposure. The two new-mode
+heavy-flavour jobs fail explicitly on unsupported excited-D decay trees;
+do not count those failures as zero acceptance or silently promote daughters.
+The additional parent-decay check found a GEN-to-Geant4 resonance-mass
+conversion mismatch. Both issues require bounded correction tests before
+scaling. Detailed findings and current repair status belong in
+`../../SHIFT_RECONSTRUCTION.md` and the material-study handoff. This mode does
+not establish inclusive material response, normalization or better tail precision.
+Do not rebuild a live shared release or edit its pinned runtime files.
+
+The bounded repair session retained a tested `PromptDecaySupport` component
+for exactly zero flight/time only. Its fourteen native HepMC2/3 controls pass;
+it is not yet connected to the production converter. A separate proposed
+energy-conversion repair passed three simple controls but failed its broader
+native test. That implementation remains private and unqualified, with the
+maintained integration restored. Resume from `../../SHIFT_RECONSTRUCTION.md`;
+do not enable these changes or count prototype replays as new statistics.
 
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
