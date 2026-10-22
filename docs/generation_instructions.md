@@ -38,6 +38,22 @@ lifetimes; it adds no proposal correction, survival factor or GEN exposure.
 A prepared-input file hash differs from the original source hash. Retain both,
 with source normalization bound to the original complete source, once.
 
+The stock GenParticle dictionary stores polar coordinates as Double32. For
+nearly massless particles, compiled CMSSW and interactive ROOT can differ in
+the cancelling mass-squared calculation despite identical source p4. The V2
+audit (workflow5193088/80284c9) keeps graph, W, identities, links, stored angles,
+Cartesian xyz and vertices exact. Only signed mass-squared and derived energy
+use an operation-count bound with explicit Float32 mass storage. Keep truthful
+nonzero residuals and freeze the worker and consumer together; the older exact
+receipt mode remains strict. This changes validation, not generated physics.
+
+The native5000+5000 DY20+ forced/natural control agrees on the primary muonic
+rate within about1.76approximate standard errors. Its forced cross section
+already includes the muonic channel factor; do not multiply by another guessed
+branching fraction. This result does not close low-mass DY, direct Jpsi or
+jaw/material acceptance. Exact counts, per-mass limits and independent final
+native readback are in `../../SHIFT_ANALYSIS.md` and the named DY control study.
+
 For a bounded heavy-flavour source check, the existing first-MPI proposal now
 also accepts the unfiltered `ordinary` QCD profile (workflow0b7faaf and2dd556f).
 Its audit requires every native accepted original and its exact W, an unchanged
