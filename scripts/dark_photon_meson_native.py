@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import hashlib
 
 
 CPP = r'''
@@ -363,6 +364,45 @@ def native_source(settings, seed, parent_ids=(221, 331)):
     for pdg in parent_ids:
         parents.push_back(pdg)
     return ROOT.ShiftMesonNative.Source(commands, seed, parents)
+
+
+def resolved_meson_production_parameters(source):
+    """Read initialized fragmentation weights and dedicated quarkonium flags.
+
+    These are generator parameters, not inclusive species probabilities or
+    bounds on physical hadron production. Zero direct-fragmentation weights
+    do not remove natural feed-down from heavier particles.
+    """
+    result = {}
+    for prefix in ('StringFlav:','Onia:','Charmonium:','Bottomonium:',
+                   'OniaShower:','CharmoniumShower:','BottomoniumShower:'):
+        group = {}
+        for kind,getter,convert in (('flags','getFlagMap',bool),('modes','getModeMap',int),
+                                    ('parameters','getParmMap',float)):
+            entries = getattr(source.pythia.settings,getter)(prefix)
+            group[kind] = {str(entry.second.name):dict(value=convert(entry.second.valNow),
+                default=convert(entry.second.valDefault)) for entry in entries}
+        # Individual NRQCD subprocess switches and their state lists are vectors.
+        for kind,getter,convert in (('flag_vectors','getFVecMap',bool),
+                                    ('mode_vectors','getMVecMap',int),
+                                    ('parameter_vectors','getPVecMap',float)):
+            entries = getattr(source.pythia.settings,getter)(prefix)
+            group[kind] = {str(entry.second.name):dict(
+                value=[convert(value) for value in entry.second.valNow],
+                default=[convert(value) for value in entry.second.valDefault]) for entry in entries}
+        result[prefix] = group
+    if not result['StringFlav:']['parameters']:
+        raise RuntimeError('Initialized StringFlav parameters are missing')
+    directory = Path(os.environ['PYTHIA8DATA'])
+    references = [directory/name for name in ('FlavourSelection.xml','OniaProcesses.xml','OniaShowers.xml',
+                                             'MultipartonInteractions.xml')
+                  if (directory/name).is_file()]
+    return dict(schema='shift-resolved-meson-production-parameters-v1',parameters=result,
+        mpi_process_level=int(source.pythia.settings.mode('MultipartonInteractions:processLevel')),
+        onium_shower_enabled=bool(source.pythia.info.getOniumShower()),
+        documentation=[dict(path=str(path.resolve()),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                       for path in references],
+        interpretation='Relative generator weights and switches, not measured inclusive production probabilities. Primary hard-process flags do not disable the separate NRQCD processes included by MPI processLevel=3. Zero configured fragmentation weight or zero MC count does not establish a zero physical rate.')
 
 
 def inject_decay(source, parent_index, sampled_decay):

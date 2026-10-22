@@ -659,7 +659,7 @@ def resolved_source_inventory(model, particle_data, collisions, seed, timeout, *
         interpretation='A primary ND Pythia source census, not measured inclusive hadron production or a meson-amplitude completeness proof. Different species in feed-down chains are correlated; all moments use whole collisions.',
         lifetime_interpretation='Stored native vDec/tau do not prove an actual decay or HepMC endvertex. Final long-lived particles need a separately reviewed flight/decay treatment.',
         omitted_yield_bounds='No epsilon-scaled bound without a reviewed timelike branching/form-factor ceiling and a finite parent-multiplicity confidence bound. Zero counts bound only the probability of at least one parent in this exact source model.',
-        quarkonium_source_caveat='Zero eta_c/Jpsi/excited-quarkonium counts in this SoftQCD ND sample do not bound physical prompt quarkonium production: dedicated charmonium/bottomonium hard processes are not enabled.',
+        quarkonium_source_caveat='Counts characterize the configured SoftQCD ND, MPI and fragmentation model only. Primary hard-process Charmonium/Bottomonium flags do not disable onia included separately by MPI processLevel=3. Zero counts do not establish zero physical quarkonium production or qualify missing direct eta_c mechanisms.',
         com_energy_bound_caveat='Parent COM energies use Lorentz dot(P_beams,p)/sqrt(s). A tighter sqrt(s)/m multiplicity ceiling is not asserted: the native check allows laboratory-frame energy and energy-dependent mass-shell deviations. Final-state per-species parents are an antichain; different ancestor species are never summed for a ceiling.',
         elapsed_seconds=time.monotonic()-started)
 

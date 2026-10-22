@@ -60,6 +60,19 @@ class InventoryPoolTest(unittest.TestCase):
         self.assertEqual(result['collision_exposure'],5)
         self.assertEqual(len(result['excluded_duplicate_revisions']),1)
 
+    def test_failed_generator_calls_remain_accounting_not_collision_exposure(self):
+        self.second['generator_calls'] += 2
+        self.second['native']['source_calls'] += 2
+        self.second['native']['generator_failures'] = 2
+        result = combine_source_inventories([self.first,self.second])
+        self.assertEqual(result['collision_exposure'],5)
+        self.assertEqual(result['generator_calls'],7)
+        self.assertEqual(result['native']['generator_failures'],2)
+        self.assertEqual(result['species'][0]['mean_parents_per_collision'],1.)
+        self.second['native']['generator_failures'] = 1
+        with self.assertRaisesRegex(ValueError,'source exposure'):
+            combine_source_inventories([self.first,self.second])
+
     def test_conflicting_reuse_of_a_seed_requires_review(self):
         other = copy.deepcopy(self.first)
         other['source_record_stream_sha256'] = 'different'
