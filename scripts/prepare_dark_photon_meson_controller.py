@@ -14,7 +14,7 @@ from prepare_dark_photon_meson_production import source_execution_limits, detect
 
 REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
                      'prepare_dark_photon_production.py',
-                     'prepare_dark_photon_meson_production.py')
+                     'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py')
 
 
 def replacement_tool_names(original):
@@ -42,7 +42,8 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             additional_meson_forecasts=(), prior_meson_controller_directory=None,
             meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=(),
             close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
-            operational_handoffs=False, reviewed_handoff_failures=()):
+            operational_handoffs=False, reviewed_handoff_failures=(),
+            regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -67,6 +68,14 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if regroup_complete_points:
+        if aggregation_storage_registration is None:
+            raise ValueError('Final regrouping requires its registered shared-storage reservation')
+        path=Path(aggregation_storage_registration).resolve()
+        config.update(regroup_complete_points=True,merge_source_histograms=False,aggregate_group_events=4000,
+            aggregate_storage_reservation_bytes=22000000000,
+            aggregation_storage_registration=dict(path=str(path),sha256=production.durable.sha(path)))
+        production.aggregation_reservation(config)
     if close_source_admission:
         config['source_admission_closed']=True
     if reviewed_coverage_recovery is not None:
@@ -155,6 +164,17 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             paths=production.prepare_handoff_worker(config,batch,output,original_seal)
             for path in paths:
                 seal_files[str(path)]=production.durable.sha(path)
+    if historical_anchor_calibration is not None:
+        source=Path(historical_anchor_calibration).resolve()
+        calibration=production.read(source)
+        if calibration.get('schema') != 'shift-meson-calibration-v1' or calibration.get('production_mechanism') not in production.MECHANISMS:
+            raise ValueError('Historical LAB anchor requires its original meson calibration')
+        target=output/'historical_anchor_calibration.json'
+        shutil.copy2(source,target)
+        if production.durable.sha(target) != production.durable.sha(source):
+            raise ValueError('Historical anchor calibration changed while freezing')
+        config['historical_anchor_calibration']=dict(path=str(target),sha256=production.durable.sha(target))
+        seal_files[str(target)]=production.durable.sha(target)
     production.durable.new(output/'config.json', config)
     replacement = dict(schema='shift-meson-scheduling-rollover-v1',
         original_production=str(directory), original_seal_sha256=original_seal,
@@ -198,6 +218,8 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         retirement_pins.append(config['reviewed_prior_meson_retirement'])
     if config.get('reviewed_coverage_recovery'):
         retirement_pins.append(config['reviewed_coverage_recovery'])
+    if config.get('aggregation_storage_registration'):
+        retirement_pins.append(config['aggregation_storage_registration'])
     for pin in retirement_pins:
         seal_files[str(production.pinned_path(pin))] = pin['sha256']
     production.durable.new(output/'seal.json', dict(schema='shift-meson-controller-seal-v1', files=seal_files))
@@ -242,6 +264,9 @@ def main():
         metavar=('NAME', 'MANIFEST'), help='Cancel reviewed never-submitted sources; protect existing workers')
     parser.add_argument('--operational-handoffs',action='store_true')
     parser.add_argument('--reviewed-handoff-failure',action='append',nargs=2,default=[],metavar=('BATCH','MANIFEST'))
+    parser.add_argument('--regroup-complete-points',action='store_true')
+    parser.add_argument('--aggregation-storage-registration',type=Path)
+    parser.add_argument('--historical-anchor-calibration',type=Path)
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -249,7 +274,9 @@ def main():
                              args.meson_peer_controller, args.reviewed_prior_meson_retirement,
                              args.retired_meson_forecast, args.close_source_admission,
                              args.reviewed_coverage_recovery, args.closed_source_forecast,
-                             args.operational_handoffs,args.reviewed_handoff_failure), sort_keys=True))
+                             args.operational_handoffs,args.reviewed_handoff_failure,
+                             args.regroup_complete_points,args.aggregation_storage_registration,
+                             args.historical_anchor_calibration), sort_keys=True))
 
 
 if __name__ == '__main__':

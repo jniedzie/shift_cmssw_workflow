@@ -598,6 +598,16 @@ def common_sample_anchor(config, batch, sample, sample_path, transport):
             raise ValueError('Common sample anchor has a cyclic or excessive predecessor chain')
         visited.add(identity)
         candidate = prior_meson_configuration(candidate)
+    if not matched and config.get('historical_anchor_calibration'):
+        authority=config['historical_anchor_calibration']
+        calibration=read_pinned(authority)
+        references=[row for row in calibration.get('points',[]) if row.get('mass_gev')==sample['mass_gev']]
+        if (creator==calibration.get('production_mechanism') and existing.get('calibration_sha256')==authority['sha256']
+                and len(references)==1):
+            reference=references[0]
+            expected_ctau=reference['physical_width_reference']['ctau_mm']*(reference['reference_epsilon']/sample['epsilon'])**2
+            matched=(math.isclose(existing['calibration_mean_beta_gamma'],reference['mean_beta_gamma_reference'],rel_tol=1.e-10)
+                     and math.isclose(existing['proper_ctau_mm'],expected_ctau,rel_tol=1.e-10))
     if not matched:
         raise ValueError('Existing global sample anchor has no matching pinned creator/calibration authority')
     return dict(path=destination, bytes=size, sha256=durable.sha(path),
@@ -870,7 +880,10 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'additional_reserved_meson_forecasts', 'meson_reservation_registration',
                                    'prior_meson_controller_directory', 'meson_peer_controller_directories',
                                    'reviewed_prior_meson_retirement', 'source_admission_closed',
-                                   'reviewed_coverage_recovery', 'operational_handoffs'}:
+                                   'reviewed_coverage_recovery', 'operational_handoffs', 'regroup_complete_points',
+                                   'merge_source_histograms', 'aggregate_group_events',
+                                   'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
+                                   'historical_anchor_calibration'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -903,6 +916,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                         ('simultaneous_detector_points',detector_point_limit(original))]:
         if key in original and (type(config.get(key)) is not int or not 1<=config[key]<=maximum):
             raise ValueError('Replacement controller scheduling limit is outside the reviewed grid: '+key)
+    aggregation_reservation(config)
     return config
 
 
@@ -1719,6 +1733,52 @@ def adaptive_reservation(config):
     return 2000000000 + (total - credited)*326000
 
 
+def aggregation_reservation(config):
+    """Protect the independently registered final Nano regrouping allocation."""
+    if config.get('regroup_complete_points') is not True:
+        return 0
+    reserved=config.get('aggregate_storage_reservation_bytes')
+    if (type(reserved) is not int or reserved <= 0
+            or config.get('merge_source_histograms') is not False
+            or config.get('aggregate_group_events') != 4000):
+        raise ValueError('Final regrouping needs its explicit storage and 4000-event grouping policy')
+    proof=read_pinned(config['aggregation_storage_registration'])
+    if (proof.get('schema') != 'shift-dp-shared-aggregation-reservation-v1'
+            or proof.get('complete') is not True
+            or proof.get('science_directory') != config['directory']
+            or proof.get('science_config_sha256') != durable.sha(Path(config['directory'])/'config.json')
+            or proof.get('additional_reserved_bytes') != reserved
+            or proof.get('source_envelope_bytes') != config['maximum_meson_forecast_bytes']
+            or proof.get('protected_sm_external_envelope_bytes',0) < 150000000000):
+        raise ValueError('Final regrouping does not match the registered shared-storage allocation')
+    if proof.get('combined_DP_reservation_bytes',0) > proof['protected_sm_external_envelope_bytes']:
+        raise ValueError('Final regrouping exceeds the registered shared external envelope')
+    pinned_path(proof['shared_SM_registration'])
+    return reserved
+
+
+def point_grouping_readiness(config):
+    """Read each compact point receipt once per poll before any EOS downloads."""
+    result={}
+    if config.get('regroup_complete_points') is not True:
+        return result
+    for batch in config['batches']:
+        if batch.get('gen_qualification_only'):
+            continue
+        row=result.setdefault(batch['point'],dict(total_sources=0,ready_sources=0,events=0,complete=False))
+        row['total_sources']+=1
+        path=batch_directory(config,batch)/'production/completed_points'/(batch['point']+'.json')
+        if path.is_file():
+            report=read(path)
+            if report.get('complete') is True:
+                row['ready_sources']+=1
+                row['events']+=report['events']
+    for row in result.values():
+        row['complete']=row['ready_sources']==row['total_sources']
+        row['target_group_events']=config['aggregate_group_events']
+    return result
+
+
 def storage_gate(config, observation, bulk=False, state=None):
     reservation = adaptive_reservation(config)
     additional = 500000000 if not bulk else None
@@ -1744,10 +1804,12 @@ def storage_gate(config, observation, bulk=False, state=None):
         published=(state or {}).get('batches',{})
         additional=sum(value for batch,value in forecasts.items() if not published.get(batch,{}).get('published'))
     reserved, claims = additional_reservations(config)
-    required = config['minimum_eos_free_bytes'] + reservation + additional + reserved
+    regrouping=aggregation_reservation(config)
+    required = config['minimum_eos_free_bytes'] + reservation + additional + reserved + regrouping
     return observation['free_bytes'] >= required and observation['free_files'] >= config['minimum_eos_free_files'], dict(
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
         meson_forecast_bytes=additional, additional_reserved_bytes=reserved,
+        aggregate_storage_reservation_bytes=regrouping,
         additional_reserved_worklists=claims, required_free_bytes=required)
 
 
@@ -1788,6 +1850,14 @@ def cumulative_result(config,state,batch,transport,primitive):
         if other['point']!=point or not report.is_file() or read(report).get('complete') is not True:
             continue
         sources.append(durable.authority(production,point,condition))
+    if config.get('regroup_complete_points') is True:
+        expected=sum(other['point']==point and not other.get('gen_qualification_only') for other in config['batches'])
+        if len(sources) != expected:
+            if batch.get('operational_canary'):
+                return primitive
+            state.setdefault('point_grouping',{}).setdefault(point,{}).update(
+                ready_sources=len(sources),total_sources=expected,complete=False,stage='waiting_for_all_source_cohorts')
+            return None
     if len(sources)<2:
         return primitive
     pending=durable.reconcile_aggregate(config,state,point,sources)
@@ -1913,6 +1983,51 @@ def close_empty_admission(config,state,batch,entry,queue_snapshot):
     return True
 
 
+def qualify_regrouping_canary(config,state):
+    """Exercise real Nano regrouping/scoring/publication before any bulk GEN."""
+    from watch_dark_photon_production import EosRpc, completed_histogram
+    previous=state.get('regrouping_canary',{})
+    if previous.get('complete'):
+        if durable.sha(previous['point_receipt_path']) != previous['point_receipt_sha256']:
+            raise ValueError('Qualified regrouping-canary receipt changed')
+        return True
+    batch=next(row for row in config['batches'] if row.get('operational_canary') and not row.get('gen_qualification_only'))
+    production=batch_directory(config,batch)/'production'
+    source=durable.authority(production,batch['point'],config['conditions']['sha256'])
+    directory=Path(config['directory'])/'regrouping_canary/v0001'
+    if not directory.exists():
+        settings=dict(config,campaign_prefix=config['campaign_prefix']+'-regroup-canary',
+            aggregation_guard=str(production),merge_source_histograms=False,aggregate_group_events=4000,
+            single_source_regrouping_canary=True)
+        durable.aggregate_plan(settings,batch['point'],[source],directory)
+        durable.new(directory/'aggregate_intent.json',durable.aggregate_record(directory,batch['point'],[source]))
+    record=durable.aggregate_record(directory,batch['point'],[source])
+    plan=read(directory/'plan.json')
+    if (plan.get('histogram_only') is not False or plan.get('group_events') != 4000
+            or plan.get('single_source_regrouping_canary') is not True):
+        raise ValueError('Regrouping canary must run the complete Nano and histogram chain')
+    receipt=(existing_receipt(directory,directory/'aggregate.sub') if (directory/'submission.json').is_file()
+             else durable.submission(config,directory,directory/'aggregate.sub'))
+    state['regrouping_canary']=dict(record,cluster=receipt['cluster'],complete=False)
+    durable.save(Path(config['directory'])/'state.json',state)
+    if native_status(config,receipt) != 'complete':
+        return False
+    transport=EosRpc('root://eosuser.cern.ch',directory/'readback')
+    try:
+        result=completed_histogram(dict(source=dict(directory=directory,campaign=plan['campaign'],
+            plan_sha256=durable.sha(directory/'plan.json'),seal_sha256=durable.sha(directory/'seal.json')),
+            row=plan['points'][0],output=Path(plan['points'][0]['final_output_base'])),transport)
+        if result is None:
+            raise ValueError('Regrouping-canary worker exited without complete histogram readback')
+        state['regrouping_canary']=dict(record,**result,cluster=receipt['cluster'],complete=True,
+            group_events=4000,histogram_only=False,latest_alias_changed=False)
+        return True
+    finally:
+        for path in (directory/'readback').glob('*'):
+            if path.is_file():
+                path.unlink()
+
+
 def histogram_promotion_floor(config, batch, result):
     """Use completed histogram input counts, never requested or selected counts."""
     floors = config.get('minimum_histogram_events_before_latest')
@@ -1926,6 +2041,12 @@ def histogram_promotion_floor(config, batch, result):
     if type(events) is not int or events < 0:
         raise ValueError('Latest promotion requires the validated histogram input count')
     minimum = floors.get(batch['point'], 0)
+    if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
+        expected={str(batch_directory(config,other)/'production/plan.json') for other in config['batches']
+            if other['point']==batch['point'] and not other.get('gen_qualification_only')}
+        if events > 0 and set(result.get('source_plans',[])) == expected:
+            return dict(minimum_events=minimum,validated_histogram_events=events,eligible=True,
+                final_planned_point_complete=True,reason='Complete new-campaign point supersedes the legacy count floor')
     return dict(minimum_events=minimum, validated_histogram_events=events,
                 eligible=events >= minimum)
 
@@ -2280,6 +2401,10 @@ def step(config,state):
         state['coverage_audit'] = dict(cluster=receipt['cluster'], **coverage_result(config))
     queue_snapshot=production_queue_snapshot(config)
     storage_decisions={}
+    point_readiness=point_grouping_readiness(config)
+    if point_readiness:
+        state['point_grouping']=point_readiness
+    aggregate_attempted=set()
     source_active, detector_active=0,0
     detector_claims=detector_reservations(config, entries)
     for batch in config['batches']:
@@ -2370,15 +2495,33 @@ def step(config,state):
             entry['detector_native_complete']=True
             if detector_claims is not None:
                 detector_claims.pop(batch['batch'], None)
+        if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
+            if not point_readiness[batch['point']]['complete']:
+                entry['stage']='waiting_for_complete_point_grouping'
+                continue
+            if batch['point'] in aggregate_attempted:
+                entry['stage']='waiting_for_complete_point_grouping'
+                continue
+            aggregate_attempted.add(batch['point'])
         published=publish_batch(config,state,batch)
         if published:
             stage = 'histograms_ready' if published.get('alias_published') is False else 'published'
             entry.update(stage=stage,published=published)
+            if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
+                expected={str(batch_directory(config,other)/'production/plan.json') for other in config['batches']
+                    if other['point']==batch['point'] and not other.get('gen_qualification_only')}
+                if set(published.get('source_plans',[])) != expected:
+                    raise ValueError('Final grouped histogram does not include every frozen source cohort')
+                for other in config['batches']:
+                    if other['point']==batch['point'] and not other.get('operational_canary') and not other.get('gen_qualification_only'):
+                        entries[other['batch']].update(stage=stage,published=published,detector_native_complete=True)
             durable.save(Path(config['directory'])/'state.json',state)
     canaries=[row for row in config['batches'] if row['operational_canary']]
     canary_ready=all(entries[row['batch']].get('published') for row in canaries)
+    if canary_ready and config.get('regroup_complete_points') is True:
+        canary_ready=qualify_regrouping_canary(config,state)
     state['canary_published']=canary_ready
-    if config.get('automatic_bulk_admission') is not None:
+    if config.get('automatic_bulk_admission') is not None and (config.get('regroup_complete_points') is not True or canary_ready):
         from dark_photon_automatic_admission import maybe_create_bulk_gate
         state['automatic_bulk_admission'] = maybe_create_bulk_gate(config, state)
     observation=durable.quota(config) if config.get('batch_native_queries') is not True else None
