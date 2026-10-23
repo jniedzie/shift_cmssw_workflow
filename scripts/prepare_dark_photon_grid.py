@@ -25,15 +25,17 @@ from dark_photon_generation import check_width_table, contract, production_setti
 from dark_photon_model import validate_native_proposal_support, validate_native_widths
 from dark_photon_sample_names import set_lab_point_name
 from shift_production_selection import DEPENDENCIES as MATERIAL_SELECTION_SOURCES
+from dark_photon_source_placement import DEPENDENCIES as SOURCE_PLACEMENT_SOURCES
 
 
 REFERENCE_SCHEMA = 'shift-dark-photon-grid-reference-v1'
-SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'dark_photon_gen_cfg.py',
+SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'run_dark_photon_private_gen.py', 'dark_photon_gen_cfg.py',
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
            'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
-           'dark_photon_detector_runtime.py') + MATERIAL_SELECTION_SOURCES
+           'dark_photon_detector_runtime.py', 'dark_photon_material_selection.py') + tuple(dict.fromkeys(
+               MATERIAL_SELECTION_SOURCES + SOURCE_PLACEMENT_SOURCES))
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
     'Compare measured <beta gamma> and lab-flight distributions with the reference estimate; do not condition on detector acceptance.',
@@ -148,6 +150,7 @@ def meson_width_qualification(points):
     """
     qualified = {}
     for row in points:
+        full_count = row.get('full_gen_events', row['events'])
         gen = Path(row['gen_directory'])
         contract_path = Path(row['signal_contract'])
         contract = json.loads(contract_path.read_text())
@@ -158,7 +161,7 @@ def meson_width_qualification(points):
         partials = width['partial_widths_gev']
         if (contract.get('production_mechanism') not in ('eta-etaprime-radiative', 'meson-radiative') or
                 contract.get('filtering') != 'none' or audit.get('runtime_validated') is not True or
-                audit.get('events') != row['events'] or contract.get('requested_events') != row['events'] or
+                audit.get('events') != full_count or contract.get('requested_events') != full_count or
                 any(contract[key] != row[key] for key in ('mass_gev', 'epsilon', 'seed', 'run_number')) or
                 contract != json.loads((gen / 'contract.json').read_text()) or
                 audit.get('source_exposure') != contract.get('source_exposure') or
@@ -175,7 +178,7 @@ def meson_width_qualification(points):
         source = contract['source_exposure']
         if (source.get('source_collisions') != source.get('fixed_source_collisions') or
                 type(source.get('source_collisions')) is not int or source['source_collisions'] < 2 or
-                source.get('accepted_signal_events') != row['events'] or
+                source.get('accepted_signal_events') != full_count or
                 source.get('native_n_accepted') != source['source_collisions']):
             raise ValueError('Meson source exposure was confused with its conditional output count')
         if row['point'] in qualified:
@@ -246,7 +249,7 @@ def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
                 row['run_number'] in runs):
             raise ValueError('Require unique physical points/runs and complete positive GEN budgets')
         if isinstance(row.get('signal_contract'), dict):
-            if row['signal_contract'].get('requested_events') != row['events']:
+            if row['signal_contract'].get('requested_events') != row.get('full_gen_events', row['events']):
                 raise ValueError('Detector stage GEN budget differs from its physical contract')
         names.add(point)
         runs.add(row['run_number'])

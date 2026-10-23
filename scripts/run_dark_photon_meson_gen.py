@@ -37,7 +37,8 @@ SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_
            'dark_photon_kaon.py', 'dark_photon_weak_meson.py', 'dark_photon_kaon_leptonic.py',
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'dark_photon_detector_runtime.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
-           'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py')
+           'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py',
+           'shift_source_placement.py', 'shift_jaw_source.py', 'shift_material_preselection.py')
 
 
 def freeze_meson_model(source, target):
@@ -476,6 +477,20 @@ def run(args):
             cross_section_convention='ND source sigma times full-source mean parent radiative probability and physical dimuon BR once; accepted signal genWeight=1',
             selection_applied=False, detector_simulated=False, physics_valid=False, normalization_ready=False,
             signal_ascii_sha256=digest(out/'signal.hepmc'))
+        if getattr(args, 'jaw_profile', None) is not None:
+            from shift_jaw_source import source_position
+            profile = json.loads(args.jaw_profile.read_text())
+            source_seed = 'dp-jaw-source-' + str(args.seed)
+            positions = [source_position(profile, contract['signal_ascii_sha256'],
+                         [args.run_number, 1, number], source_seed)
+                         for number in range(1, slots+1)]
+            contract['source_placement'] = dict(
+                schema='shift-dp-assumed-jaw-source-v1', profile=profile,
+                profile_sha256=digest(args.jaw_profile), source_seed=source_seed,
+                original_source_sha256=contract['signal_ascii_sha256'],
+                original_source_kind='Unplaced native HepMC ASCII collision cohort',
+                event_positions=positions, material_or_depth_weight_applied=False)
+            shutil.copy2(args.jaw_profile, out/'jaw_source_profile.json')
         (out/'contract.json').write_text(json.dumps(contract, indent=2)+'\n')
         if slots == 0:
             raise ValueError('The fixed source exposure produced no signal proposal; retain its zero-yield accounting')
@@ -511,6 +526,8 @@ def main():
     parser.add_argument('--seed', type=int, required=True)
     parser.add_argument('--run-number', type=int, required=True)
     parser.add_argument('--model-card', type=Path, required=True)
+    parser.add_argument('--jaw-profile', type=Path,
+                        help='Assumed common jaw-depth profile; freeze source-only positions before timing')
     parser.add_argument('--darkcast-path', type=Path, required=True)
     parser.add_argument('--darkcast-source-receipt', type=Path, required=True)
     parser.add_argument('--timeout', type=int, default=1800)

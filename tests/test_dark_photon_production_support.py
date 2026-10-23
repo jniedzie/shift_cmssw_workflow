@@ -22,6 +22,8 @@ from dark_photon_production_support import (
 )
 from prepare_dark_photon_grid import plan_detector_stage
 from prepare_dark_photon_production import extend_worker
+from shift_production_selection import default_policy
+from shift_material_preselection import checksum
 
 
 def write(path, value):
@@ -228,6 +230,29 @@ class CompleteGroupReports(unittest.TestCase):
             mutate(damaged)
             with self.assertRaises(ValueError):
                 self.check(damaged)
+
+
+class WeightedCompleteGroupReports(CompleteGroupReports):
+    def setUp(self):
+        super().setUp()
+        self.parent.update(events=46, event_ids=[[8001,1,index+1] for index in range(46)],
+                           native_sumw=46., native_sumw2=46.)
+        policy=default_policy('weighted-report-test','before-reco')
+        contract=dict(schema='shift-production-material-selection-v1', policy=policy,
+            policy_sha256=checksum(policy), ledger_sha256='f'*64,
+            track_all_hadron_decays=True,maximum_untracked_hadron_flight_mm=1.e-5)
+        probabilities=[.1 if index%2 else .25 for index in range(23)]
+        selection=dict(gen_sha256='a'*64,full_gen_events=46,selected_indices=list(range(0,46,2)),
+                       sampling_probabilities=probabilities,production_selection=contract)
+        self.row.update(full_gen_events=46,material_selection=selection)
+        self.report.update(material_selection=selection,full_gen_events=46,
+            histogram_sumw=sum(1./p for p in probabilities),weight_branch='shiftSamplingGenWeight')
+
+    def test_changed_weight_sum_or_denominator_fails(self):
+        for changes in (dict(full_gen_events=23),dict(histogram_sumw=23.),dict(weight_branch='genWeight')):
+            report=copy.deepcopy(self.report);report.update(changes)
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                self.check(report)
 
 
 class RootHistogramMerge(unittest.TestCase):

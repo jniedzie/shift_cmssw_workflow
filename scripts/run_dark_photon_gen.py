@@ -15,6 +15,7 @@ import subprocess
 import sys
 
 from dark_photon_generation import contract, production_settings
+from dark_photon_source_placement import DEPENDENCIES, place_contract, record_runtime
 
 
 def digest(path):
@@ -41,6 +42,9 @@ def main():
     parser.add_argument('--run-number', type=int)
     parser.add_argument('--timeout', type=int, default=600)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--jaw-profile', type=Path)
+    parser.add_argument('--runtime-provenance', type=Path)
+    parser.add_argument('--runtime-archive', type=Path)
     args = parser.parse_args()
     production_settings(args.mass, args.epsilon, experimental_large_epsilon=args.experimental_large_epsilon)
     scale = 1. if args.sampling_epsilon is None else args.sampling_epsilon/abs(args.epsilon)
@@ -66,14 +70,11 @@ def main():
     here = Path(__file__).resolve().parent
     for name in ('dark_photon_gen_cfg.py', 'dark_photon_generation.py', 'dark_photon_model.py',
                  'dark_photon_pythia.py', 'audit_dark_photon_gen.py',
-                 'pythia_generation_ledger.py', 'fixed_target_generation.py'):
+                 'pythia_generation_ledger.py', 'fixed_target_generation.py', *DEPENDENCIES):
         shutil.copy2(here / name, out / name)
     manifest['source_sha256'] = {p.name: digest(p) for p in out.glob('*.py')}
     base = Path(os.environ['CMSSW_BASE'])
-    manifest['cmssw_git_head'] = subprocess.check_output(
-        ['git', '-C', str(base / 'src'), 'rev-parse', 'HEAD'], text=True).strip()
-    manifest['cmssw_git_status'] = subprocess.check_output(
-        ['git', '-C', str(base / 'src'), 'status', '--porcelain'], text=True)
+    record_runtime(manifest, base, out, args.runtime_provenance, args.runtime_archive)
     manifest['pythia_tool'] = subprocess.check_output(['scram', 'tool', 'info', 'pythia8'],
                                                     cwd=base / 'src', text=True)
     path.write_text(json.dumps(manifest, indent=2) + '\n')
@@ -99,6 +100,9 @@ def main():
         data = contract(args.mass, args.epsilon, width, args.decay_mode, args.events, args.seed,
                         args.run_number or args.seed, common, cp5, sampling_width, scale,
                         accepted_events=args.accepted_events, experimental_large_epsilon=args.experimental_large_epsilon)
+        if args.jaw_profile is not None:
+            data = place_contract(data, args.jaw_profile)
+            shutil.copy2(args.jaw_profile, out/'jaw_profile.json')
         (out / 'contract.json').write_text(json.dumps(data, indent=2) + '\n')
         command = ['cmsRun', str(out / 'dark_photon_gen_cfg.py'), 'pilotDirectory=' + str(out)]
         manifest.update(command=command, status='generating')

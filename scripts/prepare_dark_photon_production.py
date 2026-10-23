@@ -13,7 +13,7 @@ import shutil
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
 from prepare_dark_photon_grid import validate_physical_preflight
-from shift_production_selection import guard_legacy_bsm_publication
+from dark_photon_material_selection import population, validate_plan
 from dark_photon_production_support import (
     PROFILES, validate_complete_groups, validate_publication_canary,
 )
@@ -159,7 +159,7 @@ def check_gen(plan, inventory, publication, prior_inventories):
             if 'seed' in row:
                 previous_seeds.add(row['seed'])
     for row in plan['points']:
-        point, count = row['point'], row['events']
+        point, count = row['point'], row.get('full_gen_events', row['events'])
         parent, payload = inventory['points'][point], published[point]
         actual = list(map(tuple, parent['event_ids']))
         gen = Path(row['gen_directory'])
@@ -294,6 +294,28 @@ def extend_worker(text, publication_profile, runtime_profile=None):
     text = text.replace(process_limit, "timeout=plan['detector_timeout_seconds']+600,check=True")
     if runtime_profile is not None:
         text = private_runtime_worker(text)
+    # The shared worker slices admitted offsets; retain the full parent ledger.
+    module = ast.parse(text)
+    function, = [node for node in module.body
+                 if isinstance(node, ast.FunctionDef) and node.name == 'chunk_spec']
+    lines = text.splitlines(keepends=True)
+    lines[function.lineno-1:function.end_lineno] = [
+        'def chunk_spec(plan, inventory, point, chunk_id):\n',
+        '    from dark_photon_material_selection import chunk_spec as selected_chunk_spec\n',
+        '    return selected_chunk_spec(plan, inventory, point, chunk_id)\n']
+    text = ''.join(lines)
+    # A selected source is a sealed input, including its original full cohort.
+    stage = "    for name in ('manifest.json', 'contract.json', 'validation.json'):\n"
+    if text.count(stage) != 1:
+        raise ValueError('Qualified GEN staging metadata hook changed')
+    text = text.replace(stage,
+        "    names = ['manifest.json', 'contract.json', 'validation.json']\n"
+        "    if row.get('material_selection') is not None:\n"
+        "        descriptor = Path(row['gen_directory'])/'material_selected_source.json'\n"
+        "        if sha(descriptor) != row['material_selected_source_sha256']:\n"
+        "            raise ValueError('Material descriptor changed before GEN staging')\n"
+        "        names.append('material_selected_source.json')\n"
+        "    for name in names:\n")
     return text
 
 
@@ -323,6 +345,7 @@ def private_runtime_worker(text):
 def private_runtime_shell(text, output, frozen):
     # Keep the shell alive so its EXIT trap returns the bounded failure archive.
     return (text[:text.index('unset PYTHONPATH')]
+            + '/usr/bin/env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH -u LD_PRELOAD -u ROOTSYS '
             + '/usr/bin/python3 ' + str(output / 'dark_photon_detector_runtime.py')
             + ' --profile ' + str(frozen / 'detector_runtime.json')
             + ' --entry ' + str(output / 'chunk_worker.py') + ' -- "$@"\n')
@@ -401,10 +424,10 @@ def prepare(args):
         raise ValueError('New detector RNG job namespace overlaps its qualified predecessor')
     inventory, publication = read(args.gen_inventory), read(args.gen_publication)
     independence = check_gen(plan, inventory, publication, args.prior_inventories)
-    guard_legacy_bsm_publication(plan, inventory)
+    validate_plan(plan, inventory)
     for row in plan['points']:
         validate_complete_groups(dict(row, group_events=plan['group_events']),
-                                 inventory['points'][row['point']]['event_ids'])
+                                 population(row, inventory['points'][row['point']])[0])
         row['gen_remote_path'] = inventory['points'][row['point']]['gen_path']
     budget = copy.deepcopy(read(args.storage_budget))
     if budget['detector_chunks'] != plan['detector_chunks'] or budget['events'] != plan['events']:
@@ -494,6 +517,9 @@ def prepare(args):
                  output / 'dark_photon_publication_quota.py')
     shutil.copy2(Path(__file__).with_name('dark_photon_production_support.py'),
                  output / 'dark_photon_production_support.py')
+    for name in ('dark_photon_material_selection.py', 'shift_production_selection.py',
+                 'shift_material_preselection.py'):
+        shutil.copy2(Path(__file__).with_name(name), output / name)
     if qualification is not None:
         write(output / 'publication_qualification.json', qualification)
     for name in ('postprocess_canary.json', 'shared_dependency_gate.json'):

@@ -26,7 +26,10 @@ or use Git worktrees unless the user explicitly overrides this policy.
   before using thinned inputs. New model runtimes must freeze both shared
   selection helpers and the coherent material-transport build; preserve their
   model-specific physics lists and the fixed Run-3 settings. Bounded legacy
-  controls require an explicit override. No full production is authorized yet.
+  controls require an explicit override. The user authorized a fresh full DP
+  weekend production on October23 with the released reconstruction; qualify
+  the actual weighted full chain before bulk admission. Cancelled deployments
+  remain cancelled. Use a dated DP campaign and publish `latest` when ready.
 
 - Stay focused on the agreed milestone. Ask before a side investigation or
   new workstream would materially delay it or expand its scope; explain the
@@ -139,11 +142,10 @@ the change.
 
 ## Workflow safety
 
-- BSM submission is on hold at the user's request of October 23, 2026.
-  Prepare and validate only; do not launch or resume large BSM controllers or
-  workers until fresh user authorization after the dimuon reconstruction work
-  is ready. Earlier submission approvals are superseded. The final agreed
-  reconstruction runtime must pass full-chain qualification first.
+- On October 23, 2026, the user authorized a fresh DP weekend production with
+  the released reconstruction. A dated DP campaign is allowed, with `latest`
+  publication when ready. Qualify its weighted full chain before bulk admission. Previously cancelled frozen
+  deployments stay cancelled; do not resume them or credit their deleted data.
 - Optimize validation for time to a useful result. Run independent events and
   variants in parallel, using one event per job when that shortens iteration.
   Thousands of jobs are acceptable within actual site and storage limits;

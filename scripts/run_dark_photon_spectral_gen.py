@@ -23,12 +23,13 @@ import sys
 
 from dark_photon_model import ElectroweakInputs, pythia_couplings, validate_native_proposal_support
 from fixed_target_generation import beam_settings
+from dark_photon_source_placement import DEPENDENCIES, place_contract, record_runtime
 
 SOURCES = (
     "run_dark_photon_spectral_gen.py", "dark_photon_gen_cfg.py", "dark_photon_generation.py",
     "dark_photon_model.py", "dark_photon_pythia.py", "audit_dark_photon_gen.py",
     "pythia_generation_ledger.py", "fixed_target_generation.py",
-)
+) + DEPENDENCIES
 PINNED_DARKCAST_COMMIT = "5a2a53a8984827be06e2939e6c3705f79d180048"
 NATIVE_EW = ElectroweakInputs(sin2_theta_w=.2312, m_z_gev=91.1876)
 
@@ -185,6 +186,9 @@ def main():
     parser.add_argument("--run-number", type=int)
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--jaw-profile", type=Path)
+    parser.add_argument("--runtime-provenance", type=Path)
+    parser.add_argument("--runtime-archive", type=Path)
     args = parser.parse_args()
     validate_point(args.mass, args.epsilon, args.sampling_epsilon, args.experimental_low_mass_dy,
                    args.experimental_large_epsilon)
@@ -208,8 +212,7 @@ def main():
             shutil.copy2(here / name, output / name)
         manifest["source_sha256"] = {name: digest(output / name) for name in sources}
         base = Path(os.environ["CMSSW_BASE"])
-        manifest["cmssw_git_head"] = subprocess.check_output(["git", "-C", str(base / "src"), "rev-parse", "HEAD"], text=True).strip()
-        manifest["cmssw_git_status"] = subprocess.check_output(["git", "-C", str(base / "src"), "status", "--porcelain"], text=True)
+        record_runtime(manifest, base, output, args.runtime_provenance, args.runtime_archive)
         manifest["pythia_tool"] = subprocess.check_output(["scram", "tool", "info", "pythia8"], cwd=base / "src", text=True)
         authority = freeze_spectral_inputs(args.darkcast_path.resolve(), args.darkcast_source_receipt.resolve(), output)
         manifest["spectral_width_source"] = authority
@@ -233,6 +236,9 @@ def main():
         native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,
             args.experimental_low_mass_dy,args.experimental_large_epsilon)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
+        if args.jaw_profile is not None:
+            contract = place_contract(contract, args.jaw_profile)
+            shutil.copy2(args.jaw_profile, output/"jaw_profile.json")
         (output / "contract.json").write_text(json.dumps(contract, indent=2, allow_nan=False)+"\n")
         command = ["cmsRun", str(output / "dark_photon_gen_cfg.py"), "pilotDirectory="+str(output)]
         manifest.update(command=command, status="generating")

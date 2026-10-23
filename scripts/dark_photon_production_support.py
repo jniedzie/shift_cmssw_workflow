@@ -15,6 +15,8 @@ import subprocess
 import sys
 import tarfile
 
+from dark_photon_material_selection import population, validate_nano, WEIGHT_BRANCH, merged_cutflow_sumw
+
 
 PROFILES = {
     'all-tiers-v1': ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD'),
@@ -241,13 +243,19 @@ def validate_histogram_merge(inputs, merged):
 
 def validate_group_reports(row, parent, report, seal_hash, plan_hash, model_hash):
     """Bind published groups and their score receipts to the unique full parent."""
-    expected = parent['event_ids']
+    expected, probabilities = population(row, parent)
     groups = validate_complete_groups(row, expected)
     if (report.get('complete') is not True or report.get('point') != row['point'] or
             report.get('events') != row['events'] or report.get('seal_sha256') != seal_hash or
             report.get('plan_sha256') != plan_hash or report.get('sample_role') != 'validation_only' or
             report.get('final_output_base') != row['final_output_base']):
         raise ValueError('Point report differs from the complete frozen production')
+    if row.get('material_selection') is not None:
+        if (report.get('material_selection') != row['material_selection']
+                or report.get('full_gen_events') != parent['events']
+                or report.get('weight_branch') != WEIGHT_BRANCH
+                or report.get('histogram_sumw') != math.fsum(1./p for p in probabilities)):
+            raise ValueError('Point report changed material weights or its full GEN denominator')
     union = report.get('union', {})
     published_groups, scored_groups = union.get('groups', []), report.get('groups', [])
     if (union.get('complete') is not True or union.get('point') != row['point'] or
@@ -312,7 +320,7 @@ def finalize(point, seal_hash, cache):
     row = rows[0]
     row = dict(row, group_events=plan['group_events'])
     parent = inventory['points'][point]
-    expected = parent['event_ids']
+    expected, probabilities = population(row, parent)
     groups = validate_complete_groups(row, expected)
     statuses = {chunk['chunk']: qualified.load_chunk_status(plan, inventory, point, chunk['chunk'], seal_hash)
                 for chunk in row['chunks']}
@@ -343,6 +351,9 @@ def finalize(point, seal_hash, cache):
                 raise ValueError('Detector Nano checksum or byte count changed')
             identities, native_weights = qualified.event_rows(local)
             qualified.validate_union(identities, native_weights, status['expected_event_ids'], chunk['count'])
+            if row.get('material_selection') is not None:
+                start = chunk['skip']
+                validate_nano(local, identities, probabilities[start:start+chunk['count']])
             paths.append(local)
             ids.extend(identities)
             weights.extend(native_weights)
@@ -356,6 +367,9 @@ def finalize(point, seal_hash, cache):
                            check=True, timeout=1800)
         if qualified.event_rows(grouped) != (selected, weights):
             raise ValueError('Merged Nano changed event identities or native weights')
+        if row.get('material_selection') is not None:
+            start = group['skip']
+            validate_nano(grouped, selected, probabilities[start:start+group['count']])
         item = worker.publish(grouped, group['nano'], directory)
         publications.append(dict(group=number, events=group['count'], event_ids=selected,
                                  native_sumw=sum(weights), native_sumw2=sum(value * value for value in weights),
@@ -394,7 +408,8 @@ def finalize(point, seal_hash, cache):
             metadata = prefix + f'/metadata/bdt_grouped/group_{number:03d}'
             score_row = dict(index=number, source_transport_path=str(source), source_logical_path=group['nano'],
                 source_sha256=worker.sha(source), source_bytes=source.stat().st_size, expected_events=group['count'],
-                weight_branch='genWeight', output_nano=prefix + f'/nanoAOD_merged/ntuple_{number}.root',
+                weight_branch=WEIGHT_BRANCH if row.get('material_selection') is not None else 'genWeight',
+                output_nano=prefix + f'/nanoAOD_merged/ntuple_{number}.root',
                 output_histograms=prefix + f'/histograms/ntuple_{number}.root', complete_marker=metadata + '/complete.json',
                 score_receipt=metadata + '/score.json', bdt_hist_receipt=metadata + '/bdt_hist.json',
                 score_log=metadata + '/score.log', histogram_log=metadata + '/histogram.log')
@@ -402,6 +417,10 @@ def finalize(point, seal_hash, cache):
             result = scorer.run_file(scoreplan, score_row, directory, cache, analysis, seal_hash)
             if qualified.event_rows(directory / 'scored.root') != (publication['event_ids'], [1.] * group['count']):
                 raise ValueError('Scoring changed grouped event identities or native weights')
+            if row.get('material_selection') is not None:
+                start = group['skip']
+                validate_nano(directory / 'scored.root', publication['event_ids'],
+                              probabilities[start:start+group['count']])
             scored.append(dict(group=number, score_histograms=result))
             histogram_paths.append(directory / 'histograms.root')
     finally:
@@ -412,7 +431,9 @@ def finalize(point, seal_hash, cache):
                        check=True, timeout=1800)
     merge_audit = validate_histogram_merge(histogram_paths, merged)
     qualified.validate_histogram_axes(merged, worker.B / 'frozen/scoring/sm_axis_authority.root')
-    scorer.check_standard_histograms(merged, row['events'], row['events'])
+    histogram_sumw = math.fsum(1./p for p in probabilities)
+    standard_sumw = merged_cutflow_sumw(histogram_paths)
+    scorer.check_standard_histograms(merged, row['events'], standard_sumw)
     histogram = worker.publish(merged, prefix + '/histograms_merged/ntuple_0.root', work)
     # The publisher independently downloads and SHA-checks its destination.
     marker = dict(schema='shift-grouped-signal-histograms-complete-v1', complete=True,
@@ -425,6 +446,10 @@ def finalize(point, seal_hash, cache):
                   seal_sha256=seal_hash, plan_sha256=worker.sha(worker.B / 'plan.json'), final_output_base=prefix,
                   canonical_sm_histogram_axes_verified=1081,
                   canonical_sm_histogram_authority_sha256=worker.sha(worker.B / 'frozen/scoring/sm_axis_authority.root'))
+    if row.get('material_selection') is not None:
+        report.update(material_selection=row['material_selection'],
+                      full_gen_events=parent['events'], histogram_sumw=histogram_sumw,
+                      weight_branch=WEIGHT_BRANCH, standard_cutflow_sumw=standard_sumw)
     validate_group_reports(row, parent, report, seal_hash, worker.sha(worker.B / 'plan.json'), scoreplan['model_sha256'])
     worker.write(work / 'point_complete.json', report)
     worker.publish(work / 'point_complete.json', prefix + '/metadata/grouping/point_complete.json', work)
@@ -454,7 +479,9 @@ def collect(seal_hash):
             marker = result['score_histograms']['marker']
             published = marker['published']
             inputs.append(dict(meta, group=publication['group'], path=published['nano']['path'], process='signal',
-                events=publication['events'], weight_branch='genWeight', mixture_scale=1.,
+                events=publication['events'],
+                weight_branch=WEIGHT_BRANCH if row.get('material_selection') is not None else 'genWeight',
+                mixture_scale=1.,
                 nano_sha256=published['nano']['sha256'], score_receipt=published['score_receipt']['path'],
                 sample_role='validation_only', parent_gen=parent,
                 parent_gen_population_id=parent['gen_sha256'], parent_gen_count_policy='Unique gen_sha256 counted once'))
@@ -463,7 +490,8 @@ def collect(seal_hash):
         label = f"A' {row['mass_gev']:g} GeV, " + ('prompt' if flight is None else f'mean lab flight {flight:g} m')
         histograms.append(dict(meta, name=point, process='signal', label=label,
             histogram_path=histogram['path'], histogram_sha256=histogram['sha256'], sample_role='validation_only'))
-    if len(all_ids) != plan['events']:
+    full_count = sum(row.get('full_gen_events', row['events']) for row in plan['points'])
+    if len(all_ids) != full_count:
         raise ValueError('Collected full GEN population differs from the frozen production')
     performance = dict(schema='shift-bdt-performance-inputs-v1', sample_kind='simulation_only', inputs_complete=True,
         expected_inputs=len(inputs), completed_inputs=len(inputs), inputs=inputs,

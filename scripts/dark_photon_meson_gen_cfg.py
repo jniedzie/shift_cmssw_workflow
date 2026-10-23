@@ -70,5 +70,12 @@ process.output = cms.OutputModule('PoolOutputModule',
     SelectEvents=cms.untracked.PSet(SelectEvents=cms.vstring('gen')))
 process.write = cms.EndPath(process.output)
 process.schedule = cms.Schedule(process.gen, process.write)
+if 'source_placement' in data:
+    from shift_source_placement import ASSUMED_SCOPE, configure_source_placement
+    configure_source_placement(process, None, 'VtxSmeared', test_scope=ASSUMED_SCOPE,
+        event_positions=data['source_placement']['event_positions'])
+    process.shiftMuonDecays.src = cms.InputTag('shiftSourcePlacement')
+    process.gen.replace(process.VtxSmeared, process.VtxSmeared + process.shiftSourcePlacement)
+    process.output.outputCommands.append('keep *_shiftSourcePlacement_*_*')
 process.MessageLogger.cerr.FwkReport.reportEvery = 20
 (out / 'resolved_cfg.py').write_text(process.dumpPython())

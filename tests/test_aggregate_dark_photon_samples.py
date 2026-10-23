@@ -140,6 +140,14 @@ class DisjointParentAccounting(unittest.TestCase):
 
 
 class PopulationAccounting(unittest.TestCase):
+    def test_recovery_cannot_replace_an_empty_frozen_draw_with_detected_events(self):
+        first=population();first.update(selected_event_ids=[],sampling_probabilities=[],rate_only=True)
+        changed=copy.deepcopy(first)
+        changed.update(selected_event_ids=changed['parent']['event_ids'],
+                       sampling_probabilities=[1.,1.],rate_only=False)
+        with self.assertRaisesRegex(ValueError,'Recovery views disagree'):
+            unique_populations([first,changed])
+
     def test_meson_rates_use_fixed_source_exposure_and_keep_signal_counts_separate(self):
         first, second = population(10, 2, 900, 2., .1), population(20, 18, 100, 4., .2)
         for item, count, mean in ((first, 100, .01), (second, 300, .02)):
@@ -390,7 +398,7 @@ else:
                 with self.subTest(change=change), self.assertRaisesRegex(ValueError, 'Source histogram'):
                     completed_histogram_input(damaged, 'b' * 64)
 
-    def run_merge(self, base, *, corrupt_source=False):
+    def run_merge(self, base, *, corrupt_source=False, zero_second=False, all_zero=False):
         import numpy as np
         import uproot
         if shutil.which('hadd') is None:
@@ -417,6 +425,9 @@ else:
             item = source['report']['score_histograms']['marker']['published']['histograms']
             remote[item['path']] = path
             populations.append(source)
+            if all_zero or (zero_second and index == 1):
+                source.update(rate_only=True,selected_event_ids=[],inputs=[],material_selected=True)
+                source['report'].update(events=0,histogram_sumw=0.,standard_cutflow_sumw=0.,rate_only=True)
         if corrupt_source:
             populations[0]['report']['score_histograms']['marker']['published']['histograms']['sha256'] = 'e' * 64
 
@@ -449,6 +460,8 @@ else:
                 seal_sha256='d' * 64, point='point'), points=[dict(point='point', events=10,
                 final_output_base='/eos/user/t/test/darkphoton_point/additive',
                 sources=[dict(index=0), dict(index=0), dict(index=1)])])
+        if zero_second or all_zero:
+            plan['points'][0].update(events=0 if all_zero else 2,full_gen_events=10)
         with patch('aggregate_dark_photon_samples.verify_aggregate_seal'), patch(
                 'aggregate_dark_photon_samples.load_plan', return_value=plan), patch(
                 'aggregate_dark_photon_samples.checked', side_effect=lambda path, digest: Path(path)), patch(
@@ -457,6 +470,26 @@ else:
                 sys.modules, run_merged_dimuon_bdt=scorer, chunk_worker=guard):
             report = execute(base / 'plan.json', 'e' * 64, 'f' * 64, 'point', base / 'cache', scratch, base / 'results')
         return report, remote, reads, writes, checks
+
+    def test_empty_draw_adds_full_denominator_without_a_histogram_input(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report,remote,reads,writes,checks=self.run_merge(Path(temporary),zero_second=True)
+            self.assertEqual(report['events'],2)
+            self.assertEqual(report['full_gen_events'],10)
+            self.assertEqual(report['union']['parent_gen_ledger_count'],2)
+            self.assertEqual(checks,[2,2])
+            rates=next(path for key,path in remote.items() if key.endswith('/cross_sections.json'))
+            self.assertEqual(json.loads(rates.read_text())['full_gen']['accepted_events'],10)
+
+    def test_all_empty_draws_finish_rate_only_without_histogram_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            report,remote,reads,writes,checks=self.run_merge(Path(temporary),all_zero=True)
+            self.assertTrue(report['rate_only'])
+            self.assertEqual(report['events'],0)
+            self.assertEqual(report['full_gen_events'],10)
+            self.assertEqual(report['full_gen_rate']['full_gen']['accepted_events'],10)
+            self.assertEqual(writes,[])
+            self.assertEqual(checks,[])
 
     def test_histograms_keep_flow_errors_and_full_ledgers_without_new_nano_files(self):
         import uproot

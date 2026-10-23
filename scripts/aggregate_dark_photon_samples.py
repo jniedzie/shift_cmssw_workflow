@@ -26,6 +26,10 @@ import sys
 
 from export_dark_photon_cross_sections import rate_record
 from pythia_generation_ledger import read_pythia_generation_ledger, same_ledger_content
+from dark_photon_material_selection import (
+    population as admitted_population, validate_nano, WEIGHT_BRANCH, merged_cutflow_sumw,
+    validate_rate_only_report,
+)
 
 
 SCHEMA = 'shift-dark-photon-additive-plan-v1'
@@ -138,7 +142,10 @@ def unique_populations(populations):
             previous = by_gen[key]
             if (previous['parent']['event_ids'] != identities
                     or previous['rate']['physical_selected_cross_sections_pb'] != record['physical_selected_cross_sections_pb']
-                    or previous['rate']['proposal_ledger'] != record['proposal_ledger']):
+                    or previous['rate']['proposal_ledger'] != record['proposal_ledger']
+                    or previous.get('selected_event_ids') != population.get('selected_event_ids')
+                    or previous.get('sampling_probabilities') != population.get('sampling_probabilities')
+                    or previous.get('rate_only',False) != population.get('rate_only',False)):
                 raise ValueError('Recovery views disagree about the same GEN population')
             previous.setdefault('duplicate_views', []).append(population['source'])
             continue
@@ -364,7 +371,7 @@ def load_source(source, expected_model, conditions_digest):
         contracts[name] = read(checked(gen / name, parent[key]))
     contract, audit, manifest = [contracts[name] for name in ('contract.json', 'validation.json', 'manifest.json')]
     meson = contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
-    native_count = contract['source_exposure']['source_collisions'] if meson else row['events']
+    native_count = contract['source_exposure']['source_collisions'] if meson else row.get('full_gen_events', row['events'])
     fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
     ledger_matches = (same_ledger_content(fresh_ledger, audit['proposal_ledger']) if meson
                       else fresh_ledger == audit['proposal_ledger'])
@@ -386,11 +393,25 @@ def load_source(source, expected_model, conditions_digest):
             or report.get('final_output_base') != row['final_output_base']):
         raise ValueError('Source point completion does not match its sealed production')
     union = report['union']
+    selected_ids, probabilities = admitted_population(row, parent)
     if (union.get('complete') is not True or union.get('parent_gen_ledger_count') != 1
-            or union['parent_gen'] != parent or union['event_ids'] != parent['event_ids']
-            or union['native_sumw'] != parent['native_sumw'] or union['native_sumw2'] != parent['native_sumw2']):
+            or union['parent_gen'] != parent or union['event_ids'] != selected_ids
+            or union['native_sumw'] != len(selected_ids) or union['native_sumw2'] != len(selected_ids)):
         raise ValueError('Source Nano union is not its complete single GEN population')
-    groups = union.get('groups') or [dict(group=0, events=row['events'], event_ids=parent['event_ids'], grouped=union['grouped'])]
+    weighted = row.get('material_selection') is not None
+    if weighted and (report.get('material_selection') != row['material_selection']
+            or report.get('full_gen_events') != parent['events']
+            or report.get('weight_branch') != WEIGHT_BRANCH
+            or report.get('histogram_sumw') != math.fsum(1./p for p in probabilities)):
+        raise ValueError('Source histogram changed its frozen sampling weights')
+    rate_only = report.get('rate_only') is True
+    if rate_only:
+        validate_rate_only_report(report,row,parent,source['plan_sha256'],source['seal_sha256'])
+        groups=[]
+    else:
+        if not selected_ids:
+            raise ValueError('Empty material admission needs an explicit rate-only completion')
+        groups = union.get('groups') or [dict(group=0, events=row['events'], event_ids=selected_ids, grouped=union['grouped'])]
     inputs, all_ids = [], []
     for group in groups:
         ids = group['event_ids']
@@ -399,11 +420,15 @@ def load_source(source, expected_model, conditions_digest):
         item = group['grouped']
         if Path(item['path']).parent != Path(row['final_output_base']) / 'nanoAOD_merged_unscored':
             raise ValueError('Aggregate must consume complete unscored Nano inputs')
-        inputs.append(dict(**item, events=len(ids), event_ids=ids))
+        start = len(all_ids)
+        inputs.append(dict(**item, events=len(ids), event_ids=ids,
+            sampling_probabilities=probabilities[start:start+len(ids)], material_selected=weighted))
         all_ids.extend(ids)
-    validate_event_rows(all_ids, [1.] * len(all_ids), parent['event_ids'])
+    validate_event_rows(all_ids, [1.] * len(all_ids), selected_ids)
     return dict(source=dict(source, completed_point_path=str(report_path), completed_point_sha256=sha(report_path)),
-                parent=parent, rate=rate, inputs=inputs, contract=contract, report=report)
+                parent=parent, rate=rate, inputs=inputs, contract=contract, report=report,
+                selected_event_ids=selected_ids, sampling_probabilities=probabilities,
+                material_selected=weighted,rate_only=rate_only)
 
 
 def completed_histogram_input(population, model_hash):
@@ -412,7 +437,7 @@ def completed_histogram_input(population, model_hash):
     marker = report.get('score_histograms', {}).get('marker', {})
     item = marker.get('published', {}).get('histograms', {})
     expected = report['final_output_base'] + '/histograms_merged/ntuple_0.root'
-    count = len(population['parent']['event_ids'])
+    count = report.get('events', len(population['parent']['event_ids']))
     if (marker.get('complete') is not True or marker.get('events') != count
             or marker.get('selection_applied') is not False
             or marker.get('model_sha256') != model_hash
@@ -421,7 +446,9 @@ def completed_histogram_input(population, model_hash):
             or type(item.get('bytes')) is not int or item['bytes'] <= 0
             or not re.fullmatch('[0-9a-f]{64}', item.get('sha256', ''))):
         raise ValueError('Source histogram does not match its complete population and classifier')
-    return dict(item, events=count, pairs=marker['pairs'], source=population['source'],
+    return dict(item, events=count, sumw=report.get('histogram_sumw', float(count)),
+                standard_cutflow_sumw=report.get('standard_cutflow_sumw',float(count)),
+                pairs=marker['pairs'], source=population['source'],
                 gen_sha256=population['parent']['gen_sha256'])
 
 
@@ -477,7 +504,7 @@ def execute_histogram_only(plan, row, populations, rate, identities,
     from dark_photon_production_support import validate_histogram_merge
     scoreplan = read(deployment / 'scoring_components.json')
     sources = [completed_histogram_input(population, scoreplan['model_sha256'])
-               for population in populations]
+               for population in populations if not population.get('rate_only')]
     guard_spec = plan['publication_guard']
     guard_directory = Path(guard_spec['deployment_path'])
     checked(guard_directory / 'seal.json', guard_spec['seal_sha256'])
@@ -487,6 +514,8 @@ def execute_histogram_only(plan, row, populations, rate, identities,
     guard.verify_seal(guard_spec['seal_sha256'], guard_spec['point'], scoring=True)
     guard.prepare_publication_guard(guard_spec['seal_sha256'])
     guard.check_headroom()
+    if not sources:
+        raise ValueError('Rate-only populations have no histogram to publish; retain their exposure receipt')
     io = scorer.io
     work = Path(scratch) / 'histogram_aggregate'
     work.mkdir(exist_ok=False)
@@ -513,7 +542,7 @@ def execute_histogram_only(plan, row, populations, rate, identities,
         path = work / ('source_' + str(index) + '.root')
         stage(source, path)
         qualified.validate_histogram_axes(path, deployment / 'frozen/scoring/sm_axis_authority.root')
-        scorer.check_standard_histograms(path, source['events'], float(source['events']))
+        scorer.check_standard_histograms(path, source['events'], source['standard_cutflow_sumw'])
         histograms.append(path)
     merged = work / 'histograms.root'
     with (work / 'merge.log').open('x') as log:
@@ -521,7 +550,7 @@ def execute_histogram_only(plan, row, populations, rate, identities,
                        stdout=log, stderr=subprocess.STDOUT, timeout=900)
     audit = validate_histogram_merge(histograms, merged)
     qualified.validate_histogram_axes(merged, deployment / 'frozen/scoring/sm_axis_authority.root')
-    scorer.check_standard_histograms(merged, len(identities), float(len(identities)))
+    scorer.check_standard_histograms(merged, len(identities), merged_cutflow_sumw(histograms))
     prefix = row['final_output_base']
     histogram = put(merged, prefix + '/histograms_merged/ntuple_0.root')
     write(work / 'cross_sections.json', rate)
@@ -555,6 +584,10 @@ def execute_histogram_only(plan, row, populations, rate, identities,
         canonical_sm_histogram_axes_verified=1081,
         canonical_sm_histogram_authority_sha256=sha(deployment / 'frozen/scoring/sm_axis_authority.root'),
         plan_sha256=plan_digest, seal_sha256=seal_digest, created_utc=datetime.now(timezone.utc).isoformat())
+    report.update(full_gen_events=sum(p['parent'].get('events',len(p['parent']['event_ids'])) for p in populations),
+        histogram_sumw=math.fsum(source['sumw'] for source in sources),
+        standard_cutflow_sumw=merged_cutflow_sumw(histograms),
+        weight_branch=WEIGHT_BRANCH if any(p.get('material_selected') for p in populations) else 'genWeight')
     write(work / 'union.json', union)
     put(work / 'union.json', prefix + '/metadata/grouping/union.json')
     write(work / 'point_receipt.json', report)
@@ -585,9 +618,24 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
            for population in populations[1:]):
         raise ValueError('Source generator, lifetime, beam or source settings differ')
     rate = combined_rate(populations, point=point, campaign=plan['campaign'])
-    identities = [identity for population in populations for identity in population['parent']['event_ids']]
-    if len(identities) != row['events']:
+    full_identities = [identity for population in populations for identity in population['parent']['event_ids']]
+    identities = [identity for population in populations
+                  for identity in population.get('selected_event_ids',population['parent']['event_ids'])]
+    if (len(full_identities) != row.get('full_gen_events',row['events'])
+            or len(identities) != row['events']):
         raise ValueError('Aggregate does not cover its full requested base-plus-new population')
+    if not identities:
+        if any(not population.get('rate_only') for population in populations):
+            raise ValueError('Empty aggregate contains a cohort without a rate-only completion')
+        report=dict(schema='shift-dark-photon-additive-rate-only-complete-v1',complete=True,
+            rate_only=True,point=point,events=0,full_gen_events=len(full_identities),
+            parent_gen_populations=[population['parent'] for population in populations],
+            parent_gen_ledger_count=len(populations),sources=[population['source'] for population in populations],
+            full_gen_rate=rate,histogram_sumw=0.,standard_cutflow_sumw=0.,
+            weight_branch=WEIGHT_BRANCH,final_output_base=prefix,
+            plan_sha256=plan_digest,seal_sha256=seal_digest)
+        write(Path(results_directory)/'completed_points'/(point+'.json'),report)
+        return report
     if plan.get('histogram_only') is True:
         return execute_histogram_only(plan, row, populations, rate, identities,
             plan_digest, seal_digest, scratch, results_directory)
@@ -637,12 +685,16 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     for group in groups:
         directory = work / ('g' + str(group['group']))
         directory.mkdir()
-        paths, ids, weights = [], [], []
+        paths, ids, weights, probabilities, selected_flags = [], [], [], [], []
         for index, item in enumerate(group['inputs']):
             path = directory / ('source_' + str(index) + '.root')
             stage(item, path)
             source_ids, source_weights = event_rows(path)
             validate_event_rows(source_ids, source_weights, item['event_ids'])
+            if item.get('material_selected'):
+                validate_nano(path, source_ids, item['sampling_probabilities'])
+            probabilities.extend(item.get('sampling_probabilities', [1.] * len(source_ids)))
+            selected_flags.append(item.get('material_selected', False))
             ids.extend(source_ids)
             weights.extend(source_weights)
             paths.append(path)
@@ -651,9 +703,14 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
             subprocess.run(['hadd', str(output), *map(str, paths)], check=True,
                            stdout=log, stderr=subprocess.STDOUT, timeout=1800)
         validate_event_rows(*event_rows(output), ids)
+        if any(selected_flags) and not all(selected_flags):
+            raise ValueError('Do not mix native-only and material-selected Nano schemas in one group')
+        if any(selected_flags):
+            validate_nano(output, ids, probabilities)
         item = put(output, prefix + '/nanoAOD_merged_unscored/ntuple_' + str(group['group']) + '.root')
         grouped.append(dict(group=group['group'], events=len(ids), event_ids=ids,
-            native_sumw=float(len(ids)), native_sumw2=float(len(ids)), grouped=item, local_path=str(output)))
+            native_sumw=float(len(ids)), native_sumw2=float(len(ids)), grouped=item, local_path=str(output),
+            sampling_probabilities=probabilities, material_selected=any(selected_flags)))
         combined_ids.extend(ids)
         for path in paths:
             path.unlink()
@@ -667,7 +724,8 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
         metadata = prefix + '/metadata/bdt_grouped/group_' + str(index)
         score_row = dict(index=index, source_transport_path=group['local_path'],
             source_logical_path=group['grouped']['path'], source_sha256=group['grouped']['sha256'],
-            source_bytes=group['grouped']['bytes'], expected_events=group['events'], weight_branch='genWeight',
+            source_bytes=group['grouped']['bytes'], expected_events=group['events'],
+            weight_branch=WEIGHT_BRANCH if group['material_selected'] else 'genWeight',
             output_nano=prefix + '/nanoAOD_merged/ntuple_' + str(index) + '.root',
             output_histograms=prefix + '/histograms/ntuple_' + str(index) + '.root',
             complete_marker=metadata + '/complete.json', score_receipt=metadata + '/score.json',
@@ -679,14 +737,20 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
         total_pairs += result['marker']['pairs']
         histogram = work / ('histogram_' + str(index) + '.root')
         stage(result['marker']['published']['histograms'], histogram)
-        scorer.check_standard_histograms(histogram, group['events'], group['native_sumw'])
+        if group['material_selected']:
+            validate_nano(work / ('score_' + str(index)) / 'scored.root',
+                          group['event_ids'], group['sampling_probabilities'])
+        scorer.check_standard_histograms(histogram, group['events'],
+            scorer.legacy_weight_sum(work / ('score_' + str(index)) / 'scored.root',
+                                     WEIGHT_BRANCH if group['material_selected'] else 'genWeight')
+            if group['material_selected'] else group['native_sumw'])
         histograms.append(histogram)
     merged = work / 'histograms.root'
     with (work / 'histogram_merge.log').open('x') as log:
         subprocess.run(['hadd', str(merged), *map(str, histograms)], check=True,
                        stdout=log, stderr=subprocess.STDOUT, timeout=900)
     histogram_audit = validate_histogram_merge(histograms, merged)
-    scorer.check_standard_histograms(merged, len(identities), float(len(identities)))
+    scorer.check_standard_histograms(merged, len(identities), merged_cutflow_sumw(histograms))
     final_histogram = put(merged, prefix + '/histograms_merged/ntuple_0.root')
     write(work / 'cross_sections.json', rate)
     with (work / 'cross_sections.txt').open('x') as target:
@@ -708,6 +772,10 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
         canonical_sm_histogram_axes_verified=1081,
         canonical_sm_histogram_authority_sha256=sha(deployment / 'frozen/scoring/sm_axis_authority.root'),
         plan_sha256=plan_digest, seal_sha256=seal_digest, created_utc=datetime.now(timezone.utc).isoformat())
+    report.update(full_gen_events=len(full_identities),
+        histogram_sumw=math.fsum(1./p for group in grouped for p in group['sampling_probabilities']),
+        standard_cutflow_sumw=merged_cutflow_sumw(histograms),
+        weight_branch=WEIGHT_BRANCH if any(group['material_selected'] for group in grouped) else 'genWeight')
     write(work / 'union.json', union)
     put(work / 'union.json', prefix + '/metadata/grouping/union.json')
     write(work / 'point_receipt.json', report)
