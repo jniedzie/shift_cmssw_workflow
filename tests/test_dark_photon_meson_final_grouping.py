@@ -20,6 +20,29 @@ class FinalPointGrouping(unittest.TestCase):
         return dict(directory=str(root),batches=batches,regroup_complete_points=True,
             aggregate_group_events=4000,conditions=dict(sha256='a'*64))
 
+    def test_reviewed_regrouping_recovery_keeps_exact_source_and_rejects_changed_exposure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config=self.fixture(root);old=root/'regrouping_canary/v0001';new=old.with_name('v0002')
+            old.mkdir(parents=True);new.mkdir()
+            plan=dict(histogram_only=False,group_events=4000,single_source_regrouping_canary=True,
+                points=[dict(sources=[dict(plan_sha256='exact-original-full-GEN')])])
+            (old/'plan.json').write_text(json.dumps(plan));(old/'seal.json').write_text('{}')
+            (old/'aggregate.sub').write_text('frozen-worker')
+            receipt=dict(cluster=123,task=str(old),submit_sha256=production.durable.sha(old/'aggregate.sub'))
+            (old/'submission.json').write_text(json.dumps(receipt))
+            native=root/'native.json';native.write_text(json.dumps([dict(ClusterId=123,Iwd=str(old),ExitCode=1,JobStatus=5)]))
+            proof=dict(schema='shift-reviewed-regrouping-canary-recovery-v1',original_directory=str(old),replacement_directory=str(new),
+                original_plan_sha256=production.durable.sha(old/'plan.json'),original_seal_sha256=production.durable.sha(old/'seal.json'),
+                native_failure=dict(path=str(native),sha256=production.durable.sha(native)),GEN_or_detector_rerun_allowed=False,source_exposure_unchanged=True)
+            authority=root/'review.json';authority.write_text(json.dumps(proof))
+            config['reviewed_regrouping_canary_recovery']=dict(path=str(authority),sha256=production.durable.sha(authority))
+            (new/'plan.json').write_text(json.dumps(plan))
+            self.assertEqual(production.regrouping_canary_directory(config),new)
+            plan['points'][0]['sources'][0]['plan_sha256']='changed-source'
+            (new/'plan.json').write_text(json.dumps(plan))
+            with self.assertRaisesRegex(ValueError,'exact source cohorts'):
+                production.regrouping_canary_directory(config)
+
     def report(self,root,batch,events):
         path=root/'batches'/batch/'production/completed_points/m0p3_prompt.json'
         path.parent.mkdir(parents=True);path.write_text(json.dumps(dict(complete=True,events=events)))

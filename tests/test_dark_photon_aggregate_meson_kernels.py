@@ -38,8 +38,12 @@ class AggregateMesonKernels(unittest.TestCase):
         names=['aggregate_dark_photon_samples.py','dark_photon_production_support.py',
             'export_dark_photon_cross_sections.py','pythia_generation_ledger.py','dark_photon_meson.py',
             'dark_photon_meson_source.py','dark_photon_vector_meson.py','dark_photon_dipion_meson.py']
-        if entries>=17:names.append('dark_photon_rho_radiative.py')
-        if entries==19:names.append('dark_photon_charged_rho_radiative.py')
+        # Current source contains lazy imports for its complete model. All
+        # referenced helpers travel with it, including for a smaller card.
+        names += ['dark_photon_rho_radiative.py','dark_photon_charged_rho_radiative.py',
+            'dark_photon_kaon.py','dark_photon_kaon_leptonic.py','dark_photon_weak_meson.py',
+            'dark_photon_model.py','dark_photon_neutral_vector_dipion.py','dark_photon_double_radiative.py',
+            'dark_photon_material_selection.py','shift_production_selection.py','shift_material_preselection.py']
         for name in names:
             if name!=missing:shutil.copy2(Path(controller.__file__).with_name(name),tools/name)
         card=root/'model.json';controller.new(card,self.model(entries))
@@ -81,12 +85,28 @@ print(json.dumps(dict(entries=len(card['parents']),bound=bound)))
                 completed=subprocess.run([sys.executable,'-I','-B','-c',probe,str(target),str(card)],
                     cwd=target,capture_output=True,text=True,check=True,timeout=120)
                 self.assertEqual(json.loads(completed.stdout)['entries'],entries)
-                self.assertEqual((target/'dark_photon_rho_radiative.py').is_file(),entries>=17)
-                self.assertEqual((target/'dark_photon_charged_rho_radiative.py').is_file(),entries==19)
+                self.assertTrue((target/'dark_photon_rho_radiative.py').is_file())
+                self.assertTrue((target/'dark_photon_charged_rho_radiative.py').is_file())
                 plan=controller.read(target/'plan.json')
                 for name in ('dark_photon_rho_radiative.py','dark_photon_charged_rho_radiative.py'):
                     if (target/name).is_file():
                         self.assertEqual(plan['dependencies'][str(target/name)],controller.sha(target/name))
+
+    def test_nested_lazy_imports_are_frozen_recursively_and_missing_dependency_fails(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for name in ('aggregate_dark_photon_samples','dark_photon_production_support',
+                         'export_dark_photon_cross_sections','pythia_generation_ledger'):
+                (root/(name+'.py')).write_text('')
+            (root/'aggregate_dark_photon_samples.py').write_text('def rate():\n from dark_photon_kaon import kernel\n')
+            (root/'dark_photon_kaon.py').write_text('def kernel():\n import dark_photon_weak_meson\n')
+            dependency=root/'dark_photon_weak_meson.py';dependency.write_text('')
+            names=controller.aggregate_helper_names(dict(tools=str(root)))
+            self.assertIn('dark_photon_kaon.py',names)
+            self.assertIn('dark_photon_weak_meson.py',names)
+            dependency.unlink()
+            with self.assertRaisesRegex(FileNotFoundError,'dark_photon_weak_meson'):
+                controller.aggregate_helper_names(dict(tools=str(root)))
 
     def test_missing_required_kernel_stops_before_creating_aggregate(self):
         for entries,missing in ((17,'dark_photon_rho_radiative.py'),

@@ -818,10 +818,9 @@ def aggregate_helper_names(config):
         source = Path(config['tools'])/name
         if not source.is_file():
             raise FileNotFoundError('Required aggregate helper is missing: '+str(source))
-        # Modern meson_source imports vector_meson even for an eta-only card;
-        # the frozen legacy source does not. Follow actual top-level imports,
-        # while the explicit model above supplies lazily imported decay kernels.
-        for statement in ast.parse(source.read_text()).body:
+        # Freeze imports inside functions too: rate export resolves kaon and
+        # other model kernels lazily. A top-level-only scan misses that closure.
+        for statement in ast.walk(ast.parse(source.read_text())):
             modules = ([row.name for row in statement.names] if isinstance(statement, ast.Import)
                        else [statement.module] if isinstance(statement, ast.ImportFrom) else [])
             for module in modules:

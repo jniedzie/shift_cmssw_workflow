@@ -883,7 +883,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_coverage_recovery', 'operational_handoffs', 'regroup_complete_points',
                                    'merge_source_histograms', 'aggregate_group_events',
                                    'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
-                                   'historical_anchor_calibration', 'operational_stage_timeouts_seconds'}:
+                                   'historical_anchor_calibration', 'operational_stage_timeouts_seconds',
+                                   'reviewed_regrouping_canary_recovery'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1990,6 +1991,36 @@ def close_empty_admission(config,state,batch,entry,queue_snapshot):
     return True
 
 
+def regrouping_canary_directory(config):
+    original=Path(config['directory'])/'regrouping_canary/v0001'
+    authority=config.get('reviewed_regrouping_canary_recovery')
+    if authority is None:
+        return original
+    proof=read_pinned(authority)
+    replacement=Path(proof.get('replacement_directory',''))
+    if (proof.get('schema')!='shift-reviewed-regrouping-canary-recovery-v1'
+            or proof.get('original_directory')!=str(original)
+            or replacement!=original.with_name('v0002')
+            or proof.get('GEN_or_detector_rerun_allowed') is not False
+            or proof.get('source_exposure_unchanged') is not True
+            or durable.sha(original/'plan.json')!=proof.get('original_plan_sha256')
+            or durable.sha(original/'seal.json')!=proof.get('original_seal_sha256')):
+        raise ValueError('Regrouping recovery changed its source or original failed authority')
+    native=read_pinned(proof['native_failure'])
+    receipt=existing_receipt(original,original/'aggregate.sub')
+    if (len(native)!=1 or native[0].get('ClusterId')!=receipt['cluster']
+            or native[0].get('Iwd')!=str(original) or native[0].get('ExitCode')!=1
+            or native[0].get('JobStatus')!=5):
+        raise ValueError('Regrouping recovery has no exact reviewed failed native attempt')
+    if (replacement/'plan.json').is_file():
+        old=read(original/'plan.json');new=read(replacement/'plan.json')
+        if (new['points'][0]['sources']!=old['points'][0]['sources']
+                or new.get('histogram_only') is not False or new.get('group_events')!=4000
+                or new.get('single_source_regrouping_canary') is not True):
+            raise ValueError('Regrouping retry changed its exact source cohorts or grouping contract')
+    return replacement
+
+
 def qualify_regrouping_canary(config,state):
     """Exercise real Nano regrouping/scoring/publication before any bulk GEN."""
     from watch_dark_photon_production import EosRpc, completed_histogram
@@ -2001,7 +2032,7 @@ def qualify_regrouping_canary(config,state):
     batch=next(row for row in config['batches'] if row.get('operational_canary') and not row.get('gen_qualification_only'))
     production=batch_directory(config,batch)/'production'
     source=durable.authority(production,batch['point'],config['conditions']['sha256'])
-    directory=Path(config['directory'])/'regrouping_canary/v0001'
+    directory=regrouping_canary_directory(config)
     if not directory.exists():
         settings=dict(config,campaign_prefix=config['campaign_prefix']+'-regroup-canary',
             aggregation_guard=str(production),merge_source_histograms=False,aggregate_group_events=4000,
