@@ -155,6 +155,13 @@ the change.
   GEN-only qualification receipts are not published signal points. Missing
   signal forecasts must stay unknown; status reporting must not invent zero
   predictions or require fields absent from a valid frozen worklist.
+- Exercise shared-storage admission with real peer state after source-only
+  qualifications exist. A source qualification is not a published histogram
+  cohort and must not earn completed-output storage credit.
+- Check the effective stage wall-time limits for a one-event job, including
+  event-count scaling. They must allow the advertised first-event/stall budget
+  and setup overhead; a lower hidden stage limit can kill a valid slow event.
+  These are CPU-protection limits, not detector or trigger timing settings.
 - Test the frozen controller's real preparation and submission subprocesses
   under its deployed environment. LCG exports `PYTHONHOME` and library paths:
   invoking `/usr/bin/python3` with those settings can fail before the script
