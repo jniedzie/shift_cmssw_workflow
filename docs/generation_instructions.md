@@ -1,6 +1,33 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Automatic SM weekend production (2026-10-23)
+
+The user authorized QCD, DY and J/psi in all 19 bins under
+`20261023_sm_material_csc_v1`. The detached deployment is recorded in
+`../../validation/sm_smart_production_20261023_v1/`. Its controller carries fresh
+uncensored GEN through inside-jaw placement, full natural muon-parent decay
+completion, the shared material selection, simulation, released reconstruction
+and Nano publication. Admission advances independently by family after its
+checks pass. Unknown paths remain at unit sampling probability. No muon-pT
+cut or material-survival weight is introduced.
+
+`run_shift_smart_sm_source.py` preserves every full source denominator,
+including zero-admission chunks. QCD and J/psi use their separately qualified
+proposal libraries; the QCD HF diagnostic library must never be used for J/psi.
+Install new plugins with a fresh modification time before `edmPluginRefresh`:
+preserving an older timestamp can leave an apparently successful refresh with
+the new plugin missing. Freeze the complete helper/plugin inventory together.
+
+`run_shift_smart_sm_controller.py` preserves uncertain submissions for review,
+pauses admission during scheduler outages, checks authenticated storage quota,
+and leaves failed bins isolated. It publishes source inventories periodically,
+with each original exposure counted once. Nano files become available as each
+worker finishes. Grouped ntuple merging, histogramming and final plot publication
+are separate stages; this controller does not claim to have completed them.
+Forced-decay and absolute-rate qualifications remain documented separately in
+`SHIFT_ANALYSIS.md`; a passing worker does not close those physics questions.
+
 ## Reconstruction default for new production (2026-10-23)
 
 The standard native point fitter now removes exact copies of CSC measurements
