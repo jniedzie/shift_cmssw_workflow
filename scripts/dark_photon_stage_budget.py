@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# Code style: AI-code. AI-generated operational launcher for existing stage-budget arguments.
+"""Run unchanged frozen DP workers with explicitly approved absolute wall budgets.
+
+Only the common runner's existing absolute-stage-timeout arguments are added.
+GEN, selected identities, probabilities, seeds, templates and transport stay
+owned by the original sealed worker. A retry policy can restrict exact slices.
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import runpy
+import subprocess
+import sys
+
+
+SCHEMA='shift-dp-operational-stage-budget-v1'
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def load_policy(path):
+    path=Path(path).resolve();policy=json.loads(path.read_text())
+    budgets=policy.get('stage_timeouts_seconds')
+    directory=Path(policy.get('production_directory',''))
+    if (policy.get('schema')!=SCHEMA or not directory.is_absolute()
+            or not isinstance(budgets,list) or len(budgets)!=4
+            or any(type(value) is not int or not 7200<=value<=43200 for value in budgets)
+            or policy.get('absolute_stage_timeouts') is not True
+            or sha(directory/'plan.json')!=policy.get('plan_sha256')):
+        raise ValueError('Operational stage budget differs from its explicit frozen authority')
+    for filename,key in [('chunk_worker.py','worker_sha256'),
+            ('frozen/sources/run_dark_photon_detector.py','detector_sha256'),
+            ('frozen/sources/run_shift_gen_to_nano.py','common_runner_sha256')]:
+        if sha(directory/filename)!=policy.get(key):
+            raise ValueError('Operational stage launcher changed an original worker source: '+filename)
+    return policy
+
+
+def common_command(command,policy):
+    """Return an exact argv extension; leave all other subprocesses untouched."""
+    if not isinstance(command,(list,tuple)) or len(command)<2 or Path(str(command[1])).name!='run_shift_gen_to_nano.py':
+        return command
+    if sha(command[1])!=policy['common_runner_sha256']:
+        raise ValueError('Staged common runner differs from its unchanged qualified source')
+    if '--absolute-stage-timeouts' in command or '--stage-timeouts' in command:
+        raise ValueError('Refuse to replace another explicit stage-budget policy')
+    return [*command,'--absolute-stage-timeouts','--stage-timeouts',
+            ','.join(map(str,policy['stage_timeouts_seconds']))]
+
+
+def worker_command(command,policy,policy_path):
+    expected=Path(policy['production_directory'])/'frozen/sources/run_dark_photon_detector.py'
+    if not isinstance(command,(list,tuple)) or len(command)<2 or str(command[1])!=str(expected):
+        return command
+    if sha(expected)!=policy['detector_sha256']:
+        raise ValueError('Original detector entry changed')
+    return [command[0],str(Path(__file__).resolve()),'--policy',str(policy_path),'--mode','detector','--',*command[1:]]
+
+
+def execute(mode,policy_path,arguments):
+    policy_path=Path(policy_path).resolve();policy=load_policy(policy_path)
+    directory=Path(policy['production_directory'])
+    original_run=subprocess.run
+    if mode=='worker':
+        if len(arguments)!=3:
+            raise ValueError('Worker needs exact point, chunk and original production seal')
+        point,index,seal=arguments;index=int(index)
+        if sha(directory/'seal.json')!=seal:
+            raise ValueError('Original production seal changed')
+        allowed=policy.get('allowed_slices')
+        if allowed!='all_planned' and dict(point=point,chunk=index) not in allowed:
+            raise ValueError('Slice is outside this bounded reviewed retry')
+        sys.path.insert(0,str(directory))
+        spec=importlib.util.spec_from_file_location('_dp_original_budgeted_worker',directory/'chunk_worker.py')
+        worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+        subprocess.run=lambda command,*args,**kwargs: original_run(worker_command(command,policy,policy_path),*args,**kwargs)
+        try:
+            return worker.run(point,index,seal)
+        finally:
+            subprocess.run=original_run
+    if not arguments or Path(arguments[0])!=directory/'frozen/sources/run_dark_photon_detector.py':
+        raise ValueError('Detector dispatch must use its exact original script')
+    sys.path.insert(0,str(directory/'frozen/sources'))
+    subprocess.run=lambda command,*args,**kwargs: original_run(common_command(command,policy),*args,**kwargs)
+    previous_argv=sys.argv
+    sys.argv=list(arguments)
+    try:
+        runpy.run_path(arguments[0],run_name='__main__')
+    finally:
+        sys.argv=previous_argv
+        subprocess.run=original_run
+
+
+def main():
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--policy',type=Path,required=True)
+    parser.add_argument('--mode',choices=('worker','detector'),required=True)
+    parser.add_argument('arguments',nargs=argparse.REMAINDER)
+    args=parser.parse_args();arguments=args.arguments[1:] if args.arguments[:1]==['--'] else args.arguments
+    result=execute(args.mode,args.policy,arguments)
+    if result is not None:
+        print(json.dumps({key:result[key] for key in ('complete','point','chunk','events','nano_sha256')}))
+
+
+if __name__=='__main__':main()

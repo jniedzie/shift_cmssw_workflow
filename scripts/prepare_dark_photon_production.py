@@ -395,6 +395,41 @@ def detector_timeout_settings(args):
     return limits
 
 
+def freeze_absolute_stage_budget(output, stage_timeouts):
+    """Seal an operational argv extension without changing qualified sources."""
+    if stage_timeouts is None:
+        return
+    if (not isinstance(stage_timeouts, list) or len(stage_timeouts) != 4
+            or any(type(value) is not int or not 7200 <= value <= 43200 for value in stage_timeouts)):
+        raise ValueError('Absolute SIM/DIGI/RECO/Nano budgets must each be7200..43200seconds')
+    output = Path(output)
+    helper = output/'dark_photon_stage_budget.py'
+    shutil.copy2(Path(__file__).with_name(helper.name), helper)
+    policy = output/'stage_budget_policy.json'
+    write(policy, dict(schema='shift-dp-operational-stage-budget-v1',
+        production_directory=str(output.resolve()), plan_sha256=sha256(output/'plan.json'),
+        worker_sha256=sha256(output/'chunk_worker.py'),
+        detector_sha256=sha256(output/'frozen/sources/run_dark_photon_detector.py'),
+        common_runner_sha256=sha256(output/'frozen/sources/run_shift_gen_to_nano.py'),
+        stage_timeouts_seconds=stage_timeouts, absolute_stage_timeouts=True,
+        allowed_slices='all_planned'))
+    wrapper = output/'detector_worker.sh'
+    text = wrapper.read_text()
+    original = ' --entry '+str(output/'chunk_worker.py')+' -- "$@"'
+    if text.count(original) != 1:
+        raise ValueError('Absolute stage budget requires the qualified private-runtime entry')
+    replacement = (' --entry '+str(helper)+' -- --policy '+str(policy)+
+                   ' --mode worker -- "$@"')
+    # These files also belong to the production seal; preflight protects the
+    # dispatch before the original worker verifies the complete common group.
+    check = ("/usr/bin/env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/python3 -c "+__import__('shlex').quote(
+        "import hashlib;from pathlib import Path;assert all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==h for p,h in "+
+        repr([(str(helper),sha256(helper)),(str(policy),sha256(policy))])+")")+"\n")
+    marker = '/usr/bin/env -u PYTHONHOME'
+    position = text.index(marker)
+    wrapper.write_text(text[:position]+check+text[position:].replace(original,replacement))
+
+
 def prepare(args):
     timeouts = detector_timeout_settings(args)
     template, output = args.template.resolve(), args.output.resolve()
@@ -551,6 +586,7 @@ def prepare(args):
         template_directory=str(template), template_seal_sha256=sha256(template / 'seal.json'),
         new_detector_gates_complete=False, dag_gates=args.canary_points,
         final_recording_acceptance_validated=False))
+    freeze_absolute_stage_budget(output, getattr(args, 'absolute_stage_timeouts', None))
     dag = dag_text(plan, output, args.canary_points, args.detector_workers, args.finalizers)
     (output / 'pipeline.dag.template').write_text(dag)
     common = [path for path in output.iterdir() if path.is_file()]
@@ -596,6 +632,8 @@ def main():
     parser.add_argument('--first-event-stall-timeout', type=int, default=3600)
     parser.add_argument('--detector-timeout', type=int, default=21600,
                         help='Total detector worker deadline in seconds, at most72000; physics is unchanged')
+    parser.add_argument('--absolute-stage-timeouts', type=int, nargs=4,
+                        help='Explicit absolute SIM/DIGI/RECO/Nano wall budgets; physics is unchanged')
     parser.add_argument('--publication-profile', choices=tuple(PROFILES), default='all-tiers-v1')
     parser.add_argument('--publication-canary', type=Path,
                         help='Pinned measured full-chain Nano/metadata canary required for nano-metadata-v1')

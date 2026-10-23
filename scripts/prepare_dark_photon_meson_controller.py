@@ -13,7 +13,7 @@ from prepare_dark_photon_meson_production import source_execution_limits, detect
 
 
 REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
-                     'prepare_dark_photon_production.py',
+                     'prepare_dark_photon_production.py', 'dark_photon_stage_budget.py',
                      'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py')
 
 
@@ -43,7 +43,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=(),
             close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
             operational_handoffs=False, reviewed_handoff_failures=(),
-            regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None):
+            regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None, absolute_detector_stage_budgets=False):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -68,6 +68,8 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if absolute_detector_stage_budgets:
+        config['operational_stage_timeouts_seconds']=[43200,7200,14400,14400]
     if regroup_complete_points:
         if aggregation_storage_registration is None:
             raise ValueError('Final regrouping requires its registered shared-storage reservation')
@@ -153,13 +155,23 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         shutil.copy2(maintained, tools/name)
         seal_files[str(tools/name)] = production.durable.sha(tools/name)
     if operational_handoffs:
-        config['operational_handoffs']=dict(directory=str(output/'handoffs'),reviewed_failures={})
+        previous_handoffs=copy.deepcopy(config.get('operational_handoffs',{}))
+        config['operational_handoffs']=dict(directory=str(output/'handoffs'),
+            reviewed_failures=previous_handoffs.get('reviewed_failures',{}),preserved_directories={})
         for batch,manifest in reviewed_handoff_failures:
             path=Path(manifest).resolve()
             config['operational_handoffs']['reviewed_failures'][batch]=dict(path=str(path),sha256=production.durable.sha(path))
             seal_files[str(path)]=production.durable.sha(path)
         for batch in config['batches']:
             if batch.get('gen_qualification_only'):
+                continue
+            old=previous_handoffs.get('preserved_directories',{}).get(batch['batch'])
+            if old is None and previous_handoffs.get('directory'):
+                old=str(Path(previous_handoffs['directory'])/batch['batch'])
+            if old is not None and (Path(old)/'submission.json').is_file():
+                config['operational_handoffs']['preserved_directories'][batch['batch']]=old
+                old_seal=Path(old).parents[1]/'seal.json'
+                seal_files[str(old_seal)]=production.durable.sha(old_seal)
                 continue
             paths=production.prepare_handoff_worker(config,batch,output,original_seal)
             for path in paths:
@@ -229,6 +241,8 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         for batch in config['batches']:
             if batch.get('gen_qualification_only'):
                 continue
+            if batch['batch'] in config['operational_handoffs']['preserved_directories']:
+                continue
             handoff=output/'handoffs'/batch['batch']
             (handoff/'worker.sub').write_text((handoff/'worker.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST',digest))
     production.operational_configuration(original, output/'config.json', digest)
@@ -267,6 +281,7 @@ def main():
     parser.add_argument('--regroup-complete-points',action='store_true')
     parser.add_argument('--aggregation-storage-registration',type=Path)
     parser.add_argument('--historical-anchor-calibration',type=Path)
+    parser.add_argument('--absolute-detector-stage-budgets',action='store_true')
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -276,7 +291,7 @@ def main():
                              args.reviewed_coverage_recovery, args.closed_source_forecast,
                              args.operational_handoffs,args.reviewed_handoff_failure,
                              args.regroup_complete_points,args.aggregation_storage_registration,
-                             args.historical_anchor_calibration), sort_keys=True))
+                             args.historical_anchor_calibration,args.absolute_detector_stage_budgets), sort_keys=True))
 
 
 if __name__ == '__main__':

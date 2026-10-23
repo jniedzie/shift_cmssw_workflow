@@ -883,10 +883,13 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_coverage_recovery', 'operational_handoffs', 'regroup_complete_points',
                                    'merge_source_histograms', 'aggregate_group_events',
                                    'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
-                                   'historical_anchor_calibration'}:
+                                   'historical_anchor_calibration', 'operational_stage_timeouts_seconds'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
+    stage_budgets = config.get('operational_stage_timeouts_seconds')
+    if stage_budgets is not None and stage_budgets != [43200,7200,14400,14400]:
+        raise ValueError('Unreviewed operational detector stage budgets')
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
     if config.get('prior_meson_controller_directory') != original.get('prior_meson_controller_directory'):
@@ -1369,7 +1372,9 @@ def handoff(config, batch):
             '--failure-base', config['failure_base'], '--detector-workers',
             str(config.get('detector_workers_per_point', 100)), '--finalizers', '2',
             '--publication-profile', 'nano-metadata-v1', '--publication-canary', config['publication_canary'],
-            '--event-stall-timeout','7200','--first-event-stall-timeout','7200','--detector-timeout','43200'],
+            '--event-stall-timeout','7200','--first-event-stall-timeout','7200','--detector-timeout','43200',
+            *(['--absolute-stage-timeouts', *map(str,config['operational_stage_timeouts_seconds'])]
+              if config.get('operational_stage_timeouts_seconds') is not None else [])],
             directory/'prepare_production.log', timeout=1800)
     receipt = (existing_receipt(production, production/'pipeline.dag.condor.sub')
                if (production/'submission.json').is_file() else durable.submit_dag(
@@ -1440,7 +1445,9 @@ def handoff_directory(config, batch, queue_snapshot=None):
     operational = config.get('operational_handoffs')
     if operational is None:
         return original
-    directory = Path(operational['directory'])/batch['batch']
+    preserved=operational.get('preserved_directories',{}).get(batch['batch'])
+    directory = (Path(preserved) if preserved is not None else
+                 Path(operational['directory'])/batch['batch'])
     if not directory.is_absolute() or not (directory/'worker.sub').is_file():
         raise ValueError('Operational handoff is not a frozen persistent worker')
     seal_path=directory.parents[1]/'seal.json'
@@ -2360,7 +2367,8 @@ def detector_admission_pending(config, batch, entry):
     directories=[root/'handoff',root/'production']
     operational=config.get('operational_handoffs')
     if operational is not None:
-        directories.append(Path(operational['directory'])/batch['batch'])
+        directories.append(Path(operational.get('preserved_directories',{}).get(batch['batch'],
+            str(Path(operational['directory'])/batch['batch']))))
     return any((directory/name).is_file() for directory in directories
                for name in ('submission.json', 'submission_intent.json'))
 
