@@ -408,6 +408,18 @@ class Admission(unittest.TestCase):
             submit.assert_not_called()
             self.assertTrue(result['canary_published'])
 
+    def test_closed_source_admission_preserves_ready_work_without_starting_future_gen(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config=dict(directory=temporary,batches=[dict(batch='future',operational_canary=False)],
+                        simultaneous_sources=7,source_admission_closed=True)
+            with patch.object(production.durable,'quota',return_value={}), \
+                 patch.object(production,'storage_gate',return_value=(True,{})), \
+                 patch.object(production.durable,'submission') as submit:
+                state=production.step(config,{})
+            submit.assert_not_called()
+            self.assertTrue(state['source_admission_closed'])
+            self.assertFalse(state['complete'])
+
     def test_one_verified_source_failure_does_not_block_an_independent_source(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary)

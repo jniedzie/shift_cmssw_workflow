@@ -729,8 +729,10 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'adaptive_terminal_completion', 'prior_meson_controller_replacement',
                                    'additional_reserved_meson_forecasts', 'meson_reservation_registration',
                                    'prior_meson_controller_directory', 'meson_peer_controller_directories',
-                                   'reviewed_prior_meson_retirement'}:
+                                   'reviewed_prior_meson_retirement', 'source_admission_closed'}:
         raise ValueError('Replacement controller added unreviewed production settings')
+    if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
+        raise ValueError('A source-admission closure may only stop future submissions')
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
     if config.get('prior_meson_controller_directory') != original.get('prior_meson_controller_directory'):
@@ -1967,9 +1969,13 @@ def step(config,state):
     canary_ready=all(entries[row['batch']].get('published') for row in canaries)
     state['canary_published']=canary_ready
     observation=durable.quota(config)
+    if config.get('source_admission_closed') is True:
+        state['source_admission_closed']=True
     for batch in config['batches']:
         entry=entries[batch['batch']]
         if entry.get('source_cluster'):
+            continue
+        if config.get('source_admission_closed') is True:
             continue
         if not batch['operational_canary'] and not canary_ready:
             continue
