@@ -186,7 +186,17 @@ def model_owned_channels(model):
 
 
 def model_recoil(owner):
-    if owner.get('decay_type') == 'charged-vector-dipion':
+    if owner.get('decay_type') == 'weak-kaon-leptonic':
+        parent = owner.get('pdg_id')
+        lepton, neutrino = owner.get('charged_lepton_pdg_id'), owner.get('neutrino_pdg_id')
+        sign = 1 if parent == 321 else -1
+        if (parent not in (-321, 321) or type(lepton) is not int or abs(lepton) not in (11, 13)
+                or lepton != -sign*abs(lepton) or neutrino != sign*(abs(lepton)+1)):
+            raise ValueError('Leptonic-kaon ownership requires charge-matched lepton and neutrino')
+        recoil = [lepton, neutrino]
+        if 'recoil_pdg_ids' in owner and sorted(owner['recoil_pdg_ids']) != sorted(recoil):
+            raise ValueError('Leptonic-kaon recoil disagrees with its physical daughters')
+    elif owner.get('decay_type') == 'charged-vector-dipion':
         recoil = owner.get('recoil_pdg_ids')
     elif owner.get('decay_type') in ('pseudoscalar-dipion', 'vector-dipion'):
         recoil = owner.get('recoil_pdg_ids', [211, -211])
@@ -342,6 +352,23 @@ def audit_coverage(model, masses, inventory):
         omission_bound='None. Real-photon branching fractions and source multiplicities do not bound a fixed-mass timelike transition.',
         completion_requirement='Each relevant channel needs reviewed rates, spectra, common physical epsilon/lifetime, overlap ownership and validation, or a quantitative omitted-yield bound. No bound is inferred from this inventory.',
         nonmeson_production_scope='Proton radiation, DY matching and baryon transitions require separate owners; inclusive meson closure would not establish inclusive dark-photon closure.')
+
+
+def bind_completion_scope(report, scope, digest):
+    """Retain both the generic inventory gaps and a reviewed detailed scope."""
+    gaps = scope.get('remaining_channels')
+    if (scope.get('physics_complete') is not False
+            or scope.get('included_channels') != report['included_channels']
+            or not isinstance(gaps, list) or not gaps
+            or any(not row.get('channel') or not row.get('reason') or
+                   row.get('status') not in ('missing_model', 'needs_validation', 'missing_source')
+                   for row in gaps)):
+        raise ValueError('Detailed completion scope differs from the audited model or omits its gaps')
+    result = dict(report)
+    result.update(inventory_remaining_channels=report['remaining_channels'],
+        remaining_channels=gaps, completion_scope_sha256=digest,
+        completion_scope_note='Detailed conditional-current gaps and generic inventory gaps are both retained; neither establishes complete physics.')
+    return result
 
 
 def valid_domain(domain, mass):
@@ -819,6 +846,7 @@ def main():
     parser.add_argument('--particle-data', required=True)
     parser.add_argument('--source-inventory')
     parser.add_argument('--model', required=True)
+    parser.add_argument('--completion-scope', help='Retain the pinned detailed scope alongside generic inventory gaps')
     parser.add_argument('--masses', nargs='+', type=float, required=True)
     parser.add_argument('--output', required=True)
     parser.add_argument('--source-collisions', type=int,
@@ -848,6 +876,9 @@ def main():
     else:
         source = json.loads(Path(args.source_inventory).read_text()) if args.source_inventory else defaults
     report = audit_coverage(model, args.masses, source)
+    if args.completion_scope:
+        report = bind_completion_scope(report, json.loads(Path(args.completion_scope).read_text()),
+                                       sha256(args.completion_scope))
     report.update(model_sha256=sha256(args.model), particle_data_sha256=sha256(args.particle_data),
                   source_inventory_sha256=sha256(args.source_inventory) if args.source_inventory else None,
                   code_sha256=sha256(__file__))

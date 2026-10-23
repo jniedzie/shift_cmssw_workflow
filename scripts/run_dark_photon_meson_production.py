@@ -610,9 +610,44 @@ def coverage_request(config):
     return request
 
 
+def reviewed_coverage_recovery(config):
+    """Adopt a separately executed audit repair; retain the failed original."""
+    authority = config.get('reviewed_coverage_recovery')
+    if authority is None:
+        return None
+    proof = read_pinned(authority)
+    root = Path(config['directory'])
+    original = read_pinned(proof['original_submission'])
+    failed = read_pinned(proof['original_status'])
+    native = read_pinned(proof['original_native_failure'])
+    receipt = read_pinned(proof['replacement_submission'])
+    directory = Path(receipt['task'])
+    if (proof.get('schema') != 'shift-reviewed-meson-coverage-recovery-v1'
+            or proof.get('scope') != 'coverage-only'
+            or proof.get('worklist_sha256') != durable.sha(root/'config.json')
+            or pinned_path(proof['original_submission']) != root/'coverage/submission.json'
+            or pinned_path(proof['original_status']) != root/'coverage/coverage_status.json'
+            or failed.get('complete') is not False or not failed.get('error')
+            or native.get('ClusterId') != original['cluster'] or native.get('ProcId') != 0
+            or native.get('Iwd') != original['task'] or native.get('JobStatus') not in (3, 4, 5)
+            or (not native.get('ExitBySignal') and native.get('ExitCode', 0) == 0)
+            or directory == root/'coverage' or not directory.is_relative_to(root.parent)
+            or pinned_path(proof['replacement_submission']) != directory/'submission.json'
+            or receipt.get('submit_sha256') != durable.sha(directory/'worker.sub')
+            or pinned_path(proof['replacement_auditor']).parent != directory
+            or pinned_path(proof['replacement_status']).parent != directory):
+        raise ValueError('Reviewed coverage repair differs from its failed audit or frozen science')
+    if durable.jobs(config, 'ClusterId == '+str(original['cluster'])+
+                    ' || DAGManJobId == '+str(original['cluster'])):
+        raise RuntimeError('Original failed coverage audit is still live')
+    return proof
+
+
 def coverage_result(config):
     directory = Path(config['directory']) / 'coverage'
-    status = read(directory / 'coverage_status.json')
+    recovery = reviewed_coverage_recovery(config)
+    status = (read_pinned(recovery['replacement_status']) if recovery else
+              read(directory / 'coverage_status.json'))
     report = read_pinned(status['report'])
     request = coverage_request(config)
     scope = completion_scope(config)
@@ -621,15 +656,19 @@ def coverage_result(config):
             or report.get('model_sha256') != durable.sha(config['model_card'])
             or report.get('particle_data_sha256') != request['particle_data']['sha256']
             or report.get('source_inventory_sha256') != request.get('source_inventory', {}).get('sha256')
-            or report.get('code_sha256') != durable.sha(Path(config['tools']) / 'audit_dark_photon_meson_coverage.py')
+            or report.get('code_sha256') != (recovery['replacement_auditor']['sha256'] if recovery else
+                durable.sha(Path(config['tools']) / 'audit_dark_photon_meson_coverage.py'))
             or report.get('mass_points_gev') != request['masses_gev']
             or report.get('included_channels') != scope['included_channels']
             or report.get('remaining_channels') != scope['remaining_channels']
+            or (recovery and (report.get('completion_scope_sha256') != scope['scope_sha256']
+                             or not isinstance(report.get('inventory_remaining_channels'), list)))
             or report.get('physics_complete') is not False):
         raise ValueError('Detached meson coverage result differs from its reviewed scope and inputs')
     return dict(complete=True, report=status['report'],
                 candidate_transitions=len(report['candidate_transitions']),
                 remaining_channels=report['remaining_channels'], physics_complete=False,
+                inventory_remaining_channels=report.get('inventory_remaining_channels', report['remaining_channels']),
                 source_sampling_verified=report.get('source_sampling_verified', False),
                 resolved_source_configuration=report.get('resolved_source_configuration', False))
 
@@ -729,7 +768,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'adaptive_terminal_completion', 'prior_meson_controller_replacement',
                                    'additional_reserved_meson_forecasts', 'meson_reservation_registration',
                                    'prior_meson_controller_directory', 'meson_peer_controller_directories',
-                                   'reviewed_prior_meson_retirement', 'source_admission_closed'}:
+                                   'reviewed_prior_meson_retirement', 'source_admission_closed',
+                                   'reviewed_coverage_recovery'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1875,7 +1915,9 @@ def step(config,state):
         for batch in config['batches']:
             entries.setdefault(batch['batch'], {})
         directory = Path(config['directory']) / 'coverage'
-        receipt = (existing_receipt(directory, directory / 'coverage.sub')
+        recovery = reviewed_coverage_recovery(config)
+        receipt = (read_pinned(recovery['replacement_submission']) if recovery else
+                  existing_receipt(directory, directory / 'coverage.sub')
                    if (directory / 'submission.json').is_file()
                    else durable.submission(config, directory, directory / 'coverage.sub'))
         state['coverage_audit'] = dict(cluster=receipt['cluster'], stage='running_or_queued')

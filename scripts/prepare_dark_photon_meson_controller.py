@@ -38,7 +38,7 @@ def scheduling_configuration(original, previous, sources, detector_points):
 def prepare(directory, original_seal, template, template_seal, output, sources=7, detector_points=35,
             additional_meson_forecasts=(), prior_meson_controller_directory=None,
             meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=(),
-            close_source_admission=False):
+            close_source_admission=False, reviewed_coverage_recovery=None):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -65,6 +65,10 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
     config = scheduling_configuration(original, previous, sources, detector_points)
     if close_source_admission:
         config['source_admission_closed']=True
+    if reviewed_coverage_recovery is not None:
+        path = Path(reviewed_coverage_recovery).resolve()
+        config['reviewed_coverage_recovery'] = dict(path=str(path), sha256=production.durable.sha(path))
+        production.reviewed_coverage_recovery(config)
     if reviewed_prior_meson_retirement is not None:
         path = Path(reviewed_prior_meson_retirement).resolve()
         config['reviewed_prior_meson_retirement'] = dict(path=str(path), sha256=production.durable.sha(path))
@@ -167,6 +171,8 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
                        if row.get('retirement_authority')]
     if config.get('reviewed_prior_meson_retirement'):
         retirement_pins.append(config['reviewed_prior_meson_retirement'])
+    if config.get('reviewed_coverage_recovery'):
+        retirement_pins.append(config['reviewed_coverage_recovery'])
     for pin in retirement_pins:
         seal_files[str(production.pinned_path(pin))] = pin['sha256']
     production.durable.new(output/'seal.json', dict(schema='shift-meson-controller-seal-v1', files=seal_files))
@@ -188,6 +194,8 @@ def main():
     parser.add_argument('--simultaneous-detector-points', type=int, default=35)
     parser.add_argument('--close-source-admission', action='store_true',
         help='Finish submitted work without starting additional old-model GEN batches')
+    parser.add_argument('--reviewed-coverage-recovery', type=Path,
+        help='Adopt a separately executed, reviewed read-only coverage audit repair')
     parser.add_argument('--additional-meson-forecast', action='append', nargs=3,
         metavar=('NAME', 'PEER_CONFIG', 'FORECAST'), default=[],
         help='Append a complete pinned peer reservation; repeat for independent meson productions')
@@ -204,7 +212,8 @@ def main():
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
                              args.additional_meson_forecast, args.prior_meson_controller_directory,
                              args.meson_peer_controller, args.reviewed_prior_meson_retirement,
-                             args.retired_meson_forecast, args.close_source_admission), sort_keys=True))
+                             args.retired_meson_forecast, args.close_source_admission,
+                             args.reviewed_coverage_recovery), sort_keys=True))
 
 
 if __name__ == '__main__':

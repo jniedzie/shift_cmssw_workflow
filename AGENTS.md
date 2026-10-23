@@ -136,6 +136,9 @@ the change.
   sample when no events pass; do not assume zero acceptance.
 - Read `docs/generation_instructions.md` and the relevant timing/overlay note
   before launching or modifying a campaign.
+- Run the coverage audit on the complete new model card before registering its
+  production. Synthetic ownership tests can miss new recoil types. Retain the
+  generic inventory gaps as well as any more detailed, conditional model scope.
 - Do not edit live campaign configuration or rebuild the shared CMSSW release
   while jobs using it are running. Documentation-only edits are safe.
 - Keep timing, occupancy, trigger-candidate, electronics-response, and offline

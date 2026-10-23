@@ -211,6 +211,57 @@ class UnifiedSource(unittest.TestCase):
             quota.assert_not_called()
             self.assertFalse(state['batches']['canary'])
 
+    def test_reviewed_audit_repair_requires_failed_original_and_fresh_queue_absence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, batch, _ = self.configuration(root)
+            config.update(directory=str(root), batches=[batch])
+            (root/'config.json').write_text(json.dumps(config))
+            (root/'coverage').mkdir()
+            original = self.authority(root/'coverage', 'submission.json',
+                dict(cluster=123, task=str(root/'coverage')))
+            failed = self.authority(root/'coverage', 'coverage_status.json',
+                dict(complete=False, error='preserved original audit failure'))
+            native = self.authority(root, 'native.json', dict(ClusterId=123, ProcId=0,
+                Iwd=str(root/'coverage'), JobStatus=5, ExitBySignal=False, ExitCode=1))
+            replacement = root/'audit_repair'
+            replacement.mkdir()
+            (replacement/'worker.sub').write_text('synthetic read-only audit')
+            receipt = self.authority(replacement, 'submission.json', dict(cluster=124,
+                task=str(replacement), submit_sha256=production.durable.sha(replacement/'worker.sub')))
+            auditor = self.authority(replacement, 'auditor.py', {})
+            status = self.authority(replacement, 'coverage_status.json', dict(complete=True))
+            proof = dict(schema='shift-reviewed-meson-coverage-recovery-v1', scope='coverage-only',
+                worklist_sha256=production.durable.sha(root/'config.json'), original_submission=original,
+                original_status=failed, original_native_failure=native, replacement_submission=receipt,
+                replacement_auditor=auditor, replacement_status=status)
+            config['reviewed_coverage_recovery'] = self.authority(root, 'review.json', proof)
+            with patch.object(production.durable, 'jobs', return_value=[]):
+                self.assertEqual(production.reviewed_coverage_recovery(config), proof)
+            with patch.object(production.durable, 'jobs', return_value=[dict(ClusterId=123)]):
+                with self.assertRaisesRegex(RuntimeError, 'still live'):
+                    production.reviewed_coverage_recovery(config)
+            proof['worklist_sha256'] = 'changed'
+            config['reviewed_coverage_recovery'] = self.authority(root, 'bad_review.json', proof)
+            with self.assertRaisesRegex(ValueError, 'frozen science'):
+                production.reviewed_coverage_recovery(config)
+
+    def test_repaired_coverage_still_requires_native_execution_before_MC(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, batch, _ = self.configuration(root)
+            config.update(directory=str(root), batches=[dict(batch, batch='canary')])
+            pin = self.authority(root, 'repair_submission.json', dict(cluster=124, task=str(root/'repair')))
+            with patch.object(production, 'reviewed_coverage_recovery',
+                    return_value=dict(replacement_submission=pin)), \
+                 patch.object(production, 'native_status', return_value='active'), \
+                 patch.object(production.durable, 'submission') as submit, \
+                 patch.object(production.durable, 'quota') as quota:
+                state = production.step(config, {})
+            self.assertEqual(state['coverage_audit']['cluster'], 124)
+            submit.assert_not_called()
+            quota.assert_not_called()
+
     def test_finished_GEN_still_waits_for_full_storage_before_detector_handoff(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

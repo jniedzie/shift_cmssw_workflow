@@ -10,7 +10,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from audit_dark_photon_meson_coverage import (audit_coverage, particle_data_inventory,
     transition_candidates, model_owned_channels, catalogue_ownership, CATALOGUE,
-    physical_mesons, final_parent_yield_bound, FeatureMoments, collision_mean_upper_bound)
+    physical_mesons, final_parent_yield_bound, FeatureMoments, collision_mean_upper_bound,
+    bind_completion_scope)
 from dark_photon_meson_source import resolved_parent_models
 
 
@@ -187,6 +188,34 @@ class CoverageTest(unittest.TestCase):
         duplicate = dict(parents=[dict(pdg_id=333, exclusive_channels=[channels[0], channels[0]])])
         with self.assertRaisesRegex(ValueError, 'ownership'):
             model_owned_channels(duplicate)
+
+    def test_leptonic_kaon_flavors_and_charges_have_distinct_ownership(self):
+        channels = [dict(pdg_id=sign*321, channel=f'K{sign}_{lepton}',
+            decay_type='weak-kaon-leptonic', charged_lepton_pdg_id=-sign*lepton,
+            neutrino_pdg_id=sign*(lepton+1)) for sign in (1, -1) for lepton in (11, 13)]
+        owners = model_owned_channels(dict(parents=channels))
+        self.assertEqual(set(owners), {(321, (-11, 12)), (321, (-13, 14)),
+                                      (-321, (-12, 11)), (-321, (-14, 13))})
+        with self.assertRaisesRegex(ValueError, 'charge-matched'):
+            model_owned_channels(dict(parents=[dict(channels[0], neutrino_pdg_id=-12)]))
+
+    def test_actual_leading_card_has_thirty_distinct_exclusive_channels(self):
+        card = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_meson_leading_model.json'
+        model = json.loads(card.read_text())
+        self.assertEqual(len(model_owned_channels(model)), 30)
+
+    def test_detailed_scope_keeps_every_generic_inventory_gap(self):
+        inventory = [dict(channel='generic missing family', status='missing_model', reason='unbounded')]
+        report = dict(included_channels=['one'], remaining_channels=inventory, physics_complete=False)
+        scope = dict(included_channels=['one'], physics_complete=False,
+                     remaining_channels=[dict(channel='detailed current', status='needs_validation', reason='conditional bound')])
+        result = bind_completion_scope(report, scope, 'pinned')
+        self.assertEqual(result['inventory_remaining_channels'], inventory)
+        self.assertEqual(result['remaining_channels'], scope['remaining_channels'])
+        self.assertEqual(report['remaining_channels'], inventory)
+        self.assertFalse(result['physics_complete'])
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            bind_completion_scope(report, dict(scope, included_channels=['different']), 'pinned')
 
     def test_charged_catalogue_channels_require_both_conjugates(self):
         for parent, recoil in ((213, 211), (313, 311), (323, 321)):
