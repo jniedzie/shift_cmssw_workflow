@@ -9,6 +9,7 @@ or combines independent cross-section estimates without their trial weights.
 """
 import argparse
 import atexit
+from bisect import bisect_right
 from datetime import datetime, timezone
 import gzip
 import hashlib
@@ -133,6 +134,43 @@ def native_precision_roundoff(parent,checked,coefficient):
             max(parent['p4'][0],1.))
 
 
+def cdf_payload_difference_bound(first, second):
+    """Bound the L1 difference of two normalized positive bilinear tables.
+
+    Use the union of both grids. On each resulting cell, the integral of the
+    absolute difference is bounded by its four absolute corner differences.
+    This remains meaningful at amplitude zeros, where relative node errors
+    can be large despite negligible probability. No node is discarded.
+    """
+    def grid(payload):
+        x,y,z=payload['axes'],payload['cosines'],payload['values']
+        if (not 2<=len(x)<=1024 or not 2<=len(y)<=1024
+                or x[0]!=0. or x[-1]!=1. or y[0]!=-1. or y[-1]!=1.
+                or any(not math.isfinite(v) for v in x+y)
+                or any(a>=b for a,b in zip(x,x[1:])) or any(a>=b for a,b in zip(y,y[1:]))
+                or len(z)!=len(x) or any(len(row)!=len(y) for row in z)
+                or any(not math.isfinite(v) or v<0 for row in z for v in row)):
+            raise ValueError('Invalid positive CDF grid')
+        integral=math.fsum((b-a)*(d-c)*math.fsum((z[i][j],z[i+1][j],z[i][j+1],z[i+1][j+1]))/4
+            for i,(a,b) in enumerate(zip(x,x[1:])) for j,(c,d) in enumerate(zip(y,y[1:])))
+        if integral<=0:raise ValueError('CDF grid has no positive probability')
+        return x,y,z,integral
+    a,b=grid(first),grid(second)
+    def value(g,x,y):
+        xs,ys,z,_=g;i=max(0,min(len(xs)-2,bisect_right(xs,x)-1));j=max(0,min(len(ys)-2,bisect_right(ys,y)-1))
+        u=(x-xs[i])/(xs[i+1]-xs[i]);v=(y-ys[j])/(ys[j+1]-ys[j])
+        return (1-u)*((1-v)*z[i][j]+v*z[i][j+1])+u*((1-v)*z[i+1][j]+v*z[i+1][j+1])
+    xs=sorted(set(a[0]+b[0]));ys=sorted(set(a[1]+b[1]));terms=[]
+    for x0,x1 in zip(xs,xs[1:]):
+        for y0,y1 in zip(ys,ys[1:]):
+            corners=[abs(value(a,x,y)-value(b,x,y)) for x,y in ((x0,y0),(x1,y0),(x0,y1),(x1,y1))]
+            terms.append((x1-x0)*(y1-y0)*math.fsum(corners)/4)
+    absolute=math.fsum(terms)+64*math.ulp(max(a[3],b[3]))
+    relative=2*absolute/min(a[3],b[3])
+    if relative>1.e-5:raise ValueError('Independent CDF probability crosscheck differs by more than 10 ppm')
+    return dict(normalized_l1_bound=relative,native_integral=a[3],portable_integral=b[3],all_cells_checked=True)
+
+
 def same_resolved_meson_model(stored, resolved, name='resolved exclusive meson model'):
     """Compare identities exactly and floating inputs at accounting precision.
 
@@ -140,6 +178,37 @@ def same_resolved_meson_model(stored, resolved, name='resolved exclusive meson m
     Their hypot results can differ by one ulp for identical physical inputs.
     """
     if isinstance(resolved, dict):
+        if resolved.get('schema') == 'shift-neutral-vector-dipion-positive-cdf-rate-v1':
+            if not isinstance(stored, dict):
+                raise ValueError(name + ' lacks the native CDF authority')
+            # Retain the exact native SHA, and verify the payload it identifies.
+            # Then compare every numerical node at the existing accounting
+            # precision. Hash equality alone is not portable across libm.
+            for authority in (stored, resolved):
+                payload=authority.get('cdf_table_payload')
+                if payload is not None:
+                    digest=hashlib.sha256(json.dumps(payload,sort_keys=True,
+                        separators=(',',':'),allow_nan=False).encode()).hexdigest()
+                    if digest != authority.get('cdf_table_sha256'):
+                        raise ValueError(name + ' CDF payload differs from its recorded SHA')
+                elif 'cdf_table_payload' in authority and authority.get('cdf_table_sha256') is not None:
+                    raise ValueError(name + ' CDF SHA has no numerical payload')
+            if 'cdf_table_payload' not in stored:
+                if stored.get('cdf_table_sha256') != resolved.get('cdf_table_sha256'):
+                    raise ValueError(name + ' legacy CDF requires its original native payload')
+                resolved={key:value for key,value in resolved.items() if key!='cdf_table_payload'}
+            else:
+                first,second=stored.get('cdf_table_payload'),resolved.get('cdf_table_payload')
+                if (first is None)!=(second is None):raise ValueError(name+' changed whether the CDF is open')
+                if first is not None:
+                    same_resolved_meson_model({k:v for k,v in first.items() if k not in ('axes','cosines','values')},
+                        {k:v for k,v in second.items() if k not in ('axes','cosines','values')},name+'.CDF inputs')
+                    comparison=cdf_payload_difference_bound(first,second)
+                    same_signed_number(stored['width_over_em_mixing_squared_gev'],comparison['native_integral'],name+'.native CDF integral')
+                    same_signed_number(resolved['width_over_em_mixing_squared_gev'],comparison['portable_integral'],name+'.portable CDF integral')
+                omitted=('cdf_table_sha256','cdf_table_payload','width_over_em_mixing_squared_gev')
+                stored={key:value for key,value in stored.items() if key not in omitted}
+                resolved={key:value for key,value in resolved.items() if key not in omitted}
         if not isinstance(stored, dict) or stored.keys() != resolved.keys():
             raise ValueError(name + ' keys differ from the native authority')
         for key in resolved:
@@ -355,6 +424,18 @@ def meson_source_exposure(contract, directory):
                 epsilon=epsilon,model_directory=directory)
             for pdg, model in precision_models.items():
                 same_resolved_meson_model(contract["resolved_parent_models"].get(str(pdg)), model)
+                # The generator's positive table defines its exact rate and
+                # sampling distribution. After the independent current check,
+                # audit the ledger with that native rate, not a libm-dependent
+                # reevaluation of the current in this export runtime.
+                from dark_photon_meson_source import exclusive_channels
+                from dark_photon_neutral_vector_dipion import register_native_rate_authority
+                stored_channels=exclusive_channels(contract['resolved_parent_models'][str(pdg)])
+                for stored_channel,resolved_channel in zip(stored_channels,exclusive_channels(model)):
+                    if resolved_channel.get('decay_type')=='neutral-vector-dipion':
+                        authority=stored_channel['numerical_cdf_rate_authority']
+                        if authority.get('cdf_table_payload') is not None:
+                            register_native_rate_authority(resolved_channel,contract['mass_gev'],authority)
         for support in (() if unified else precision["parents"]):
             pdg = support["pdg_id"]
             if pdg not in parents or pdg in precision_models:

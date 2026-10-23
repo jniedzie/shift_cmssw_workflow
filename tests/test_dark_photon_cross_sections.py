@@ -537,6 +537,43 @@ class NativeModelPortability(unittest.TestCase):
         with self.assertRaises(ValueError):same_number(7.344250125485237e-5,7.344250125485237e-5*1.000001,'physical rate')
         self.assertLess(bounds['native_mass_shell_deviation'],1e-16)
 
+    def test_cdf_payload_preserves_native_hash_and_checks_every_node(self):
+        from export_dark_photon_cross_sections import same_resolved_meson_model
+        def authority(value):
+            payload=dict(axes=[0.,.5,1.],cosines=[-1.,1.],values=[[0.,0.],[value,2.],[0.,0.]],loop_order=96)
+            digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+            return dict(schema='shift-neutral-vector-dipion-positive-cdf-rate-v1',
+                settings=dict(cells_s=64),cdf_table_sha256=digest,cdf_table_payload=payload,
+                width_over_em_mixing_squared_gev=(value+2)/2)
+        native=authority(1.);portable=authority(math.nextafter(1.,2.))
+        self.assertNotEqual(native['cdf_table_sha256'],portable['cdf_table_sha256'])
+        same_resolved_meson_model(native,portable)
+        with self.assertRaises(ValueError):same_resolved_meson_model(native,authority(1.001))
+        corrupt=copy.deepcopy(portable);corrupt['cdf_table_payload']['values'][1][0]=3.
+        with self.assertRaisesRegex(ValueError,'recorded SHA'):same_resolved_meson_model(native,corrupt)
+        legacy={k:v for k,v in native.items() if k!='cdf_table_payload'}
+        same_resolved_meson_model(legacy,native)
+        with self.assertRaisesRegex(ValueError,'original native payload'):same_resolved_meson_model(legacy,portable)
+        closed=dict(native,cdf_table_payload=None)
+        with self.assertRaisesRegex(ValueError,'no numerical payload'):same_resolved_meson_model(closed,portable)
+
+    def test_native_cdf_rate_is_retained_after_cross_runtime_validation(self):
+        from dark_photon_neutral_vector_dipion import register_native_rate_authority,branching_coefficient
+        import dark_photon_neutral_vector_dipion as kernel
+        inputs=dict(reference_parent_mass_gev=.78,pion_mass_gev=.135,total_width_gev=.1,
+                    em_mixing_over_epsilon_abs2=2.)
+        payload=dict(parent_mass_gev=.78,pion_mass_gev=.135,mass_gev=.3,
+            axes=[0.,.5,1.],cosines=[-1.,1.],values=[[0.,0.],[1.,2.],[0.,0.]])
+        digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+        authority=dict(cdf_table_payload=payload,cdf_table_sha256=digest,width_over_em_mixing_squared_gev=1.5)
+        with patch.dict(kernel._AUDITED_NATIVE_RATES,{},clear=True), \
+             patch.object(kernel,'_mass_precision',return_value=inputs), \
+             patch.object(kernel,'_table',side_effect=AssertionError('Native rate must not be replaced')):
+            register_native_rate_authority(inputs,.3,authority)
+            self.assertEqual(branching_coefficient(.78,.3,inputs),30.)
+            with self.assertRaisesRegex(ValueError,'does not integrate'):
+                register_native_rate_authority(inputs,.3,dict(authority,width_over_em_mixing_squared_gev=1.500001))
+
     def test_one_ulp_libm_difference_preserves_exact_channel_and_model_ownership(self):
         from export_dark_photon_cross_sections import same_resolved_meson_model
         expected = dict(exclusive_channels=[dict(channel='eta_prime_dipion',

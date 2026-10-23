@@ -391,6 +391,7 @@ class NumericalDecayTable:
         payload=dict(parent_mass_gev=parent_mass,pion_mass_gev=pion_mass,mass_gev=mass,
             axes=self.axes,cosines=self.cosines,values=values,loop_order=loop_order,
             interpolation='nonnegative-bilinear-joint-density-in-sine-squared-invariant-coordinate')
+        self.payload=payload
         self.sha256=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
 
     def invariant(self,t):return self.low+(self.high-self.low)*math.sin(math.pi*t/2)**2
@@ -424,6 +425,32 @@ def _table(model,mass):
     return _cached_decay_table(json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False),mass)
 
 
+_AUDITED_NATIVE_RATES={}
+
+
+def register_native_rate_authority(model,mass,authority):
+    """Use the retained generator table after its independent export audit.
+
+    This registry is used only by ledger audits. Generation still constructs
+    its own table. The exact native payload SHA and integral remain the rate
+    authority even when another Python/libm evaluates the current differently.
+    """
+    inputs=model.get('neutral_dipion_model',model);payload=authority['cdf_table_payload']
+    digest=hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':'),allow_nan=False).encode()).hexdigest()
+    if (digest!=authority['cdf_table_sha256'] or payload['mass_gev']!=mass
+            or payload['parent_mass_gev']!=inputs['reference_parent_mass_gev']
+            or payload['pion_mass_gev']!=inputs['pion_mass_gev']):
+        raise ValueError('Native CDF rate belongs to different retained inputs')
+    x,y,z=payload['axes'],payload['cosines'],payload['values']
+    integral=math.fsum((b-a)*(d-c)*math.fsum((z[i][j],z[i+1][j],z[i][j+1],z[i+1][j+1]))/4
+        for i,(a,b) in enumerate(zip(x,x[1:])) for j,(c,d) in enumerate(zip(y,y[1:])))
+    rate=authority['width_over_em_mixing_squared_gev']
+    if not math.isfinite(rate) or rate<=0 or not math.isclose(rate,integral,rel_tol=1.e-10):
+        raise ValueError('Native CDF rate does not integrate its retained table')
+    key=(json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False),mass)
+    _AUDITED_NATIVE_RATES[key]=rate
+
+
 def _mass_precision(parent_mass,mass,model,**native_precision):
     inputs=model.get('neutral_dipion_model',model);nominal=inputs['reference_parent_mass_gev']
     _positive(nominal,'reference parent mass');_positive(inputs['pion_mass_gev'],'neutral pion mass')
@@ -454,7 +481,10 @@ def branching_coefficient(parent_mass,mass,model,**native_precision):
     """Fixed-M0 CDF rate / physical total width, before kinetic epsilon² and BRμμ."""
     inputs=_mass_precision(parent_mass,mass,model,**native_precision)
     if mass>=inputs['reference_parent_mass_gev']-2*inputs['pion_mass_gev']:return 0.
-    return (_table(model,mass).integral/inputs['total_width_gev']*
+    key=(json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False),mass)
+    rate=_AUDITED_NATIVE_RATES.get(key)
+    if rate is None:rate=_table(model,mass).integral
+    return (rate/inputs['total_width_gev']*
             inputs.get('em_mixing_over_epsilon_abs2',1.))
 
 
@@ -546,5 +576,6 @@ def numerical_rate_authority(model,mass):
         signal_mass_gev=mass,reference_parent_mass_gev=inputs['reference_parent_mass_gev'],
         interpolation='positive-bilinear-in-sine-squared-invariant-coordinate',
         settings=dict(inputs['numerical_cdf']),cdf_table_sha256=table.sha256 if table else None,
+        cdf_table_payload=table.payload if table else None,
         width_over_em_mixing_squared_gev=table.integral if table else 0.,
         numerical_accuracy='Fixed grid validated by independent quadrature/refinement; not a rigorous universal error bound')
