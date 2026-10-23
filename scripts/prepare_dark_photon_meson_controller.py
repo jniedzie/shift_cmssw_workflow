@@ -41,7 +41,8 @@ def scheduling_configuration(original, previous, sources, detector_points):
 def prepare(directory, original_seal, template, template_seal, output, sources=7, detector_points=35,
             additional_meson_forecasts=(), prior_meson_controller_directory=None,
             meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=(),
-            close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=()):
+            close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
+            operational_handoffs=False, reviewed_handoff_failures=()):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -142,6 +143,18 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         maintained = Path(__file__).with_name(name)
         shutil.copy2(maintained, tools/name)
         seal_files[str(tools/name)] = production.durable.sha(tools/name)
+    if operational_handoffs:
+        config['operational_handoffs']=dict(directory=str(output/'handoffs'),reviewed_failures={})
+        for batch,manifest in reviewed_handoff_failures:
+            path=Path(manifest).resolve()
+            config['operational_handoffs']['reviewed_failures'][batch]=dict(path=str(path),sha256=production.durable.sha(path))
+            seal_files[str(path)]=production.durable.sha(path)
+        for batch in config['batches']:
+            if batch.get('gen_qualification_only'):
+                continue
+            paths=production.prepare_handoff_worker(config,batch,output,original_seal)
+            for path in paths:
+                seal_files[str(path)]=production.durable.sha(path)
     production.durable.new(output/'config.json', config)
     replacement = dict(schema='shift-meson-scheduling-rollover-v1',
         original_production=str(directory), original_seal_sha256=original_seal,
@@ -190,6 +203,12 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
     production.durable.new(output/'seal.json', dict(schema='shift-meson-controller-seal-v1', files=seal_files))
     digest = production.durable.sha(output/'seal.json')
     (output/'controller.sub').write_text((output/'controller.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST', digest))
+    if operational_handoffs:
+        for batch in config['batches']:
+            if batch.get('gen_qualification_only'):
+                continue
+            handoff=output/'handoffs'/batch['batch']
+            (handoff/'worker.sub').write_text((handoff/'worker.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST',digest))
     production.operational_configuration(original, output/'config.json', digest)
     return dict(complete=True, directory=str(output), seal_sha256=digest,
                 original_seal_sha256=original_seal, **{key: config[key] for key in limits})
@@ -221,13 +240,16 @@ def main():
         metavar=('NAME', 'MANIFEST'), help='Cancel only the reviewed remaining future writes of an existing peer')
     parser.add_argument('--closed-source-forecast', action='append', nargs=2, default=[],
         metavar=('NAME', 'MANIFEST'), help='Cancel reviewed never-submitted sources; protect existing workers')
+    parser.add_argument('--operational-handoffs',action='store_true')
+    parser.add_argument('--reviewed-handoff-failure',action='append',nargs=2,default=[],metavar=('BATCH','MANIFEST'))
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
                              args.additional_meson_forecast, args.prior_meson_controller_directory,
                              args.meson_peer_controller, args.reviewed_prior_meson_retirement,
                              args.retired_meson_forecast, args.close_source_admission,
-                             args.reviewed_coverage_recovery, args.closed_source_forecast), sort_keys=True))
+                             args.reviewed_coverage_recovery, args.closed_source_forecast,
+                             args.operational_handoffs,args.reviewed_handoff_failure), sort_keys=True))
 
 
 if __name__ == '__main__':

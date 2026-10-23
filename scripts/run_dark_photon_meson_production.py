@@ -870,7 +870,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'additional_reserved_meson_forecasts', 'meson_reservation_registration',
                                    'prior_meson_controller_directory', 'meson_peer_controller_directories',
                                    'reviewed_prior_meson_retirement', 'source_admission_closed',
-                                   'reviewed_coverage_recovery'}:
+                                   'reviewed_coverage_recovery', 'operational_handoffs'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1179,6 +1179,7 @@ def prepare_material_admission(config, batch, status):
     immutable(request_path,request)
     immutable(profile_path,config['detector_runtime'])
     tools=Path(config['tools'])
+    from dark_photon_detector_runtime import clean_environment
     invocation=['/usr/bin/python3',str(tools/'dark_photon_detector_runtime.py'),
         '--profile',str(profile_path),'--entry',str(tools/'prepare_dark_photon_material_source.py'),
         '--','--request',str(request_path)]
@@ -1186,7 +1187,8 @@ def prepare_material_admission(config, batch, status):
     # mutable shared release or alter the already saved lifetime/source draws.
     with (directory/'logs/material_admission.log').open('a') as log:
         subprocess.run(invocation,cwd=directory,check=True,
-            stdout=log,stderr=subprocess.STDOUT,timeout=config.get('material_timeout_seconds',3600))
+            stdout=log,stderr=subprocess.STDOUT,env=clean_environment(),
+            timeout=config.get('material_timeout_seconds',3600))
     descriptor_path=gen/'material_selected_source.json'
     receipt=read(gen/'material_selection_receipt.json')
     if receipt.get('complete') is not True or receipt['descriptor_sha256'] != durable.sha(descriptor_path):
@@ -1370,11 +1372,15 @@ def handoff(config, batch):
     return receipt
 
 
-def prepare_handoff_worker(config, batch):
+def prepare_handoff_worker(config, batch, operational_directory=None, original_seal=None):
     """Freeze an independent preparation worker before the science seal exists."""
-    directory=batch_directory(config,batch)/'handoff'
-    directory.mkdir()
-    script=Path(config['tools'])/'run_dark_photon_meson_production.py'
+    directory=(Path(operational_directory)/'handoffs'/batch['batch'] if operational_directory
+               else batch_directory(config,batch)/'handoff')
+    directory.mkdir(parents=True)
+    script=(Path(operational_directory)/'tools' if operational_directory else Path(config['tools']))/'run_dark_photon_meson_production.py'
+    options = (' --seal '+shlex.quote(original_seal)+' --controller-config '+
+        shlex.quote(str(Path(operational_directory)/'config.json'))+' --controller-seal "$1"'
+        if operational_directory else ' --seal "$1"')
     wrapper=directory/'run.sh'
     wrapper.write_text('''#!/bin/bash
 # Code style: AI-code. AI-generated independent meson detector preparation.
@@ -1384,12 +1390,12 @@ unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD ROOTSYS
 export PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
 exec python3 '''+shlex.quote(str(script))+' --directory '+shlex.quote(config['directory'])+
-        ' --seal "$1" --action handoff --batch '+shlex.quote(batch['batch'])+'\n')
+        options+' --action handoff --batch '+shlex.quote(batch['batch'])+'\n')
     wrapper.chmod(0o755)
     descriptor=f'''# Code style: AI-code. AI-generated independent meson handoff worker.
 universe = vanilla
 executable = {wrapper}
-arguments = SEAL_DIGEST
+arguments = {'OPERATIONS_SEAL_DIGEST' if operational_directory else 'SEAL_DIGEST'}
 initialdir = {directory}
 getenv = False
 should_transfer_files = YES
@@ -1414,8 +1420,42 @@ queue
     return [wrapper,directory/'worker.sub.in']
 
 
+def handoff_directory(config, batch, queue_snapshot=None):
+    """Use sealed replacement launchers without editing original workers or GEN."""
+    original = batch_directory(config,batch)/'handoff'
+    operational = config.get('operational_handoffs')
+    if operational is None:
+        return original
+    directory = Path(operational['directory'])/batch['batch']
+    if not directory.is_absolute() or not (directory/'worker.sub').is_file():
+        raise ValueError('Operational handoff is not a frozen persistent worker')
+    seal_path=directory.parents[1]/'seal.json'
+    seal_digest=durable.sha(seal_path)
+    frozen=read(seal_path)['files']
+    for path in (directory/'run.sh',directory/'worker.sub.in'):
+        if frozen.get(str(path)) != durable.sha(path):
+            raise ValueError('Operational handoff launcher changed after freezing')
+    if (directory/'worker.sub').read_text() != (directory/'worker.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST',seal_digest):
+        raise ValueError('Operational handoff differs from its sealed submit template')
+    if (original/'submission.json').exists():
+        receipt = existing_receipt(original,original/'worker.sub')
+        proof = read_pinned(operational.get('reviewed_failures',{}).get(batch['batch'],{}))
+        if (proof.get('schema') != 'shift-meson-handoff-recovery-v1'
+                or proof.get('original_submission') != receipt
+                or proof.get('source_status_sha256') != durable.sha(batch_directory(config,batch)/'source_status.json')
+                or proof.get('gen_or_detector_rerun_allowed') is not False):
+            raise ValueError('Operational handoff does not match its reviewed failed launch')
+        try:
+            native_status(config,receipt,queue_snapshot)
+        except MesonJobFailure:
+            pass
+        else:
+            raise RuntimeError('Original handoff is active or successful; preserve its owner')
+    return directory
+
+
 def parallel_handoff(config,state,batch,entry,queue_snapshot):
-    directory=batch_directory(config,batch)/'handoff'
+    directory=handoff_directory(config,batch,queue_snapshot)
     description=directory/'worker.sub'
     receipt=(existing_receipt(directory,description) if (directory/'submission.json').is_file()
              else durable.submission(config,directory,description))
@@ -1782,6 +1822,97 @@ def cumulative_result(config,state,batch,transport,primitive):
     return result
 
 
+def complete_empty_admission(config, batch, status):
+    """Retain a zero detector draw as a full-exposure source in later sums."""
+    from dark_photon_material_selection import bind, rate_only_report, validate_rate_only_report
+    from prepare_dark_photon_material_source import immutable
+    directory=batch_directory(config,batch)
+    descriptor_path=directory/'gen/material_selected_source.json'
+    receipt=read(directory/'gen/material_selection_receipt.json')
+    if (receipt.get('complete') is not True or receipt.get('original_exposure_preserved') is not True
+            or receipt.get('descriptor_sha256') != durable.sha(descriptor_path)):
+        raise ValueError('Empty admission has no complete immutable selection receipt')
+    for path,digest in status['metadata_sha256'].items():
+        if durable.sha(path) != digest:
+            raise ValueError('Empty admission changed original GEN metadata')
+    row=bind(adopted_row(batch,directory/'gen',config),status['parent'],read(descriptor_path))
+    if row['events'] != 0 or batch.get('operational_canary'):
+        raise ValueError('Only an empty bulk draw may use automatic rate-only completion')
+    row.update(final_output_base=batch['final_output_base'],chunks=[],groups=[],
+        material_selected_source_sha256=durable.sha(descriptor_path))
+    production=directory/'production'
+    if production.exists() and not (production/'rate_only_intent.json').exists():
+        raise ValueError('Do not replace an existing detector deployment with a rate-only source')
+    production.mkdir(exist_ok=True)
+    immutable(production/'rate_only_intent.json',dict(source_status_sha256=durable.sha(directory/'source_status.json'),
+        descriptor_sha256=durable.sha(descriptor_path),detector_events=0,selection_redrawn=False))
+    plan=dict(schema='shift-dark-photon-rate-only-production-v1',rate_only=True,
+        campaign=batch['campaign'],points=[row],events=0,full_gen_events=row['full_gen_events'],
+        detector_chunks=0,electronics_or_trigger_changes=False)
+    inventory=dict(schema='shift-independent-signal-GEN-inventory-v1',complete=True,
+        points={batch['point']:status['parent']},each_parent_ledger_counted_once=True)
+    publication=dict(schema='shift-stage-GEN-publication-v1',complete=True,inputs=[status['publication']])
+    for name,value in [('plan.json',plan),('gen_inventory.json',inventory),('gen_publication.json',publication)]:
+        immutable(production/name,value)
+    pins=[production/'plan.json',production/'gen_inventory.json',production/'gen_publication.json',
+        directory/'source_status.json',descriptor_path,directory/'gen/material_selection_receipt.json']
+    pins.extend(Path(path) for path in status['metadata_sha256'])
+    immutable(production/'seal.json',dict(schema='shift-dark-photon-rate-only-seal-v1',
+        files={str(path):durable.sha(path) for path in pins}))
+    report=rate_only_report(row,status['parent'],durable.sha(production/'plan.json'),durable.sha(production/'seal.json'))
+    (production/'completed_points').mkdir(exist_ok=True)
+    path=production/'completed_points'/(batch['point']+'.json')
+    immutable(path,report)
+    validate_rate_only_report(read(path),row,status['parent'],report['plan_sha256'],report['seal_sha256'])
+    rates=directory/'rates.json'
+    if not rates.exists():
+        durable.run_logged([os.sys.executable,Path(config['tools'])/'export_dark_photon_cross_sections.py',
+            '--plan',production/'plan.json','--output',directory/'rates','--publish','--eos-rpc'],
+            directory/'export_rates.log',timeout=1800)
+        immutable(rates,dict(complete=True,production_plan_sha256=report['plan_sha256']))
+    elif read(rates) != dict(complete=True,production_plan_sha256=report['plan_sha256']):
+        raise ValueError('Rate-only source has changed rate-export evidence')
+    return dict(complete=True,rate_only=True,point=batch['point'],events=0,
+        full_gen_events=row['full_gen_events'],point_receipt_path=str(path),point_receipt_sha256=durable.sha(path))
+
+
+def close_empty_admission(config,state,batch,entry,queue_snapshot):
+    """Finish expected empty draws, preserving a failed old launcher if present."""
+    descriptor=batch_directory(config,batch)/'gen/material_selected_source.json'
+    if not descriptor.is_file() or read(descriptor).get('selected_indices') != []:
+        return False
+    if batch.get('operational_canary'):
+        raise ValueError('Empty canary draw cannot qualify the weighted detector chain')
+    handoff=handoff_directory(config,batch,queue_snapshot)
+    if (handoff/'submission.json').exists():
+        receipt=existing_receipt(handoff,handoff/'worker.sub')
+        try:
+            if native_status(config,receipt,queue_snapshot)=='active':
+                entry['stage']='waiting_for_empty_admission_worker'
+                return True
+        except MesonJobFailure as error:
+            entry['preserved_empty_admission_attempt']=dict(submission=receipt,error=str(error),native_jobs=error.jobs)
+    proof=complete_empty_admission(config,batch,read(batch_directory(config,batch)/'source_status.json'))
+    entry.update(stage='rate_only_complete',detector_native_complete=True,rate_only_completion=proof)
+    state.get('blocked_points',{}).pop(batch['point'],None)
+    # When this is the last cohort, refresh the already-ready histogram too:
+    # otherwise its denominator would miss this newly completed empty draw.
+    candidates=[other for other in config['batches'] if other['point']==batch['point']
+        and not other.get('gen_qualification_only') and other['batch'] != batch['batch']]
+    candidates.sort(key=lambda other: bool(other.get('operational_canary')))
+    for other in candidates:
+        report=batch_directory(config,other)/'production/completed_points'/(batch['point']+'.json')
+        if report.is_file() and read(report).get('complete') and not read(report).get('rate_only'):
+            result=publish_batch(config,state,other)
+            if result is None:
+                entry['stage']='waiting_for_rate_only_histogram_update'
+                return True
+            proof=dict(proof,cumulative_histogram=result)
+            break
+    entry['published']=proof
+    return True
+
+
 def histogram_promotion_floor(config, batch, result):
     """Use completed histogram input counts, never requested or selected counts."""
     floors = config.get('minimum_histogram_events_before_latest')
@@ -2105,7 +2236,11 @@ def detector_admission_pending(config, batch, entry):
     if entry.get('published') or entry.get('detector_native_complete'):
         return False
     root = batch_directory(config, batch)
-    return any((root/stage/name).is_file() for stage in ('handoff', 'production')
+    directories=[root/'handoff',root/'production']
+    operational=config.get('operational_handoffs')
+    if operational is not None:
+        directories.append(Path(operational['directory'])/batch['batch'])
+    return any((directory/name).is_file() for directory in directories
                for name in ('submission.json', 'submission_intent.json'))
 
 
@@ -2179,6 +2314,11 @@ def step(config,state):
             entry.update(stage='GEN_qualified', published=dict(source_qualification_only=True,
                 batch=batch['batch'], point=batch['point'], complete=True))
             durable.save(Path(config['directory'])/'state.json', state)
+            continue
+        if close_empty_admission(config,state,batch,entry,queue_snapshot):
+            if detector_claims is not None and entry.get('detector_native_complete'):
+                detector_claims.pop(batch['batch'],None)
+            durable.save(Path(config['directory'])/'state.json',state)
             continue
         production=directory/'production'
         admitted = ((batch['batch'] in detector_claims or entry.get('detector_native_complete')) if detector_claims is not None else
@@ -2283,8 +2423,8 @@ def main():
     config=verify(args.directory.resolve(),args.seal)
     os.chdir(config['directory'])
     if args.controller_config is not None:
-        if args.action!='controller' or args.controller_seal is None:
-            raise ValueError('Only the controller may adopt a separately sealed operational configuration')
+        if args.action not in ('controller','handoff') or args.controller_seal is None:
+            raise ValueError('Only controller and handoff workers may adopt a sealed operational configuration')
         config=operational_configuration(config,args.controller_config.resolve(),args.controller_seal)
     if args.action in ('source','handoff'):
         rows=[row for row in config['batches'] if row['batch']==args.batch]
