@@ -210,6 +210,45 @@ class KaonSourceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.resolve([parent_row(130,self.models[130],index=i+1) for i in range(22)])
 
+    def test_boosted_native_mass_drift_uses_independent_com_count_floor(self):
+        # Exact charged-kaon inputs from the two October 23 source failures.
+        beam=[6800.938269999998,0.,0.,-6799.999935268339]
+        ecm=112.97005223140982
+        cases=[([2365.5808596790444,.0019168436679661977,-.7321924814721366,
+                  -2365.5806937297775],19.658618300369028),
+               ([42.5715954313909,.10648654462553739,-.3487119255716363,
+                  -42.567184147121],.6191299193342757)]
+        native=copy.deepcopy(self.native);native['ecm_gev']=ecm
+        for signal_mass in (.7,.9):
+            models=resolved_parent_models(self.card,native,signal_mass,epsilon=EPSILON)
+            for p4,energy in cases:
+                raw=parent_row(321,models[321]);raw.update(p4=p4,
+                    source_total_p4=beam,source_com_energy_gev=energy)
+                before=copy.deepcopy(raw)
+                resolved,=resolve_parent_kinematics([raw],.001,signal_mass,models,BR)
+                proof=resolved['kaon_source_count_authority']
+                self.assertEqual(proof['native_parent_count_bound'],math.floor(ecm/.493677))
+                self.assertGreater(proof['roundoff_mass_floor_gev'],
+                    proof['independent_source_ecm_interval_gev'][1]/
+                    (proof['native_parent_count_bound']+1))
+                self.assertEqual(raw,before);self.assertEqual(resolved['p4'],p4)
+                self.assertEqual(resolved['mass_gev'],raw['native_mass_gev'])
+                self.assertEqual(resolved['coefficient_relative_precision_shift'],0.)
+        # Open-channel rate precision is an independent, unchanged restriction.
+        models=resolved_parent_models(self.card,native,MASS,epsilon=EPSILON)
+        with self.assertRaisesRegex(ValueError,'precision.*budget'):
+            resolve_parent_kinematics([raw],.001,MASS,models,BR)
+
+    def test_com_floor_still_rejects_a_changed_integer_count_limit(self):
+        raw=parent_row(321,self.models[321])
+        # Timelike, within the fixed Pythia tolerance, but below ECM/(C+1).
+        raw['p4']=[.493,0.,0.,0.];raw['source_com_energy_gev']=.493
+        native=copy.deepcopy(self.native);native['ecm_gev']=10.36
+        raw['source_total_p4']=[10.36,0.,0.,0.]
+        models=resolved_parent_models(self.card,native,.7,epsilon=EPSILON)
+        with self.assertRaisesRegex(ValueError,'integer source-count envelope'):
+            resolve_parent_kinematics([raw],.001,.7,models,BR)
+
     def test_broad_support_missing_physical_coupling_and_unqualified_families_fail(self):
         native=copy.deepcopy(self.native);native['parents'][0]['mass_width_gev']=1.e-6
         with self.assertRaises(ValueError):resolved_parent_models(self.card,native,MASS,epsilon=EPSILON)

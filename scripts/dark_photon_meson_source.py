@@ -407,7 +407,11 @@ def _kaon_snapshot_authority(parent,model,kinematic_mass):
     gamma_32=32u/(1-32u), u=2^-53. Native COM values use long double; this
     interval deliberately also covers their JSON conversion. Native-vs-p4
     mass drift is recorded separately and must pass the existing rate gate.
-    The integer count limit must stay unchanged after those allowances.
+    The integer count limit must stay unchanged after those allowances. The
+    actual COM energy interval includes momentum drift already; subtracting
+    the invariant-mass discrepancy again would count that effect twice.
+    Every candidate must certify E_COM > ECM_upper/(count_limit+1), so one
+    extra final parent would exceed the same collision's total COM energy.
     """
     channel=next(c for c in exclusive_channels(model) if kaon_channel(c))
     if parent.get('native_mass_gev') not in channel['native_record_mass_support_gev']:
@@ -439,7 +443,11 @@ def _kaon_snapshot_authority(parent,model,kinematic_mass):
     native_delta=abs(kinematic_mass-parent['native_mass_gev'])
     if energy+arithmetic+native_delta<parent['native_mass_gev']:
         raise ValueError('Physical native kaon COM energy violates its qualified mass floor')
-    mass_floor=channel['mass_min_gev']-native_delta-2*arithmetic
+    # Each counted parent must independently exceed ECM/(count_limit+1).
+    # Use its measured COM lower bound, capped at the declared mass floor.
+    # This also rejects a genuinely low-energy parent that invalidates the
+    # fixed count limit; no mass, momentum or rate is repaired here.
+    mass_floor=min(channel['mass_min_gev'],low)-2*arithmetic
     if (mass_floor<=0 or low<mass_floor
             or math.floor(ecm_high/mass_floor)!=channel['native_parent_count_bound']):
         raise ValueError('Kaon arithmetic allowance changes the fixed integer source-count envelope')
