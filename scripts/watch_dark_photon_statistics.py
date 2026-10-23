@@ -274,6 +274,38 @@ def stage_counts(directory):
 def reviewed_terminal_failures(config):
     """Keep reviewed failed attempts visible without treating them as active failures."""
     result = {}
+    for authority in config.get('reviewed_meson_coverage_recoveries', []):
+        path = Path(authority['path'])
+        if config.get('dependencies', {}).get(str(path)) != authority['sha256'] or sha(path) != authority['sha256']:
+            raise ValueError('Coverage recovery is outside frozen watchdog authority')
+        proof = read(path)
+        def retained(key):
+            pin = proof[key]
+            if not Path(pin['path']).is_absolute() or sha(pin['path']) != pin['sha256']:
+                raise ValueError('Changed retained coverage recovery evidence: '+key)
+            return read(pin['path'])
+        original = retained('original_submission')
+        failed = retained('original_status')
+        native = retained('original_native_failure')
+        replacement = retained('replacement_submission')
+        success = retained('replacement_native_success')
+        status = retained('replacement_status')
+        report_pin = status['report']
+        if sha(report_pin['path']) != report_pin['sha256']:
+            raise ValueError('Changed successful coverage report')
+        if (proof.get('schema') != 'shift-reviewed-meson-coverage-recovery-v1'
+                or proof.get('scope') != 'coverage-only'
+                or proof['worklist_sha256'] != sha(config['worklist'])
+                or failed.get('complete') is not False or not failed.get('error')
+                or native.get('ClusterId') != original['cluster'] or native.get('ProcId') != 0
+                or native.get('Iwd') != original['task'] or native.get('ExitCode') in (None, 0)
+                or success.get('ClusterId') != replacement['cluster'] or success.get('ProcId') != 0
+                or success.get('Iwd') != replacement['task'] or success.get('JobStatus') != 4
+                or success.get('ExitBySignal') is not False or success.get('ExitCode') != 0
+                or status.get('complete') is not True):
+            raise ValueError('Coverage recovery lacks its exact failed original or successful replacement')
+        result[original['cluster']] = dict(authority=authority, native=native,
+            kind='meson_coverage_recovery', recovery_submission=proof['replacement_submission']['path'])
     for authority in config.get('retired_aggregate_attempts', []):
         path = Path(authority['path'])
         if (not path.is_absolute() or config.get('dependencies', {}).get(str(path)) != authority['sha256']
@@ -443,6 +475,10 @@ def assess(config, previous, rows, history, receipts, now):
             if reviewed[cluster].get('kind') == 'meson_finalizer_recovery':
                 issue('reviewed_meson_failure_' + str(cluster), 'warning',
                       'Original runtime download failed; its reviewed finalizer recovery is tracked separately',
+                      job=cluster, original_exit=expected['ExitCode'])
+            if reviewed[cluster].get('kind') == 'meson_coverage_recovery':
+                issue('reviewed_coverage_failure_' + str(cluster), 'warning',
+                      'Original read-only coverage audit failed; its reviewed replacement passed',
                       job=cluster, original_exit=expected['ExitCode'])
             if recovery and not Path(recovery).is_file():
                 issue('reviewed_handoff_pending_' + str(cluster), 'warning',

@@ -52,6 +52,34 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertEqual(report['health'], 'ok')
         self.assertEqual(report['observed_state'], 'awaiting_payload_execution')
 
+    def test_coverage_recovery_keeps_original_failure_and_rejects_changed_success(self):
+        def pin(name, value):
+            path = self.root/name
+            path.write_text(json.dumps(value))
+            return dict(path=str(path), sha256=WATCH.sha(path))
+        old = self.root/'coverage'
+        new = self.root/'repaired_coverage'
+        proof = dict(schema='shift-reviewed-meson-coverage-recovery-v1', scope='coverage-only',
+            worklist_sha256=WATCH.sha(self.config['worklist']),
+            original_submission=pin('original.json', dict(cluster=123, task=str(old))),
+            original_status=pin('failed.json', dict(complete=False, error='preserved failure')),
+            original_native_failure=pin('native_failure.json', dict(ClusterId=123, ProcId=0,
+                Iwd=str(old), ExitCode=1, ExitBySignal=False, JobStatus=5)),
+            replacement_submission=pin('replacement.json', dict(cluster=124, task=str(new))),
+            replacement_native_success=pin('native_success.json', dict(ClusterId=124, ProcId=0,
+                Iwd=str(new), ExitCode=0, ExitBySignal=False, JobStatus=4)),
+            replacement_status=pin('success.json', dict(complete=True,
+                report=pin('report.json', dict(physics_complete=False)))))
+        authority = pin('review.json', proof)
+        self.config.update(reviewed_meson_coverage_recoveries=[authority],
+                           dependencies={authority['path']: authority['sha256']})
+        reviewed = WATCH.reviewed_terminal_failures(self.config)
+        self.assertEqual(reviewed[123]['native']['ExitCode'], 1)
+        self.assertEqual(reviewed[123]['recovery_submission'], proof['replacement_submission']['path'])
+        (self.root/'native_success.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError, 'Changed retained'):
+            WATCH.reviewed_terminal_failures(self.config)
+
     def test_transient_afs_write_is_retried_without_losing_the_record(self):
         original = Path.write_text
         attempts = []
