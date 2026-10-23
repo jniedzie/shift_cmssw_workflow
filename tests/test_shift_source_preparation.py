@@ -97,6 +97,27 @@ class SourceCensusTests(unittest.TestCase):
                     else:
                         with self.assertRaises(ValueError):prep.feature_census(path,unit,value,output)
 
+    def test_navigator_timeout_retries_full_graph_without_material_and_keeps_weights(self):
+        value=plan();unit=value['units'][0]
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory);output=path/'complete.root';output.write_bytes(b'synthetic');calls=[]
+            def scanner(command,**kwargs):
+                calls.append(command)
+                if len(calls)==1:
+                    Path(command[-1]).write_bytes(b'partial')
+                    raise prep.subprocess.TimeoutExpired(command,600)
+                self.assertIn('--skip-material-navigation',command)
+                data=dict(events=[dict(event_id=e,native_weight=w,original_source_sha256='a'*64)
+                    for e,w in zip(unit['event_ids'],unit['native_weights'])],
+                    sources=[dict(sha256=prep.sha(output))],maximum_events_per_source=None,
+                    prefix_requested=False,summary=dict(source_read_counts=[dict(entire_input_file_read=True)]))
+                with gzip.open(command[-1],'wt') as stream:json.dump(data,stream)
+            with patch.object(prep.subprocess,'run',side_effect=scanner):
+                features,audit=prep.feature_census(path,unit,value,output)
+            self.assertEqual(len(calls),2);self.assertEqual(audit['events'],3)
+            self.assertEqual(audit['navigation_fallback']['reason'],'material navigator CPU timeout')
+            self.assertFalse(audit['usable_as_physics_weight'])
+
 
 class PersistenceRoundoffTests(unittest.TestCase):
     def test_failed_photon_and_massive_signed_and_subnormal_cases(self):

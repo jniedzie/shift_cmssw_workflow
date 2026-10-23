@@ -1,12 +1,15 @@
 # Code style: AI-code. AI-generated native scheduler and receipt regression checks.
 import json
+import hashlib
+import copy
+from unittest.mock import patch
 from pathlib import Path
 import sys
 import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from run_shift_smart_sm_controller import admission_order, native_exit, observe, publication_charge
+from run_shift_smart_sm_controller import admission_order, native_exit, observe, publication_charge, gen_supply_progress, advance_gen_supply, retry_stalled_sim, closed_tasks
 
 
 class PublicationChargeTests(unittest.TestCase):
@@ -55,6 +58,92 @@ class SchedulingTests(unittest.TestCase):
         tasks['next']=dict(kind='source',phase='ready',stratum='qcd_5to10')
         self.assertEqual(admission_order(tasks), [])
         self.assertTrue(all(tasks[str(i)]['phase']=='submitted' for i in range(2)))
+
+
+class SupplyAndRetryTests(unittest.TestCase):
+    def test_saved_GEN_is_counted_once_across_raw_and_prepared_sources(self):
+        tasks={str(i):dict(kind=kind,phase='done',stratum='qcd_2to5',
+            raw_gen_sha256='a'*64,saved_GEN_events=600) for i,kind in enumerate(['raw_source','source'])}
+        p=gen_supply_progress({},tasks)
+        self.assertEqual(p['QCD_saved_events'],600)
+        self.assertFalse(p['raw_supply_is_detector_exposure'])
+
+    def test_replaced_failed_parent_is_closed_only_when_every_retry_finishes(self):
+        tasks=dict(parent=dict(phase='replaced',replacement_tasks=['a','b']),
+            a=dict(phase='done'),b=dict(phase='submitted'))
+        self.assertFalse(closed_tasks(tasks));tasks['b']['phase']='done';self.assertTrue(closed_tasks(tasks))
+
+    def test_extra_supply_waits_for_every_bin_minimum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            config=dict(campaign='test',source_templates={st:dict(source_request=dict()) for st in ['qcd_0to1','qcd_1to2']},
+                worker_template='initialdir = @DIRECTORY@\nrequest = @REQUEST_SHA@\n',
+                gen_supply=dict(target_QCD_saved_events=3,continue_until_epoch=1.e20,
+                    chunk_events_or_trials=1000,publication_base='/synthetic',bins={st:dict(
+                    minimum_chunks=1,maximum_chunks=2,run_base=600000000+i*100000,seed_base=700000000+i*1000000)
+                    for i,st in enumerate(['qcd_0to1','qcd_1to2'])}))
+            state=dict(tasks=dict(done=dict(kind='raw_source',phase='done',stratum='qcd_0to1',
+                raw_gen_sha256='a'*64,saved_GEN_events=1)))
+            # Keep detector backlog high so this test exercises only GEN admission.
+            state['tasks'].update({str(i):dict(kind='detector',phase='ready') for i in range(500)})
+            advance_gen_supply(root,config,state,set())
+            added=[t for t in state['tasks'].values() if t['kind']=='raw_source' and t['phase']=='ready']
+            self.assertEqual(len(added),1);self.assertEqual(added[0]['stratum'],'qcd_1to2')
+            request=json.loads((Path(added[0]['directory'])/'request.json').read_text())
+            self.assertTrue(request['generate_only']);self.assertEqual(request['source_request']['events_or_trials'],1000)
+
+    def test_large_AFS_read_reopens_after_transient_EIO(self):
+        import run_shift_smart_sm_controller as controller
+        import errno,io
+        with patch.object(Path,'open',side_effect=[OSError(errno.EIO,'transient'),io.BytesIO(b'{"x":1}')]),patch.object(controller.time,'sleep'):
+            self.assertEqual(controller.read('/synthetic/ledger.json'),dict(x=1))
+
+    def test_CPU_retry_entry_writes_identical_descriptor_and_keeps_job_seed(self):
+        import run_shift_smart_sm_controller as controller
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            here=os.getcwd()
+            try:
+                os.chdir(directory)
+                request=dict(detector_source=dict(gen='/synthetic',weights=[.2]),selected_skip=30,selected_count=5,detector_job=123)
+                child=controller.cpu_retry_request(request)
+                Path('request.json').write_text(json.dumps(child))
+                with patch('subprocess.run') as run:exec(compile(child['argv'][2],'<retry>','exec'),{})
+                written=json.loads(Path('selected_source.json').read_text())
+                self.assertEqual(written,dict(request['detector_source'],gen_path_resolved=True))
+                argv=run.call_args.args[0]
+                self.assertEqual(argv[argv.index('--job')+1],'123')
+                self.assertEqual(argv[argv.index('--count')+1],'5')
+                self.assertIn('43200,3600,5400,10800',argv)
+            finally:os.chdir(here)
+
+    def test_reviewed_native_SIM_timeout_keeps_event_order_seed_and_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);original=root/'original';original.mkdir()
+            descriptor=dict(gen='/synthetic/GEN.root',weights=[.2]*40,selected_indices=list(range(40)),sampling_probabilities=[.25]*40)
+            request=dict(detector_source=descriptor,selected_skip=30,selected_count=5,detector_job=123)
+            path=original/'request.json';path.write_text(json.dumps(request,indent=2)+'\n')
+            checksum=hashlib.sha256(path.read_bytes()).hexdigest()
+            fp=hashlib.sha256((json.dumps(dict(descriptor,gen_path_resolved=True),indent=2)+'\n').encode()).hexdigest()
+            result=dict(error="TimeoutError('SIM made no event progress for 3600 seconds; records started=4')",
+                request_sha256=checksum,source_descriptor_sha256=fp,source_skip=30,events=5,
+                current_tier='SIM',source_indices=list(range(30,35)),validated_tier_events=dict(NANO=0))
+            (original/'result.json').write_text(json.dumps(result))
+            (original/'events.log').write_text('005 (123.000.000) event\nNormal termination (return value 1)\n...\n')
+            task=dict(kind='detector',phase='failed',directory=str(original),cluster=123,request_sha256=checksum,stratum='dy_low')
+            state=dict(tasks=dict(parent=task),next_detector_job=200)
+            config=dict(reviewed_SIM_timeout_retry=True,worker_template='@DIRECTORY@ @REQUEST_SHA@')
+            ad=dict(ClusterId=123,ProcId=0,JobStatus=5,ExitCode=1,RemoteUserCpu=6300,Iwd=str(original))
+            # A live/released worker is never duplicated.
+            retry_stalled_sim(root,config,state,[dict(ad,JobStatus=2)])
+            self.assertEqual(len(state['tasks']),1)
+            retry_stalled_sim(root,config,state,[ad])
+            self.assertEqual(task['phase'],'replaced');self.assertEqual(len(task['replacement_tasks']),1)
+            rows=[json.loads((Path(state['tasks'][n]['directory'])/'request.json').read_text()) for n in task['replacement_tasks']]
+            self.assertEqual([r['selected_skip'] for r in rows],[30])
+            self.assertTrue(all(r['selected_count']==5 and r['detector_job']==123 and r['detector_source']==descriptor for r in rows))
+            self.assertEqual(state['reviewed_cpu_retries']['parent']['original_task']['phase'],'failed')
+            retry_stalled_sim(root,config,state,[ad]);self.assertEqual(len(state['tasks']),2)
 
 
 class CompletionTests(unittest.TestCase):

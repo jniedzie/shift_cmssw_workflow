@@ -3124,3 +3124,25 @@ runtime. For zero-saved GEN chunks, storage charging uses verified published
 sizes plus a conservative native-receipt bound instead of the whole in-flight
 reservation. Their original trials/exposure remain in the source inventory.
 Unknown legacy output sizes still consume the conservative full reservation.
+
+### Million-event GEN supply and reviewed CPU recovery
+
+An optional `gen_supply` in the SM controller creates independent raw QCD GEN
+cohorts before detector preparation. It uses the same partition/proposal inputs;
+count native saved events separately from attempts. Complete per-bin minimum
+budgets before extra weekend generation. Raw and detector phases have separate
+storage partitions under one registered owner. A raw cohort is not detector
+exposure: prepare its complete unchanged census once, freeze its admission,
+and count the original GEN once when the prepared source enters reconstruction.
+
+Material-feature timeouts may reread every unchanged GEN event with explicitly
+unknown material paths. This affects ranking only; G4 still transports material.
+Record the timeout, original arguments and full identity/weight coverage. Do not
+catch graph/audit failures as missing material or silently keep a prefix.
+
+The optional reviewed SIM timeout retry preserves the original event order and
+transport seed, uses larger CPU allowances once and retains failure evidence.
+Require native hold/exit, CPU usage, exact request/source/indices and proof that
+SIM never published Nano. Independent detector work can continue; unresolved
+cohorts keep completion/normalization gates closed. Unsubmitted job grouping is
+allowed only with exact index/weight/probability coverage; live jobs stay frozen.

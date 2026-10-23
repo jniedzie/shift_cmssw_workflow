@@ -264,6 +264,7 @@ def scan_source(path, hepmc_label, geometry=None, frame=None, maximum_events=Non
             raise ValueError('Repeated identity within one GEN source')
         seen.add(event_id)
         rows, weight, hepmc_weights, units = read_hepmc(event, hepmc_label)
+        print('Material features: event '+str(list(event_id)),flush=True)
         record = event_features(rows, event_id, weight, hepmc_weights, geometry, frame)
         record['original_hepmc_units'] = dict(momentum=units[0], length=units[1])
         original = (original_sources or {}).get(str(event_id[0]), {})
@@ -279,6 +280,8 @@ def main():
     parser.add_argument('--hepmc-label', default='shiftEventTime')
     parser.add_argument('--geometry', type=Path)
     parser.add_argument('--frame', type=Path, help='JSON object with the existing material scorer frame')
+    parser.add_argument('--skip-material-navigation', action='store_true',
+                        help='Read the complete GEN graph but mark material paths unknown after a reviewed navigator timeout')
     parser.add_argument('--original-source-map', type=Path,
                         help='JSON object mapping original run number to source_id and original_source_sha256')
     parser.add_argument('--maximum-events-per-source', type=int)
@@ -303,12 +306,13 @@ def main():
         frame = json.loads(args.frame.read_text())
         if 'minimum_abs_z_cm' not in frame or frame['minimum_abs_z_cm'] < 0:
             parser.error('Frame must explicitly specify minimum_abs_z_cm')
-        ROOT.TGeoManager.LockDefaultUnits(False)
-        ROOT.TGeoManager.SetDefaultUnits(ROOT.TGeoManager.kRootUnits)
-        ROOT.TGeoManager.LockDefaultUnits(True)
-        geometry = ROOT.TGeoManager.Import(str(args.geometry))
-        if not geometry:
-            raise ValueError('Cannot import supplied private geometry')
+        if not args.skip_material_navigation:
+            ROOT.TGeoManager.LockDefaultUnits(False)
+            ROOT.TGeoManager.SetDefaultUnits(ROOT.TGeoManager.kRootUnits)
+            ROOT.TGeoManager.LockDefaultUnits(True)
+            geometry = ROOT.TGeoManager.Import(str(args.geometry))
+            if not geometry:
+                raise ValueError('Cannot import supplied private geometry')
     from DataFormats.FWLite import Events
     sources = [dict(path=str(path.resolve()), sha256=digest(path),
                     source_file_event_count=int(Events(str(path)).size()),
@@ -322,6 +326,7 @@ def main():
                   usable_as_physics_weight=False, zero_GEN_muon_records_retained=True,
                   full_source_exposure_is_not_selected_event_count=True,
                   geometry_path=str(args.geometry.resolve()) if args.geometry else None,
+                  material_navigation_skipped=args.skip_material_navigation,
                   geometry_sha256=digest(args.geometry) if args.geometry else None,
                   frame_definition_sha256=digest(args.frame) if args.frame else None,
                   material_score_schema='shift-gen-material-path-score-v1',

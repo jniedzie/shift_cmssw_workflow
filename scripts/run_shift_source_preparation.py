@@ -369,8 +369,25 @@ def feature_census(directory,unit,plan,output):
              '--geometry',plan['geometry_path'],'--frame',str(directory/'frame.json'),
              '--original-source-map',str(directory/'original_sources.json'),'--output',str(features)]
     started=time.monotonic()
+    fallback=None
     with (directory/'features.log').open('w') as log:
-        subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=plan.get('feature_timeout_seconds',3600))
+        try:
+            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,
+                           timeout=plan.get('feature_timeout_seconds',600))
+        except subprocess.TimeoutExpired:
+            # Ranking is optional; native material transport is not. Preserve
+            # every original and its graph/W. Missing paths get the existing
+            # unknown-path admission, never a guessed survival probability.
+            fallback=dict(reason='material navigator CPU timeout',
+                          timeout_seconds=plan.get('feature_timeout_seconds',600),
+                          original_argv=list(command))
+            if features.exists():
+                fallback.update(discarded_incomplete_bytes=features.stat().st_size,
+                                discarded_incomplete_sha256=sha(features))
+                features.unlink()
+            command=command[:-2]+['--skip-material-navigation']+command[-2:]
+            log.write('\nNavigator timeout: retain full GEN census with unknown material paths.\n');log.flush()
+            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=600)
     import gzip
     with gzip.open(features,'rt') as stream:data=json.load(stream)
     expected={tuple(identity):weight for identity,weight in zip(unit['event_ids'],unit['native_weights'])}
@@ -385,7 +402,8 @@ def feature_census(directory,unit,plan,output):
     return features,dict(events=len(rows),all_saved_originals_read=True,zero_muon_controls_retained=True,
         original_source_sha256=unit['source']['gen_sha256'],prepared_GEN_sha256=sha(output),
         feature_sha256=sha(features),feature_bytes=features.stat().st_size,summary=data['summary'],
-        argv=command,seconds=time.monotonic()-started,usable_as_physics_weight=False)
+        argv=command,seconds=time.monotonic()-started,navigation_fallback=fallback,
+        usable_as_physics_weight=False)
 
 
 def run(plan):

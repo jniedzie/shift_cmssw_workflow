@@ -69,7 +69,8 @@ def finish(data, result, request_path=None):
     evidence.update(exit_code=result)
     Path('result.json').write_text(json.dumps(evidence, indent=2) + '\n')
     with tarfile.open('return_payload.tar.gz', 'w:gz') as archive:
-        for name in data.get('return_files', []):
+        names=data.get('return_files', [])+([] if complete else data.get('failure_return_files', []))
+        for name in names:
             path = Path(name)
             if path.is_absolute() or '..' in path.parts or path.suffix == '.root':
                 raise ValueError('Only compact local evidence can return through Condor')

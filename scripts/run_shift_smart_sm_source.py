@@ -203,22 +203,24 @@ def resume_source(request, directory):
         raise ValueError('Recovery native audit differs from its original receipt')
     row = request['source_request']
     weighted = row['family'] != 'dy' and row['bounds'][0] > 0
-    if not weighted:
-        raise ValueError('This reviewed raw recovery currently supports fixed-trial sources only')
-    from audit_shift_weighted_gen import validate_ledger
-    ledger = json.loads((directory/'proposal_ledger.json').read_text())
-    validate_ledger(ledger)
-    if ([ledger['run'], ledger['requested_trials'], ledger['lower'], ledger['upper']]
-            != [row['run'], row['events_or_trials'], *row['bounds']]):
-        raise ValueError('Recovery changed the source run, exposure or bin')
-    run(['python3', str(TOOLS/'scripts/audit_shift_weighted_gen.py'), '--input', 'gen.root',
-         '--ledger', 'proposal_ledger.json', '--config', 'resolved_gen_cfg.py',
-         '--generator-profile', 'ordinary', '--output', 'replayed_audit.json'],
-        directory/'audit.log', cwd=directory, timeout=900)
+    if weighted:
+        from audit_shift_weighted_gen import validate_ledger
+        ledger = json.loads((directory/'proposal_ledger.json').read_text())
+        validate_ledger(ledger)
+        if ([ledger['run'], ledger['requested_trials'], ledger['lower'], ledger['upper']]
+                != [row['run'], row['events_or_trials'], *row['bounds']]):
+            raise ValueError('Recovery changed the source run, exposure or bin')
+        run(['python3', str(TOOLS/'scripts/audit_shift_weighted_gen.py'), '--input', 'gen.root',
+             '--ledger', 'proposal_ledger.json', '--config', 'resolved_gen_cfg.py',
+             '--generator-profile', 'ordinary', '--output', 'replayed_audit.json'],
+            directory/'audit.log', cwd=directory, timeout=900)
     source, identities, weights, audit, config = inspect_source(row, directory, audit,
         directory/'resolved_gen_cfg.py', weighted)
     if identities != native['event_ids'] or weights != native['semantic_audit']['weights']:
         raise ValueError('Recovery changed the full original event census')
+    if not weighted and (len(identities)!=row['events_or_trials'] or any(w!=1. for w in weights)
+                         or any(eid[0]!=row['run'] for eid in identities)):
+        raise ValueError('Unweighted recovery lost its native count, run or unit weights')
     gen = next(row for row in publications if row['name'] == 'gen.root')
     source.update(url='root://eosuser.cern.ch/'+gen['path'],
         original_receipt=reference['url'].removeprefix('root://eosuser.cern.ch/'),
@@ -276,6 +278,16 @@ def main(request_path):
             source['original_receipt_sha256'] = sha('native_source_receipt.json')
             publish([(Path('native_source_receipt.json'), 'source.json')], raw_base)
         save('raw_source.json', source)
+        if request.get('generate_only') is True:
+            receipt=Path('native_source_receipt.json')
+            report.update(complete=True,generated_only=True,prepared_for_detector=False,
+                source=source,raw_events=len(identities),raw_publications=raw_publications,
+                raw_source_receipt_url='root://eosuser.cern.ch/'+source['original_receipt'],
+                raw_source_receipt_sha256=source['original_receipt_sha256'],
+                published_storage_bytes=sum(p['bytes'] for p in raw_publications)+receipt.stat().st_size,
+                finished_epoch=time.time())
+            save('source_report.json',report)
+            return
         if not identities:
             report.update(complete=True, empty_source=True, selected_events=0,
                           source=source, raw_publications=raw_publications)
@@ -355,6 +367,16 @@ def main(request_path):
             source_preparation_receipt_sha256=sha(preparation/'summary.json'))
     except BaseException as error:
         report.update(error=repr(error))
+        if Path('raw/gen.root').is_file() and not Path('native_source_receipt.json').exists() and not request.get('resume_raw'):
+            candidates=[(p,p.name) for p in Path('raw').iterdir()
+                        if p.is_file() and p.name in ('gen.root','resolved_gen_cfg.py','resolved_cfg.py',
+                            'proposal_ledger.json','validation.json','cmsRun.log')]
+            if sum(p.stat().st_size for p,name in candidates)<=request['source_publication_bound_bytes']:
+                try:
+                    report['failed_raw_publications']=publish(candidates,request['publication_directory']+'/failed_raw')
+                    report['failed_raw_is_admitted_exposure']=False
+                except BaseException as archive_error:
+                    report['failed_raw_preservation_error']=repr(archive_error)
         report['log_tails'] = {str(p):p.read_text(errors='replace')[-16000:]
             for p in Path('.').rglob('*.log') if 'runtime' not in p.parts}
         raise
