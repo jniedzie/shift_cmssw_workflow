@@ -853,3 +853,54 @@ class PreparationEnvironment(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class ReviewedBudgetHandoff(unittest.TestCase):
+    def fixture(self, root):
+        stage=root/'waves/w001/gen_stage';stage.mkdir(parents=True)
+        for name in ('gen_inventory.json','gen_publication.json'):
+            controller.new(stage/name,dict(complete=True))
+        descriptor=stage/'material_selected_source.json';controller.new(descriptor,dict(selected_indices=[1,2]))
+        replacement=root/'operations/w001';replacement.mkdir(parents=True)
+        description=replacement/'worker.sub';description.write_text('queue\n')
+        native=dict(ClusterId=123,ProcId=0,Iwd=str(stage),JobStatus=4,ExitCode=1,ExitBySignal=False)
+        proof=root/'authority.json'
+        controller.new(proof,dict(schema='shift-reviewed-gen-handoff-v1',wave_index=1,gen_cluster=123,
+            science_rerun=False,failure_kind='detector_stage_budget_upgrade_before_SIM',operational_cancel=True,
+            detector_submission_absent=True,terminal_native_ad=native,absolute_stage_timeouts=[43200,7200,14400,14400],
+            files={n:controller.sha(stage/n) for n in ('gen_inventory.json','gen_publication.json')},
+            preserved_material_descriptors={str(descriptor):controller.sha(descriptor)},
+            replacement_handoff_directory=str(replacement)))
+        authority=dict(path=str(proof),sha256=controller.sha(proof))
+        config=dict(directory=str(root),dependencies={str(proof):authority['sha256'],str(description):controller.sha(description)},
+            reviewed_gen_handoffs=[authority],handoff_operations=str(root/'operations'),absolute_stage_timeouts=[43200,7200,14400,14400])
+        state=dict(waves={'1':dict(gen_cluster=123,terminal=True,successful=False)},failures={'wave_1':{}})
+        return config,state,native,replacement,descriptor
+
+    def test_async_recovery_reuses_population_and_submits_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config,state,native,replacement,descriptor=self.fixture(root)
+            with patch.object(controller,'jobs',return_value=[]),patch.object(controller,'scheduler_arguments',return_value=[]), \
+                 patch.object(controller,'run_condor',return_value=json.dumps([native])), \
+                 patch.object(controller,'submission',return_value=dict(cluster=456)) as submit, \
+                 patch.object(controller,'run_logged') as synchronous:
+                controller.adopt_reviewed_gen_handoffs(config,root/'config.json',state)
+                controller.adopt_reviewed_gen_handoffs(config,root/'config.json',state)
+            submit.assert_called_once_with(config,replacement,replacement/'worker.sub')
+            synchronous.assert_not_called()
+            self.assertEqual(state['waves']['1']['replacement_handoff_cluster'],456)
+            self.assertNotIn('terminal',state['waves']['1'])
+            self.assertNotIn('wave_1',state['failures'])
+
+    def test_native_or_descriptor_change_cannot_authorize_recovery(self):
+        for changed in ('native','descriptor','submit','budgets'):
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);config,state,native,replacement,descriptor=self.fixture(root)
+                if changed=='native':native=dict(native,ExitCode=0)
+                elif changed=='descriptor':descriptor.write_text('{}')
+                elif changed=='submit':(replacement/'worker.sub').write_text('tampered')
+                else:config['absolute_stage_timeouts']=[1800,7200,14400,14400]
+                with patch.object(controller,'jobs',return_value=[]),patch.object(controller,'scheduler_arguments',return_value=[]), \
+                     patch.object(controller,'run_condor',return_value=json.dumps([native])),patch.object(controller,'submission') as submit:
+                    with self.assertRaises((RuntimeError,ValueError)):
+                        controller.adopt_reviewed_gen_handoffs(config,root/'config.json',state)
+                    submit.assert_not_called()

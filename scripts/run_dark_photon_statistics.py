@@ -694,6 +694,12 @@ def handoff(config, index):
                 '--detector-workers', str(config.get('detector_workers_per_wave', 100)), '--finalizers', '2', '--publication-profile', 'nano-metadata-v1',
                 '--publication-canary', config['publication_canary'], '--event-stall-timeout', '7200',
                 '--first-event-stall-timeout', '7200', '--detector-timeout', '43200']
+            budgets=config.get('absolute_stage_timeouts')
+            if budgets is not None:
+                if (not isinstance(budgets,list) or len(budgets)!=4
+                        or any(type(value) is not int or not 7200<=value<=43200 for value in budgets)):
+                    raise ValueError('Direct handoff requires four explicit qualified absolute stage budgets')
+                command.extend(['--absolute-stage-timeouts',*map(str,budgets)])
             # Qualification imports uproot; keep its known LCG interpreter here.
             command[0] = sys.executable
             run_logged(command, operations / 'prepare_production.log')
@@ -1289,22 +1295,51 @@ def adopt_reviewed_gen_handoffs(config, config_path, state):
             raise RuntimeError('Reviewed GEN source still has a live manager or child')
         history = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
             str(cluster) + '.0', '-limit', '1', '-json'], timeout=45))
-        if (len(history) != 1 or history[0].get('ExitCode') != 1
-                or history[0].get('ExitBySignal') is not False
-                or history[0].get('Iwd') != str(stage)):
-            raise RuntimeError('Reviewed GEN handoff lacks its exact terminal native failure')
-        recovery_log = Path(config['handoff_operations']) / f'reviewed_w{index:03d}.log'
-        recovery_log.parent.mkdir(parents=True, exist_ok=True)
-        run_logged(['/bin/bash', config['lcg_wrapper'], '--config', str(config_path),
-                    '--handoff-wave', str(index)], recovery_log)
+        budget_upgrade=proof.get('failure_kind')=='detector_stage_budget_upgrade_before_SIM'
+        replacement=None
+        if budget_upgrade:
+            native=proof['terminal_native_ad']
+            if (proof.get('detector_submission_absent') is not True
+                    or proof.get('operational_cancel') is not True
+                    or proof.get('absolute_stage_timeouts') != [43200,7200,14400,14400]
+                    or proof.get('absolute_stage_timeouts') != config.get('absolute_stage_timeouts')
+                    or len(history)!=1 or any(history[0].get(key)!=native.get(key)
+                        for key in ('ClusterId','ProcId','Iwd','JobStatus','ExitCode','ExitBySignal'))
+                    or native.get('ClusterId')!=cluster or native.get('ProcId')!=0
+                    or native.get('Iwd')!=str(stage) or native.get('JobStatus') not in (3,4)
+                    or (native.get('JobStatus')==4 and native.get('ExitCode') in (None,0))):
+                raise RuntimeError('Budget handoff rollover differs from its exact reviewed terminal source manager')
+            for name,digest in proof.get('preserved_material_descriptors',{}).items():
+                if (not Path(name).is_absolute() or not Path(name).is_relative_to(directory)
+                        or sha(name)!=digest):
+                    raise ValueError('Reviewed handoff changed an existing frozen material admission')
+            replacement=Path(proof['replacement_handoff_directory'])
+            if (not replacement.is_absolute() or replacement.name!=f'w{index:03d}'
+                    or not replacement.is_relative_to(Path(config['handoff_operations']))):
+                raise ValueError('Budget handoff replacement must use its pinned persistent operational directory')
+            description=replacement/'worker.sub'
+            if config['dependencies'].get(str(description))!=sha(description):
+                raise ValueError('Budget handoff submit description must be pinned')
+            receipt=submission(config,replacement,description)
+        else:
+            if (len(history) != 1 or history[0].get('ExitCode') != 1
+                    or history[0].get('ExitBySignal') is not False
+                    or history[0].get('Iwd') != str(stage)):
+                raise RuntimeError('Reviewed GEN handoff lacks its exact terminal native failure')
+            recovery_log = Path(config['handoff_operations']) / f'reviewed_w{index:03d}.log'
+            recovery_log.parent.mkdir(parents=True, exist_ok=True)
+            run_logged(['/bin/bash', config['lcg_wrapper'], '--config', str(config_path),
+                        '--handoff-wave', str(index)], recovery_log)
         previous = copy.deepcopy(entry)
         state.setdefault('reviewed_handoff_recoveries', []).append(dict(
             wave_index=index, previous=previous, authority=authority))
         for key in ('terminal', 'successful', 'exit_code', 'queue'):
             entry.pop(key, None)
         entry['reviewed_handoff_sha256'] = authority['sha256']
+        if replacement is not None:
+            entry.update(replacement_handoff_directory=str(replacement),replacement_handoff_cluster=receipt['cluster'])
         state.setdefault('failures', {}).pop('wave_' + str(index), None)
-        # This checkpoint records an actual completed handoff, including rates.
+        # Persist the new handoff owner before the next reconciliation poll.
         state.update(checked_utc=datetime.now(timezone.utc).isoformat(),
                      heartbeat=state.get('heartbeat', 0) + 1)
         save(Path(config['directory']) / 'state.json', state)
@@ -1379,10 +1414,12 @@ def step(config, config_path, state):
         index = int(index_text)
         directory = wave_directory(config, index)
         production = directory / 'production'
-        stage = production if (production / 'submission.json').is_file() else gen_stage_directory(config,index)
+        stage = production if (production / 'submission.json').is_file() else (
+            Path(entry['replacement_handoff_directory']) if entry.get('replacement_handoff_directory')
+            else gen_stage_directory(config,index))
         receipt = read(stage / 'submission.json')
         rows = jobs(config, 'ClusterId == ' + str(receipt['cluster']))
-        entry.update(stage='detector' if stage == production else 'GEN',
+        entry.update(stage='detector' if stage == production else 'handoff' if entry.get('replacement_handoff_directory') else 'GEN',
                      cluster=receipt['cluster'], queue=rows)
         if not rows:
             history = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
