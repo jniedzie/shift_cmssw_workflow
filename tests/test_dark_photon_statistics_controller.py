@@ -164,6 +164,50 @@ class SupplementAdmission(unittest.TestCase):
                              'waiting_for_complete_detector_canary_histogram_readbacks')
 
 
+class FreshMesonQualificationStorage(unittest.TestCase):
+    def test_seven_source_checks_release_no_histogram_reservation_credit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);meson=root/'meson';meson.mkdir()
+            batches=[dict(batch='gen_qualification_%02d'%index,point=mass+'_prompt',
+                gen_qualification_only=True) for index,mass in enumerate(
+                ('m0p22','m0p25','m0p3','m0p4','m0p5','m0p7','m0p9'))]
+            controller.new(meson/'config.json',dict(directory=str(meson),batches=batches))
+            controller.new(meson/'state.json',dict(batches={row['batch']:dict(published=dict(
+                batch=row['batch'],point=row['point'],complete=True,source_qualification_only=True)) for row in batches}))
+            controller.new(root/'worklist.json',dict(total_additional_events=60,waves=[]))
+            config=dict(directory=str(root),worklist=str(root/'worklist.json'),fresh_own_fixed_bytes=1000,
+                minimum_free_bytes=50000,fresh_meson_peer=dict(configuration=dict(path=str(meson/'config.json'),
+                sha256=controller.sha(meson/'config.json')),reservation_bytes=65000000,
+                forecast_bytes={row['batch']:10000 for row in batches}))
+            observation=dict(observed_utc='2026-10-23T19:42:00+00:00',free_bytes=100000000)
+            with patch.object(controller,'jobs',return_value=[]):
+                allowed,evidence=controller.fresh_storage_admission(config,observation)
+            self.assertTrue(allowed)
+            self.assertEqual(evidence['meson_closed_bytes'],0)
+            self.assertEqual(evidence['meson_future_bytes'],65000000)
+            self.assertEqual(evidence['required_free_bytes'],50000+1000+60*326000+65000000)
+            reservation=root/'regrouping.json'
+            controller.new(reservation,dict(schema='shift-dp-shared-aggregation-reservation-v1',complete=True,
+                science_directory=str(meson),science_config_sha256=controller.sha(meson/'config.json'),
+                additional_reserved_bytes=22000000,source_envelope_bytes=65000000,direct_DY_envelope_bytes=30000000,
+                combined_DP_reservation_bytes=117000000,registered_controller_directories=[str(root)]))
+            pin=dict(path=str(reservation),sha256=controller.sha(reservation))
+            config['fresh_shared_aggregation_reservation']=pin;config['dependencies']={pin['path']:pin['sha256']}
+            with patch.object(controller,'jobs',return_value=[]):
+                allowed,protected=controller.fresh_storage_admission(config,observation)
+            self.assertFalse(allowed)
+            self.assertEqual(protected['shared_aggregation_reserved_bytes'],22000000)
+            self.assertEqual(protected['required_free_bytes'],evidence['required_free_bytes']+22000000)
+            reservation.write_text('{}')
+            with patch.object(controller,'jobs',return_value=[]),self.assertRaises(ValueError):
+                controller.fresh_storage_admission(config,observation)
+            ordinary=dict(batch='regular',point='m0p3_prompt')
+            self.assertFalse(controller.meson_published_batch(meson,ordinary,dict(
+                batch='regular',source_qualification_only=True),0))
+            with self.assertRaises(KeyError):
+                controller.meson_published_batch(meson,ordinary,dict(batch='regular'),0)
+
+
 class SupplementReadbacks(unittest.TestCase):
     def test_required_cohort_qualifies_itself_after_last_point_finishes(self):
         with tempfile.TemporaryDirectory() as temporary:

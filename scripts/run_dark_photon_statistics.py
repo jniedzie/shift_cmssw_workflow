@@ -375,6 +375,8 @@ def meson_published_batch(directory, batch, published, observed):
     """Bind credit to this source and its verified final histogram receipt."""
     if not isinstance(published, dict) or published.get('batch') != batch['batch']:
         return False
+    if batch.get('gen_qualification_only') or published.get('source_qualification_only'):
+        return False  # GEN checks have no final histograms and release no storage credit.
     if datetime.fromisoformat(published['published_utc']).timestamp() > observed:
         return False
     directory = Path(directory)
@@ -1337,10 +1339,28 @@ def fresh_storage_admission(config, observation):
             meson_credit+=peer['forecast_bytes'][batch['batch']]
     own_remaining=config['fresh_own_fixed_bytes']+(own_total-own_credit)*326000
     meson_remaining=peer['reservation_bytes']-meson_credit
-    required=config['minimum_free_bytes']+own_remaining+meson_remaining
+    regrouping=0
+    authority=config.get('fresh_shared_aggregation_reservation')
+    if authority is not None:
+        reservation=pinned_json(authority)
+        regrouping=reservation.get('additional_reserved_bytes')
+        if (config['dependencies'].get(authority['path']) != authority['sha256']
+                or reservation.get('schema') != 'shift-dp-shared-aggregation-reservation-v1'
+                or reservation.get('complete') is not True
+                or reservation.get('science_directory') != str(root)
+                or reservation.get('science_config_sha256') != sha(root/'config.json')
+                or reservation.get('source_envelope_bytes') != peer['reservation_bytes']
+                or type(regrouping) is not int or regrouping <= 0
+                or reservation.get('direct_DY_envelope_bytes',0) < config['fresh_own_fixed_bytes']+own_total*326000
+                or reservation.get('combined_DP_reservation_bytes') !=
+                   reservation['source_envelope_bytes']+reservation['direct_DY_envelope_bytes']+regrouping
+                or config['directory'] not in reservation.get('registered_controller_directories',[])):
+            raise ValueError('Shared regrouping reservation differs from its registered production')
+    required=config['minimum_free_bytes']+own_remaining+meson_remaining+regrouping
     return observation['free_bytes']>=required,dict(reason='shared_storage_checked',
         required_free_bytes=required,free_bytes=observation['free_bytes'],
         own_future_bytes=own_remaining,meson_future_bytes=meson_remaining,
+        shared_aggregation_reserved_bytes=regrouping,
         own_completed_GEN_events=own_credit,meson_closed_bytes=meson_credit)
 
 
