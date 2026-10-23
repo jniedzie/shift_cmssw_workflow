@@ -904,3 +904,55 @@ class ReviewedBudgetHandoff(unittest.TestCase):
                     with self.assertRaises((RuntimeError,ValueError)):
                         controller.adopt_reviewed_gen_handoffs(config,root/'config.json',state)
                     submit.assert_not_called()
+
+class ReviewedDetectorStage(unittest.TestCase):
+    def fixture(self,root):
+        original=root/'waves/w001/production';original.mkdir(parents=True)
+        replacement=root/'operations/w001';replacement.mkdir(parents=True)
+        controller.new(original/'plan.json',dict(events=20))
+        controller.new(original/'stage_budget_policy.json',dict(stage_timeouts_seconds=[43200,7200,14400,14400]))
+        controller.new(original/'seal.json',dict(files={str(original/'plan.json'):controller.sha(original/'plan.json')}))
+        controller.new(original/'submission.json',dict(cluster=123))
+        (original/'detector.sub').write_text('executable = '+str(original/'detector_worker.sh')+'\narguments = identical seed slice seal\n')
+        (original/'pipeline.dag').write_text('JOB D '+str(original/'detector.sub')+'\n')
+        (replacement/'detector_worker.sh').write_text('#!/bin/bash\ntrue\n')
+        (replacement/'detector.sub').write_text((original/'detector.sub').read_text().replace(str(original/'detector_worker.sh'),str(replacement/'detector_worker.sh')))
+        (replacement/'pipeline.dag').write_text((original/'pipeline.dag').read_text().replace(str(original/'detector.sub'),str(replacement/'detector.sub')))
+        native=dict(ClusterId=123,ProcId=0,Iwd=str(original),JobStatus=4,ExitCode=1,ExitBySignal=False)
+        proof=dict(schema='shift-reviewed-detector-stage-replacement-v1',failure_kind='malformed_budget_preflight_shell_before_SIM',
+            wave_index=1,detector_cluster=123,terminal_native_ad=native,science_rerun=False,detector_payload_started=False,
+            original_directory=str(original),original_plan_sha256=controller.sha(original/'plan.json'),
+            original_seal_sha256=controller.sha(original/'seal.json'),original_budget_policy_sha256=controller.sha(original/'stage_budget_policy.json'),directory=str(replacement),
+            files={str(p):controller.sha(p) for p in [replacement/'pipeline.dag',replacement/'detector.sub',replacement/'detector_worker.sh']})
+        path=root/'review.json';controller.new(path,proof)
+        config=dict(directory=str(root),tools=str(root/'tools'),dependencies=dict(proof['files'],**{str(path):controller.sha(path)}),
+            reviewed_detector_stage_overrides={'1':dict(directory=str(replacement),review=dict(path=str(path),sha256=controller.sha(path)))})
+        state=dict(waves={'1':dict(gen_cluster=100,cluster=123,terminal=True,successful=False)},failures={'wave_1':{}})
+        return config,state,native,replacement,original
+
+    def test_only_new_operational_manager_is_adopted_once(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config,state,native,replacement,original=self.fixture(root)
+            with patch.object(controller,'jobs',return_value=[]),patch.object(controller,'scheduler_arguments',return_value=[]), \
+                 patch.object(controller,'run_condor',return_value=json.dumps([native])), \
+                 patch.object(controller,'submit_dag',return_value=dict(cluster=456)) as submit:
+                controller.adopt_reviewed_detector_stages(config,state)
+                controller.adopt_reviewed_detector_stages(config,state)
+            submit.assert_called_once_with(config,replacement,102)
+            self.assertEqual(state['waves']['1']['gen_cluster'],100)
+            self.assertEqual(state['waves']['1']['replacement_detector_cluster'],456)
+            self.assertNotIn('terminal',state['waves']['1'])
+
+    def test_changed_seed_scientific_seal_or_native_record_blocks_replacement(self):
+        for changed in ['arguments','seal','native','live']:
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);config,state,native,replacement,original=self.fixture(root)
+                if changed=='arguments':(replacement/'detector.sub').write_text('changed seed')
+                elif changed=='seal':(original/'plan.json').write_text('{}')
+                elif changed=='native':native=dict(native,ExitCode=0)
+                with patch.object(controller,'jobs',return_value=[dict(JobStatus=2)] if changed=='live' else []), \
+                     patch.object(controller,'scheduler_arguments',return_value=[]),patch.object(controller,'run_condor',return_value=json.dumps([native])), \
+                     patch.object(controller,'submit_dag') as submit:
+                    with self.assertRaises((RuntimeError,ValueError)):
+                        controller.adopt_reviewed_detector_stages(config,state)
+                    submit.assert_not_called()

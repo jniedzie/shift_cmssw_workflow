@@ -1345,6 +1345,69 @@ def adopt_reviewed_gen_handoffs(config, config_path, state):
         save(Path(config['directory']) / 'state.json', state)
 
 
+
+def adopt_reviewed_detector_stages(config, state):
+    """Replace only an audited pre-SIM shell failure; keep its scientific seal."""
+    for index_text, authority in config.get('reviewed_detector_stage_overrides', {}).items():
+        proof_path=authority['review']['path']
+        digest=authority['review']['sha256']
+        if config['dependencies'].get(proof_path)!=digest or sha(proof_path)!=digest:
+            raise ValueError('Reviewed detector replacement authority changed')
+        proof=read(proof_path);entry=state['waves'][index_text]
+        if entry.get('reviewed_detector_sha256')==digest:
+            continue
+        original=wave_directory(config,int(index_text))/'production'
+        replacement=Path(authority['directory'])
+        native=proof['terminal_native_ad'];cluster=proof['detector_cluster']
+        if (proof.get('schema')!='shift-reviewed-detector-stage-replacement-v1'
+                or proof.get('failure_kind')!='malformed_budget_preflight_shell_before_SIM'
+                or proof.get('science_rerun') is not False or proof.get('detector_payload_started') is not False
+                or proof.get('wave_index')!=int(index_text) or proof.get('directory')!=str(replacement)
+                or proof.get('original_directory')!=str(original)
+                or not replacement.is_absolute() or replacement.name!=f'w{int(index_text):03d}'
+                or not replacement.is_relative_to(Path(config['tools']).parent)
+                or read(original/'submission.json')['cluster']!=cluster
+                or sha(original/'plan.json')!=proof.get('original_plan_sha256')
+                or sha(original/'seal.json')!=proof.get('original_seal_sha256')):
+            raise ValueError('Detector replacement differs from its original sealed population')
+        required={str(replacement/name) for name in ('pipeline.dag','detector.sub','detector_worker.sh')}
+        if sha(original/'stage_budget_policy.json')!=proof.get('original_budget_policy_sha256'):
+            raise ValueError('Original absolute stage budget changed')
+        if not required.issubset(proof['files']):
+            raise ValueError('Detector replacement must pin its DAG, executable and existing budget policy')
+        for name,expected in read(original/'seal.json')['files'].items():
+            if sha(name)!=expected:
+                raise ValueError('Original scientific deployment changed before operational recovery')
+        for name,expected in proof['files'].items():
+            if config['dependencies'].get(name)!=expected or sha(name)!=expected:
+                raise ValueError('Reviewed operational detector file changed')
+        expected_dag=(original/'pipeline.dag').read_text().replace(str(original/'detector.sub'),str(replacement/'detector.sub'))
+        expected_submit=(original/'detector.sub').read_text().replace(
+            'executable = '+str(original/'detector_worker.sh'),'executable = '+str(replacement/'detector_worker.sh'))
+        if ((replacement/'pipeline.dag').read_text()!=expected_dag
+                or (replacement/'detector.sub').read_text()!=expected_submit):
+            raise ValueError('Detector replacement may change only the executable, preserving all node arguments')
+        if jobs(config,f'ClusterId == {cluster} || DAGManJobId == {cluster}'):
+            raise RuntimeError('Original malformed detector stage still has a live manager or child')
+        history=parse_ads(run_condor(['/usr/bin/condor_history',*scheduler_arguments(config),
+            str(cluster)+'.0','-limit','1','-json'],timeout=45))
+        fields=('ClusterId','ProcId','Iwd','JobStatus','ExitCode','ExitBySignal')
+        if (len(history)!=1 or any(history[0].get(k)!=native.get(k) for k in fields)
+                or native.get('ClusterId')!=cluster or native.get('ProcId')!=0
+                or native.get('Iwd')!=str(original) or native.get('JobStatus')!=4
+                or native.get('ExitCode')!=1 or native.get('ExitBySignal') is not False):
+            raise RuntimeError('Detector replacement lacks its exact terminal operational failure')
+        receipt=submit_dag(config,replacement,config.get('detector_workers_per_wave',100)+2)
+        state.setdefault('reviewed_detector_recoveries',[]).append(dict(previous=copy.deepcopy(entry),authority=authority))
+        for key in ('terminal','successful','exit_code','queue'):
+            entry.pop(key,None)
+        entry.update(reviewed_detector_sha256=digest,replacement_detector_directory=str(replacement),
+            replacement_detector_cluster=receipt['cluster'])
+        for key in ('wave_'+index_text,'held_wave_'+index_text):
+            state.setdefault('failures',{}).pop(key,None)
+        save(Path(config['directory'])/'state.json',state)
+
+
 def fresh_storage_admission(config, observation):
     """Protect all future DP exposure and credit only closed published batches."""
     allocation=read(config['worklist'])
@@ -1403,6 +1466,7 @@ def step(config, config_path, state):
     now = datetime.now(timezone.utc).isoformat()
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
     adopt_reviewed_gen_handoffs(config, config_path, state)
+    adopt_reviewed_detector_stages(config, state)
     observation = quota(config)
     state['quota'] = observation
     worklist = read(config['worklist'])
@@ -1414,23 +1478,24 @@ def step(config, config_path, state):
         index = int(index_text)
         directory = wave_directory(config, index)
         production = directory / 'production'
-        stage = production if (production / 'submission.json').is_file() else (
+        detector_stage=Path(entry.get('replacement_detector_directory',str(production)))
+        stage = detector_stage if (detector_stage / 'submission.json').is_file() else (
             Path(entry['replacement_handoff_directory']) if entry.get('replacement_handoff_directory')
             else gen_stage_directory(config,index))
         receipt = read(stage / 'submission.json')
         rows = jobs(config, 'ClusterId == ' + str(receipt['cluster']))
-        entry.update(stage='detector' if stage == production else 'handoff' if entry.get('replacement_handoff_directory') else 'GEN',
+        entry.update(stage='detector' if stage == detector_stage else 'handoff' if entry.get('replacement_handoff_directory') else 'GEN',
                      cluster=receipt['cluster'], queue=rows)
         if not rows:
             history = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
                 str(receipt['cluster']) + '.0', '-limit', '1', '-json'], timeout=45))
             if len(history) != 1:
                 raise RuntimeError('Missing manager in both queue and history')
-            if stage != production and (directory / 'handoff_complete.json').is_file():
+            if stage != detector_stage and (directory / 'handoff_complete.json').is_file():
                 active += 1
                 continue  # Next pass switches to the submitted detector manager.
             entry.update(terminal=True, exit_code=history[0].get('ExitCode'),
-                         successful=history[0].get('ExitCode') == 0 and stage == production)
+                         successful=history[0].get('ExitCode') == 0 and stage == detector_stage)
             if not entry['successful']:
                 state.setdefault('failures', {})['wave_' + index_text] = copy.deepcopy(entry)
         else:
