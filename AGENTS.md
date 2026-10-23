@@ -152,6 +152,9 @@ the change.
   Check the eligibility logic against actual report field types. Preserve
   failures and keep independent points progressing without silently dropping
   failed or zero-selected cohorts from their full GEN normalization.
+  GEN-only qualification receipts are not published signal points. Missing
+  signal forecasts must stay unknown; status reporting must not invent zero
+  predictions or require fields absent from a valid frozen worklist.
 - Test the frozen controller's real preparation and submission subprocesses
   under its deployed environment. LCG exports `PYTHONHOME` and library paths:
   invoking `/usr/bin/python3` with those settings can fail before the script
