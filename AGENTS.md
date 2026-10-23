@@ -12,6 +12,22 @@ or use Git worktrees unless the user explicitly overrides this policy.
 
 ## Temporary scripts and cleanup
 
+- For the next new SM/BSM production, use `scripts/shift_production_selection.py`
+  and the default material mode of `prepare_shift_detector_sample.py` on the
+  full placed/completed GEN census. Freeze admission before SIM; do not couple
+  it to the evolving reconstruction templates or apply W/p twice. Keep unknown
+  material/model paths at p=1 and a positive random control for other events;
+  use total momentum, not muon pT. The old pilot JSON is not the shared default.
+- The BSM detector entry now expects a compact prepared selected descriptor,
+  `material_selected_source.json` beside GEN (or `--material-source`). Produce
+  that once from the shared sampler, not by rescanning full feature evidence
+  in every worker. Plan chunks over selected offsets. Older BSM full-GEN/unit-
+  weight grouping and publication assumptions must be requalified for W/p
+  before using thinned inputs. New model runtimes must freeze both shared
+  selection helpers and the coherent material-transport build; preserve their
+  model-specific physics lists and the fixed Run-3 settings. Bounded legacy
+  controls require an explicit override. No full production is authorized yet.
+
 - Stay focused on the agreed milestone. Ask before a side investigation or
   new workstream would materially delay it or expand its scope; explain the
   evidence and expected time or compute cost. Necessary small checks within

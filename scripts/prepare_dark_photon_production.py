@@ -13,6 +13,7 @@ import shutil
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
 from prepare_dark_photon_grid import validate_physical_preflight
+from shift_production_selection import guard_legacy_bsm_publication
 from dark_photon_production_support import (
     PROFILES, validate_complete_groups, validate_publication_canary,
 )
@@ -400,6 +401,7 @@ def prepare(args):
         raise ValueError('New detector RNG job namespace overlaps its qualified predecessor')
     inventory, publication = read(args.gen_inventory), read(args.gen_publication)
     independence = check_gen(plan, inventory, publication, args.prior_inventories)
+    guard_legacy_bsm_publication(plan, inventory)
     for row in plan['points']:
         validate_complete_groups(dict(row, group_events=plan['group_events']),
                                  inventory['points'][row['point']]['event_ids'])

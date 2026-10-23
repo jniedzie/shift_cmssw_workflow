@@ -23,9 +23,14 @@ from shift_material_path_score import score_paths
 
 def hadron(pdg):
     value = abs(int(pdg))
-    # Diquarks use q1 q2 0 spin codes; they are not transported hadrons.
-    return (100 < value < 1000000000
-            and not (1000 <= value < 10000 and (value//10) % 10 == 0))
+    # Be conservative about model-specific codes. A large PDG number alone
+    # does not make a BSM state a hadron. Unclassified ancestors stay unknown
+    # and get full reconstruction support, rather than invented absorption.
+    if value in (130, 310):
+        return True
+    return (100 < value < 1000000 and 1 <= (value//10) % 10 <= 6
+            and 1 <= (value//100) % 10 <= 6 and (value//1000) % 10 <= 6
+            and value % 10 != 0)
 
 
 def kinematics(momentum):
@@ -126,10 +131,18 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
         if any(number not in particles for number in row['parents']):
             raise ValueError('Missing immediate HepMC parent')
     muons, parent_flights, needed_ancestors = [], {}, set()
+    unknown_ancestors = set()
     for row in rows:
         if abs(row['pdg']) != 13 or row['status'] != 1:
             continue
         parents = ancestry(row['barcode'], particles)
+        # Explicit elementary SM ancestors and the supported neutral A-prime
+        # are not assigned nuclear interaction lengths. Other new model IDs
+        # need their own transport qualification; until then retain controls.
+        known_elementary = set(range(1, 7)) | set(range(11, 17)) | {21, 22, 23, 24, 25, 32}
+        unknown_ancestors.update(number for number in parents
+            if particles[number]['status'] != 4 and not hadron(particles[number]['pdg'])
+            and abs(particles[number]['pdg']) not in known_elementary)
         needed_ancestors.update(parents)
         flight_numbers = [number for number in parents if hadron(particles[number]['pdg'])
                           and particles[number]['status'] != 4]
@@ -190,6 +203,7 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
                              status=particles[number]['status'],
                              immediate_parent_barcodes=particles[number]['parents'])
                         for number in sorted(needed_ancestors)],
+        unknown_transport_ancestor_barcodes=sorted(unknown_ancestors),
         parent_flights=[parent_flights[number] for number in sorted(parent_flights)])
 
 

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Freeze a weighted detector sample from an immutable GEN replay inventory.
+# Code style: human-code.
+"""Freeze material-guided detector sampling from a complete GEN inventory.
 
-Selection uses GEN weights alone.  Independent Bernoulli probabilities are
-min(1, c * abs(native_weight)), with c fixed before the single sampling draw.
-Native GEN and its trial denominators stay unchanged; selected observables use
-native_weight / inclusion_probability.  This tool does not submit jobs.
+The default uses placed/completed GEN, total momentum, pointing and material.
+An explicit legacy mode retains the old GEN-weight-only draw. Native GEN and
+its trial denominators stay unchanged; use native_weight / inclusion_probability.
+This tool does not submit jobs.
 """
 import argparse
 from array import array
@@ -17,6 +18,7 @@ from pathlib import Path
 import shutil
 
 import shift_storage_paths
+from shift_production_selection import bind_sources, prepare_default_selection
 
 
 HASH_SPACE = 1 << 256
@@ -118,10 +120,24 @@ def _normalization_authorities(manifest):
 def prepare(input_campaign, output, eos_output, target_events, events_per_job, seed,
             include_strata=None, target_events_by_stratum=None,
             process_bin_campaign=None, eos_data_root=None,
-            complete_muon_decays=False, resolve_input_paths=False):
+            complete_muon_decays=False, resolve_input_paths=False,
+            material_selection_inputs=None, legacy_weight_only=False):
     input_campaign, output = Path(input_campaign).resolve(), Path(output).resolve()
     if output.exists():
         raise ValueError('Refusing an existing output campaign')
+    if legacy_weight_only and material_selection_inputs is not None:
+        raise ValueError('Legacy selection cannot also request material admission')
+    material_ledger = None
+    if not legacy_weight_only:
+        selection_path = Path(material_selection_inputs or input_campaign / 'material_selection_inputs.json')
+        if not selection_path.is_file():
+            raise ValueError('New production defaults to material admission: prepare material_selection_inputs.json '
+                             'from placed/completed GEN, or explicitly use legacy_weight_only for a legacy replay')
+        if complete_muon_decays:
+            raise ValueError('Complete and place GEN before material admission; do not redraw selected decays')
+        material_input_bytes = selection_path.read_bytes()
+        material_ledger = prepare_default_selection(json.loads(material_input_bytes))
+        seed = material_ledger['policy']['selection_seed']
     if not seed or not eos_output.startswith('/eos/') or '\n' in eos_output:
         raise ValueError('An explicit sampling seed and absolute EOS output are required')
     if type(events_per_job) is not int or events_per_job < 1:
@@ -193,6 +209,17 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
             normalization_record=descriptor.get('normalization_record')))
     if set(grouped) != included:
         raise ValueError('Full inventory does not cover every declared bin')
+    if material_ledger is not None:
+        if ({row['feature_source_sha256'] for row in material_ledger['events']}
+                != {item['descriptor']['gen_sha256'] for item in cache}):
+            raise ValueError('Material cohort must cover exactly the included GEN sources')
+        material_events = defaultdict(dict)
+        for row in material_ledger['events']:
+            material_events[row['feature_source_sha256']][tuple(row['event_id'])] = row
+        bound_sources = bind_sources([item['descriptor'] for item in cache], material_ledger)
+        for item, bound in zip(cache, bound_sources):
+            item['material_descriptor'] = bound
+            item['material_events'] = material_events[item['descriptor']['gen_sha256']]
 
     statistics = {}
     chosen_ids = set()
@@ -202,7 +229,14 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         if len(weights) != manifest['strata'][stratum]:
             raise ValueError('Full-inventory event count differs for ' + stratum)
         requested_target = target_events_by_stratum.get(stratum, target_events)
-        scale, expected_target = fit_scale(weights, requested_target)
+        if material_ledger is None:
+            scale, expected_target = fit_scale(weights, requested_target)
+        else:
+            # The draw is already fixed for the complete cohort. Job size and
+            # requested throughput must never retune it after seeing outcomes.
+            scale = None
+            expected_target = math.fsum(row['sampling_probability']
+                for item in items for row in item['material_events'].values())
         sumw, sumw2 = math.fsum(weights), math.fsum(w * w for w in weights)
         expected_terms, expected_w2 = [], []
         selected_native, corrected, selected_variance = [], [], []
@@ -212,8 +246,13 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
             selected, probabilities = [], []
             chunk_expected, chunk_expected_w2 = [], []
             for raw_index, (identity, weight) in enumerate(zip(descriptor['event_ids'], item['weights'])):
-                threshold, probability = inclusion_probability(weight, scale)
-                if weight == 0:
+                material_row = (item['material_events'][tuple(identity)]
+                                if material_ledger is not None else None)
+                if material_row is None:
+                    threshold, probability = inclusion_probability(weight, scale)
+                else:
+                    probability = material_row['sampling_probability']
+                if weight == 0 and material_row is None:
                     zero += 1
                     continue
                 if len(identity) != 3 or any(type(value) is not int or value < 0 for value in identity):
@@ -222,7 +261,9 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
                 saturated += probability == 1
                 chunk_expected.append(probability)
                 chunk_expected_w2.append(weight * weight / probability)
-                if not select_event(seed, stratum, descriptor['gen_sha256'], identity, raw_index, threshold):
+                admitted = (material_row['admitted'] if material_row is not None else
+                            select_event(seed, stratum, descriptor['gen_sha256'], identity, raw_index, threshold))
+                if not admitted:
                     continue
                 key = tuple(identity)
                 if key in chosen_ids:
@@ -266,11 +307,13 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
     jobs = partition_jobs(selected_sources, events_per_job)
     canaries = []
     for stratum in statistics:
-        candidates = [row for row in selected_sources if row['stratum'] == stratum and row['events'] >= 3]
+        minimum = 3 if material_ledger is None else 1
+        candidates = [row for row in selected_sources if row['stratum'] == stratum and row['events'] >= minimum]
         if not candidates:
             raise ValueError('No source supports a two-event check after its first selected event in ' + stratum)
         candidate = max(candidates, key=lambda row: row['events'])
-        canaries.append(dict(source=candidate['index'], skip=1, count=2,
+        canaries.append(dict(source=candidate['index'], skip=1 if material_ledger is None else 0,
+                             count=2 if material_ledger is None else min(2, candidate['events']),
                              job=800000 + candidate['index'], stratum=stratum))
     templates = {}
     for stage in range(1, 5):
@@ -296,6 +339,13 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         zero_weight_policy='Omit exact zero native weights: their contribution to every weighted observable is zero.',
         uncertainty='Bernoulli thinning: sum_selected((W/p)^2*f^2*(1-p)); report realized ESS.',
         prospective_ess_is_planning_proxy=True, physics_valid=False, normalization_ready=False)
+    if material_ledger is not None:
+        plan.update(algorithm='shared-direction-momentum-material-bernoulli-v1',
+            probability='Frozen shared material admission; no pT cut; unknown paths retained with p=1',
+            hash_support_bits=53, material_policy=material_ledger['policy'],
+            material_ledger_sha256=cache[0]['material_descriptor']['production_selection']['ledger_sha256'],
+            target_expected_events_per_bin=None, target_expected_events_by_stratum=None,
+            zero_weight_policy='Keep the frozen material draw, including zero native weights.')
     new_manifest = dict(manifest)
     if 'approval_basis' in new_manifest:
         new_manifest['parent_approval_basis'] = new_manifest.pop('approval_basis')
@@ -322,6 +372,11 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
             correction='Complete every enabled positive-BR Pythia decay chain reaching muons; retain natural branching ratios.')
 
     output.mkdir(parents=True)
+    if material_ledger is not None:
+        (output / 'material_selection_inputs.json').write_bytes(material_input_bytes)
+        with gzip.open(output / 'material_selection.json.gz', 'wt') as evidence:
+            json.dump(material_ledger, evidence, allow_nan=False)
+        new_manifest['production_selection'] = dict(cache[0]['material_descriptor']['production_selection'])
     (output / 'sources').mkdir()
     (output / 'templates').mkdir()
     for stage, path in templates.items():
@@ -348,7 +403,7 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
     for item in cache:
         if not item['selected_indices']:
             continue
-        descriptor = dict(item['descriptor'])
+        descriptor = dict(item.get('material_descriptor', item['descriptor']))
         stratum = descriptor['stratum']
         if resolve_input_paths:
             descriptor['logical_gen'] = descriptor['gen']
@@ -375,11 +430,15 @@ def prepare(input_campaign, output, eos_output, target_events, events_per_job, s
         for row in selected_sources:
             descriptor = json.loads((output / 'sources' / f'source{row["index"]:05d}.json').read_text())
             row['gen'] = descriptor['gen']
-    (output / 'manifest.json').write_text(json.dumps(new_manifest, indent=2, allow_nan=False) + '\n')
     (output / 'jobs.txt').write_text(''.join(f'{index:05d} {offset} {count} {job}\n' for index, offset, count, job in jobs))
     (output / 'canaries.json').write_text(json.dumps(canaries, indent=2) + '\n')
+    if material_ledger is not None:
+        new_manifest['preparation_basis'] = (
+            'Shared frozen material admission on the complete placed/completed GEN cohort; full parent '
+            'normalization unchanged. Preparation is not production authorization or physics qualification.')
+    (output / 'manifest.json').write_text(json.dumps(new_manifest, indent=2, allow_nan=False) + '\n')
     (output / 'README.txt').write_text(
-        'Weighted representative detector sample. The single GEN-weight-only draw is frozen in sampling_plan.json.\n'
+        'Representative detector sample. The frozen selection is recorded in sampling_plan.json.\n'
         'Parent GEN, event IDs, native weights, physics configuration and normalization denominators are preserved.\n'
         'Job skip/count address selected_indices, not raw GEN entries. Use native_weight / sampling_probability in analysis.\n'
         'The full selected-event ledger is sampling_events.jsonl.gz. No adaptive top-ups are permitted by this plan.\n'
@@ -398,11 +457,15 @@ def main():
     parser.add_argument('--include-strata',
                         help='Comma-separated exact strata to include; defaults to every parent stratum')
     parser.add_argument('--events-per-job', type=int, default=10)
-    parser.add_argument('--seed', required=True)
+    parser.add_argument('--seed', help='Required for legacy selection; material admission uses its frozen input seed')
     parser.add_argument('--process-bin-campaign',
                         help='Dated campaign name for the current process-bin storage contract')
     parser.add_argument('--eos-data-root', default='/eos/user/j/jniedzie/shift_cmssw')
     parser.add_argument('--complete-muon-decays', action='store_true')
+    parser.add_argument('--material-selection-inputs', type=Path,
+                        help='Full placed/completed GEN features and original exposure; defaults to the parent directory')
+    parser.add_argument('--legacy-weight-only', action='store_true',
+                        help='Explicit old-campaign replay; bypass the new default material admission')
     parser.add_argument('--resolve-input-paths', action='store_true',
                         help='Freeze current resolved GEN and receipt locations while preserving logical paths')
     args = parser.parse_args()
@@ -414,7 +477,9 @@ def main():
                    process_bin_campaign=args.process_bin_campaign,
                    eos_data_root=args.eos_data_root,
                    complete_muon_decays=args.complete_muon_decays,
-                   resolve_input_paths=args.resolve_input_paths)
+                   resolve_input_paths=args.resolve_input_paths,
+                   material_selection_inputs=args.material_selection_inputs,
+                   legacy_weight_only=args.legacy_weight_only)
     print(json.dumps({k: plan[k] for k in ('schema', 'expected_events', 'selected_events', 'planned_jobs', 'seed')}))
 
 

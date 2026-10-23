@@ -56,10 +56,11 @@ class HandoffTests(unittest.TestCase):
                 self.assertEqual(canonical.read_bytes(), b'preserve')
 
     def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
-        for mechanism, mass, name, transport in ((None, 15., 'dy', False),
-                ('eta-etaprime-radiative', .3, 'eta_etaprime', False),
-                ('meson-radiative', .3, 'meson_radiative', False),
-                ('meson-radiative', .3, 'meson_radiative', True)):
+        for mechanism, mass, name, transport, smart in ((None, 15., 'dy', False, False),
+                ('eta-etaprime-radiative', .3, 'eta_etaprime', False, False),
+                ('meson-radiative', .3, 'meson_radiative', False, False),
+                ('meson-radiative', .3, 'meson_radiative', True, False),
+                ('meson-radiative', .3, 'meson_radiative', True, True)):
             with self.subTest(mechanism=mechanism), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); gen = root/'gen'; gen.mkdir()
                 (gen/'gen.root').write_bytes(b'synthetic GEN payload')
@@ -71,6 +72,20 @@ class HandoffTests(unittest.TestCase):
                 identities = [[123, 1, event] for event in range(1, 6)]
                 (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
                     event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))
+                if smart:
+                    from test_shift_material_preselection import event, inputs
+                    from shift_production_selection import prepare_default_selection, bind_source
+                    rows = [event(identity[-1]) for identity in identities]
+                    for row, identity in zip(rows, identities):
+                        row.update(event_id=identity, source_file_sha256=worker.sha(gen/'gen.root'),
+                                   unknown_transport_ancestor_barcodes=[99])
+                    census, authority = inputs(rows)
+                    authority['sources'][0]['feature_source_sha256s'] = [worker.sha(gen/'gen.root')]
+                    ledger = prepare_default_selection(dict(schema='shift-production-material-inputs-v1',
+                        cohort_id='bsm-control', selection_seed='bsm-control-seed', features=census, authority=authority))
+                    selected = bind_source(dict(gen_sha256=worker.sha(gen/'gen.root'),
+                                               event_ids=identities, weights=[1.] * 5), ledger)
+                    (gen/'material_selected_source.json').write_text(json.dumps(selected))
                 templates = root/'templates'; templates.mkdir()
                 for stage in range(1, 5):
                     (templates/f'step{stage}.py').write_text('# synthetic template\n')
@@ -90,6 +105,8 @@ class HandoffTests(unittest.TestCase):
                 arguments = ['detector', str(gen), '--templates', str(templates), '--output', str(output),
                              '--count', '5', '--event-stall-timeout', '1800', '--first-event-stall-timeout', '3600',
                              '--audit-timeout', '900']
+                if not smart:
+                    arguments.append('--legacy-replay')
                 if transport:
                     arguments.append('--transport-predefined-signal-decays')
                 with patch.object(sys, 'argv', arguments), patch.dict(os.environ, {'CMSSW_BASE': directory}), \
@@ -100,6 +117,11 @@ class HandoffTests(unittest.TestCase):
                 self.assertTrue(descriptor['gen_path_resolved'])
                 self.assertEqual(descriptor['event_ids'], identities)
                 self.assertEqual(descriptor['stratum'], 'darkphoton_'+name+'_m'+str(mass))
+                if smart:
+                    self.assertEqual(descriptor['selected_indices'], list(range(5)))
+                    self.assertEqual(descriptor['sampling_probabilities'], [1.] * 5)
+                    self.assertTrue((output/'shift_production_selection.py').is_file())
+                    self.assertTrue((output/'shift_material_preselection.py').is_file())
                 if transport:
                     self.assertEqual(descriptor['predefined_signal_decays']['proper_ctau_mm'], 58.55432679904731)
                     self.assertEqual(descriptor['predefined_signal_decays']['mass_gev'], mass)

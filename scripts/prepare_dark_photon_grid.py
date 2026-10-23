@@ -24,6 +24,7 @@ import sys
 from dark_photon_generation import check_width_table, contract, production_settings
 from dark_photon_model import validate_native_proposal_support, validate_native_widths
 from dark_photon_sample_names import set_lab_point_name
+from shift_production_selection import DEPENDENCIES as MATERIAL_SELECTION_SOURCES
 
 
 REFERENCE_SCHEMA = 'shift-dark-photon-grid-reference-v1'
@@ -32,7 +33,7 @@ SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'dark_photon
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
            'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
-           'dark_photon_detector_runtime.py')
+           'dark_photon_detector_runtime.py') + MATERIAL_SELECTION_SOURCES
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
     'Compare measured <beta gamma> and lab-flight distributions with the reference estimate; do not condition on detector acceptance.',
@@ -539,6 +540,10 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
         row['detector_argv'] = [python, str(frozen / 'run_dark_photon_detector.py'), str(gen),
                                 '--count', str(row['detector_count']), '--job', str(row['detector_job']),
                                 '--templates', str(frozen_templates), '--output', str(detector)]
+        if not result.get('detector_stage_prepared'):
+            # The 1..20-event model/transport reference deliberately keeps all
+            # originals. New full detector stages use material admission.
+            row['detector_argv'].append('--legacy-replay')
         row['gen_command'] = shlex.join(row['gen_argv'])
         row['detector_command'] = shlex.join(row['detector_argv'])
         row['launch_order'] = 'GEN and full-GEN audit first; detector canary only after completed GEN validation'

@@ -279,7 +279,8 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
             'missing muon production vertex', 'muon born inside unmodelled central CMS region')
         if muon['straight_line_towards_CMS_entry'] or unknown_direction:
             candidates.append(muon)
-    best, best_pair, unknown_pair, best_incomplete = 0., None, False, False
+    best, best_pair, unknown_pair, best_incomplete = (
+        0., None, bool(event.get('unknown_transport_ancestor_barcodes')), False)
     best_pointing, best_column = None, None
     for left, right in itertools.combinations(candidates, 2):
         if require_opposite_sign:
@@ -346,8 +347,12 @@ def admission_probability(ranking, weight, mean_abs_weight, policy):
     return grid_probability(value)
 
 
-def prepare_selection(features, authority, policy):
+def prepare_selection(features, authority, policy=None):
     """Bind an exact GEN census to source exposure and a single decay draw."""
+    if policy is None:
+        from shift_production_selection import default_policy
+        cohort = checksum(authority)
+        policy = default_policy('source-' + cohort, 'material-draw-' + cohort)
     validate_policy(policy)
     if features['schema'] != 'shift-gen-material-features-v1':
         raise ValueError('Unsupported GEN material features')
@@ -486,10 +491,13 @@ def read_json(path):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('features', 'authority', 'policy', 'output'):
+    for name in ('features', 'authority', 'output'):
         parser.add_argument('--'+name, type=Path, required=True)
+    parser.add_argument('--policy', type=Path,
+                        help='Study override; otherwise use the shared production default')
     args = parser.parse_args()
-    result = prepare_selection(read_json(args.features), read_json(args.authority), read_json(args.policy))
+    result = prepare_selection(read_json(args.features), read_json(args.authority),
+                               read_json(args.policy) if args.policy else None)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     opener = gzip.open if args.output.suffix == '.gz' else open
     with opener(args.output, 'xt') as target:

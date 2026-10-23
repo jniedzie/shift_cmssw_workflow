@@ -101,7 +101,7 @@ class DetectorSampleTest(unittest.TestCase):
                 approval_basis='Synthetic parent authorization evidence')
             manifest_path=parent/'manifest.json';manifest_path.write_text(json.dumps(manifest))
             originals={p: p.read_bytes() for p in parent.rglob('*') if p.is_file()}
-            out=root/'sample'; plan=sample.prepare(parent,out,'/eos/synthetic/sample',10,3,'fixed')
+            out=root/'sample'; plan=sample.prepare(parent,out,'/eos/synthetic/sample',10,3,'fixed', legacy_weight_only=True)
             self.assertEqual(plan['expected_events'],20)
             self.assertEqual(plan['parent_manifest_sha256'], hashlib.sha256(originals[manifest_path]).hexdigest())
             child_manifest=json.loads((out/'manifest.json').read_text())
@@ -120,9 +120,9 @@ class DetectorSampleTest(unittest.TestCase):
                     self.assertEqual(produced.get(key),original.get(key))
                 self.assertEqual(produced['selected_indices'],sorted(set(produced['selected_indices'])))
             for path, original in originals.items():self.assertEqual(path.read_bytes(),original)
-            repeat=root/'repeat'; sample.prepare(parent,repeat,'/eos/synthetic/sample',10,3,'fixed')
+            repeat=root/'repeat'; sample.prepare(parent,repeat,'/eos/synthetic/sample',10,3,'fixed', legacy_weight_only=True)
             self.assertEqual((out/'sampling_events.jsonl.gz').read_bytes(),(repeat/'sampling_events.jsonl.gz').read_bytes())
-            with self.assertRaises(ValueError):sample.prepare(parent,out,'/eos/synthetic/sample',10,3,'fixed')
+            with self.assertRaises(ValueError):sample.prepare(parent,out,'/eos/synthetic/sample',10,3,'fixed', legacy_weight_only=True)
 
     def test_qcd_subset_uses_process_bin_storage_and_complete_decays(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -158,7 +158,7 @@ class DetectorSampleTest(unittest.TestCase):
                     include_strata={'qcd_0to1'}, target_events_by_stratum={'qcd_0to1': 9},
                     process_bin_campaign='20261012-qcd-tail-v1',
                     eos_data_root='/eos/user/j/test/shift_cmssw', complete_muon_decays=True,
-                    resolve_input_paths=True)
+                    resolve_input_paths=True, legacy_weight_only=True)
             storage.assert_called_once_with('/eos/user/j/test/shift_cmssw', 'qcd', '0to1',
                                             '20261012-qcd-tail-v1')
             manifest = json.loads((output / 'manifest.json').read_text())

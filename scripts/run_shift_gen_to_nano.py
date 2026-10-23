@@ -263,7 +263,7 @@ def configure_signal_transport(process, contract):
     process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftDarkPhotonHepMC_*_SHIFTSIM')
 
 
-def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None, complete_muon_decays=False, predefined_signal_decays=None):
+def build_config(template, stage, input_file, output_file, skip, count, seed, timing_persisted=True, missing_filter_lumi=False, event_ids=None, complete_muon_decays=False, predefined_signal_decays=None, production_selection=None):
     import FWCore.ParameterSet.Config as cms
     process = runpy.run_path(str(template))['process']
     process.source = cms.Source('PoolSource', fileNames=cms.untracked.vstring('file:' + str(input_file)),
@@ -284,6 +284,11 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
                 value.initialSeed = seed + offset
     if stage == 1:
         process.setName_('SHIFTSIM')
+        if production_selection is not None:
+            if not timing_persisted or complete_muon_decays:
+                raise ValueError('Material selection needs already placed, completed and timed GEN')
+            process.generatorSmeared = cms.EDProducer('ShiftHepMC2CopyProducer',
+                src=cms.InputTag('shiftEventTime', '', '@skipCurrentProcess'))
         sequence = process.generatorSmeared + process.psim
         if not timing_persisted:
             process.shiftEventTime.src = cms.InputTag('generatorSmeared', '', '@skipCurrentProcess')
@@ -296,8 +301,9 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
             if hasattr(process, name):
                 delattr(process, name)
         if timing_persisted:
-            delattr(process, 'shiftEventTime')
-            delattr(process, 'genParticles')
+            for name in ('shiftEventTime', 'genParticles'):
+                if hasattr(process, name):
+                    delattr(process, name)
         if complete_muon_decays:
             from shift_muon_decay_replay import configure_decays
             configure_decays(process, seed, timing_persisted)
@@ -305,6 +311,9 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
             if complete_muon_decays:
                 raise ValueError('Natural completion and predefined signal replay need a separately qualified composition')
             configure_signal_transport(process, predefined_signal_decays)
+        if production_selection is not None:
+            from shift_production_selection import configure_transport
+            configure_transport(process, production_selection)
         process.FEVTDEBUGoutput.SelectEvents = cms.untracked.PSet(SelectEvents=cms.vstring('simulation_step'))
         process.FEVTDEBUGoutput.outputCommands.extend(['drop *_g4SimHits_*_*', 'keep *_g4SimHits_*_SHIFTSIM'])
     outputs = process.outputModules_()
@@ -517,6 +526,9 @@ def main():
     descriptor = json.loads(args.source.read_text())
     predefined_signal_decays = signal_transport_contract(descriptor.get('predefined_signal_decays'))
     complete_muon_decays = descriptor.get('complete_muon_decays', False)
+    production_selection = descriptor.get('production_selection')
+    if production_selection is not None and (complete_muon_decays or descriptor.get('selected_indices') is None):
+        raise ValueError('Material admission requires a frozen selection of already completed GEN')
     population_indices = descriptor.get('selected_indices')
     population_size = len(population_indices) if population_indices is not None else len(descriptor['event_ids'])
     if 'weights' in descriptor and len(descriptor['weights']) != len(descriptor['event_ids']):
@@ -564,6 +576,8 @@ def main():
               'recipe': 'Frozen archived Steps 1-4; persisted GEN replay; resolved configuration hashes recorded per stage'}
     if predefined_signal_decays is not None:
         report['predefined_signal_decays'] = predefined_signal_decays
+    if production_selection is not None:
+        report['production_selection'] = production_selection
     if probabilities is not None:
         report.update(source_indices=indices, sampling_probabilities=probabilities,
                       sampling_plan_sha256=descriptor['sampling']['plan_sha256'],
@@ -615,14 +629,18 @@ def main():
                      str(args.skip if stage == 1 else 0), str(args.count), str(report['seed'] + stage * 10),
                      str(int(report['timing_persisted_in_gen'])), str(int(descriptor.get(
                          'missing_filter_lumi', descriptor['stratum'].startswith('dy_')))), str(cfg)]
-                if probabilities is not None or complete_muon_decays or predefined_signal_decays is not None:
+                if probabilities is not None or complete_muon_decays or predefined_signal_decays is not None or production_selection is not None:
                     config_arguments.append(str(selection) if stage == 1 and probabilities is not None else '-')
                     config_arguments.append(str(int(complete_muon_decays)))
-                if predefined_signal_decays is not None:
+                if predefined_signal_decays is not None or production_selection is not None:
                     transport_path = work / 'predefined_signal_decays.json'
-                    if not transport_path.exists():
+                    if predefined_signal_decays is not None and not transport_path.exists():
                         transport_path.write_text(json.dumps(predefined_signal_decays, indent=2) + '\n')
-                    config_arguments.append(str(transport_path))
+                    config_arguments.append(str(transport_path) if predefined_signal_decays is not None else '-')
+                if production_selection is not None:
+                    policy_path = work / 'production_selection.json'
+                    policy_path.write_text(json.dumps(production_selection, indent=2) + '\n')
+                    config_arguments.append(str(policy_path))
                 command(config_arguments,
                      timeout=args.config_timeout, stdout=config_log, stderr=subprocess.STDOUT)
             config_seconds = time.monotonic() - config_start
@@ -727,9 +745,10 @@ if __name__ == '__main__':
         template, stage, source, target, skip, count, seed, timed, missing_filter, cfg = sys.argv[2:12]
         event_ids = json.loads(Path(sys.argv[12]).read_text()) if len(sys.argv) > 12 and sys.argv[12] != '-' else None
         complete_muon_decays = bool(int(sys.argv[13])) if len(sys.argv) > 13 else False
-        predefined_signal_decays = json.loads(Path(sys.argv[14]).read_text()) if len(sys.argv) > 14 else None
+        predefined_signal_decays = json.loads(Path(sys.argv[14]).read_text()) if len(sys.argv) > 14 and sys.argv[14] != '-' else None
+        production_selection = json.loads(Path(sys.argv[15]).read_text()) if len(sys.argv) > 15 else None
         process = build_config(Path(template), int(stage), Path(source), Path(target),
-                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids, complete_muon_decays, predefined_signal_decays)
+                               int(skip), int(count), int(seed), bool(int(timed)), bool(int(missing_filter)), event_ids, complete_muon_decays, predefined_signal_decays, production_selection)
         Path(cfg).write_text(process.dumpPython())
     else:
         main()

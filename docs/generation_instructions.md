@@ -2975,3 +2975,76 @@ Full production remains unsubmitted. All runtime/worklist/qualification receipts
 and the current storage authority are linked from the material-study handoff.
 The old raw-input replay controllers were also retired after terminal failure;
 keep their unqualified comparison and reconstruction inputs unchanged.
+
+## Shared SM/BSM admission default, 23 October
+
+New cohorts use `scripts/shift_production_selection.py`. Its shared default
+ranks opposite-sign muon pairs by pointing, total momentum and material paths.
+The minimum control probability is 0.1; unknown material or model ancestors
+are kept with probability one. Pointing uses the existing birth-aware V3
+station score. There is no muon-pT cut, hard pointing veto or material-survival
+weight. These are conservative sampling settings, not measured efficiencies.
+The previous V2 pilot and its frozen deployments remain unchanged.
+
+`prepare_shift_detector_sample.py` now defaults to this path for every process
+name, including BSM. Supply `material_selection_inputs.json` beside its full
+parent inventory, or use `--material-selection-inputs`. The maintained input
+schema is `shift-production-material-inputs-v1`: `cohort_id`, `selection_seed`,
+`features` (the full existing material-feature census), and `authority` (the
+existing source/decay/exposure authority). GEN must already be placed inside
+the assumed jaw-depth distribution, naturally completed, timed and audited.
+The adapter requires unsampled source descriptors and proposal factors already
+included in native weights. It refuses separate unpropagated proposal factors,
+changed weights, missing census rows and attempts to reopen a previous draw.
+It does not make new lifetimes from the old decay-filtered subset.
+
+The preparer draws once, stores the complete material ledger, preserves the
+original source inventory/exposure, and writes compact source descriptors with
+selected indices, probabilities and a policy/ledger hash. It indexes the
+cohort once rather than rescanning it for every source. Target-event settings
+and job grouping do not retune this draw; its seed comes from the frozen input.
+Even one-event source files can provide the small orchestration controls.
+`--legacy-weight-only` explicitly reproduces the old weight-only sampler.
+The standalone material-selection API/CLI also uses the shared policy when
+no study override is provided.
+
+The common detector worker consumes these descriptors for SM or BSM. Only SIM
+gets the typed HepMC2 copy and complete hadron-decay transport, with the
+user-approved explicit 10 nm unsupported-flight allowance. Steps 2--4 still
+come directly from the selected reconstruction templates. Do not install the
+old three-library pilot overlay over a newer BSM/reco runtime: build and qualify
+a coherent Generator/Application/plugin runtime that includes the model work.
+The complete contract and Double p/W/p fields survive in its receipts/Nano.
+
+The BSM bounded detector entry uses `material_selected_source.json` beside GEN,
+or `--material-source`, and checks its full IDs, native weights and GEN SHA
+against the native BSM audit. Create that descriptor once with the shared
+sampler and freeze it before planning selected offsets. Missing evidence
+stops before SIM rather than silently using the old selection. Both shared
+helper files are included in new DY/meson BSM freeze inventories. Small
+unthinned model-reference grids explicitly use `--legacy-replay`; that option
+is not a full-production default. Existing frozen controllers stay unchanged.
+
+**Remaining BSM integration gate:** older full BSM group/finalizer code assumes
+all GEN identities and unit weights. It must not receive a thinned descriptor
+unchanged. Qualify selected-ID partitions, cumulative W/p, original full GEN
+exposure, model transport, merging and publication together in the next frozen
+handoff. The new detector entry checks selected offsets; a complete bounded
+legacy reference is not proof of this weighted publication path. Full production
+remains unsubmitted and unapproved. Changes to reconstruction must reuse the
+same source selection, then rerun paired detector controls with the new runtime.
+
+Validation of this default includes synthetic SM and BSM inventories, exact
+W/p/native-source preservation, unchanged draws under different job grouping,
+unknown-model support, and native clean-SCRAM resolution of all four stages.
+Resolved Steps 2--4 are byte-identical with the new admission contract present.
+This is configuration/accounting validation, not a new event-level BSM physics
+qualification or proof of a tail gain.
+
+The corrected295 p=1 detector reference and its predeclared 10%/1%/0.1% floor
+comparisons are now complete. They found zero positive originals in the tested
+Both-Both tails (mass >20/50 GeV and pair pT >10/20 GeV). None establishes a
+precision-per-CPU gain; zero observations do not establish zero background.
+The new conservative default is provisional and was not the frozen V2 policy
+used by that benchmark. Keep its complete native/EOS evidence and PDFs; do not
+use a CPU-saving estimate alone as a physics qualification.

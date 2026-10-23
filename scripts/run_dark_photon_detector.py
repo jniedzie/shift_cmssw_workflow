@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from run_shift_gen_to_nano import sha, signal_transport_contract
+from shift_production_selection import DEPENDENCIES, SCHEMA, validate_contract
 
 
 def main():
@@ -32,6 +33,10 @@ def main():
                         help='Wall-time deadline for exact selected-event graph audits; no selection changes')
     parser.add_argument('--transport-predefined-signal-decays',action='store_true',
                         help='Use the qualified optional physics/adapter for the explicit physical GEN point')
+    parser.add_argument('--material-source', type=Path,
+                        help='Prepared selected descriptor; default: material_selected_source.json beside GEN')
+    parser.add_argument('--legacy-replay', action='store_true',
+                        help='Explicit bounded old-recipe control; do not use for a new full production')
     args=parser.parse_args()
     if not 1 <= args.count <= 20 or args.skip < 0 or min(args.timeout,args.audit_timeout) <= 0:
         parser.error('Require 1..20 events, nonnegative skip and positive timeouts')
@@ -44,6 +49,21 @@ def main():
     manifest=json.loads((gen_dir/'manifest.json').read_text())
     contract=json.loads((gen_dir/'contract.json').read_text())
     audit=json.loads((gen_dir/'validation.json').read_text())
+    selection = None
+    if args.legacy_replay:
+        if args.material_source is not None:
+            raise ValueError('Legacy replay cannot also request material admission')
+    else:
+        inputs = args.material_source or gen_dir/'material_selected_source.json'
+        if not inputs.is_file():
+            raise ValueError('New SM/BSM production defaults to material admission; prepare '
+                             'material_selected_source.json once from placed/completed GEN. '
+                             'Use --legacy-replay only for a bounded old-recipe control.')
+        selection_bytes = inputs.read_bytes()
+        selection = json.loads(selection_bytes)
+        if selection.get('production_selection', {}).get('schema') != SCHEMA:
+            raise ValueError('Require the shared prepared production selection descriptor')
+        validate_contract(selection['production_selection'])
     if not audit.get('runtime_validated') or not manifest['status'].startswith('GEN runtime audit passed'):
         raise ValueError('Signal source lacks completed GEN runtime validation')
     if args.skip+args.count > audit['events'] or sha(gen_dir/'gen.root') != manifest['output_sha256']:
@@ -51,7 +71,7 @@ def main():
     out=args.output.resolve();out.mkdir(parents=True,exist_ok=False)
     scripts=Path(__file__).resolve().parent
     for name in ('run_shift_gen_to_nano.py','shift_storage_paths.py','shift_muon_decay_replay.py','audit_dark_photon_gen.py',
-                 'pythia_generation_ledger.py'):
+                 'pythia_generation_ledger.py') + DEPENDENCIES:
         shutil.copy2(scripts/name,out/name)
     templates=out/'templates';templates.mkdir()
     frozen_templates={}
@@ -72,6 +92,19 @@ def main():
         output_base=str(out),complete_muon_decays=False,missing_filter_lumi=True,
         signal_contract_sha256=sha(gen_dir/'contract.json'),
         source_full_graph_sha256=[row['full_graph_sha256'] for row in audit['event_rows']])
+    selected_ids = audit['event_ids']
+    if selection is not None:
+        if any(selection.get(name) != descriptor[name] for name in ('gen_sha256', 'event_ids', 'weights')):
+            raise ValueError('Prepared material selection differs from the full audited BSM GEN source')
+        for name in ('selected_indices', 'sampling_probabilities', 'sampling', 'production_selection'):
+            descriptor[name] = selection[name]
+        if 'normalization_record' in selection:
+            descriptor['normalization_record'] = selection['normalization_record']
+        selected_ids = [descriptor['event_ids'][index] for index in descriptor['selected_indices']]
+        if args.skip + args.count > len(selected_ids):
+            raise ValueError('Detector chunks must partition selected offsets, not full GEN offsets; '
+                             'replan from the frozen material ledger before submitting')
+        (out/'material_selected_source.json').write_bytes(selection_bytes)
     if args.transport_predefined_signal_decays:
         proper_ctau = contract.get('proper_ctau_mm', contract.get('physical_width_table', {}).get('ctau_mm'))
         descriptor['predefined_signal_decays'] = signal_transport_contract(dict(
@@ -82,8 +115,12 @@ def main():
     wrapper=dict(schema='shift-dark-photon-detector-pilot-v1',complete=False,
         physics_valid=False,normalization_ready=False,signal_contract=contract,
         source_manifest_sha256=sha(gen_dir/'manifest.json'),templates=frozen_templates,
-        requested_event_ids=audit['event_ids'][args.skip:args.skip+args.count],
+        requested_event_ids=selected_ids[args.skip:args.skip+args.count],
+        legacy_replay=args.legacy_replay,
         scope='bounded no-pileup/Fake2-HLT background-chain replay; no final recorded-event efficiency')
+    if selection is not None:
+        wrapper.update(material_source_sha256=sha(inputs),
+                       production_selection=selection['production_selection'])
     path=out/'signal_report.json';path.write_text(json.dumps(wrapper,indent=2)+'\n')
     command=[sys.executable,str(out/'run_shift_gen_to_nano.py'),str(out/'source.json'),
         '--skip',str(args.skip),'--count',str(args.count),'--job',str(args.job),
