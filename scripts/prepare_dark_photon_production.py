@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
@@ -425,9 +426,14 @@ def freeze_absolute_stage_budget(output, stage_timeouts):
     check = ("/usr/bin/env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH -u LD_PRELOAD /usr/bin/python3 -c "+__import__('shlex').quote(
         "import hashlib;from pathlib import Path;assert all(hashlib.sha256(Path(p).read_bytes()).hexdigest()==h for p,h in "+
         repr([(str(helper),sha256(helper)),(str(policy),sha256(policy))])+")")+"\n")
-    marker = '/usr/bin/env -u PYTHONHOME'
-    position = text.index(marker)
-    wrapper.write_text(text[:position]+check+text[position:].replace(original,replacement))
+    lines = text.splitlines(keepends=True)
+    matches = [index for index,line in enumerate(lines) if original in line]
+    if len(matches) != 1 or not lines[matches[0]].startswith('/usr/bin/env '):
+        raise ValueError('Expected one standalone private-runtime entry line')
+    index = matches[0]
+    lines[index] = check + lines[index].replace(original,replacement)
+    wrapper.write_text(''.join(lines))
+    subprocess.run(['bash','-n',str(wrapper)],check=True,capture_output=True,text=True)
 
 
 def prepare(args):

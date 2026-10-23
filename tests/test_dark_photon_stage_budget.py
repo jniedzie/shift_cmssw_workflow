@@ -59,9 +59,17 @@ class StageBudget(unittest.TestCase):
             wrapper=production/'detector_worker.sh'
             bootstrap=root/'bootstrap.py'
             bootstrap.write_text('import runpy,sys\nentry=sys.argv[sys.argv.index("--entry")+1];sys.argv=[entry]+sys.argv[sys.argv.index("--")+1:];runpy.run_path(entry,run_name="__main__")\n')
-            wrapper.write_text('#!/bin/bash\n/usr/bin/env -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 '+str(bootstrap)+' --entry '+str(production/'chunk_worker.py')+' -- "$@"\n')
+            # Exact real production shell structure: its trap contains an env
+            # command before the standalone runtime entry. Preserve it unchanged.
+            failure=production/'preserve_failure.py'
+            failure.write_text('import sys\nfrom pathlib import Path\nPath("trap-status").write_text(sys.argv[1])\n')
+            trap='trap \'task_status=$?; /usr/bin/env -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 '+str(failure)+' "$task_status"; exit "$task_status"\' EXIT\n'
+            wrapper.write_text('#!/bin/bash\nset -euo pipefail\numask 077\nexport PYTHONDONTWRITEBYTECODE=1\n'+trap+
+                '/usr/bin/env -u PYTHONHOME -u PYTHONPATH -u LD_LIBRARY_PATH -u LD_PRELOAD -u ROOTSYS /usr/bin/python3 '+str(bootstrap)+' --entry '+str(production/'chunk_worker.py')+' -- "$@"\n')
             preparer.freeze_absolute_stage_budget(production,[43200,7200,14400,14400])
             pinned=budget.load_policy(production/'stage_budget_policy.json')
+            self.assertIn(trap,wrapper.read_text())
+            self.assertEqual(wrapper.read_text().count(trap),1)
             self.assertEqual(pinned['allowed_slices'],'all_planned')
             self.assertIn('--mode worker -- "$@"',wrapper.read_text())
             self.assertNotIn('--entry '+str(production/'chunk_worker.py'),wrapper.read_text())
@@ -72,6 +80,7 @@ class StageBudget(unittest.TestCase):
             result=subprocess.run(['bash',str(wrapper),'m0p3_prompt','38',budget.sha(production/'seal.json')],
                 cwd=scratch,env=environment,text=True,capture_output=True,check=True)
             self.assertTrue(json.loads(result.stdout)['complete'])
+            self.assertEqual((scratch/'trap-status').read_text(),'0')
             self.assertEqual(json.loads((scratch/'observed.json').read_text())[-3:],
                 ['--absolute-stage-timeouts','--stage-timeouts','43200,7200,14400,14400'])
 
