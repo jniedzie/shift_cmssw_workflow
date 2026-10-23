@@ -729,9 +729,14 @@ def assess(config, previous, rows, history, receipts, now):
         name: value for name, value in controller.get('failures', {}).items()
         if value.get('cluster') in reviewed}
     if meson:
+        expected_rows=[row for row in worklist['batches']
+                       if not row.get('gen_qualification_only') and not row.get('operational_canary')]
+        expectations=[row.get('expected_signal_events') for row in expected_rows]
+        expected_signal_events=(sum(expectations) if expectations and all(
+            type(value) in (int,float) and math.isfinite(value) and value >= 0 for value in expectations) else None)
         report['actual_planned_progress'].update(
             authorized_source_collisions=sum(row['source_collisions'] for row in worklist['batches']),
-            expected_signal_events=sum(row['expected_signal_events'] for row in worklist['batches']))
+            expected_signal_events=expected_signal_events)
     return report
 
 

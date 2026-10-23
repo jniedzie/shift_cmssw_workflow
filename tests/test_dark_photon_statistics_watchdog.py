@@ -124,6 +124,23 @@ class StatisticsWatchdogTest(unittest.TestCase):
         source.write_text('{"complete":false}')
         with self.assertRaisesRegex(ValueError,'source authority'):WATCH.operational_recoveries(self.config)
 
+    def test_seven_real_gen_qualification_rows_need_no_expected_signal_count(self):
+        masses=('m0p22','m0p25','m0p3','m0p4','m0p5','m0p7','m0p9')
+        rows=[dict(batch='gen_qualification_%02d'%index,point=mass+'_prompt',source_collisions=10000,
+                   gen_qualification_only=True,operational_canary=False) for index,mass in enumerate(masses)]
+        rows.extend(dict(batch='operational_%04d'%index,point='m0p3_'+life,source_collisions=10000,
+                         operational_canary=True) for index,life in enumerate(('prompt','lab_30m')))
+        rows.append(dict(batch='bulk_0002',point='m0p22_prompt',source_collisions=42083,operational_canary=False))
+        worklist=Path(self.config['worklist'])
+        worklist.write_text(json.dumps(dict(schema='shift-dp-meson-production-v1',batches=rows)))
+        report=self.assess([])
+        self.assertEqual(report['actual_planned_progress']['authorized_source_collisions'],132083)
+        self.assertIsNone(report['actual_planned_progress']['expected_signal_events'])
+        rows[-1]['expected_signal_events']=123
+        worklist.write_text(json.dumps(dict(schema='shift-dp-meson-production-v1',batches=rows)))
+        report=self.assess([])
+        self.assertEqual(report['actual_planned_progress']['expected_signal_events'],123)
+
     def test_source_qualifications_do_not_crash_or_replace_aggregated_publication_counts(self):
         worklist=dict(schema='shift-dp-meson-production-v1',batches=[dict(batch=name,point='m0p3_prompt',
             source_collisions=10000,expected_signal_events=25) for name in ('qualification','first','second')])
