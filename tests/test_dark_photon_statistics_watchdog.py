@@ -498,13 +498,19 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertEqual(receipts[301]['payload_directory'],str(original))
         manager=dict(ClusterId=301,ProcId=0,JobStatus=2,Iwd=str(replacement),JobStartDate=self.now-120)
         child=dict(ClusterId=302,ProcId=0,DAGManJobId=301,JobStatus=2,Iwd=str(original),QDate=self.now-120)
-        self.counts.update(completed_events=5,complete_receipts=1)
+        self.counts.update(completed_events=5,complete_receipts=1,latest_receipt_epoch=self.now)
         with patch.object(WATCH,'stage_counts',return_value=self.counts) as counts, \
                 patch.object(WATCH,'execute_events',return_value=['302.0']):
             report=WATCH.assess(self.config,{},[manager,child],[native],receipts,self.now)
             self.assertEqual(report['actual_planned_progress']['detector_completed_events'],5)
+            self.assertFalse(any(i['severity']=='critical' for i in report['issues']))
             self.assertFalse(any(i['code'].startswith('wrong_iwd') for i in report['issues']))
             self.assertTrue(all(call.args==(original,) for call in counts.call_args_list))
+            for parent in (100,999):
+                child['DAGManJobId']=parent
+                report=WATCH.assess(self.config,{},[manager,child],[native],receipts,self.now)
+                self.assertTrue(any(i['code']=='reviewed_failure_active_302' for i in report['issues']))
+            child['DAGManJobId']=301
             child['Iwd']=str(self.root/'unexpected')
             report=WATCH.assess(self.config,{},[manager,child],[native],receipts,self.now)
             self.assertTrue(any(i['code']=='wrong_iwd_302' for i in report['issues']))

@@ -567,8 +567,13 @@ def assess(config, previous, rows, history, receipts, now):
         if row.get('ShiftDPStatisticsWatchdog'):
             continue
         cluster, status = row['ClusterId'], row['JobStatus']
+        parent = row.get('DAGManJobId')
         retired_meson = retired_meson_directories.get(row.get('Iwd'))
-        if cluster in reviewed or retired_meson is not None or row.get('DAGManJobId') in reviewed:
+        replacement = receipts.get(parent, {})
+        replacement_child = (parent not in reviewed and replacement.get('kind') == 'production'
+                             and replacement.get('payload_directory') == row.get('Iwd'))
+        if (cluster in reviewed or parent in reviewed
+                or (retired_meson is not None and not replacement_child)):
             issue('reviewed_failure_active_' + str(cluster), 'critical',
                   'A reviewed terminal job has reappeared in the queue', job=cluster, status=status)
             continue
@@ -579,7 +584,6 @@ def assess(config, previous, rows, history, receipts, now):
                       'Retired supervisor is active again or has an unexpected identity', job=cluster,
                       actual_iwd=row.get('Iwd'), expected_iwd=retired, status=status)
             continue
-        parent = row.get('DAGManJobId')
         expected = receipts.get(parent if parent in receipts else cluster)
         expected_iwd = (expected.get('payload_directory', expected['directory']) if parent in receipts
                         else expected['directory']) if expected else None
