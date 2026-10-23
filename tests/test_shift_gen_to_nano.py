@@ -57,6 +57,8 @@ class HandoffTests(unittest.TestCase):
 
     def test_signal_runner_packages_local_storage_support_and_forwards_watchdog_limits(self):
         for mechanism, mass, name, transport, smart in ((None, 15., 'dy', False, False),
+                (None, 2., 'dy', True, False),
+                (None, 15., 'dy', True, True),
                 ('eta-etaprime-radiative', .3, 'eta_etaprime', False, False),
                 ('meson-radiative', .3, 'meson_radiative', False, False),
                 ('meson-radiative', .3, 'meson_radiative', True, False),
@@ -66,9 +68,12 @@ class HandoffTests(unittest.TestCase):
                 (gen/'gen.root').write_bytes(b'synthetic GEN payload')
                 (gen/'manifest.json').write_text(json.dumps(dict(
                     status='GEN runtime audit passed fixture', output_sha256=worker.sha(gen/'gen.root'))))
-                (gen/'contract.json').write_text(json.dumps(dict(mass_gev=mass, production_mechanism=mechanism,
+                contract=dict(mass_gev=mass, production_mechanism=mechanism,
                     physical_width_table=dict(ctau_mm=58.55432679904731),
-                    generated_mass_support_gev=[mass*.999999, mass*1.000001])))
+                    generated_mass_support_gev=[mass*.999999, mass*1.000001])
+                if mechanism is None and transport:
+                    contract['width_authority']=contract.pop('physical_width_table')
+                (gen/'contract.json').write_text(json.dumps(contract))
                 identities = [[123, 1, event] for event in range(1, 6)]
                 (gen/'validation.json').write_text(json.dumps(dict(runtime_validated=True, events=5,
                     event_ids=identities, event_rows=[dict(weight=1., full_graph_sha256='0'*64) for _ in identities])))

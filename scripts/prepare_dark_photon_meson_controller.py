@@ -19,9 +19,12 @@ REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_sta
 
 def replacement_tool_names(original):
     # Legacy science keeps its qualified detector runner and AST telemetry guard.
+    names = REPLACEMENT_TOOLS
     if original.get('detector_runtime') is not None:
-        return (*REPLACEMENT_TOOLS, 'run_shift_gen_to_nano.py')
-    return REPLACEMENT_TOOLS
+        names += ('run_shift_gen_to_nano.py',)
+    if original.get('automatic_bulk_admission') is not None:
+        names += ('dark_photon_automatic_admission.py',)
+    return names
 
 
 def scheduling_configuration(original, previous, sources, detector_points):
@@ -161,6 +164,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         (output/'lcg_controller.sh').write_text(f'''#!/bin/bash
 # Code style: AI-code. AI-generated immutable meson operational controller.
 set -eo pipefail
+cd {quoted['science']}
 unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD ROOTSYS
 export PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh

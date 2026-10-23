@@ -146,6 +146,12 @@ the change.
   the released reconstruction. A dated DP campaign is allowed, with `latest`
   publication when ready. Qualify its weighted full chain before bulk admission. Previously cancelled frozen
   deployments stay cancelled; do not resume them or credit their deleted data.
+- For an authorized unattended production, freeze automatic progression from
+  qualification through bulk processing, grouping, histogramming and final
+  publication. Do not leave a successful test waiting for a manual gate file.
+  Check the eligibility logic against actual report field types. Preserve
+  failures and keep independent points progressing without silently dropping
+  failed or zero-selected cohorts from their full GEN normalization.
 - Optimize validation for time to a useful result. Run independent events and
   variants in parallel, using one event per job when that shortens iteration.
   Thousands of jobs are acceptable within actual site and storage limits;

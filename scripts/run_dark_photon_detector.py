@@ -107,6 +107,8 @@ def main():
         (out/'material_selected_source.json').write_bytes(selection_bytes)
     if args.transport_predefined_signal_decays:
         proper_ctau = contract.get('proper_ctau_mm', contract.get('physical_width_table', {}).get('ctau_mm'))
+        if proper_ctau is None:
+            proper_ctau = contract.get('width_authority', {}).get('ctau_mm')
         descriptor['predefined_signal_decays'] = signal_transport_contract(dict(
             schema='shift-predefined-dark-photon-transport-v1',mass_gev=contract['mass_gev'],
             proper_ctau_mm=proper_ctau,

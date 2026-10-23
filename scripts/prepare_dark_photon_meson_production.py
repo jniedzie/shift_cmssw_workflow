@@ -15,11 +15,14 @@ from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES
 from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
 from run_dark_photon_statistics import sha, new
 from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
-    additional_reservations, gen_runtime, coverage_request, prior_meson_configuration)
+    additional_reservations, gen_runtime, coverage_request, prior_meson_configuration,
+    fresh_production_authority)
+from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
 
 
-TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + (
+TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + MATERIAL_SOURCES + (
     'prepare_dark_photon_meson_production.py', 'run_dark_photon_meson_production.py',
+    'dark_photon_automatic_admission.py',
     'prepare_dark_photon_production.py', 'dark_photon_production_support.py',
     'dark_photon_publication_quota.py', 'run_dark_photon_gen_stage.py',
     'run_dark_photon_statistics.py', 'shift_condor_native.py', 'watch_dark_photon_production.py',
@@ -183,24 +186,27 @@ def prepare(configuration, output, scripts=None):
         config.setdefault('publish_canary_aliases', False)
         if config['publish_canary_aliases'] is not False:
             raise ValueError('Unified operational canaries must leave global aliases and sample anchors unchanged')
-        previous = prior_meson_configuration(config)
-        controller = config['prior_meson_publication'].get('controller_receipt')
-        if not isinstance(controller, dict) or sha(controller['path']) != controller.get('sha256'):
-            raise ValueError('Prior meson publication requires its pinned terminal-controller receipt')
-        native = json.loads(Path(controller['path']).read_text())
-        if (type(native.get('cluster')) is not int or native['cluster'] <= 0
-                or not Path(native.get('task', '')).is_absolute()
-                or json.loads((Path(native['task'])/'config.json').read_text()).get('directory') != previous['directory']
-                or sha(Path(native['task'])/'controller.sub') != native.get('submit_sha256')):
-            raise ValueError('Pinned prior meson controller does not own the original production')
+        fresh = fresh_production_authority(config)
+        if fresh is None:
+            previous = prior_meson_configuration(config)
+            controller = config['prior_meson_publication'].get('controller_receipt')
+            if not isinstance(controller, dict) or sha(controller['path']) != controller.get('sha256'):
+                raise ValueError('Prior meson publication requires its pinned terminal-controller receipt')
+            native = json.loads(Path(controller['path']).read_text())
+            if (type(native.get('cluster')) is not int or native['cluster'] <= 0
+                    or not Path(native.get('task', '')).is_absolute()
+                    or json.loads((Path(native['task'])/'config.json').read_text()).get('directory') != previous['directory']
+                    or sha(Path(native['task'])/'controller.sub') != native.get('submit_sha256')):
+                raise ValueError('Pinned prior meson controller does not own the original production')
         completion_scope(config)
         for row in batches:
             reference_point(config, row)
         additional_reservations(config)
         gen_runtime(config)
         coverage_request(config)
-        if config.get('minimum_eos_free_bytes', 100000000000) < 90000000000:
-            raise ValueError('The unified-source storage floor must retain at least 90 GB')
+        minimum_floor = 50000000000 if fresh is not None else 90000000000
+        if config.get('minimum_eos_free_bytes', 100000000000) < minimum_floor:
+            raise ValueError('The unified-source storage floor is below the shared protected minimum')
         if (type(config.get('detector_workers_per_point', 10)) is not int
                 or not 1 <= config.get('detector_workers_per_point', 10) <= 100
                 or type(config.get('dag_max_idle', 5)) is not int
@@ -232,6 +238,17 @@ def prepare(configuration, output, scripts=None):
         else:shutil.copy2(source, target)
         config[key] = str(target)
         files[str(target)] = sha(target)
+    for key in ('jaw_source_profile',):
+        authority = config.get(key)
+        if authority is None:
+            continue
+        source = Path(authority['path']).resolve()
+        if sha(source) != authority['sha256']:
+            raise ValueError('Source-placement profile changed')
+        target = output / (key + '.json')
+        shutil.copy2(source, target)
+        config[key] = dict(path=str(target), sha256=sha(target))
+        files[str(target)] = sha(target)
     calibration = config.get('calibration_authority')
     if calibration:
         if sha(calibration['path']) != calibration['sha256']:
@@ -252,22 +269,23 @@ def prepare(configuration, output, scripts=None):
         config[key] = dict(path=str(target), sha256=sha(target))
         files[str(target)] = sha(target)
     if mechanism == 'meson-radiative':
-        previous = config['prior_meson_publication']
-        source = Path(previous['path']).resolve()
-        if sha(source) != previous['sha256']:
-            raise ValueError('Prior meson publication configuration changed during preparation')
-        target = output/'prior_meson_publication.json'
-        shutil.copy2(source, target)
-        config['prior_meson_publication'] = dict(previous, path=str(target), sha256=sha(target))
-        files[str(target)] = sha(target)
-        authority = previous['controller_receipt']
-        source = Path(authority['path']).resolve()
-        if sha(source) != authority['sha256']:
-            raise ValueError('Prior meson controller receipt changed during preparation')
-        target = output/'prior_meson_controller_receipt.json'
-        shutil.copy2(source, target)
-        config['prior_meson_publication']['controller_receipt'] = dict(path=str(target), sha256=sha(target))
-        files[str(target)] = sha(target)
+        if config.get('fresh_production_authority') is None:
+            previous = config['prior_meson_publication']
+            source = Path(previous['path']).resolve()
+            if sha(source) != previous['sha256']:
+                raise ValueError('Prior meson publication configuration changed during preparation')
+            target = output/'prior_meson_publication.json'
+            shutil.copy2(source, target)
+            config['prior_meson_publication'] = dict(previous, path=str(target), sha256=sha(target))
+            files[str(target)] = sha(target)
+            authority = previous['controller_receipt']
+            source = Path(authority['path']).resolve()
+            if sha(source) != authority['sha256']:
+                raise ValueError('Prior meson controller receipt changed during preparation')
+            target = output/'prior_meson_controller_receipt.json'
+            shutil.copy2(source, target)
+            config['prior_meson_publication']['controller_receipt'] = dict(path=str(target), sha256=sha(target))
+            files[str(target)] = sha(target)
         authority = config['gen_runtime']['provenance']
         source = Path(authority['path']).resolve()
         if sha(source) != authority['sha256']:
@@ -286,8 +304,8 @@ def prepare(configuration, output, scripts=None):
         authorities.append(dict(path=str(target),sha256=sha(target)))
         files[str(target)]=sha(target)
     config['operational_authorities']=authorities
-    for key in ('qualified_template', 'reference_preparation', 'cmssw_base', 'adaptive_directory',
-                'darkcast_path', 'darkcast_source_receipt'):
+    for key in ('qualified_template', 'reference_preparation', 'cmssw_base',
+                'darkcast_path', 'darkcast_source_receipt') + (() if config.get('fresh_production_authority') else ('adaptive_directory',)):
         if not Path(config[key]).is_absolute():
             raise ValueError('Require an explicit absolute dependency: ' + key)
     reference = json.loads(Path(config['reference_preparation']).read_text())
@@ -299,9 +317,16 @@ def prepare(configuration, output, scripts=None):
         target = output / 'templates' / name
         shutil.copy2(record['frozen_copy'], target)
         files[str(target)] = sha(target)
-    for path in [*config['prior_inventories'], config['darkcast_source_receipt'],
-                 str(Path(config['qualified_template']) / 'seal.json'),
-                 str(Path(config['adaptive_directory']) / 'worklist.json')]:
+    dependencies = [*config['prior_inventories'], config['darkcast_source_receipt'],
+                    str(Path(config['qualified_template']) / 'seal.json')]
+    if config.get('fresh_production_authority'):
+        authority = config['fresh_production_authority']
+        registration = fresh_production_authority(config)['authority']['storage_registration']
+        dependencies.extend([authority['path'], registration['path']])
+        dependencies.append(fresh_production_authority(config)['storage_registration']['native_queue_evidence']['path'])
+    else:
+        dependencies.append(str(Path(config['adaptive_directory']) / 'worklist.json'))
+    for path in dependencies:
         files[str(Path(path).resolve())] = sha(path)
     receipt = Path(config['darkcast_source_receipt'])
     for relative, expected in json.loads(receipt.read_text())['files'].items():
@@ -397,6 +422,7 @@ queue
     wrapper.write_text(f'''#!/bin/bash
 # Code style: AI-code. AI-generated frozen meson controller environment.
 set -eo pipefail
+cd {output}
 unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD ROOTSYS
 export PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh

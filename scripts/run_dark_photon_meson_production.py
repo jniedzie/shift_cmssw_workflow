@@ -73,9 +73,44 @@ def source_mechanism(config):
     return mechanism
 
 
+def fresh_production_authority(config):
+    """Verify a new campaign without inheriting cancelled exposure or claims."""
+    authority = config.get('fresh_production_authority')
+    if authority is None:
+        return None
+    record = read_pinned(authority)
+    forbidden = ('prior_meson_publication', 'prior_meson_controller_directory',
+                 'adaptive_directory', 'adaptive_terminal_completion',
+                 'reviewed_prior_meson_retirement')
+    if (record.get('schema') != 'shift-fresh-dp-production-authority-v1'
+            or record.get('campaign_prefix') != config['campaign_prefix']
+            or record.get('cancelled_exposure_credit') != 0
+            or record.get('resume_cancelled_deployments') is not False
+            or record.get('preserve_previous_ready_outputs') is not True
+            or any(key in config for key in forbidden)):
+        raise ValueError('Fresh production must preserve previous outputs without inheriting cancelled work')
+    registration = read_pinned(record['storage_registration'])
+    claims = registration.get('peer_reservations', [])
+    if (registration.get('schema') != 'shift-fresh-dp-storage-registration-v1'
+            or registration.get('complete') is not True
+            or registration.get('campaign_prefix') != config['campaign_prefix']
+            or not isinstance(claims, list)
+            or len({row.get('name') for row in claims}) != len(claims)
+            or any(not row.get('name') or type(row.get('reserved_bytes')) is not int
+                   or row['reserved_bytes'] < 0 for row in claims)
+            or not registration.get('native_queue_evidence')
+            or not registration.get('registered_controller_directories')):
+        raise ValueError('Fresh production requires its verified shared-storage registration')
+    pinned_path(registration['native_queue_evidence'])
+    return dict(authority=record, storage_registration=registration,
+                reserved_peer_bytes=sum(row['reserved_bytes'] for row in claims))
+
+
 def prior_meson_configuration(config):
     """The previous model owns each point until all its batches close."""
     if source_mechanism(config) != 'meson-radiative':
+        return None
+    if fresh_production_authority(config) is not None:
         return None
     previous = read_pinned(config['prior_meson_publication'])
     directory = Path(previous.get('directory', ''))
@@ -116,7 +151,13 @@ def prior_publication_ready(config, batch):
     """Check fresh prior ownership without granting credit for another point."""
     previous = prior_meson_configuration(config)
     if previous is None:
-        return True, {}
+        fresh = fresh_production_authority(config)
+        allowed = (fresh['authority'].get('allowed_previous_campaigns', {}).get(batch['point'], [])
+                   if fresh is not None else [])
+        if (not isinstance(allowed, list) or any(not isinstance(value, str) or not value for value in allowed)):
+            raise ValueError('Fresh publication requires explicit prior alias ownership')
+        return True, dict(allowed_previous_campaigns=allowed,
+                          fresh_campaign_without_prior_exposure=fresh is not None)
     root = Path(previous['directory'])
     expected = [row for row in previous['batches'] if row['point'] == batch['point']]
     evidence = dict(point=batch['point'], prior_directory=str(root),
@@ -747,6 +788,8 @@ def coverage(config):
                 '--masses', *map(str, request['masses_gev']), '--output', report]
         if request.get('source_inventory'):
             argv.extend(['--source-inventory', request['source_inventory']['path']])
+        if config.get('meson_completion_scope') is not None:
+            argv.extend(['--completion-scope', str(pinned_path(config['meson_completion_scope']))])
         durable.run_logged(argv, directory / 'audit.log', timeout=600)
         status.update(complete=True, report=dict(path=str(report), sha256=durable.sha(report)),
                       finished_utc=datetime.now(timezone.utc).isoformat())
@@ -1039,6 +1082,8 @@ def source(config, seal_digest, batch):
                 '--run-number', str(batch['run_number']), '--model-card', config['model_card'],
                 '--darkcast-path', config['darkcast_path'], '--darkcast-source-receipt', config['darkcast_source_receipt'],
                 '--timeout', str(config['gen_timeout_seconds']), '--output', str(gen)]
+            if config.get('jaw_source_profile') is not None:
+                argv.extend(['--jaw-profile', str(pinned_path(config['jaw_source_profile']))])
             rename = ''
             if runtime_archive is not None:
                 runtime = gen_runtime(config)
@@ -1115,6 +1160,69 @@ def source(config, seal_digest, batch):
     return status
 
 
+def prepare_material_admission(config, batch, status):
+    """Use the qualified capsule once, before selected detector chunks exist."""
+    from prepare_dark_photon_material_source import immutable
+    directory = batch_directory(config, batch)
+    gen = directory/'gen'
+    settings = config.get('material_admission')
+    if not isinstance(settings,dict) or config.get('detector_runtime') is None:
+        raise ValueError('New DP adoption needs shared material admission and its pinned detector runtime')
+    request = dict(parent=status['parent'], gen_directory=str(gen),
+        contract_sha256=durable.sha(gen/'contract.json'),
+        gen_publication=status['publication'], output_base=batch['final_output_base'],
+        geometry=copy.deepcopy(settings['geometry']), frame=copy.deepcopy(settings['frame']),
+        cohort_id=batch['campaign']+':'+batch['batch'],
+        selection_seed=settings.get('selection_seed','dp-material-'+batch['campaign'])+':'+batch['batch'])
+    request_path=directory/'material_admission_request.json'
+    profile_path=directory/'material_runtime_profile.json'
+    immutable(request_path,request)
+    immutable(profile_path,config['detector_runtime'])
+    tools=Path(config['tools'])
+    invocation=['/usr/bin/python3',str(tools/'dark_photon_detector_runtime.py'),
+        '--profile',str(profile_path),'--entry',str(tools/'prepare_dark_photon_material_source.py'),
+        '--','--request',str(request_path)]
+    # This entry needs native FWLite/ROOT. Its private runtime does not load the
+    # mutable shared release or alter the already saved lifetime/source draws.
+    with (directory/'logs/material_admission.log').open('a') as log:
+        subprocess.run(invocation,cwd=directory,check=True,
+            stdout=log,stderr=subprocess.STDOUT,timeout=config.get('material_timeout_seconds',3600))
+    descriptor_path=gen/'material_selected_source.json'
+    receipt=read(gen/'material_selection_receipt.json')
+    if receipt.get('complete') is not True or receipt['descriptor_sha256'] != durable.sha(descriptor_path):
+        raise ValueError('Material admission did not finish its immutable publication')
+    return read(descriptor_path)
+
+
+def qualify_gen_source(config, batch):
+    """Audit one independent mass cohort and freeze admission without SIM."""
+    from dark_photon_material_selection import bind
+    directory = batch_directory(config, batch)
+    status = read(directory/'source_status.json')
+    if status.get('complete') is not True:
+        raise ValueError('GEN qualification requires complete published source metadata')
+    for path, expected in status['metadata_sha256'].items():
+        if durable.sha(path) != expected:
+            raise ValueError('GEN qualification metadata changed')
+    row = adopted_row(batch, directory/'gen', config)
+    descriptor = prepare_material_admission(config, batch, status)
+    row = bind(row, status['parent'], descriptor)
+    proof = dict(complete=True, source_status_sha256=durable.sha(directory/'source_status.json'),
+        material_receipt_sha256=durable.sha(directory/'gen/material_selection_receipt.json'),
+        full_gen_events=row['full_gen_events'], selected_events=row['events'],
+        model_card_sha256=durable.sha(config['model_card']),
+        detector_runtime_sha256=config['detector_runtime']['runtime_sha256'],
+        gen_runtime_sha256=config['gen_runtime']['sha256'],
+        source_qualification_only=True, zero_admission_is_valid=row['events'] == 0)
+    path = directory/'gen_qualification.json'
+    if path.exists():
+        if read(path) != proof:
+            raise ValueError('GEN qualification receipt changed')
+    else:
+        durable.new(path, proof)
+    return proof
+
+
 def adopt(config, batch):
     import prepare_dark_photon_grid as grid
     directory = batch_directory(config, batch)
@@ -1125,6 +1233,10 @@ def adopt(config, batch):
         if durable.sha(path) != expected:
             raise ValueError('Published GEN metadata changed before adoption')
     row = adopted_row(batch, directory / 'gen', config)
+    from dark_photon_material_selection import bind
+    descriptor=prepare_material_admission(config,batch,status)
+    row=bind(row,status['parent'],descriptor)
+    row['material_selected_source_sha256']=durable.sha(directory/'gen/material_selected_source.json')
     actual_source_storage(config, batch, row, status)
     chunk_size=batch.get('events_per_job',config['events_per_job'])
     if math.ceil(row['events']/chunk_size) + 1 > batch['detector_job_capacity']:
@@ -1139,7 +1251,8 @@ def adopt(config, batch):
         # The ordinary preparer validates this separately qualified capsule.
         plan['detector_runtime']=copy.deepcopy(config['detector_runtime'])
     from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
-    sources=set(grid.SOURCES)|set(MESON_SOURCES)
+    from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
+    sources=set(grid.SOURCES)|set(MESON_SOURCES)|set(MATERIAL_SOURCES)
     plan['frozen_dependencies'] = dict(sources={name: dict(frozen_copy=str(Path(config['tools'])/name),
         sha256=durable.sha(Path(config['tools'])/name)) for name in sorted(sources)},
         templates={name:dict(frozen_copy=str(path),sha256=durable.sha(path))
@@ -1170,7 +1283,8 @@ def adopt(config, batch):
 
 def actual_source_storage(config, batch, row, status):
     """Stop an oversized actual population before detector submission."""
-    if source_mechanism(config) != 'meson-radiative' or batch['operational_canary']:
+    if (source_mechanism(config) != 'meson-radiative' or batch['operational_canary']
+            or batch.get('gen_qualification_only') is True):
         return None
     from prepare_dark_photon_meson_production import meson_storage_limit
     gate_path = Path(config['bulk_storage_gate'])
@@ -1192,8 +1306,12 @@ def actual_source_storage(config, batch, row, status):
             or publication.get('encoding') != 'gzip' or type(publication.get('bytes')) is not int
             or publication['bytes'] <= 0 or publication.get('sha256') != publication.get('readback_sha256')):
         raise ValueError('Actual source budget requires its verified complete compressed ledger')
-    required = row['events']*326000 + publication['bytes'] + 5000000
+    gen_bytes = status['publication'].get('bytes') if row.get('material_selection') is not None else 0
+    if type(gen_bytes) is not int or gen_bytes < 0 or (row.get('material_selection') is not None and not gen_bytes):
+        raise ValueError('Actual source storage needs the published full GEN byte count')
+    required = row['events']*326000 + publication['bytes'] + gen_bytes + 5000000
     result = dict(point=batch['point'], batch=batch['batch'], actual_signal_events=row['events'],
+        full_gen_events=row.get('full_gen_events', row['events']), full_gen_bytes=gen_bytes,
         compressed_source_ledger_bytes=publication['bytes'], fixed_metadata_bytes=5000000,
         event_storage_coefficient_bytes=326000, required_bytes=required,
         forecast_bytes=forecasts[batch['batch']], storage_gate_sha256=durable.sha(gate_path),
@@ -1261,6 +1379,7 @@ def prepare_handoff_worker(config, batch):
     wrapper.write_text('''#!/bin/bash
 # Code style: AI-code. AI-generated independent meson detector preparation.
 set -eo pipefail
+cd '''+shlex.quote(str(directory))+'''
 unset PYTHONPATH PYTHONHOME LD_LIBRARY_PATH LD_PRELOAD ROOTSYS
 export PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1
 source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
@@ -1511,6 +1630,9 @@ def additional_reservations(config):
 
 
 def adaptive_reservation(config):
+    fresh = fresh_production_authority(config)
+    if fresh is not None:
+        return fresh['reserved_peer_bytes']
     root = Path(config['adaptive_directory'])
     worklist = read(root/'worklist.json')
     if 'directory' in config:
@@ -1607,6 +1729,18 @@ def cumulative_result(config,state,batch,transport,primitive):
     """Keep the independent canary population when the bulk batch completes."""
     point=batch['point']
     condition=config['conditions']['sha256']
+    for other in config['batches']:
+        if other['point'] != point or other.get('gen_qualification_only') is True:
+            continue
+        root = batch_directory(config, other)
+        selected = root/'gen/material_selected_source.json'
+        report = root/'production/completed_points'/(point+'.json')
+        if selected.is_file() and read(selected).get('selected_indices') == []:
+            if not report.is_file() or read(report).get('rate_only') is not True:
+                state.setdefault('blocked_points', {})[point] = dict(
+                    reason='Empty frozen admission retains its full GEN denominator and needs explicit rate-only completion',
+                    batch=other['batch'], material_descriptor_sha256=durable.sha(selected))
+                return None
     sources=[]
     for other in config['batches']:
         production=batch_directory(config,other)/'production'
@@ -2040,6 +2174,12 @@ def step(config,state):
             continue
         if not (directory/'source_status.json').is_file() or not read(directory/'source_status.json').get('complete'):
             raise RuntimeError('Native source exited without complete source publication')
+        if batch.get('gen_qualification_only') is True:
+            entry['gen_qualification'] = qualify_gen_source(config, batch)
+            entry.update(stage='GEN_qualified', published=dict(source_qualification_only=True,
+                batch=batch['batch'], point=batch['point'], complete=True))
+            durable.save(Path(config['directory'])/'state.json', state)
+            continue
         production=directory/'production'
         admitted = ((batch['batch'] in detector_claims or entry.get('detector_native_complete')) if detector_claims is not None else
                     (production/'submission.json').exists() or (production/'submission_intent.json').exists())
@@ -2098,6 +2238,9 @@ def step(config,state):
     canaries=[row for row in config['batches'] if row['operational_canary']]
     canary_ready=all(entries[row['batch']].get('published') for row in canaries)
     state['canary_published']=canary_ready
+    if config.get('automatic_bulk_admission') is not None:
+        from dark_photon_automatic_admission import maybe_create_bulk_gate
+        state['automatic_bulk_admission'] = maybe_create_bulk_gate(config, state)
     observation=durable.quota(config) if config.get('batch_native_queries') is not True else None
     if config.get('source_admission_closed') is True:
         state['source_admission_closed']=True
@@ -2107,14 +2250,14 @@ def step(config,state):
             continue
         if config.get('source_admission_closed') is True:
             continue
-        if not batch['operational_canary'] and not canary_ready:
+        if not batch['operational_canary'] and not batch.get('gen_qualification_only') and not canary_ready:
             continue
         if source_active>=config['simultaneous_sources']:
             break
         if config.get('batch_native_queries') is True:
-            allowed,evidence=poll_storage_gate(config,state,storage_decisions,not batch['operational_canary'])
+            allowed,evidence=poll_storage_gate(config,state,storage_decisions,not (batch['operational_canary'] or batch.get('gen_qualification_only')))
         else:
-            allowed,evidence=storage_gate(config,observation,bulk=not batch['operational_canary'],state=state)
+            allowed,evidence=storage_gate(config,observation,bulk=not (batch['operational_canary'] or batch.get('gen_qualification_only')),state=state)
         state['storage_admission']=evidence
         if not allowed:
             continue
@@ -2138,6 +2281,7 @@ def main():
     parser.add_argument('--once',action='store_true')
     args=parser.parse_args()
     config=verify(args.directory.resolve(),args.seal)
+    os.chdir(config['directory'])
     if args.controller_config is not None:
         if args.action!='controller' or args.controller_seal is None:
             raise ValueError('Only the controller may adopt a separately sealed operational configuration')
