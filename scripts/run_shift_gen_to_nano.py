@@ -316,6 +316,11 @@ def build_config(template, stage, input_file, output_file, skip, count, seed, ti
             configure_transport(process, production_selection)
         process.FEVTDEBUGoutput.SelectEvents = cms.untracked.PSet(SelectEvents=cms.vstring('simulation_step'))
         process.FEVTDEBUGoutput.outputCommands.extend(['drop *_g4SimHits_*_*', 'keep *_g4SimHits_*_SHIFTSIM'])
+    if stage == 4:
+        # Archived Step-4 recipes predate the current reconstruction defaults.
+        # Set these explicitly so every newly prepared source uses the same fit.
+        process.shiftMuonTable.removeExactDuplicateMuonFitInputs = cms.bool(True)
+        process.shiftMuonTable.correctCSC2DAlignmentCovariance = cms.bool(True)
     outputs = process.outputModules_()
     if stage == 4 and missing_filter_lumi:
         # LumiSingletonSimpleFlatTableProducer dereferences its input even

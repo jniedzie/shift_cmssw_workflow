@@ -1,6 +1,32 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Reconstruction default for new production (2026-10-23)
+
+The standard native point fitter now removes exact copies of CSC measurements
+and uses the positional x/y alignment-error block for CSC points. Both
+`removeExactDuplicateMuonFitInputs` and `correctCSC2DAlignmentCovariance` default
+to true in the CMSSW producer and its CFI. The common detector worker explicitly
+sets both for Step4, including archived recipes. This applies to QCD, DY, J/psi
+and dark-photon sources; GEN sampling, weights and detector/trigger settings do
+not change. The unconstrained muon/dimuon state remains canonical.
+
+The segment-replacement, iterated-fit, opposite-endpoint-refinement and new
+energy-loss experiments are not adopted. Material treatment and outlier cuts
+remain at the tested native baseline. This baseline has useful recoveries and
+known legacy-control costs; it is not a demonstrated population-resolution gain.
+Full numerical results, limitations and the release/qualification receipt belong
+in [`SHIFT_RECONSTRUCTION.md`](../../SHIFT_RECONSTRUCTION.md).
+
+New runtime archives must include the qualified normal
+`pluginPhysicsToolsShiftMuonSegmentsPlugins.so` and current Python defaults.
+Already-frozen archives and detector capsules remain unchanged: regenerate them
+and perform the required full-chain qualification before bulk admission. A new
+workflow with an old plugin must fail on the unrecognized correction parameter,
+rather than silently using old reconstruction. Source-only updates are insufficient.
+The separately recorded production-submission holds remain in force.
+
+
 ## Assumed jaw interaction depths (2026-10-22)
 
 The user selected inside-jaw collisions and authorized a simple front-heavy
