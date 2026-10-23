@@ -818,6 +818,18 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
             budget = channel.get('relative_numerical_mass_precision_budget',
                                  channel.get('relative_model_uncertainty'))
             if abs(relative) > budget:
+                if kaon_channel(channel) and deferred_policy:
+                    # The native proposal keeps its original coefficient. Bound
+                    # the entire exceptional conditional channel, including a
+                    # possible rate change, in the fixed full-source measure.
+                    parent.setdefault('native_channel_precision_reports',[]).append(dict(
+                        schema='shift-kaon-native-channel-precision-v1',channel=channel['channel'],
+                        deferred_full_source_check=True,scope='deferred-full-source',
+                        nominal_parent_coefficient=nominal/br_mumu,
+                        conservative_absolute_parent_measure_bound=2*max(nominal,shifted)/br_mumu,
+                        native_relative_rate_shift=relative,
+                        original_channel_precision_budget=budget))
+                    continue
                 if channel.get('decay_type') == 'pseudoscalar-dipion':
                     parent['native_parent_precision_report'] = pseudoscalar_dipion_precision_report(
                         parent, mass, signal_mass, model, br_mumu)

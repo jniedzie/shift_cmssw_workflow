@@ -75,6 +75,26 @@ class KaonSourceTest(unittest.TestCase):
     def resolve(self,rows):
         return resolve_parent_kinematics(rows,.001,MASS,self.models,BR)
 
+    def test_exceptional_ks_rate_is_bounded_in_full_source_without_repairing_p4(self):
+        from dark_photon_meson_source import FULL_SOURCE_NATIVE_PRECISION_POLICY,deferred_native_precision_measure
+        raw=parent_row(310,self.models[310]);before=copy.deepcopy(raw)
+        target=raw['native_mass_gev']*(1-4.e-5)
+        raw['p4'][0]=math.sqrt(target*target+math.fsum(v*v for v in raw['p4'][1:]))
+        raw['source_com_energy_gev']=raw['p4'][0];before=copy.deepcopy(raw)
+        with self.assertRaisesRegex(ValueError,'precision.*budget'):self.resolve([raw])
+        checked,=resolve_parent_kinematics([raw],.001,MASS,self.models,BR,
+            native_precision_policy=FULL_SOURCE_NATIVE_PRECISION_POLICY)
+        self.assertEqual(raw,before);self.assertEqual(checked['p4'],raw['p4'])
+        reports=checked['native_channel_precision_reports'];self.assertTrue(reports)
+        measure,count=deferred_native_precision_measure([checked],BR,FULL_SOURCE_NATIVE_PRECISION_POLICY)
+        expected=0.
+        for channel,report in zip(exclusive_channels(self.models[310]),reports):
+            a=parent_branching_coefficient(raw['native_mass_gev'],MASS,channel,BR)
+            b=parent_branching_coefficient(target,MASS,channel,BR)
+            expected+=2*max(a,b)
+        self.assertAlmostEqual(measure,expected,delta=expected*1.e-9)
+        self.assertEqual(count,1)
+
     def test_native_rates_match_each_independent_qualified_current(self):
         em=mixing_parameters(MASS,EPSILON).em_coefficient
         for parent in self.card['parents']:
