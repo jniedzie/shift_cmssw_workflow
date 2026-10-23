@@ -161,6 +161,39 @@ class MaterialResponsePublicationTest(unittest.TestCase):
         self.assertEqual(self.annotations[0][0][1][0]['sampling_gen_weight'], 4.)
         self.check_downstream(report)
 
+    def test_explicit_tiny_flight_budget_is_receipt_bound_and_reaches_SIM(self):
+        receipt, inventory = self.prepare_hadron_transport()
+        build = json.loads(receipt.read_text())
+        build['maximum_untracked_hadron_flight_mm'] = 1.e-5
+        receipt.write_text(json.dumps(build))
+        transport = self.request['hadron_transport']
+        transport['build_receipt']['sha256'] = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        transport['maximum_untracked_hadron_flight_mm'] = 1.e-5
+        report = self.run_worker()
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['hadron_transport']['maximum_untracked_hadron_flight_mm'], 1.e-5)
+        script = next(args[2] for args in self.commands if len(args) > 3
+                      and args[1] == '-c' and 'sim_cfg.py' in args[2])
+        self.assertIn('MaxUntrackedHadronFlightMm=cms.untracked.double(1e-05)', script)
+        self.assertEqual(report['full_source_exposure'], self.exposure)
+        self.check_downstream(report)
+
+    def test_unqualified_or_invalid_tiny_flight_budget_fails_before_runtime_changes(self):
+        self.prepare_hadron_transport()
+        transport = self.request['hadron_transport']
+        for value in [-1., 1.e-4, float('nan'), float('inf'), True]:
+            with self.subTest(value=value):
+                transport['maximum_untracked_hadron_flight_mm'] = value
+                with self.assertRaisesRegex(ValueError, 'between zero and 10 nm'):
+                    worker.install_hadron_transport(self.request, self.tools)
+        transport['maximum_untracked_hadron_flight_mm'] = 1.e-5
+        with self.assertRaisesRegex(ValueError, 'does not qualify'):
+            worker.install_hadron_transport(self.request, self.tools)
+        self.assertFalse(self.runtime.exists())
+        self.assertFalse(self.commands)
+        with self.assertRaisesRegex(ValueError, 'Invalid explicit'):
+            worker.material_sim_config_script(True, False, 1.e-5)
+
     def test_hadron_transport_requires_explicit_optin_and_complete_bound_inventory(self):
         receipt, inventory = self.prepare_hadron_transport()
         self.request['hadron_transport']['track_all_hadron_decays'] = False

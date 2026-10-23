@@ -140,25 +140,42 @@ scaling. Detailed findings and current repair status belong in
 not establish inclusive material response, normalization or better tail precision.
 Do not rebuild a live shared release or edit its pinned runtime files.
 
-The 23 October private repair passes 114 native controls, including 18 decay
-kinematics cases, stopped and nested parents, exact default controls and actual
-stacking integration. Preserve the generated four-momentum at primary birth;
-for a decay daughter, restore only its recorded mass while retaining its actual
-parent-derived momentum. Never reset a daughter's momentum after parent energy
-loss. Exact-zero unknown nodes can be expanded; nonzero unknown flights still
-fail explicitly. The coherent three-library worker deployment and resolved
-configuration pass their pinned-runtime checks with inherited PYTHONPATH removed.
+The 23 October repair now has native graph, default-mode, stacking and
+post-loss decay controls, plus a compiled check of 41,241 physical GEN records
+from all 301 prepared originals. Soft daughters inherit absolute rounding from
+boosts of energetic parents; validate source energy against the original event's
+largest energy, rather than only the soft daughter's local invariant mass.
+The downstream decay-conservation limit is unchanged. Preserve generated source
+masses and momenta; never reset a transported daughter to its GEN momentum.
 
-Four corrected QCD/DY/Jpsi single-original tests now have a separate campaign
-`decay_conversion_canary_20261023_v1`, with independent downstream comparisons
-and verified old controls reused. These replays add no GEN exposure and cannot
-be merged as independent statistics. Full material/reconstruction closure,
-finite unknown resonances and a useful Both-Both tail gain remain open. The
-completed 295-original QCD benchmark has no retained target-tail pair; it does
-not establish zero physical background. Exact results, failures and current
-qualification belong in `../../SHIFT_RECONSTRUCTION.md`. No shared release or
-live production configuration changed; do not enable this private canary for
-full production based on component tests alone.
+`Generator.MaxUntrackedHadronFlightMm` defaults to zero. The user explicitly
+approved an opt-in budget of `1e-5` mm (10 nm) for unsupported hadrons. Both
+spatial flight and elapsed ct must fit; larger, backward-time, nonfinite or
+unsupported terminal trees still fail. Each nonzero approximation is logged.
+The full census has 104 finite unknown flights, all below 10 nm; this is bounded
+approximate support, not full new Geant4 physics for excited resonances.
+`TrackAllHadronDecays` remains false by default. Deploy matching Generators,
+Application and simulation-plugin libraries together in worker-local runtimes.
+Never rebuild a shared live release to enable these changes.
+
+The first four-event conversion canary failed on an overly strict input-rounding
+check; its six exhausted queue entries were retired with all failures preserved.
+`decay_conversion_recovery_20261023_v2` runs five corrected one-original controls
+with automatic native comparisons and verified legacy controls reused. The two
+passive `parent_transport_trace_20261023_v1` SIM workers completed: all 34 observed
+preassigned decays conserve four-momentum, including three after energy loss;
+34 parents were removed by inelastic interactions before their planned decay,
+with no later decay of those tracks. Exact plain/logged truth and hit comparison
+still follows automatically. The subsequent event-scale input check has its own
+SIM-only `source_precision_canary_20261023_v3` (original 95), with no new GEN or
+EOS bulk. These replays are validation and cannot be added as production exposure.
+
+The completed 295-original QCD benchmark has no retained target-tail pair.
+A useful Both-Both tail gain, complete all-process reconstruction/publication
+checks and inclusive rate qualification remain required before full production.
+Exact current results, commits and readiness gates belong in
+`../../SHIFT_RECONSTRUCTION.md` and the material-study handoff. Physics tests
+passing is not evidence of a measured statistics gain or closed normalization.
 
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
@@ -2896,3 +2913,14 @@ Storage reservation uses 1 GB per high worker, its ceiling of 80, ordinary
 workers' 250 MB bound, and the 50 GB free-space reserve. Consult
 `../SHIFT_ANALYSIS.md` for the remaining physics gates. These managers and
 monitoring continue after lxplus logout.
+
+
+### 2026-10-23 one-hour readiness milestone
+
+Implemented and privately tested coherent decay conversion and birth-mass repair; shared binaries untouched. CMSSW commits 6652ae6061d, 30511d083b6, 67797164762. User explicitly approved opt-in unsupported-hadron flights up to 10 nm; longer flights still fail. Census: 301 original events, 104 unsupported finite hadron flights (maximum 8.6564 nm), no unsupported terminal hadrons. All 41,241 saved physical inputs pass the original-event precision check; maximum energy discrepancy 1.5846e-11 GeV. Decay conservation tolerance unchanged.
+
+Five QCD/DY/Jpsi/heavy-flavour full SIM+RECO+Nano chains and five independent paired comparisons completed and published. This is validation exposure, not additive new GEN statistics; no tail gain qualified. Final combined collection failed on missing request_sha256 in compare_paired.py:23. Keep the individual successful comparisons and original failure; repair collector against exact request hashes before replacement.
+
+Both passive material traces completed and published: 34 decays conserve four-momentum, three after positive parent energy loss; 34 inelastic removals never later decay. Logger leaves native truth, hits and metadata exactly unchanged in both events. Native closure summary is parent_transport_trace_20261023_v1/summary.json.
+
+Latest numerical-precision event95 canary submitted under source_precision_canary_20261023_v3 (manager13055448, watchdog13055449). See final_queue.json for fresh scheduler state. Detached frozen directories remain required until terminal results/readback; failed campaigns and retries preserved. Full production NOT admitted: final precision runtime result, combined collection repair, inclusive normalization closure and statistically meaningful both-both tail gain still needed. No detector timing settings or GEN weights changed. Native suites plus 66 worker-publication and 45 preselection tests pass. Temporary build removed if no /proc consumers; compact evidence and byte receipt in process_feature_checks/readiness_hour_v1.

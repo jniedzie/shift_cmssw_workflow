@@ -70,6 +70,10 @@ def install_hadron_transport(request, tools):
         return None
     if not isinstance(transport, dict) or transport.get('track_all_hadron_decays') is not True:
         raise ValueError('Hadron transport requires an explicit TrackAllHadronDecays opt-in')
+    maximum_flight = transport.get('maximum_untracked_hadron_flight_mm', 0.)
+    if (type(maximum_flight) not in (int, float) or not math.isfinite(maximum_flight)
+            or not 0. <= maximum_flight <= 1.e-5):
+        raise ValueError('Tiny hadron-flight approximation must be explicitly between zero and 10 nm')
     reference = transport.get('build_receipt', {})
     expected = checked_sha256(reference.get('sha256'), 'hadron transport build receipt')
     relative = Path(reference.get('path', ''))
@@ -79,7 +83,10 @@ def install_hadron_transport(request, tools):
         raise ValueError('Hadron transport build receipt is outside frozen tools')
     if digest(receipt) != expected:
         raise ValueError('Hadron transport build receipt SHA differs')
-    inventory = json.loads(receipt.read_text()).get('libraries', {})
+    build = json.loads(receipt.read_text())
+    if maximum_flight > build.get('maximum_untracked_hadron_flight_mm', 0.):
+        raise ValueError('Private build does not qualify the requested tiny-flight budget')
+    inventory = build.get('libraries', {})
     if not isinstance(inventory, dict) or set(inventory) != set(TRANSPORT_LIBRARIES):
         raise ValueError('Hadron transport requires the complete three-library build')
     if not all(os.environ.get(key) for key in ('_CONDOR_SCRATCH_DIR', 'CMSSW_BASE', 'SCRAM_ARCH')):
@@ -114,12 +121,17 @@ def install_hadron_transport(request, tools):
              if p and '/biglib/' not in p and p != str(library)]
     os.environ['LD_LIBRARY_PATH'] = ':'.join([str(library)]+paths)
     command(['edmPluginRefresh', str(library)], timeout=120)
-    return dict(track_all_hadron_decays=True, build_receipt_sha256=expected,
+    return dict(track_all_hadron_decays=True, maximum_untracked_hadron_flight_mm=maximum_flight,
+                build_receipt_sha256=expected,
                 libraries=inventory, installed_directory=str(library), baseline_preload=False)
 
 
-def material_sim_config_script(prepared, track_all_hadron_decays=False):
+def material_sim_config_script(prepared, track_all_hadron_decays=False, maximum_untracked_hadron_flight_mm=0.):
     """Use the fixed HepMC2 copy only after the prepared-source proof passes."""
+    if (not math.isfinite(maximum_untracked_hadron_flight_mm)
+            or not 0. <= maximum_untracked_hadron_flight_mm <= 1.e-5
+            or (maximum_untracked_hadron_flight_mm and not track_all_hadron_decays)):
+        raise ValueError('Invalid explicit tiny-flight configuration')
     script = '''import json,runpy,sys
 import FWCore.ParameterSet.Config as cms
 p=runpy.run_path(sys.argv[1])['process']
@@ -133,6 +145,9 @@ p.FEVTDEBUGoutput.fileName=cms.untracked.string('file:'+sys.argv[3])
         script += "p.generatorSmeared=cms.EDProducer('ShiftHepMC2CopyProducer',src=cms.InputTag('shiftEventTime','','SHIFTTIMING'))\n"
     if track_all_hadron_decays:
         script += 'p.g4SimHits.Generator.TrackAllHadronDecays=cms.untracked.bool(True)\n'
+    if maximum_untracked_hadron_flight_mm:
+        script += ('p.g4SimHits.Generator.MaxUntrackedHadronFlightMm=cms.untracked.double('
+                   + repr(maximum_untracked_hadron_flight_mm) + ')\n')
     return script+"open('sim_cfg.py','w').write(p.dumpPython())\n"
 
 
@@ -351,7 +366,7 @@ open('timing_cfg.py','w').write(p.dumpPython())
         dump('event_ids.json', [x['id'] for x in original_rows])
         # Generate every stage in a fresh interpreter; CMSSW era modifiers are global.
         # The SIM template already schedules the saved, complete HepMC directly.
-        script = material_sim_config_script(prepared, bool(transport))
+        script = material_sim_config_script(prepared, bool(transport), transport.get('maximum_untracked_hadron_flight_mm',0.) if transport else 0.)
         command([sys.executable, '-c', script, str(tools/'templates/material_sim.py'),
                  str(Path('timed_gen.root').resolve()), str(Path('step1.root').resolve()),
                  str(len(original_rows)), str(sample['seed'])], timeout=600)
@@ -361,6 +376,8 @@ open('timing_cfg.py','w').write(p.dumpPython())
         else:
             env['LD_PRELOAD'] = str(tools/'plugin/libShiftCompleteIncomingBaseline.so')
         run_stage('SIM', ['cmsRun', 'sim_cfg.py'], request['stage_timeout_seconds'], env)
+        report['tiny_flight_approximations']=[line for line in Path('SIM.log').read_text(errors='replace').splitlines() if '[SHIFT tiny-flight approximation]' in line]
+        save()
         audit_edm('step1.root', original_rows)
         measured = audit(Path('timed_gen.root'), Path('step1.root'), minimum_stations=1,
                          expected_event_ids=set(tuple(x['id']) for x in original_rows))
