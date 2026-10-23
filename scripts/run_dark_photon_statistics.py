@@ -185,8 +185,25 @@ def submit_dag(config, directory, cap):
 
 
 def run_logged(argv, log, *, timeout=3600):
-    with Path(log).open('x') as output:
-        subprocess.run(list(map(str, argv)), check=True, timeout=timeout,
+    argv = list(map(str, argv))
+    environment = dict(os.environ)
+    if argv[0] == '/usr/bin/python3':
+        # An LCG controller uses another Python version. Its HOME and module
+        # path must not leak into the explicit system-Python subprocess.
+        for name in ('PYTHONHOME', 'PYTHONPATH', 'LD_LIBRARY_PATH', 'LD_PRELOAD', 'ROOTSYS'):
+            environment.pop(name, None)
+        environment['PATH'] = '/usr/bin:/bin'
+    log = Path(log)
+    attempt = 0
+    while True:
+        candidate = log if attempt == 0 else log.with_name(log.name + '.attempt' + str(attempt))
+        try:
+            output = candidate.open('x')
+            break
+        except FileExistsError:
+            attempt += 1
+    with output:
+        subprocess.run(argv, check=True, timeout=timeout, env=environment,
                        stdout=output, stderr=subprocess.STDOUT)
 
 
@@ -533,11 +550,19 @@ def prepare_gen(config, config_path, index):
         prepared = helper.prepare_wave(config['worklist'], index, directory)
     stage = directory / 'gen_stage'
     if not stage.is_dir():
-        handoff = directory / 'handoff.json'
-        new(handoff, dict(handoff_argvs=[['/bin/bash', config['lcg_wrapper'],
+        handoff_record = dict(handoff_argvs=[['/bin/bash', config['lcg_wrapper'],
             '--config', str(config_path), '--handoff-wave', str(index)]],
             retain_local_gen_root=False, minimum_eos_free_bytes=config['minimum_free_bytes'],
-            minimum_eos_free_files=config['minimum_free_files'], afs_metadata_reservation_mb=128))
+            minimum_eos_free_files=config['minimum_free_files'], afs_metadata_reservation_mb=128)
+        # Operational rollovers keep the scientific wave and its failed
+        # handoff intact. Bind a fresh immutable handoff to these exact tools.
+        handoff_digest = hashlib.sha256(json.dumps(handoff_record, sort_keys=True).encode()).hexdigest()
+        handoff = directory / ('handoff.' + handoff_digest[:16] + '.json')
+        if handoff.exists():
+            if read(handoff) != handoff_record:
+                raise ValueError('Existing GEN handoff differs from its frozen operational owner')
+        else:
+            new(handoff, handoff_record)
         run_logged(['/usr/bin/python3', Path(config['tools']) / 'prepare_dark_photon_gen_stage.py',
             '--plan', prepared['preparation'], '--runtime-fingerprint', config['runtime_fingerprint'],
             '--handoff-config', handoff, '--handoff-dependencies', config_path,

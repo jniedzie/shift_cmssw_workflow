@@ -750,5 +750,56 @@ class DagQueueLimits(unittest.TestCase):
             native.assert_not_called()
 
 
+class PreparationEnvironment(unittest.TestCase):
+    def test_system_python_ignores_inherited_lcg_home_and_preserves_failed_logs(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            log = Path(temporary) / 'prepare.log'
+            log.write_text('original failure evidence\n')
+            command = ['/usr/bin/python3', '-c',
+                       'import json,os; print(json.dumps(dict(home=os.getenv("PYTHONHOME"), '
+                       'modules=os.getenv("PYTHONPATH"), libs=os.getenv("LD_LIBRARY_PATH"))))']
+            with patch.dict(os.environ, {'PYTHONHOME':'/missing/lcg312',
+                    'PYTHONPATH':'/missing/lcg312/site-packages', 'LD_LIBRARY_PATH':'/missing/lcg312/lib'}):
+                controller.run_logged(command, log, timeout=30)
+            self.assertEqual(log.read_text(), 'original failure evidence\n')
+            self.assertEqual(json.loads((Path(str(log)+'.attempt1')).read_text()),
+                             dict(home=None, modules=None, libs=None))
+
+    def test_lcg_python_retains_its_matching_package_environment(self):
+        import os
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.dict(os.environ, {'PYTHONHOME':'/qualified/lcg312',
+                    'PYTHONPATH':'/qualified/lcg312/site-packages'}), \
+                 patch.object(controller.subprocess, 'run') as launch:
+                controller.run_logged(['/qualified/lcg312/bin/python3', 'qualify.py'],
+                                      Path(temporary)/'qualify.log')
+            self.assertEqual(launch.call_args.kwargs['env']['PYTHONHOME'], '/qualified/lcg312')
+            self.assertEqual(launch.call_args.kwargs['env']['PYTHONPATH'], '/qualified/lcg312/site-packages')
+
+    def test_gen_preparation_reuses_immutable_handoff_after_preparation_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root/'waves/w000'; directory.mkdir(parents=True)
+            controller.new(directory/'preparation_receipt.json', dict(preparation='/frozen/plan.json'))
+            controller.new(directory/'handoff.json', dict(original_failure='preserved'))
+            config = dict(directory=str(root), lcg_wrapper='/new/qualified/lcg.sh',
+                minimum_free_bytes=1000, minimum_free_files=100, tools='/new/frozen/tools',
+                runtime_fingerprint='/frozen/runtime.json', dependencies={}, prior_inventories=[],
+                workspace='/persistent/workspace')
+            with patch.object(controller, 'run_logged', side_effect=[RuntimeError('first failure'),None]) as prepare, \
+                 patch.object(controller, 'submit_dag', return_value=dict(cluster=123)) as submit:
+                with self.assertRaises(RuntimeError):
+                    controller.prepare_gen(config, root/'config.json', 0)
+                receipt = controller.prepare_gen(config, root/'config.json', 0)
+            self.assertEqual(receipt, dict(cluster=123))
+            self.assertEqual(prepare.call_count, 2)
+            submit.assert_called_once()
+            versions = list(directory.glob('handoff.*.json'))
+            self.assertEqual(len(versions), 1)
+            self.assertEqual(controller.read(versions[0])['handoff_argvs'][0][1], config['lcg_wrapper'])
+            self.assertEqual(controller.read(directory/'handoff.json'), dict(original_failure='preserved'))
+
+
 if __name__ == '__main__':
     unittest.main()
