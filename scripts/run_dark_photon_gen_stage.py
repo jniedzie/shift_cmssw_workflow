@@ -282,11 +282,23 @@ def run_point(directory, expected, point):
         gen = Path(row['gen_directory'])
         if not gen.exists():
             runtime = plan['runtime']
-            shell = ('source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
-                     shlex.quote(str(Path(runtime['cmssw_base']) / 'src')) +
-                     ' && eval "$(scram runtime -sh)" && exec ' + shlex.join(row['gen_argv']))
+            if plan.get('private_gen_runtime') is not None:
+                tools=Path(row['gen_argv'][1]).parent
+                profile=directory/'private_runtime_profile.json'
+                if not profile.exists():
+                    write_new(profile,plan['detector_runtime'])
+                elif read(profile)!=plan['detector_runtime']:
+                    raise ValueError('Frozen private GEN runtime profile changed')
+                argv=['/usr/bin/python3',str(tools/'dark_photon_detector_runtime.py'),
+                    '--profile',str(profile),'--entry',str(tools/'run_dark_photon_private_gen.py'),
+                    '--','--directory',str(directory),'--point',point]
+            else:
+                shell = ('source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
+                         shlex.quote(str(Path(runtime['cmssw_base']) / 'src')) +
+                         ' && eval "$(scram runtime -sh)" && exec ' + shlex.join(row['gen_argv']))
+                argv=['/bin/bash','-c',shell]
             with (directory / 'logs' / (point + '_GEN.log')).open('x') as log:
-                subprocess.run(['/bin/bash', '-c', shell], stdout=log, stderr=subprocess.STDOUT,
+                subprocess.run(argv, stdout=log, stderr=subprocess.STDOUT,
                     timeout=config['gen_worker_timeout_seconds'], check=True, env=native_env())
         publication, parent = publish_gen(row, config)
         verify_seal(directory, expected)

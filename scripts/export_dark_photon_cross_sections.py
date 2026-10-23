@@ -907,8 +907,8 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
         meson = contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative")
         expected_native = contract["source_exposure"]["source_collisions"] if meson else audit["events"]
         fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=expected_native)
-        ledger_matches = (same_ledger_content(fresh_ledger, audit["proposal_ledger"]) if meson
-                          else fresh_ledger == audit["proposal_ledger"])
+        # Scratch-only workers relocate the unchanged log before handoff.
+        ledger_matches = same_ledger_content(fresh_ledger, audit["proposal_ledger"])
         if not ledger_matches:
             raise ValueError("Generator log differs from the retained trial ledger")
         if publication:

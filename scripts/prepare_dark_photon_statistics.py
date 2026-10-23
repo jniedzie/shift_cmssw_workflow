@@ -41,10 +41,14 @@ def write(path, value):
 
 
 def physics_digest(contract):
-    return grid.content_digest({key: value for key, value in contract.items() if key not in MC_FIELDS})
+    physics={key:copy.deepcopy(value) for key,value in contract.items() if key not in MC_FIELDS}
+    if physics.get('source_placement') is not None:
+        for key in ('event_positions','selection_seed','original_source_sha256'):
+            physics['source_placement'].pop(key,None)
+    return grid.content_digest(physics)
 
 
-def extend_contract(contract, events, seed, run_number):
+def extend_contract(contract, events, seed, run_number, jaw_profile=None):
     if (contract.get('schema') != 'shift-dark-photon-gen-v1'
             or contract.get('event_budget_mode') != 'outputAccepted'
             or type(events) is not int or not 1 <= events <= 2000):
@@ -52,6 +56,13 @@ def extend_contract(contract, events, seed, run_number):
     result = copy.deepcopy(contract)
     result.update(requested_events=events, maximum_framework_events=10 * events,
                   seed=seed, run_number=run_number)
+    if result.get('source_placement') is not None:
+        if jaw_profile is None:
+            raise ValueError('A new source population needs its frozen jaw profile')
+        from dark_photon_source_placement import place_contract
+        placement=result.pop('source_placement')
+        result['source_model']=placement['preplacement_source_model']
+        result=place_contract(result,jaw_profile)
     if physics_digest(result) != physics_digest(contract):
         raise ValueError('Statistics extension changed generator physics')
     return result
@@ -157,7 +168,8 @@ def prepare_worklist(args):
     for wave in waves:
         wave['campaign'] = args.campaign + f'-w{wave["wave_index"]:03d}'
         for batch in wave['batches']:
-            chunks = math.ceil(batch['events'] / args.events_per_job)
+            chunk_size=1 if wave['operational_canary'] else args.events_per_job
+            chunks = math.ceil(batch['events'] / chunk_size)
             batch.update(batch_index=batch_index, seed=args.seed_base + batch_index,
                          run_number=args.run_base + batch_index, detector_job_base=job,
                          detector_chunks=chunks, detector_audit_job=job + chunks)
@@ -167,10 +179,26 @@ def prepare_worklist(args):
         wave['detector_chunks'] = sum(batch['detector_chunks'] for batch in wave['batches'])
     proof = namespace_audit(waves, args.prior_inventories, args.prior_plans,
                             args.reserved_seeds, args.reserved_runs)
-    if not re.fullmatch(r'[A-Za-z0-9_-]+', args.campaign) or '20261016' not in args.campaign:
+    if (not re.fullmatch(r'[A-Za-z0-9_-]+', args.campaign)
+            or not re.search(r'(?<![0-9])20[0-9]{6}(?![0-9])',args.campaign)):
         raise ValueError('Require an explicit dated campaign base')
     output.mkdir(parents=True)
     files, sources, points, physics_sources = {}, {}, {}, {}
+    fresh_profile=getattr(args,'runtime_profile',None)
+    jaw_profile=getattr(args,'jaw_profile',None)
+    private_gen=getattr(args,'gen_runtime',None)
+    if bool(fresh_profile)!=bool(jaw_profile) or bool(fresh_profile)!=bool(private_gen):
+        raise ValueError('Fresh source production requires private detector/GEN runtimes and jaw profile together')
+    if fresh_profile:
+        for original,name in ((fresh_profile,'detector_runtime.json'),(private_gen,'gen_runtime.json'),
+                              (jaw_profile,'jaw_profile.json')):
+            copy_checked(original,output/name,files)
+        jaw_profile=output/'jaw_profile.json'
+        for authority in (read(output/'detector_runtime.json')['manifest'],
+                          read(output/'gen_runtime.json')['provenance']):
+            if digest(authority['path']) != authority['sha256']:
+                raise ValueError('Fresh runtime authority changed')
+            files[authority['path']]=authority['sha256']
     copy_checked(args.allocation, output / 'allocation.json', files)
     for index, path in enumerate(args.physical_preparations):
         previous = read(path)
@@ -215,7 +243,17 @@ def prepare_worklist(args):
             if digest(row['signal_contract']) != row['signal_contract_sha256']:
                 raise ValueError('Qualified physical contract changed: ' + name)
             contract_path = source_dir / 'contracts' / (name + '.json')
-            copy_checked(row['signal_contract'], contract_path, files)
+            if fresh_profile:
+                from dark_photon_source_placement import place_contract
+                contract=place_contract(contract,jaw_profile)
+                # This is a physics reference, not an executable event map.
+                # Each new wave regenerates positions for its own seed/run.
+                contract['source_placement']['event_positions']=[]
+                contract_path.parent.mkdir(parents=True,exist_ok=True)
+                write(contract_path,contract)
+                files[str(contract_path)]=digest(contract_path)
+            else:
+                copy_checked(row['signal_contract'], contract_path, files)
             points[name] = dict(source=label, row=copy.deepcopy(row), contract=str(contract_path),
                                 physics_sha256=physics_digest(contract))
     requested = {row['point'] for row in allocation['points']}
@@ -225,6 +263,16 @@ def prepare_worklist(args):
     here = Path(__file__).resolve().parent
     physics_sources['dark_photon_sample_names.py'] = str(here / 'dark_photon_sample_names.py')
     operational_overrides = {}
+    if fresh_profile:
+        from run_dark_photon_spectral_gen import SOURCES as SPECTRAL_SOURCES
+        from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
+        for name in set(grid.SOURCES)|set(SPECTRAL_SOURCES)|set(MATERIAL_SOURCES):
+            replacement=here/name
+            if name in physics_sources:
+                operational_overrides[name]=dict(qualified_sha256=digest(physics_sources[name]),
+                    replacement_sha256=digest(replacement),
+                    reason='Fresh jaw/material production; native GEN and weighted full-chain gates before bulk')
+            physics_sources[name]=str(replacement)
     if args.detector_runner is not None:
         original = physics_sources['run_dark_photon_detector.py']
         operational_overrides['run_dark_photon_detector.py'] = dict(
@@ -251,6 +299,11 @@ def prepare_worklist(args):
                     known_limitations=['Unchanged detector/reconstruction may still encounter slow originals.',
                                        'Existing failed original events remain separate unresolved work; they are not replaced or credited.',
                                        'Physics and real trigger/recording acceptance remain provisional.'])
+    if fresh_profile:
+        worklist.update(detector_runtime=read(output/'detector_runtime.json'),
+            private_gen_runtime=read(output/'gen_runtime.json'),jaw_profile=str(jaw_profile),
+            prior_completed_events_are_exposure_credit=False,
+            fresh_source_placement_requires_fullchain_canary=True)
     if worklist['total_additional_events'] != allocation['totals']['planned_next_stage_additional_events']:
         raise ValueError('Worklist changed the authorized allocation')
     write(output / 'worklist.json', worklist)
@@ -286,7 +339,7 @@ def prepare_wave(worklist_path, wave_index, output):
         plan['points'] = []
         for batch, record in members:
             row = copy.deepcopy(record['row'])
-            contract = extend_contract(read(record['contract']), batch['events'], batch['seed'], batch['run_number'])
+            contract = extend_contract(read(record['contract']), batch['events'], batch['seed'], batch['run_number'], worklist.get('jaw_profile'))
             if physics_digest(contract) != record['physics_sha256']:
                 raise ValueError('Wave changed an inherited physical point')
             for key in ('chunks', 'groups', 'gen_argv', 'gen_command', 'detector_argv', 'detector_command',
@@ -301,7 +354,7 @@ def prepare_wave(worklist_path, wave_index, output):
                     first_event_stall_timeout_seconds=worklist['first_event_stall_timeout_seconds'],
                     statistics_extension_physics_authority=dict(path=source['plan'], sha256=digest(source['plan'])))
         plan = grid.plan_detector_stage(plan, wave['campaign'], worklist['eos_base'],
-                                        worklist['events_per_job'], worklist['group_events'],
+                                        (1 if wave['operational_canary'] else worklist['events_per_job']), worklist['group_events'],
                                         min(batch['detector_job_base'] for batch, _ in members))
         batches = {batch['point']: batch for batch, _ in members}
         for row in plan['points']:
@@ -311,9 +364,13 @@ def prepare_wave(worklist_path, wave_index, output):
             for chunk in row['chunks']:
                 chunk['job'] = batch['detector_job_base'] + chunk['chunk']
             row['detector_job'] = batch['detector_audit_job']
+        if worklist.get('private_gen_runtime') is not None:
+            plan['private_gen_runtime']=copy.deepcopy(worklist['private_gen_runtime'])
+            plan['detector_runtime']=copy.deepcopy(worklist['detector_runtime'])
         runtime = copy.deepcopy(previous['runtime'])
         runtime['source_preflight_sha256'] = {name: digest(Path(worklist['physics_scripts']) / name) for name in worklist['physics_script_names']}
-        runtime['width_preflight'] = 'Exact inherited qualified physics contracts; only MC count/run/seed changed'
+        runtime['width_preflight'] = ('Inherited qualified width/coupling contracts; fresh qualified jaw law and private runtime'
+            if worklist.get('private_gen_runtime') else 'Exact inherited qualified physics contracts; only MC count/run/seed changed')
         destination = output / source_name
         grid.SOURCES = tuple(worklist['physics_script_names'])
         frozen = grid.write_plan(destination, source['references'], source['templates'], plan, runtime,
@@ -327,6 +384,11 @@ def prepare_wave(worklist_path, wave_index, output):
                 row['gen_argv'].extend(['--darkcast-path', str(external), '--darkcast-source-receipt', str(external / 'source_receipt.json')])
                 row['gen_command'] = shlex.join(row['gen_argv'])
             (destination / 'plan.json').write_text(json.dumps(frozen, indent=2, allow_nan=False) + '\n')
+        if worklist.get('jaw_profile'):
+            for row in frozen['points']:
+                row['gen_argv'].extend(['--jaw-profile',worklist['jaw_profile']])
+                row['gen_command']=shlex.join(row['gen_argv'])
+            (destination/'plan.json').write_text(json.dumps(frozen,indent=2,allow_nan=False)+'\n')
         plans.append(destination / 'plan.json')
     combined = combine_plans(plans, output / 'combined')
     plan_path = Path(combined['plan'])
@@ -363,6 +425,9 @@ def main():
     create.add_argument('--reserved-seeds', nargs='+', type=int, default=[761016001, 761016002])
     create.add_argument('--reserved-runs', nargs='+', type=int, default=[1761016001, 1761016002])
     create.add_argument('--detector-runner', type=Path)
+    create.add_argument('--runtime-profile',type=Path)
+    create.add_argument('--gen-runtime',type=Path)
+    create.add_argument('--jaw-profile',type=Path)
     wave = commands.add_parser('prepare-wave')
     wave.add_argument('--worklist', type=Path, required=True)
     wave.add_argument('--wave', type=int, required=True)

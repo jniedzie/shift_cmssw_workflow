@@ -333,7 +333,7 @@ def closed_primitive(directory, point, events, before):
     plan, seal, report = map(read, names)
     plan_hash = sha(names[0])
     if (seal['files'].get(str(names[0])) != plan_hash or report.get('complete') is not True
-            or report.get('events') != events or report.get('point') != point
+            or report.get('full_gen_events',report.get('events')) != events or report.get('point') != point
             or report.get('plan_sha256') != plan_hash or report.get('seal_sha256') != sha(names[1])):
         raise ValueError('Published primitive differs from its sealed complete population')
     return True
@@ -542,9 +542,9 @@ def prepare_gen(config, config_path, index):
             '--plan', prepared['preparation'], '--runtime-fingerprint', config['runtime_fingerprint'],
             '--handoff-config', handoff, '--handoff-dependencies', config_path,
             *config['dependencies'].keys(), '--prior-inventories', *config['prior_inventories'],
-            '--workspace', config['workspace'], '--output', stage, '--gen-workers', '3'],
+            '--workspace', config['workspace'], '--output', stage, '--gen-workers', str(config.get('gen_workers_per_wave',10))],
             directory / 'prepare_gen.log')
-    return submit_dag(config, stage, 5)
+    return submit_dag(config, stage, config.get('gen_workers_per_wave',10)+2)
 
 
 def production_budget(config, preparation):
@@ -556,6 +556,62 @@ def production_budget(config, preparation):
     budget['fixed_reservation_breakdown'] = config['fixed_publication_breakdown']
     budget['publication_reservation_scope'] = 'One adaptive wave plus protected peer-wave and analysis headroom'
     return budget
+
+
+def selected_preparation(config, directory, prepared):
+    """Bind frozen material admission before replanning selected detector offsets."""
+    original=read(prepared['preparation'])
+    if original.get('private_gen_runtime') is None:
+        return prepared
+    from dark_photon_material_selection import bind, validate_plan
+    from prepare_dark_photon_material_source import immutable
+    import prepare_dark_photon_grid as grid
+    stage=directory/'gen_stage'
+    inventory=read(stage/'gen_inventory.json')
+    publications={row['point']:row for row in read(stage/'gen_publication.json')['inputs']}
+    destination=directory/'material_preparation.json'
+    if destination.exists():
+        plan=read(destination)
+        validate_plan(plan,inventory)
+    else:
+        settings=config['material_admission']
+        profile=directory/'material_runtime_profile.json'
+        immutable(profile,original['detector_runtime'])
+        bound=[]
+        for row in original['points']:
+            parent=inventory['points'][row['point']]
+            gen=Path(row['gen_directory'])
+            request=dict(parent=parent,gen_directory=str(gen),
+                contract_sha256=sha(gen/'contract.json'),gen_publication=publications[row['point']],
+                output_base=row['final_output_base'],geometry=copy.deepcopy(settings['geometry']),
+                frame=copy.deepcopy(settings['frame']),cohort_id=original['campaign']+':'+row['point'],
+                selection_seed=settings['selection_seed']+':'+original['campaign']+':'+row['point'])
+            request_path=gen/'material_admission_request.json'
+            immutable(request_path,request)
+            tools=Path(config['tools'])
+            run_logged(['/usr/bin/python3',tools/'dark_photon_detector_runtime.py',
+                '--profile',profile,'--entry',tools/'prepare_dark_photon_material_source.py',
+                '--','--request',request_path],
+                directory/(row['point']+'_material.log'),timeout=3600)
+            descriptor=gen/'material_selected_source.json'
+            selected=bind(row,parent,read(descriptor))
+            selected['material_selected_source_sha256']=sha(descriptor)
+            bound.append(selected)
+        plan=grid.plan_detector_stage(dict(original,points=bound),original['campaign'],
+            read(config['worklist'])['eos_base'],events_per_job=original['chunk_size'],
+            group_events=original['group_events'],
+            detector_job_base=min(chunk['job'] for row in original['points'] for chunk in row['chunks']))
+        by_point={row['point']:row for row in original['points']}
+        for row in plan['points']:
+            previous=by_point[row['point']]
+            base=previous['chunks'][0]['job']
+            for chunk in row['chunks']:
+                chunk['job']=base+chunk['chunk']
+            row['detector_job']=previous['detector_job']
+        validate_plan(plan,inventory)
+        new(destination,plan)
+    return dict(prepared,preparation=str(destination),preparation_sha256=sha(destination),
+        events=plan['events'],detector_chunks=plan['detector_chunks'])
 
 
 def handoff(config, index):
@@ -570,7 +626,7 @@ def handoff(config, index):
         if not read(stage / 'gen_inventory.json')['complete'] or not read(stage / 'gen_publication.json')['complete']:
             raise ValueError('Detector handoff requires the complete published GEN population')
         if not production.exists():
-            prepared = read(directory / 'preparation_receipt.json')
+            prepared = selected_preparation(config,directory,read(directory / 'preparation_receipt.json'))
             plan = read(prepared['preparation'])
             budget = operations / 'storage_budget.json'
             expected_budget = production_budget(config, plan)
@@ -643,6 +699,10 @@ def additional_statistics_ready(source):
 def available_sources(config):
     result = copy.deepcopy(read(config['baseline_sources'])['points'])
     result = {point: [source] for point, source in result.items()}
+    if config.get('fresh_production'):
+        if result:
+            raise ValueError('Fresh reconstruction production cannot credit old baselines')
+        result={point:[] for point in read(config['worklist'])['points']}
     condition = config['conditions']['sha256']
     # Primitive source populations only: an aggregate must never be counted twice.
     directories = [Path(config['previous_statistics'])]
@@ -709,7 +769,8 @@ def aggregate_helper_names(config):
             modules = ([row.name for row in statement.names] if isinstance(statement, ast.Import)
                        else [statement.module] if isinstance(statement, ast.ImportFrom) else [])
             for module in modules:
-                if module and module.startswith('dark_photon_'):
+                if module and (module.startswith('dark_photon_') or module in
+                               ('shift_production_selection', 'shift_material_preselection')):
                     dependency = module.split('.')[0]+'.py'
                     if dependency not in helpers:
                         helpers.append(dependency)
@@ -739,6 +800,7 @@ def aggregate_plan(config, point, sources, directory):
     campaign = config['campaign_prefix'] + '-' + point + '-v' + directory.name[1:]
     prefix = config['eos_base'] + '/darkphoton_' + point + '/' + campaign
     row = dict(point=point, **models[0], events=sum(item['events'] for item in source_rows),
+        full_gen_events=sum(item.get('full_gen_events', item['events']) for item in source_rows),
         target_mean_lab_flight_m=source_rows[0].get('target_mean_lab_flight_m'),
         sources=sources, final_output_base=prefix)
     plan = dict(schema='shift-dark-photon-additive-plan-v1', campaign=campaign,
@@ -914,6 +976,32 @@ def published_canary(config, state):
     wave = worklist['waves'][0]
     names = [row['point'] for row in wave['batches']]
     source_plan = str(wave_directory(config, 0) / 'production' / 'plan.json')
+    if config.get('fresh_production'):
+        from watch_dark_photon_production import EosRpc,completed_histogram
+        production=Path(source_plan).parent
+        if not Path(source_plan).is_file() or not (production/'seal.json').is_file():
+            return False
+        plan=read(source_plan)
+        saved=state.get('operational_canary_qualification')
+        if saved:
+            if (saved['plan_sha256'] != sha(source_plan) or saved['seal_sha256'] != sha(production/'seal.json')
+                    or any(sha(item['point_receipt_path']) != item['point_receipt_sha256'] for item in saved['points'])):
+                raise ValueError('Qualified canary evidence changed')
+            return True
+        transport=EosRpc('root://eosuser.cern.ch',Path(config['directory'])/'readbacks')
+        points=[]
+        for point in names:
+            row,=[row for row in plan['points'] if row['point']==point]
+            candidate=dict(source=dict(directory=production,campaign=plan['campaign'],
+                plan_sha256=sha(source_plan),seal_sha256=sha(production/'seal.json')),
+                row=row,output=Path(row['final_output_base']))
+            ready=completed_histogram(candidate,transport)
+            if ready is None:
+                return False
+            points.append(ready)
+        state['operational_canary_qualification']=dict(plan_sha256=sha(source_plan),
+            seal_sha256=sha(production/'seal.json'),points=points,latest_aliases_unchanged=True)
+        return True
     return all(source_plan in state.get('published', {}).get(point, {}).get('source_plans', [])
                for point in names)
 
@@ -1019,6 +1107,28 @@ def publish(config, state):
     active = sum(row['JobStatus'] in (1, 2, 6, 7) for row in aggregate_jobs)
     for point, populations in sources.items():
         if len(populations) < 2:
+            if config.get('fresh_production') and populations:
+                source=populations[0];production=Path(source['plan_path']).parent
+                plan=read(source['plan_path'])
+                row,=[row for row in plan['points'] if row['point']==point]
+                if row.get('full_gen_events',row['events']) < config.get('minimum_publish_gen_events',1000):
+                    continue
+                signature=hashlib.sha256(json.dumps(populations,sort_keys=True).encode()).hexdigest()
+                if state.get('published',{}).get(point,{}).get('sources_sha256')==signature:
+                    continue
+                candidate=dict(source=dict(directory=production,campaign=plan['campaign'],
+                    plan_sha256=source['plan_sha256'],seal_sha256=source['seal_sha256']),
+                    row=row,output=Path(row['final_output_base']))
+                ready=completed_histogram(candidate,transport)
+                if ready and Path(config['publication_owner_receipt']).is_file():
+                    alias=config['eos_base']+'/darkphoton_'+point+'/latest'
+                    current=transport.alias_target(alias)
+                    transport.publish_alias(alias,ready['campaign'],[current,ready['campaign']])
+                    ready['primitive_receipt_path']=ready.pop('point_receipt_path')
+                    ready['primitive_receipt_sha256']=ready.pop('point_receipt_sha256')
+                    ready.update(sources_sha256=signature,source_plans=[source['plan_path']],
+                        published_utc=datetime.now(timezone.utc).isoformat())
+                    state.setdefault('published',{})[point]=ready
             continue
         signature = hashlib.sha256(json.dumps(populations, sort_keys=True).encode()).hexdigest()
         old = state.setdefault('published', {}).get(point, {})
@@ -1134,6 +1244,42 @@ def adopt_reviewed_gen_handoffs(config, config_path, state):
         save(Path(config['directory']) / 'state.json', state)
 
 
+def fresh_storage_admission(config, observation):
+    """Protect all future DP exposure and credit only closed published batches."""
+    allocation=read(config['worklist'])
+    observed=datetime.fromisoformat(observation['observed_utc']).timestamp()
+    own_total=allocation['total_additional_events']
+    own_credit=0
+    for wave in allocation['waves']:
+        production=wave_directory(config,wave['wave_index'])/'production'
+        for row in wave['batches']:
+            if closed_primitive(production,row['point'],row['events'],observed):
+                own_credit+=row['events']
+    peer=config['fresh_meson_peer']
+    science=pinned_json(peer['configuration'])
+    root=Path(science['directory'])
+    peer_state=read(root/'state.json') if (root/'state.json').exists() else {}
+    # Read native state before releasing any reservation; a failed query leaves
+    # admission unknown. Completed receipts keep their hashes after heartbeat stops.
+    from run_dark_photon_meson_production import directory_condition
+    live=jobs(config,directory_condition(root))
+    meson_credit=0
+    for batch in science['batches']:
+        prefix=str(root/'batches'/batch['batch'])
+        if any(row.get('Iwd','').startswith(prefix) for row in live):
+            continue
+        published=peer_state.get('batches',{}).get(batch['batch'],{}).get('published')
+        if meson_published_batch(root,batch,published,observed):
+            meson_credit+=peer['forecast_bytes'][batch['batch']]
+    own_remaining=config['fresh_own_fixed_bytes']+(own_total-own_credit)*326000
+    meson_remaining=peer['reservation_bytes']-meson_credit
+    required=config['minimum_free_bytes']+own_remaining+meson_remaining
+    return observation['free_bytes']>=required,dict(reason='shared_storage_checked',
+        required_free_bytes=required,free_bytes=observation['free_bytes'],
+        own_future_bytes=own_remaining,meson_future_bytes=meson_remaining,
+        own_completed_GEN_events=own_credit,meson_closed_bytes=meson_credit)
+
+
 def step(config, config_path, state):
     now = datetime.now(timezone.utc).isoformat()
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
@@ -1186,6 +1332,12 @@ def step(config, config_path, state):
         if observation['free_bytes'] < config['minimum_free_bytes'] or observation['free_files'] < config['minimum_free_files']:
             state['admission'] = 'waiting_for_storage'
             break
+        if config.get('fresh_production'):
+            allowed,evidence=fresh_storage_admission(config,observation)
+            state['fresh_storage_admission']=evidence
+            if not allowed:
+                state['admission']='waiting_for_shared_storage'
+                break
         if config.get('supplement_admission'):
             observation = quota(config)
             state['quota'] = observation

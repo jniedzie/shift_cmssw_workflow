@@ -33,6 +33,24 @@ class StatisticsPreparationTest(unittest.TestCase):
         self.assertEqual(result['maximum_framework_events'], 20000)
         self.assertEqual(result['requested_events'], 2000)
 
+    def test_jaw_extension_redraws_only_new_source_ids_not_physics(self):
+        from dark_photon_source_placement import place_contract
+        from test_shift_jaw_source import profile
+        with tempfile.TemporaryDirectory() as temporary:
+            path=Path(temporary)/'jaw.json';path.write_text(json.dumps(profile()))
+            original=dict(schema='shift-dark-photon-gen-v1',event_budget_mode='outputAccepted',
+                requested_events=2,maximum_framework_events=20,seed=10,run_number=10,
+                epsilon=1.e-6,proper_ctau_mm=42.,source_model='native DY axis baseline')
+            original=place_contract(original,path)
+            newer=TOOL.extend_contract(original,20,862350001,1762350001,path)
+            self.assertEqual(TOOL.physics_digest(newer),TOOL.physics_digest(original))
+            self.assertEqual(len(newer['source_placement']['event_positions']),200)
+            self.assertEqual(newer['source_placement']['event_positions'][0]['event_id'],[1762350001,1,1])
+            self.assertEqual(newer['epsilon'],original['epsilon'])
+            self.assertEqual(newer['proper_ctau_mm'],original['proper_ctau_mm'])
+            with self.assertRaisesRegex(ValueError,'frozen jaw'):
+                TOOL.extend_contract(original,20,862350001,1762350001)
+
     def test_canary_is_part_of_exact_allocation(self):
         requested = {'m2_prompt': 9520, 'm15_prompt': 10140, 'm70_lab_1000m': 10120}
         waves = TOOL.build_waves(allocation(requested), list(requested))

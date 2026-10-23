@@ -113,6 +113,9 @@ def frozen_dependencies(plan):
         files[record['path']] = record['sha256']
     for record in plan.get('statistics_extension_physics_authorities', []):
         files[record['path']] = record['sha256']
+    if plan.get('private_gen_runtime') is not None:
+        for authority in (plan['private_gen_runtime']['provenance'],plan['detector_runtime']['manifest']):
+            files[authority['path']]=authority['sha256']
     for row in plan['points']:
         files[row['signal_contract']] = row['signal_contract_sha256']
         # The spectral runner will validate its pinned package again.
@@ -144,8 +147,8 @@ def prepare(args):
                             any(not isinstance(item, str) for item in argv) or
                             not Path(argv[0]).is_absolute() for argv in argv_list):
         raise ValueError('A full-chain GEN stage requires explicit absolute downstream commands')
-    if not 1 <= args.gen_workers <= 6:
-        raise ValueError('GEN worker cap must be 1..6')
+    if not 1 <= args.gen_workers <= 300:
+        raise ValueError('GEN worker cap must be 1..300')
     configuration.update(workspace=str(args.workspace.resolve()),
         scratch_base=str(args.scratch_base.resolve()),
         prior_inventories=[str(path.resolve()) for path in args.prior_inventories],
@@ -173,6 +176,9 @@ def prepare(args):
     shutil.copy2(Path(__file__).with_name('run_dark_photon_gen_stage.py'), worker)
     write_new(output / 'plan.json', plan)
     write_new(output / 'config.json', configuration)
+    if plan.get('private_gen_runtime') is not None:
+        write_new(output/'private_runtime_profile.json',plan['detector_runtime'])
+        files[str(output/'private_runtime_profile.json')]=sha256(output/'private_runtime_profile.json')
     shutil.copy2(args.runtime_fingerprint, output / 'runtime_fingerprint.json')
     lines = []
     parents = []
@@ -204,7 +210,11 @@ request_disk = 6000MB
 output = {output}/logs/$(action)_$(point).$(ClusterId).$(ProcId).out
 error = {output}/logs/$(action)_$(point).$(ClusterId).$(ProcId).err
 log = {output}/jobs.log
-SendCredential = True
++SendCredential = True
++MaxRuntime = {args.gen_worker_timeout + args.handoff_timeout + 1800}
+on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)
+on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)
+periodic_release = False
 queue
 '''
     (output / 'worker.sub').write_text(common)
