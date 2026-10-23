@@ -102,6 +102,25 @@ def operational_receipts(specifications):
 
 
 
+def preserved_handoffs(config):
+    """Keep exact already-submitted handoffs when a controller changes directory."""
+    result = {}
+    for batch, name in config.get('operational_handoffs', {}).get('preserved_directories', {}).items():
+        directory = Path(name)
+        if (not re.fullmatch(r'[A-Za-z0-9_-]+', batch) or not directory.is_absolute()
+                or '..' in directory.parts or directory.name != batch):
+            raise ValueError('Preserved handoff needs its exact persistent batch directory')
+        for path in (directory / 'submission.json', directory / 'worker.sub'):
+            if config.get('dependencies', {}).get(str(path)) != sha(path):
+                raise ValueError('Preserved handoff is outside frozen watchdog authority')
+        receipt = read(directory / 'submission.json')
+        if (receipt.get('task') != str(directory)
+                or receipt.get('submit_sha256') != sha(directory / 'worker.sub')):
+            raise ValueError('Preserved handoff changed its submitted identity')
+        result[batch] = directory
+    return result
+
+
 def operational_recoveries(config):
     """Bind reviewed old orchestration failures to their exact replacements."""
     root=Path(config['production_directory'])
@@ -137,6 +156,7 @@ def operational_recoveries(config):
             recovery_submission=str(replacement/'submission.json'))
     operations=config.get('operational_handoffs',{})
     if operations:
+        preserved = preserved_handoffs(config)
         destination=Path(operations['directory'])
         if not destination.is_absolute():
             raise ValueError('Operational handoffs require a persistent absolute directory')
@@ -153,7 +173,8 @@ def operational_recoveries(config):
                     or Path(proof['failed_log']['path']).parent != original):
                 raise ValueError('Meson handoff recovery changed its original failed source authority')
             result[receipt['cluster']]=dict(authority=authority,native=None,kind='meson_handoff_recovery',
-                original_directory=str(original),recovery_submission=str(destination/batch/'submission.json'))
+                original_directory=str(original),
+                recovery_submission=str(preserved.get(batch, destination/batch)/'submission.json'))
     return result
 
 
@@ -171,6 +192,7 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
     paths += [Path(item['recovery_submission']) for item in recoveries.values()]
     if config and config.get('operational_handoffs'):
         paths += sorted(Path(config['operational_handoffs']['directory']).glob('*/submission.json'))
+        paths += [directory/'submission.json' for directory in preserved_handoffs(config).values()]
     paths += sorted((root / 'waves').glob('w*/production/submission.json'))
     paths += sorted((root / 'batches').glob('*/submission.json'))
     paths += sorted((root / 'batches').glob('*/handoff/submission.json'))
@@ -203,6 +225,10 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
         for record in result.values():
             if record['directory']==str(replacement):
                 record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
+    preserved = set(preserved_handoffs(config).values()) if config else set()
+    for record in result.values():
+        if Path(record['directory']) in preserved:
+            record['kind'] = 'handoff'
     operations = operational_receipts(operational_jobs)
     if set(result) & set(operations):
         raise ValueError('Operational job duplicates another monitored manager')

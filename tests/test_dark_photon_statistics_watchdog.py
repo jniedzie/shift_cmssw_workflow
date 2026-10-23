@@ -121,8 +121,43 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.config.update(operational_handoffs=dict(directory=str(destination),reviewed_failures={'b000':dict(path=str(proof),sha256=WATCH.sha(proof))}),dependencies={str(proof):WATCH.sha(proof)})
         receipts=WATCH.manager_receipts(self.root,config=self.config)
         self.assertEqual(receipts[100]['kind'],'reviewed_orchestration');self.assertEqual(receipts[300]['kind'],'handoff')
+        # A later controller keeps the successful old replacement while new
+        # batches use its own handoff directory.
+        (new/'worker.sub').write_text('queue\n')
+        receipt=WATCH.read(new/'submission.json')
+        receipt['submit_sha256']=WATCH.sha(new/'worker.sub')
+        (new/'submission.json').write_text(json.dumps(receipt))
+        self.config['operational_handoffs'].update(directory=str(self.root/'next/handoffs'),
+                                                  preserved_directories={'b000':str(new)})
+        for path in (new/'submission.json',new/'worker.sub'):
+            self.config['dependencies'][str(path)]=WATCH.sha(path)
+        receipts=WATCH.manager_receipts(self.root,config=self.config)
+        self.assertEqual(receipts[300]['directory'],str(new))
+        self.assertEqual(WATCH.operational_recoveries(self.config)[100]['recovery_submission'],str(new/'submission.json'))
         source.write_text('{"complete":false}')
         with self.assertRaisesRegex(ValueError,'source authority'):WATCH.operational_recoveries(self.config)
+
+    def test_preserved_handoff_requires_pinned_receipt_and_matching_submit_identity(self):
+        directory=self.root/'earlier/handoffs/b001';directory.mkdir(parents=True)
+        submit=directory/'worker.sub';submit.write_text('queue\n')
+        receipt=directory/'submission.json'
+        receipt.write_text(json.dumps(dict(cluster=301,task=str(directory),
+            submit_sha256=WATCH.sha(submit),utc='1970-01-01T00:00:00+00:00')))
+        self.config.update(operational_handoffs=dict(directory=str(self.root/'next/handoffs'),
+            preserved_directories={'b001':str(directory)}),
+            dependencies={str(path):WATCH.sha(path) for path in (submit,receipt)})
+        record=WATCH.manager_receipts(self.root,config=self.config)[301]
+        self.assertEqual(record['kind'],'handoff')
+        self.assertEqual(record['directory'],str(directory))
+        submit.write_text('changed\n')
+        with self.assertRaisesRegex(ValueError,'frozen watchdog authority'):
+            WATCH.manager_receipts(self.root,config=self.config)
+        self.config['dependencies'][str(submit)]=WATCH.sha(submit)
+        with self.assertRaisesRegex(ValueError,'submitted identity'):
+            WATCH.manager_receipts(self.root,config=self.config)
+        self.config['operational_handoffs']['preserved_directories']['b001']='relative/b001'
+        with self.assertRaisesRegex(ValueError,'persistent batch directory'):
+            WATCH.manager_receipts(self.root,config=self.config)
 
     def test_seven_real_gen_qualification_rows_need_no_expected_signal_count(self):
         masses=('m0p22','m0p25','m0p3','m0p4','m0p5','m0p7','m0p9')
