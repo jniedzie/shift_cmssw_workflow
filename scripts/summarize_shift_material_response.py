@@ -6,11 +6,93 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import re
 import subprocess
 import sys
 
 from shift_material_response import (bootstrap_comparison, shape_comparison, response_reporting_scope,
                                      source_exposures, source_rate_weight, source_origin_sha256)
+
+
+def collect_paired(directory, fetch=None):
+    """Collect completed pairs using their frozen request inventory.
+
+    Older comparison receipts omit request_sha256. Their submitted request
+    remains bound by the reviewed inventory and native submit/execute/exit log;
+    do not add a guessed hash to those original receipts.
+    """
+    directory = Path(directory).resolve()
+    read = lambda path: json.loads(path.read_text())
+    sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+    binding_path = directory/'preparation/request_binding.json'
+    binding = read(binding_path)
+    review = read(directory/'preparation/root_review.json')
+    plan_path = directory/'plan.json'
+    if (sha(binding_path) != review['request_binding_sha256']
+            or sha(plan_path) != binding['plan_sha256']
+            or sha(directory/'frozen/frozen_tools.tar.gz') != binding['archive_sha256']
+            or binding['archive_sha256'] != review['archive_sha256']):
+        raise ValueError('Reviewed pair inventory or plan changed')
+    plan, pairs, request_hashes = read(plan_path), [], {}
+    dag = (directory/'production.dag').read_text().splitlines()
+    for pair in plan['pairs']:
+        job = directory/'verifiers'/pair['id']
+        request_path = job/'request.json'
+        pin = binding['requests'][pair['id']]
+        if str(request_path) != pin['path'] or sha(request_path) != pin['sha256']:
+            raise ValueError('Pair request changed: '+pair['id'])
+        expected_vars = ('VARS '+pair['id']+' RequestSHA="'+pin['sha256']
+                         +'" ToolsSHA="'+binding['archive_sha256']+'"')
+        if dag.count(expected_vars) != 1:
+            raise ValueError('Pair submitted request/runtime binding differs')
+        request, result, status = [read(job/name) for name in
+                                    ('request.json', 'result.json', 'status.json')]
+        if (request['argv'][-2:] != [str(directory), pair['id']]
+                or request['cohort_id'] != plan['cohort_id']
+                or not all(x.get('complete') is True and x.get('exit_code') == 0
+                           for x in (result, status))):
+            raise ValueError('Pair request or completion differs: '+pair['id'])
+        if result.get('request_sha256', pin['sha256']) != pin['sha256']:
+            raise ValueError('Pair receipt request hash differs: '+pair['id'])
+        log = (job/'events.log').read_text()
+        submitted = re.findall(r'000 \((\d+)\.0+\.0+\)', log)
+        if len(submitted) != 1:
+            raise ValueError('Pair requires one preserved native attempt')
+        cluster = submitted[0]
+        terminal = [block for block in log.split('...')
+                    if re.search(r'005 \(0*'+cluster+r'\.0+\.0+\)', block)]
+        if (not re.search(r'001 \(0*'+cluster+r'\.0+\.0+\)', log)
+                or not terminal or 'Normal termination (return value 0)' not in terminal[-1]):
+            raise ValueError('Pair lacks native successful execution')
+        if sha(job/'return_payload.tar.gz') != status['return_payload_sha256']:
+            raise ValueError('Pair returned archive changed')
+        summary_path = directory/'pair_summaries'/(pair['id']+'.json')
+        item = read(summary_path)
+        if (item.get('complete') is not True or item['pair'] != pair
+                or result['selector'] != pair['id']
+                or sha(summary_path) != result['summary_sha256']):
+            raise ValueError('Pair summary changed: '+pair['id'])
+        expected_url = 'root://eosuser.cern.ch/'+plan['publication_directory']+'/pairs/'+pair['id']+'/comparison.json'
+        publications = result['published']
+        if (len(publications) != 1 or publications[0] != dict(url=expected_url,
+                bytes=summary_path.stat().st_size, sha256=sha(summary_path))):
+            raise ValueError('Pair publication differs')
+        if fetch is not None:
+            fetch(publications[0], summary_path)
+        old, new = item['units']['legacy'], item['units']['complete']
+        for key in ('source_id', 'original_source_sha256', 'prepared_input_GEN_sha256',
+                    'timed_GEN_graph_sha256', 'full_source_metadata_sha256', 'weight_audit'):
+            if old[key] != new[key]:
+                raise ValueError('Paired source, graph, weight or exposure differs: '+key)
+        pairs.append(item)
+        request_hashes[pair['id']] = pin['sha256']
+    return dict(schema='shift-paired-hadron-transport-comparison-v1', complete=True,
+        originals=len(pairs), workers=len(plan['samples']), pairs=pairs, new_GEN_exposure=0,
+        modes_not_additive=True, source_exposure_counted_once_per_source_per_mode=plan['full_source_denominators'],
+        representative_efficiency_or_rate=False, tail_gain_qualified=False,
+        physics_normalization_ready=False, request_hashes=request_hashes,
+        plan_sha256=sha(plan_path), binding_sha256=sha(binding_path),
+        published_pairs_independently_read_back=fetch is not None)
 
 
 def summarize(directory, canary=False):

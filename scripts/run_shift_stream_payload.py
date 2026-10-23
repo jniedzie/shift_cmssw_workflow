@@ -39,12 +39,17 @@ def payload_environment(environment, tools, parent=None):
     return env
 
 
-def finish(data, result):
+def finish(data, result, request_path=None):
     receipt = Path(data['result_path'])
     if receipt.is_file():
         evidence = read(receipt)
     else:
         evidence = dict(complete=False, error='Stage did not write its completion receipt')
+    if request_path is not None:
+        expected = hashlib.sha256(Path(request_path).read_bytes()).hexdigest()
+        if evidence.get('request_sha256', expected) != expected:
+            evidence.update(complete=False, error='Stage receipt request hash differs')
+        evidence['request_sha256'] = expected
     complete = result == 0 and evidence.get('complete') is True
     if not complete and result == 0:
         result = 1
@@ -106,7 +111,7 @@ def main():
                 'from shift_sample_paths import streaming_histogram_inputs'], env=env, check=True)
         subprocess.run(argv, env=env, check=True)
     else:
-        sys.exit(finish(data, args.exit_code))
+        sys.exit(finish(data, args.exit_code, args.request))
 
 
 if __name__ == '__main__':

@@ -2924,3 +2924,41 @@ Five QCD/DY/Jpsi/heavy-flavour full SIM+RECO+Nano chains and five independent pa
 Both passive material traces completed and published: 34 decays conserve four-momentum, three after positive parent energy loss; 34 inelastic removals never later decay. Logger leaves native truth, hits and metadata exactly unchanged in both events. Native closure summary is parent_transport_trace_20261023_v1/summary.json.
 
 Latest numerical-precision event95 canary submitted under source_precision_canary_20261023_v3 (manager13055448, watchdog13055449). See final_queue.json for fresh scheduler state. Detached frozen directories remain required until terminal results/readback; failed campaigns and retries preserved. Full production NOT admitted: final precision runtime result, combined collection repair, inclusive normalization closure and statistically meaningful both-both tail gain still needed. No detector timing settings or GEN weights changed. Native suites plus 66 worker-publication and 45 preselection tests pass. Temporary build removed if no /proc consumers; compact evidence and byte receipt in process_feature_checks/readiness_hour_v1.
+
+
+## Corrected transport readiness and summary repair (2026-10-23)
+
+The five corrected QCD/DY/Jpsi comparisons are published. Their collector-only
+recovery checks the frozen plan, reviewed request hashes, native execution and
+exit records, returned archives, source/weight equality and EOS readback. Older
+comparison receipts omit `request_sha256`; preserve them unchanged and bind them
+through the original reviewed inventory and DAG arguments. The shared streaming
+receipt writer now records the exact request-file hash and rejects a conflicting
+application hash. Native success alone remains insufficient.
+
+The newest event-scale precision canary also passed its real SIM worker and
+terminal verifier: 11 decays conserve four-momentum. The earlier two actual
+material traces had 34 passing decays, including three after parent energy loss;
+plain/logged truth, hits and metadata are exactly equal. Unsupported hadron
+flights retain the user-approved, explicit 10 nm limit.
+
+`qcd_complete_transport_response_295_20261023_v1` is a bounded validation replay,
+not a full production. It prepares all 295 existing QCD originals from the same
+500 full source trials at p=1 with the corrected coherent runtime. Its 149
+workers may run independently: two first-result controls use one event each,
+and the rest use at most two events to reduce Nano metadata/storage overhead.
+The candidate score is unchanged. There is no muon-pT cut, material-survival
+factor, new GEN exposure or addition of old/new replays as independent samples.
+The source includes full natural muon-producing decay completion; the diagnostic
+raw-source profile label does not mean weak decays are omitted.
+
+An early native Nano/weight/EOS verifier follows the two controls; a final one
+checks every published chunk before the summary/PDF handoff. The real reader
+passed a clean-CMSSW rehearsal on a completed QCD event. The registered component
+stays below 3.5 GB by retaining the finished older benchmark's actual EOS files
+and releasing only its unused future allocation. No prior output is deleted.
+Production admission still requires an unbiased corrected response, meaningful
+weighted Both-Both tail support and the remaining process/bin normalization
+checks. A completed replay with zero tails must remain an unresolved rate/tail
+measurement, not proof of zero background or a statistics gain. No full-scale
+production or analysis-alias change is authorized by this validation.

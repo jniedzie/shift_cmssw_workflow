@@ -1,5 +1,6 @@
 # Code style: AI-code. AI-generated streaming completion contract tests.
 import json
+import hashlib
 import os
 from pathlib import Path
 import sys
@@ -68,6 +69,26 @@ class PayloadTests(unittest.TestCase):
     def test_request_cannot_replace_physical_evidence(self):
         with self.assertRaisesRegex(ValueError, 'cannot override'):
             self.exercise({'complete': True, 'events': 1}, extra={'events': 100})
+
+    def test_finish_binds_exact_request_bytes_and_rejects_conflicting_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            previous = Path.cwd()
+            try:
+                os.chdir(directory)
+                data = dict(result_path='report.json', cohort_id='test', stage='comparison')
+                Path('request.json').write_text(json.dumps(data, indent=2)+'\n')
+                expected = hashlib.sha256(Path('request.json').read_bytes()).hexdigest()
+                for claimed, code in ((None, 0), (expected, 0), ('a'*64, 1)):
+                    receipt = dict(complete=True)
+                    if claimed is not None:
+                        receipt['request_sha256'] = claimed
+                    Path('report.json').write_text(json.dumps(receipt))
+                    self.assertEqual(payload.finish(data, 0, 'request.json'), code)
+                    result = json.loads(Path('result.json').read_text())
+                    self.assertEqual(result['request_sha256'], expected)
+                    self.assertEqual(result['complete'], code == 0)
+            finally:
+                os.chdir(previous)
 
 
 if __name__ == '__main__':
