@@ -162,6 +162,10 @@ the change.
   Qualify the exact production template, including its EXIT trap, from scratch
   under the deployed environment. Match a standalone entry line when inserting
   commands; the first matching substring may be inside a quoted trap.
+- Qualify a replacement monitor with real replacement-manager and child records.
+  A reviewed wrapper-only recovery can keep the original payload directory;
+  distinguish its children by the exact new DAG manager and frozen proof.
+  Keep old-manager children and unrelated jobs in that directory as failures.
 - Check the effective stage wall-time limits for a one-event job, including
   event-count scaling. They must allow the advertised first-event/stall budget
   and setup overhead; a lower hidden stage limit can kill a valid slow event.
