@@ -158,6 +158,10 @@ the change.
 - Exercise shared-storage admission with real peer state after source-only
   qualifications exist. A source qualification is not a published histogram
   cohort and must not earn completed-output storage credit.
+- Check generated shell entries with `bash -n` before sealing or submitting.
+  Qualify the exact production template, including its EXIT trap, from scratch
+  under the deployed environment. Match a standalone entry line when inserting
+  commands; the first matching substring may be inside a quoted trap.
 - Check the effective stage wall-time limits for a one-event job, including
   event-count scaling. They must allow the advertised first-event/stall budget
   and setup overhead; a lower hidden stage limit can kill a valid slow event.

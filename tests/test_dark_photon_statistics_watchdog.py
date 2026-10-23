@@ -475,6 +475,43 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'preserved material descriptor'):
             WATCH.manager_receipts(self.root,config=self.config)
 
+    def test_detector_recovery_binds_original_payload_directory_and_counts_it_once(self):
+        original=self.root/'waves/w001/production';original.mkdir(parents=True)
+        for name in ('plan.json','seal.json'):(original/name).write_text('{}')
+        (original/'submission.json').write_text(json.dumps(dict(cluster=100,utc='1970-01-01T00:00:00+00:00')))
+        replacement=self.root/'operations/detector_w001';replacement.mkdir(parents=True)
+        for name in ('pipeline.dag','detector.sub','worker.sh'):(replacement/name).write_text(name+'\n')
+        files={str(path):WATCH.sha(path) for path in replacement.iterdir()}
+        (replacement/'submission.json').write_text(json.dumps(dict(cluster=301,utc='1970-01-01T00:00:00+00:00')))
+        native=dict(ClusterId=100,ProcId=0,Iwd=str(original),JobStatus=4,ExitBySignal=False,ExitCode=1)
+        proof=self.root/'detector_recovery.json'
+        proof.write_text(json.dumps(dict(schema='shift-reviewed-detector-stage-replacement-v1',wave_index=1,
+            failure_kind='malformed_budget_preflight_shell_before_SIM',science_rerun=False,
+            detector_payload_started=False,original_directory=str(original),directory=str(replacement),
+            detector_cluster=100,terminal_native_ad=native,original_plan_sha256=WATCH.sha(original/'plan.json'),
+            original_seal_sha256=WATCH.sha(original/'seal.json'),files=files)))
+        self.config.update(reviewed_detector_stage_overrides={'1':dict(directory=str(replacement),
+            review=dict(path=str(proof),sha256=WATCH.sha(proof)))},dependencies={str(proof):WATCH.sha(proof)})
+        receipts=WATCH.manager_receipts(self.root,config=self.config)
+        self.assertEqual(receipts[100]['kind'],'reviewed_orchestration')
+        self.assertEqual(receipts[301]['kind'],'production')
+        self.assertEqual(receipts[301]['payload_directory'],str(original))
+        manager=dict(ClusterId=301,ProcId=0,JobStatus=2,Iwd=str(replacement),JobStartDate=self.now-120)
+        child=dict(ClusterId=302,ProcId=0,DAGManJobId=301,JobStatus=2,Iwd=str(original),QDate=self.now-120)
+        self.counts.update(completed_events=5,complete_receipts=1)
+        with patch.object(WATCH,'stage_counts',return_value=self.counts) as counts, \
+                patch.object(WATCH,'execute_events',return_value=['302.0']):
+            report=WATCH.assess(self.config,{},[manager,child],[native],receipts,self.now)
+            self.assertEqual(report['actual_planned_progress']['detector_completed_events'],5)
+            self.assertFalse(any(i['code'].startswith('wrong_iwd') for i in report['issues']))
+            self.assertTrue(all(call.args==(original,) for call in counts.call_args_list))
+            child['Iwd']=str(self.root/'unexpected')
+            report=WATCH.assess(self.config,{},[manager,child],[native],receipts,self.now)
+            self.assertTrue(any(i['code']=='wrong_iwd_302' for i in report['issues']))
+        (replacement/'worker.sh').write_text('changed\n')
+        with self.assertRaisesRegex(ValueError,'replacement inputs'):
+            WATCH.manager_receipts(self.root,config=self.config)
+
     def test_running_classad_alone_does_not_prove_execution(self):
         report = self.assess([self.child(status=2, starts=1)])
         self.assertFalse(report['stages']['100']['execution_verified'])

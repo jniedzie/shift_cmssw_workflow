@@ -175,6 +175,34 @@ def operational_recoveries(config):
             result[receipt['cluster']]=dict(authority=authority,native=None,kind='meson_handoff_recovery',
                 original_directory=str(original),
                 recovery_submission=str(preserved.get(batch, destination/batch)/'submission.json'))
+    for index, authority in config.get('reviewed_detector_stage_overrides', {}).items():
+        proof = proof_at(authority['review'])
+        original = root/'waves'/f'w{int(index):03d}'/'production'
+        replacement = Path(authority['directory'])
+        native = proof.get('terminal_native_ad', {})
+        if (proof.get('schema') != 'shift-reviewed-detector-stage-replacement-v1'
+                or proof.get('failure_kind') != 'malformed_budget_preflight_shell_before_SIM'
+                or proof.get('wave_index') != int(index) or proof.get('science_rerun') is not False
+                or proof.get('detector_payload_started') is not False
+                or proof.get('original_directory') != str(original)
+                or proof.get('directory') != str(replacement) or not replacement.is_absolute()
+                or '..' in replacement.parts or not replacement.is_relative_to(root.parent)
+                or native.get('JobStatus') != 4 or native.get('ExitCode') != 1
+                or native.get('ExitBySignal') is not False or native.get('ProcId') != 0
+                or native.get('Iwd') != str(original)
+                or native.get('ClusterId') != proof.get('detector_cluster')
+                or read(original/'submission.json').get('cluster') != native.get('ClusterId')
+                or sha(original/'plan.json') != proof.get('original_plan_sha256')
+                or sha(original/'seal.json') != proof.get('original_seal_sha256')
+                or not proof.get('files')):
+            raise ValueError('Detector bootstrap recovery changed its exact original attempt')
+        for filename, digest in proof['files'].items():
+            path = Path(filename)
+            if not path.is_absolute() or not path.is_relative_to(replacement) or sha(path) != digest:
+                raise ValueError('Detector bootstrap recovery changed its replacement inputs')
+        result[native['ClusterId']] = dict(authority=authority['review'], native=native,
+            kind='detector_stage_recovery', original_directory=str(original),
+            recovery_submission=str(replacement/'submission.json'))
     return result
 
 
@@ -227,7 +255,10 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
         replacement=Path(item['recovery_submission']).parent
         for record in result.values():
             if record['directory']==str(replacement):
-                record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
+                if item['kind'] == 'detector_stage_recovery':
+                    record.update(kind='production', payload_directory=item['original_directory'])
+                else:
+                    record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
     preserved = set(preserved_handoffs(config).values()) if config else set()
     for record in result.values():
         if Path(record['directory']) in preserved:
@@ -550,9 +581,11 @@ def assess(config, previous, rows, history, receipts, now):
             continue
         parent = row.get('DAGManJobId')
         expected = receipts.get(parent if parent in receipts else cluster)
-        if expected and row.get('Iwd') != expected['directory']:
+        expected_iwd = (expected.get('payload_directory', expected['directory']) if parent in receipts
+                        else expected['directory']) if expected else None
+        if expected and row.get('Iwd') != expected_iwd:
             issue('wrong_iwd_' + str(cluster), 'critical', 'Job does not use its exact persistent working directory',
-                  job=cluster, actual=row.get('Iwd'), expected=expected['directory'])
+                  job=cluster, actual=row.get('Iwd'), expected=expected_iwd)
         if status == 5:
             issue('held_' + str(cluster), 'critical', 'Production job is held', job=cluster, reason=row.get('HoldReason'))
         if status == 1:
@@ -562,11 +595,12 @@ def assess(config, previous, rows, history, receipts, now):
                       starts=row.get('NumJobStarts', 0))
     for cluster, receipt in receipts.items():
         directory = Path(receipt['directory'])
+        payload_directory = Path(receipt.get('payload_directory', directory))
         current, terminal = queued.get(cluster), ended.get(cluster)
         old = previous.get('stages', {}).get(str(cluster), {})
-        stamps = {name: (directory / name).stat().st_mtime_ns if (directory / name).exists() else 0
+        stamps = {name: (payload_directory / name).stat().st_mtime_ns if (payload_directory / name).exists() else 0
                   for name in ('plan.json', 'statuses', 'completed_points', 'source_status.json', 'source_heartbeat.json')}
-        counts = old['counts'] if old.get('directory_stamps') == stamps else stage_counts(directory)
+        counts = old['counts'] if old.get('directory_stamps') == stamps else stage_counts(payload_directory)
         executed = (old.get('observed_execute_events', []) if terminal and old else execute_events(directory)) \
             if receipt['kind'] in ('gen_stage', 'production') else []
         known_execute.update(executed)
@@ -602,7 +636,7 @@ def assess(config, previous, rows, history, receipts, now):
                 raise ValueError('Native history conflicts with the reviewed failed aggregate')
             summary['reviewed_terminal_failure'] = reviewed[cluster]
             recovery = reviewed[cluster].get('recovery_submission')
-            if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery'):
+            if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery','detector_stage_recovery'):
                 issue('reviewed_orchestration_failure_'+str(cluster),'warning',
                       'Original orchestration failure is retained; its exact replacement is monitored separately',job=cluster)
             if reviewed[cluster].get('kind') == 'meson_finalizer_recovery':
