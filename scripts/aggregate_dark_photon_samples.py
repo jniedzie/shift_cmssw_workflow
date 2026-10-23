@@ -596,6 +596,18 @@ def execute_histogram_only(plan, row, populations, rate, identities,
     return report
 
 
+
+def validate_aggregate_population_count(plan, row, populations):
+    single = plan.get('single_source_regrouping_canary', False)
+    if type(single) is not bool:
+        raise ValueError('Single-source regrouping canary must be an explicit boolean')
+    if single:
+        if plan.get('histogram_only') is not False or len(row['sources']) != 1 or len(populations) != 1:
+            raise ValueError('Single-source canary requires one actual parent and full Nano regrouping')
+    elif len(populations) < 2:
+        raise ValueError('Additive production requires at least two independent GEN populations')
+
+
 def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_directory):
     verify_aggregate_seal(plan_path, plan_digest, seal_digest)
     plan = load_plan(plan_path, plan_digest)
@@ -608,8 +620,7 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
             or Path(prefix).name != plan['campaign'] or Path(prefix).parent.name != 'darkphoton_' + point):
         raise ValueError('Aggregate output is outside its canonical point/campaign namespace')
     populations = unique_populations([load_source(source, row, plan['conditions']['sha256']) for source in row['sources']])
-    if len(populations) < 2:
-        raise ValueError('Additive production requires at least two independent GEN populations')
+    validate_aggregate_population_count(plan,row,populations)
     settings = ('common', 'cp5', 'beam_settings', 'process_settings', 'source_settings', 'source_z_mm',
                 'source_sigma_z_mm', 'source_model', 'timing', 'hadron_decay_policy',
                 'signal_decay_policy', 'lifetime_owner', 'signal_parent_transport')

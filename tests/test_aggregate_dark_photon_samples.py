@@ -39,6 +39,24 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
         inputs=[dict(path='nano_' + str(run), events=events, event_ids=identities)])
 
 
+class SingleSourceRegroupingCanary(unittest.TestCase):
+    def test_explicit_nano_only_canary_keeps_one_actual_parent_denominator(self):
+        from aggregate_dark_photon_samples import validate_aggregate_population_count
+        source=population()
+        plan=dict(histogram_only=False,single_source_regrouping_canary=True)
+        row=dict(sources=[source['source']])
+        validate_aggregate_population_count(plan,row,[source])
+        self.assertEqual(len(unique_populations([source])),1)
+        for changed_plan,changed_sources,changed_populations in [
+            ({'histogram_only':False},row['sources'],[source]),
+            (dict(plan,histogram_only=True),row['sources'],[source]),
+            (dict(plan,single_source_regrouping_canary=1),row['sources'],[source]),
+            (plan,row['sources']*2,[source]),(plan,row['sources'],[source,population(20)]),
+        ]:
+            with self.assertRaises(ValueError):
+                validate_aggregate_population_count(changed_plan,dict(sources=changed_sources),changed_populations)
+
+
 class DisjointParentAccounting(unittest.TestCase):
     @staticmethod
     def component(name, pdg, populations):

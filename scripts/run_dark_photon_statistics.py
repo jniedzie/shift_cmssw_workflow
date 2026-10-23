@@ -828,6 +828,9 @@ def aggregate_helper_names(config):
 def aggregate_plan(config, point, sources, directory):
     histogram_only = config.get('merge_source_histograms', True)
     group_events = config.get('aggregate_group_events', 2000)
+    single_canary = config.get('single_source_regrouping_canary', False)
+    if type(single_canary) is not bool or (single_canary and (histogram_only is not False or len(sources) != 1)):
+        raise ValueError('Single-source canary requires exactly one source and full Nano regrouping')
     if type(histogram_only) is not bool or type(group_events) is not int or group_events < 1:
         raise ValueError('Aggregation requires a boolean histogram mode and positive integer group size')
     directory = Path(directory)
@@ -838,7 +841,9 @@ def aggregate_plan(config, point, sources, directory):
     dependencies = {}
     for name in helpers:
         target = directory / name
-        shutil.copy2(Path(config['tools']) / name, target)
+        source = (Path(__file__).with_name(name) if single_canary and name == 'aggregate_dark_photon_samples.py'
+                  else Path(config['tools']) / name)
+        shutil.copy2(source, target)
         dependencies[str(target)] = sha(target)
     source_rows = []
     for source in sources:
@@ -861,6 +866,8 @@ def aggregate_plan(config, point, sources, directory):
         scoring_deployment=dict(path=str(guard), seal_sha256=sha(guard / 'seal.json')),
         publication_guard=dict(deployment_path=str(guard), seal_sha256=sha(guard / 'seal.json'),
                                point=read(guard / 'plan.json')['points'][0]['point']))
+    if single_canary:
+        plan['single_source_regrouping_canary'] = True
     new(directory / 'plan.json', plan)
     plan_hash = sha(directory / 'plan.json')
     original = (guard / 'finalizer_worker.sh').read_text()
@@ -938,7 +945,11 @@ def aggregate_record(directory, point, populations):
     if len(clusters) > 1:
         raise ValueError('Aggregate submission intent and receipt disagree about the native cluster')
     sources = plan['points'][0].get('sources', [])
-    if (len(sources) < 2 or len({json.dumps(item, sort_keys=True) for item in sources}) != len(sources)
+    single_canary = plan.get('single_source_regrouping_canary',False)
+    single_allowed = (single_canary is True and plan['histogram_only'] is False and len(sources) == 1)
+    if (type(single_canary) is not bool or (single_canary and not single_allowed)
+            or (len(sources) < 2 and not single_allowed)
+            or len({json.dumps(item, sort_keys=True) for item in sources}) != len(sources)
             or any(item not in populations for item in sources)):
         raise ValueError('Existing aggregate source identity changed: ' + str(directory))
     return dict(directory=str(directory),

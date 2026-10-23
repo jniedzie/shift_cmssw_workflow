@@ -650,7 +650,9 @@ class AggregateDescription(unittest.TestCase):
                               eos_base='/eos/synthetic', conditions={})
                 if meson:
                     config.update(production_mechanism='eta-etaprime-radiative', aggregation_guard=str(guard),
-                                  merge_source_histograms=False,aggregate_group_events=4000)
+                                  merge_source_histograms=False,aggregate_group_events=4000,
+                                  single_source_regrouping_canary=True)
+                    sources=sources[:1]
                 target = directory / 'aggregates/m15_prompt/v0001'
                 controller.aggregate_plan(config, 'm15_prompt', sources, target)
                 plan=controller.read(target/'plan.json')
