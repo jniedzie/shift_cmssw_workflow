@@ -359,6 +359,47 @@ def reviewed_meson_retirement(config, authority, expected, check_queue=True):
                 retired_directories=sorted(roots), allocation_canceled=True)
 
 
+def reviewed_source_closure(config, authority, expected):
+    """Cancel only explicitly closed, never-submitted source allocations."""
+    proof = read_pinned(authority)
+    peer = read_pinned(expected)
+    root = Path(peer['directory'])
+    owner_pin = proof['controller_configuration']
+    owner = read_pinned(owner_pin)
+    owner_directory = pinned_path(owner_pin).parent
+    identity = meson_controller_configuration(peer, owner_directory)
+    receipt = read_pinned(proof['controller_submission'])
+    names = proof.get('canceled_batches')
+    batches = {row['batch']: row for row in peer['batches']}
+    if (proof.get('schema') != 'shift-reviewed-meson-source-closure-v1'
+            or proof.get('scope') != 'future-unsubmitted-sources-only'
+            or proof.get('peer_configuration') != expected
+            or proof.get('source_namespaces_remain_reserved') is not True
+            or owner.get('source_admission_closed') is not True or owner.get('directory') != str(root)
+            or receipt.get('task') != str(owner_directory)
+            or receipt.get('submit_sha256') != durable.sha(identity['submit'])
+            or pinned_path(proof['controller_submission']) != owner_directory/'submission.json'
+            or not isinstance(names, list) or not names or len(set(names)) != len(names)
+            or not set(names).issubset(batches)):
+        raise ValueError('Source closure differs from its exact closed controller or source allocation')
+    for name in names:
+        directory = root/'batches'/name
+        paths = [directory/'source_status.json', directory/'source_heartbeat.json']
+        paths += [directory/stage/file for stage in ('', 'production', 'handoff')
+                  for file in ('submission.json', 'submission_intent.json')]
+        if any(path.exists() for path in paths):
+            raise ValueError('Canceled source batch was already attempted: '+name)
+    constraint = ('regexp('+json.dumps(re.escape(str(root)))+',Iwd) || regexp('
+                  +json.dumps(re.escape(str(root)))+',Args)')
+    for row in durable.jobs(config, constraint):
+        path = Path(row['Iwd'])
+        if not path.is_relative_to(root) and path != owner_directory:
+            raise RuntimeError('Unexpected live owner prevents closed-source storage credit')
+        if any(path == root/'batches'/name or path.is_relative_to(root/'batches'/name) for name in names):
+            raise RuntimeError('Canceled source batch has a live job')
+    return names
+
+
 def predecessor_controller_configuration(config, directory):
     """Validate a named operational owner without changing its science or state."""
     previous = prior_meson_configuration(config)
@@ -842,11 +883,15 @@ def validate_meson_reservation_additions(previous, candidate):
             raise ValueError('Meson registration removed or changed an existing protected claim')
         row = matches[0]
         if row != old:
-            if ('retirement_authority' in old or 'retirement_authority' not in row
-                    or {key:value for key,value in row.items() if key != 'retirement_authority'} != old):
+            added = set(row)-set(old)
+            if (len(added) != 1 or not added <= {'retirement_authority', 'source_closure_authority'}
+                    or {key:value for key,value in row.items() if key not in added} != old):
                 raise ValueError('Meson registration changed or repeated an existing protected claim')
             expected = row.get('peer_configuration') or row.get('completion_authority')
-            reviewed_meson_retirement(candidate, row['retirement_authority'], expected, check_queue=False)
+            if 'retirement_authority' in added:
+                reviewed_meson_retirement(candidate, row['retirement_authority'], expected, check_queue=False)
+            else:
+                reviewed_source_closure(candidate, row['source_closure_authority'], expected)
     additions = [row for row in after if row['name'] not in {old['name'] for old in before}]
     directories = set()
     for row in before:
@@ -854,7 +899,8 @@ def validate_meson_reservation_additions(previous, candidate):
         if authority.get('path'):
             directories.add(read_pinned(authority).get('directory'))
     for row in additions:
-        if row.get('completion_authority') is not None or row.get('retirement_authority') is not None:
+        if any(row.get(key) is not None for key in
+               ('completion_authority', 'retirement_authority', 'source_closure_authority')):
             raise ValueError('New meson reservations keep their full positive allocation')
         directory = validate_meson_forecast_peer(row, candidate.get('directory'))
         if directory in directories:
@@ -1429,6 +1475,14 @@ def additional_reservations(config):
                 claim_authority['controller_directory'] = locator
             detail = durable.supplement_campaign_claim(claim_authority, time.time(), 1200, config)
             amount = detail['remaining_bytes']
+            if authority.get('source_closure_authority'):
+                canceled = reviewed_source_closure(config, authority['source_closure_authority'], peer_pin)
+                closed_bytes = sum(amounts[name] for name in canceled)
+                if closed_bytes > amount:
+                    raise ValueError('Closed source allocation overlaps published storage credit')
+                amount -= closed_bytes
+                detail.update(remaining_bytes=amount, canceled_unsubmitted_source_bytes=closed_bytes,
+                              source_closure_verified=True)
         total += amount
         claim = dict(name=authority['name'], reserved_bytes=amount,
                            forecast_sha256=authority['forecast']['sha256'],

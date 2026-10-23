@@ -38,7 +38,7 @@ def scheduling_configuration(original, previous, sources, detector_points):
 def prepare(directory, original_seal, template, template_seal, output, sources=7, detector_points=35,
             additional_meson_forecasts=(), prior_meson_controller_directory=None,
             meson_peer_controllers=(), reviewed_prior_meson_retirement=None, retired_meson_forecasts=(),
-            close_source_admission=False, reviewed_coverage_recovery=None):
+            close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=()):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -80,6 +80,12 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             raise ValueError('Retirement needs one existing uncanceled meson forecast: '+name)
         path = Path(manifest).resolve()
         matches[0]['retirement_authority'] = dict(path=str(path), sha256=production.durable.sha(path))
+    for name, manifest in closed_source_forecasts:
+        matches = [row for row in config.get('additional_reserved_meson_forecasts', []) if row['name'] == name]
+        if len(matches) != 1 or matches[0].get('source_closure_authority') or matches[0].get('retirement_authority'):
+            raise ValueError('Source closure needs one existing live meson forecast: '+name)
+        path = Path(manifest).resolve()
+        matches[0]['source_closure_authority'] = dict(path=str(path), sha256=production.durable.sha(path))
     production.validate_meson_reservation_additions(previous, config)
     if prior_meson_controller_directory is not None:
         locator = str(Path(prior_meson_controller_directory).resolve())
@@ -169,6 +175,8 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         seal_files[str(path)] = production.durable.sha(path)
     retirement_pins = [row['retirement_authority'] for row in config.get('additional_reserved_meson_forecasts', [])
                        if row.get('retirement_authority')]
+    retirement_pins.extend(row['source_closure_authority'] for row in config.get('additional_reserved_meson_forecasts', [])
+                           if row.get('source_closure_authority'))
     if config.get('reviewed_prior_meson_retirement'):
         retirement_pins.append(config['reviewed_prior_meson_retirement'])
     if config.get('reviewed_coverage_recovery'):
@@ -207,13 +215,15 @@ def main():
         help='Pinned review of stopped predecessor allocations; does not declare them complete')
     parser.add_argument('--retired-meson-forecast', action='append', nargs=2, default=[],
         metavar=('NAME', 'MANIFEST'), help='Cancel only the reviewed remaining future writes of an existing peer')
+    parser.add_argument('--closed-source-forecast', action='append', nargs=2, default=[],
+        metavar=('NAME', 'MANIFEST'), help='Cancel reviewed never-submitted sources; protect existing workers')
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
                              args.additional_meson_forecast, args.prior_meson_controller_directory,
                              args.meson_peer_controller, args.reviewed_prior_meson_retirement,
                              args.retired_meson_forecast, args.close_source_admission,
-                             args.reviewed_coverage_recovery), sort_keys=True))
+                             args.reviewed_coverage_recovery, args.closed_source_forecast), sort_keys=True))
 
 
 if __name__ == '__main__':

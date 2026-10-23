@@ -99,6 +99,38 @@ class UnifiedSource(unittest.TestCase):
                 mass_gev=.3, epsilon=.001, proper_ctau_mm=.01, target_mean_lab_flight_m=None)}))
         return config, batch, card
 
+    def test_source_closure_never_cancels_attempted_batches_or_unknown_live_owners(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            peer = root/'peer'
+            owner = root/'closed_controller'
+            peer.mkdir(); owner.mkdir()
+            config = dict(directory=str(peer), batches=[dict(batch='unused'), dict(batch='running')])
+            expected = self.authority(peer, 'config.json', config)
+            owner_pin = self.authority(owner, 'config.json', dict(directory=str(peer), source_admission_closed=True))
+            (owner/'controller.sub').write_text('sealed closed controller')
+            submission = self.authority(owner, 'submission.json', dict(cluster=12, task=str(owner),
+                submit_sha256=production.durable.sha(owner/'controller.sub')))
+            proof = dict(schema='shift-reviewed-meson-source-closure-v1', scope='future-unsubmitted-sources-only',
+                peer_configuration=expected, controller_configuration=owner_pin,
+                controller_submission=submission, canceled_batches=['unused'], source_namespaces_remain_reserved=True)
+            authority = self.authority(root, 'closure.json', proof)
+            with patch.object(production, 'meson_controller_configuration',
+                    return_value=dict(submit=str(owner/'controller.sub'))), \
+                 patch.object(production.durable, 'jobs', return_value=[dict(Iwd=str(peer/'batches/running/production'))]) as jobs:
+                self.assertEqual(production.reviewed_source_closure({}, authority, expected), ['unused'])
+                jobs.return_value = [dict(Iwd=str(peer/'batches/unused'))]
+                with self.assertRaisesRegex(RuntimeError, 'live job'):
+                    production.reviewed_source_closure({}, authority, expected)
+                jobs.return_value = [dict(Iwd=str(root/'unreviewed_controller'))]
+                with self.assertRaisesRegex(RuntimeError, 'Unexpected live owner'):
+                    production.reviewed_source_closure({}, authority, expected)
+                (peer/'batches/unused').mkdir(parents=True)
+                (peer/'batches/unused/submission_intent.json').write_text('{}')
+                jobs.return_value = []
+                with self.assertRaisesRegex(ValueError, 'already attempted'):
+                    production.reviewed_source_closure({}, authority, expected)
+
     def test_declared_canaries_need_not_repeat_the_legacy_eta_split(self):
         rows = FixedExposure().rows()
         rows[1]['mass_gev'] = .5
