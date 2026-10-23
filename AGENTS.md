@@ -123,6 +123,11 @@ the change.
 
 ## Workflow safety
 
+- BSM submission is on hold at the user's request of October 23, 2026.
+  Prepare and validate only; do not launch or resume large BSM controllers or
+  workers until fresh user authorization after the dimuon reconstruction work
+  is ready. Earlier submission approvals are superseded. The final agreed
+  reconstruction runtime must pass full-chain qualification first.
 - Optimize validation for time to a useful result. Run independent events and
   variants in parallel, using one event per job when that shortens iteration.
   Thousands of jobs are acceptable within actual site and storage limits;
