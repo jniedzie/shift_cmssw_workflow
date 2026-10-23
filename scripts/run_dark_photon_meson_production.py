@@ -468,13 +468,24 @@ def common_sample_anchor(config, batch, sample, sample_path, transport):
     existing = read(path)
     exact = ('schema', 'point', 'original_point', 'naming', 'selector_kind', 'mass_gev', 'epsilon',
              'sampling_epsilon', 'target_mean_lab_flight_m', 'mean_lab_flight_m',
-             'calibration_mean_beta_gamma', 'mean_lab_flight_is_estimate')
+             'mean_lab_flight_is_estimate')
     if any(existing.get(key) != sample.get(key) for key in exact):
         raise ValueError('Existing global sample anchor has different physical point or LAB reference')
-    for key in ('proper_ctau_mm', 'reference_mean_lab_flight_m'):
+    for key in ('proper_ctau_mm',):
         value = existing.get(key)
         if (type(value) not in (int, float) or not math.isfinite(value)
                 or not math.isclose(value, sample[key], rel_tol=1.e-10, abs_tol=0.)):
+            raise ValueError('Existing global sample anchor has a different physical lifetime/LAB reference')
+    # Independent source calibrations have different mean boosts. Preserve the
+    # original LAB anchor when mass, epsilon, proper lifetime and selector agree;
+    # check each estimate against its own calibration instead of equating them.
+    for record in (existing, sample):
+        boost = record.get('calibration_mean_beta_gamma')
+        flight = record.get('reference_mean_lab_flight_m')
+        if (type(boost) not in (int, float) or not math.isfinite(boost) or boost <= 0
+                or type(flight) not in (int, float) or not math.isfinite(flight)
+                or not math.isclose(flight, boost*record['proper_ctau_mm']/1000.,
+                                    rel_tol=1.e-10, abs_tol=0.)):
             raise ValueError('Existing global sample anchor has a different physical lifetime/LAB reference')
     creator = existing.get('production_mechanism')
     candidate = config

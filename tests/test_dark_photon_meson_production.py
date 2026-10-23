@@ -817,6 +817,10 @@ class PublicationSafety(unittest.TestCase):
                 self.assertTrue(proof['retained_existing'])
                 self.assertIn('does not describe',proof['scope'])
                 publish.assert_not_called()
+                old.update(calibration_mean_beta_gamma=400.,reference_mean_lab_flight_m=.004)
+                proof=production.common_sample_anchor(config,batch,sample,root/'sample.json',Transport())
+                self.assertTrue(proof['retained_existing'])
+                old.update(calibration_mean_beta_gamma=500.,reference_mean_lab_flight_m=.005)
                 for field,value in [('epsilon',.002),('calibration_mean_beta_gamma',400.),
                                     ('proper_ctau_mm',.02),('target_mean_lab_flight_m',5.)]:
                     original=old[field];old[field]=value
