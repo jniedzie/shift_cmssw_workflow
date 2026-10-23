@@ -142,6 +142,9 @@ the change.
 - Verify a new native queue filter against a known live manager and worker.
   An empty mocked queue missed a double-escaped path regex on October 23;
   use literal directory-prefix comparisons for ClassAd working directories.
+- After changing a live DAG limit, verify that its manager consumed it. A
+  ClassAd readback alone is insufficient. Newer DAGMan versions provide
+  `htcondor dag throttle`; the frontend client may be an older version.
 - Do not edit live campaign configuration or rebuild the shared CMSSW release
   while jobs using it are running. Documentation-only edits are safe.
 - Keep timing, occupancy, trigger-candidate, electronics-response, and offline
