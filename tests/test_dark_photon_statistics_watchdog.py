@@ -80,6 +80,64 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Changed retained'):
             WATCH.reviewed_terminal_failures(self.config)
 
+    def test_partial_gen_recovery_discovers_replacement_and_keeps_original_failure(self):
+        old=self.root/'waves/w000/gen_stage';new=old.with_name('gen_stage_recovery_v1')
+        for path,cluster in ((old,100),(new,300)):
+            path.mkdir(parents=True);(path/'statuses').mkdir()
+            (path/'submission.json').write_text(json.dumps(dict(cluster=cluster,task=str(path),utc='1970-01-01T00:00:00+00:00')))
+            (path/'plan.json').write_text('{}')
+        (old/'statuses/m2_prompt.json').write_text(json.dumps(dict(complete=False,error='original contract mismatch')))
+        successful=old/'statuses/m15_prompt.json';successful.write_text(json.dumps(dict(complete=True)))
+        proof=self.root/'review.json';proof.write_text(json.dumps(dict(schema='shift-reviewed-partial-GEN-recovery-v1',
+            original_stage=str(old),replacement_stage=str(new),physics_seeds_exposure_unchanged=True,
+            original_plan_sha256=WATCH.sha(old/'plan.json'),recovered_plan_sha256=WATCH.sha(new/'plan.json'),
+            original_gen_manager=100,failed_point='m2_prompt',reused_points={'m15':dict(status=str(successful),sha256=WATCH.sha(successful))})))
+        self.config.update(reviewed_gen_stage_overrides={'0':dict(directory=str(new),review=dict(path=str(proof),sha256=WATCH.sha(proof)))},dependencies={str(proof):WATCH.sha(proof)})
+        receipts=WATCH.manager_receipts(self.root,config=self.config)
+        self.assertEqual(receipts[100]['kind'],'reviewed_orchestration')
+        self.assertEqual(receipts[300]['kind'],'gen_stage')
+        native=dict(ClusterId=100,ProcId=0,JobStatus=3,Iwd=str(old),ExitCode=0,ExitBySignal=False)
+        with patch.object(WATCH,'stage_counts',return_value=self.counts),patch.object(WATCH,'execute_events',return_value=[]):
+            report=WATCH.assess(self.config,{},[],[native],{100:receipts[100]},self.now)
+            self.assertTrue(any(x['code']=='reviewed_orchestration_failure_100' for x in report['issues']))
+            self.assertFalse(any(x['severity']=='critical' for x in report['issues']))
+            revived=dict(native,ClusterId=999,JobStatus=2)
+            report=WATCH.assess(self.config,{},[revived],[native],{100:receipts[100]},self.now)
+            self.assertTrue(any(x['code']=='reviewed_failure_active_999' for x in report['issues']))
+        successful.write_text('{"complete":false}')
+        with self.assertRaisesRegex(ValueError,'successful population'):WATCH.operational_recoveries(self.config)
+
+    def test_declared_meson_operational_handoff_is_discovered_with_exact_review(self):
+        old=self.root/'batches/b000/handoff';old.mkdir(parents=True)
+        source=old.parent/'source_status.json';source.write_text('{"complete":true}')
+        failure=old/'worker.err';failure.write_text('original Python bootstrap failure')
+        original=dict(cluster=100,task=str(old),utc='1970-01-01T00:00:00+00:00')
+        (old/'submission.json').write_text(json.dumps(original))
+        destination=self.root/'operations/handoffs';new=destination/'b000';new.mkdir(parents=True)
+        (new/'submission.json').write_text(json.dumps(dict(cluster=300,task=str(new),utc='1970-01-01T00:00:00+00:00')))
+        proof=self.root/'review.json';proof.write_text(json.dumps(dict(schema='shift-meson-handoff-recovery-v1',
+            original_submission=original,source_status_sha256=WATCH.sha(source),gen_or_detector_rerun_allowed=False,
+            failed_log=dict(path=str(failure)))))
+        self.config.update(operational_handoffs=dict(directory=str(destination),reviewed_failures={'b000':dict(path=str(proof),sha256=WATCH.sha(proof))}),dependencies={str(proof):WATCH.sha(proof)})
+        receipts=WATCH.manager_receipts(self.root,config=self.config)
+        self.assertEqual(receipts[100]['kind'],'reviewed_orchestration');self.assertEqual(receipts[300]['kind'],'handoff')
+        source.write_text('{"complete":false}')
+        with self.assertRaisesRegex(ValueError,'source authority'):WATCH.operational_recoveries(self.config)
+
+    def test_source_qualifications_do_not_crash_or_replace_aggregated_publication_counts(self):
+        worklist=dict(schema='shift-dp-meson-production-v1',batches=[dict(batch=name,point='m0p3_prompt',
+            source_collisions=10000,expected_signal_events=25) for name in ('qualification','first','second')])
+        Path(self.config['worklist']).write_text(json.dumps(worklist))
+        state=dict(complete=False,published={'m0p3_prompt':dict(events=8)},batches={
+            'qualification':dict(published=dict(source_qualification_only=True)),
+            'first':dict(published=dict(events=2)),'second':dict(published=dict(events=3))})
+        (self.root/'state.json').write_text(json.dumps(state))
+        report=self.assess([])
+        self.assertEqual(report['actual_planned_progress']['published_total_events_by_point'],{'m0p3_prompt':8})
+        state.pop('published');(self.root/'state.json').write_text(json.dumps(state))
+        report=self.assess([])
+        self.assertEqual(report['actual_planned_progress']['published_total_events_by_point'],{'m0p3_prompt':5})
+
     def test_transient_afs_write_is_retried_without_losing_the_record(self):
         original = Path.write_text
         attempts = []

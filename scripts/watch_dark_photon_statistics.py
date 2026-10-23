@@ -101,7 +101,63 @@ def operational_receipts(specifications):
     return result
 
 
-def manager_receipts(root, supervisor_receipt=None, external_productions=(), operational_jobs=()):
+
+def operational_recoveries(config):
+    """Bind reviewed old orchestration failures to their exact replacements."""
+    root=Path(config['production_directory'])
+    def proof_at(authority):
+        path=Path(authority['path'])
+        if (not path.is_absolute() or config.get('dependencies',{}).get(str(path)) != authority['sha256']
+                or sha(path) != authority['sha256']):
+            raise ValueError('Operational recovery is outside frozen watchdog authority')
+        return read(path)
+    result={}
+    for index,authority in config.get('reviewed_gen_stage_overrides',{}).items():
+        proof=proof_at(authority['review'])
+        original=root/'waves'/f'w{int(index):03d}'/'gen_stage'
+        replacement=Path(authority['directory'])
+        if (proof.get('schema') != 'shift-reviewed-partial-GEN-recovery-v1'
+                or proof.get('original_stage') != str(original)
+                or proof.get('replacement_stage') != str(replacement)
+                or replacement.parent != original.parent or not replacement.is_absolute()
+                or proof.get('physics_seeds_exposure_unchanged') is not True
+                or sha(original/'plan.json') != proof['original_plan_sha256']
+                or sha(replacement/'plan.json') != proof['recovered_plan_sha256']):
+            raise ValueError('Partial GEN recovery changed its exact source/stage authority')
+        receipt=read(original/'submission.json')
+        failed=read(original/'statuses'/(proof['failed_point']+'.json'))
+        if (receipt['cluster'] != proof['original_gen_manager']
+                or failed.get('complete') is not False or not failed.get('error')):
+            raise ValueError('Partial GEN recovery lacks its original failed point')
+        for item in proof['reused_points'].values():
+            if sha(item['status']) != item['sha256'] or read(item['status']).get('complete') is not True:
+                raise ValueError('Partial GEN recovery changed an original successful population')
+        result[receipt['cluster']]=dict(authority=authority['review'],native=None,
+            kind='partial_gen_recovery',original_directory=str(original),
+            recovery_submission=str(replacement/'submission.json'))
+    operations=config.get('operational_handoffs',{})
+    if operations:
+        destination=Path(operations['directory'])
+        if not destination.is_absolute():
+            raise ValueError('Operational handoffs require a persistent absolute directory')
+        for batch,authority in operations.get('reviewed_failures',{}).items():
+            proof=proof_at(authority)
+            original=root/'batches'/batch/'handoff'
+            receipt=read(original/'submission.json')
+            if (proof.get('schema') != 'shift-meson-handoff-recovery-v1'
+                    or proof.get('original_submission') != receipt
+                    or receipt.get('task') != str(original)
+                    or proof.get('gen_or_detector_rerun_allowed') is not False
+                    or sha(original.parent/'source_status.json') != proof['source_status_sha256']
+                    or not Path(proof['failed_log']['path']).is_file()
+                    or Path(proof['failed_log']['path']).parent != original):
+                raise ValueError('Meson handoff recovery changed its original failed source authority')
+            result[receipt['cluster']]=dict(authority=authority,native=None,kind='meson_handoff_recovery',
+                original_directory=str(original),recovery_submission=str(destination/batch/'submission.json'))
+    return result
+
+
+def manager_receipts(root, supervisor_receipt=None, external_productions=(), operational_jobs=(), config=None):
     explicit_supervisor = supervisor_receipt is not None
     supervisor_receipt = Path(supervisor_receipt) if supervisor_receipt else root / 'submission.json'
     if not supervisor_receipt.is_absolute():
@@ -111,6 +167,10 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
     paths = [supervisor_receipt]
     paths.append(root / 'coverage' / 'submission.json')
     paths += sorted((root / 'waves').glob('w*/gen_stage/submission.json'))
+    recoveries=operational_recoveries(config) if config else {}
+    paths += [Path(item['recovery_submission']) for item in recoveries.values()]
+    if config and config.get('operational_handoffs'):
+        paths += sorted(Path(config['operational_handoffs']['directory']).glob('*/submission.json'))
     paths += sorted((root / 'waves').glob('w*/production/submission.json'))
     paths += sorted((root / 'batches').glob('*/submission.json'))
     paths += sorted((root / 'batches').glob('*/handoff/submission.json'))
@@ -136,6 +196,13 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
                                    'production' if path.parent in external else
                                    'aggregate' if 'aggregates' in path.parts else
                                    'meson_source' if path.parent.parent == root / 'batches' else path.parent.name))
+    for cluster,item in recoveries.items():
+        if cluster in result:
+            result[cluster]['kind']='reviewed_orchestration'
+        replacement=Path(item['recovery_submission']).parent
+        for record in result.values():
+            if record['directory']==str(replacement):
+                record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
     operations = operational_receipts(operational_jobs)
     if set(result) & set(operations):
         raise ValueError('Operational job duplicates another monitored manager')
@@ -170,7 +237,7 @@ def scheduler_snapshot(config, receipts, previous):
     # A sealed, previously read native terminal record is immutable. Reuse it
     # rather than rescanning the same old failed manager on a fresh monitor.
     for cluster, reviewed in reviewed_terminal_failures(config).items():
-        if cluster not in present and cluster not in known_terminal:
+        if cluster not in present and cluster not in known_terminal and reviewed.get('native') is not None:
             history.append(reviewed['native'])
             known_terminal.add(cluster)
     missing = [cluster for cluster in receipts if cluster not in present and cluster not in known_terminal]
@@ -277,7 +344,7 @@ def stage_counts(directory):
 
 def reviewed_terminal_failures(config):
     """Keep reviewed failed attempts visible without treating them as active failures."""
-    result = {}
+    result = operational_recoveries(config)
     for authority in config.get('reviewed_meson_coverage_recoveries', []):
         path = Path(authority['path'])
         if config.get('dependencies', {}).get(str(path)) != authority['sha256'] or sha(path) != authority['sha256']:
@@ -415,7 +482,7 @@ def assess(config, previous, rows, history, receipts, now):
     queued = {row['ClusterId']: row for row in rows if row.get('ProcId', 0) == 0}
     ended = {row['ClusterId']: row for row in history if row.get('ProcId', 0) == 0}
     retired_meson_directories = {value['original_directory']: cluster for cluster, value in reviewed.items()
-                                if value.get('kind') == 'meson_finalizer_recovery'}
+                                if value.get('original_directory') is not None}
     for row in rows:
         if row.get('ShiftDPStatisticsWatchdog'):
             continue
@@ -471,11 +538,24 @@ def assess(config, previous, rows, history, receipts, now):
         stages[str(cluster)] = summary
         if cluster in reviewed:
             expected = reviewed[cluster]['native']
-            if terminal and any(terminal.get(key) != expected[key]
+            if expected is None:
+                if (terminal is None or terminal.get('ClusterId') != cluster or terminal.get('ProcId') != 0
+                        or terminal.get('Iwd') != reviewed[cluster]['original_directory']
+                        or terminal.get('JobStatus') not in (3,4)
+                        or (terminal.get('JobStatus') == 4 and terminal.get('ExitCode') in (None,0))):
+                    issue('reviewed_native_missing_'+str(cluster),'critical',
+                          'Reviewed orchestration replacement lacks verified terminal native history',job=cluster)
+                else:
+                    summary['observed_terminal_native']=terminal
+                expected=terminal or {}
+            if terminal and reviewed[cluster]['native'] is not None and any(terminal.get(key) != expected[key]
                     for key in ('ClusterId', 'ProcId', 'Iwd', 'ExitCode', 'ExitBySignal')):
                 raise ValueError('Native history conflicts with the reviewed failed aggregate')
             summary['reviewed_terminal_failure'] = reviewed[cluster]
             recovery = reviewed[cluster].get('recovery_submission')
+            if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery'):
+                issue('reviewed_orchestration_failure_'+str(cluster),'warning',
+                      'Original orchestration failure is retained; its exact replacement is monitored separately',job=cluster)
             if reviewed[cluster].get('kind') == 'meson_finalizer_recovery':
                 issue('reviewed_meson_failure_' + str(cluster), 'warning',
                       'Original runtime download failed; its reviewed finalizer recovery is tracked separately',
@@ -556,8 +636,16 @@ def assess(config, previous, rows, history, receipts, now):
     meson = worklist.get('schema') == 'shift-dp-meson-production-v1'
     if meson:
         names = {row['batch']: row['point'] for row in worklist['batches']}
-        published = {names[batch]: row['published']['events']
-                     for batch, row in controller.get('batches', {}).items() if row.get('published')}
+        batches=Counter()
+        for batch,row in controller.get('batches',{}).items():
+            output=row.get('published',{})
+            if (batch in names and output and not output.get('source_qualification_only')
+                    and type(output.get('events')) is int):
+                batches[names[batch]]+=output['events']
+        published=dict(batches)
+        for point,row in controller.get('published',{}).items():
+            if type(row.get('events')) is int and not row.get('source_qualification_only'):
+                published[point]=row['events']
     operations = {}
     operation_receipts = {value['operation_name']: (cluster, value) for cluster, value in receipts.items()
                           if value['kind'] == 'operation'}
@@ -669,7 +757,7 @@ def poll(config, previous):
         config = dict(config, initial_supervisor_cluster=cluster, initial_gen_manager_cluster=cluster)
     root = Path(config['production_directory'])
     receipts = manager_receipts(root, config.get('supervisor_receipt'), config.get('external_productions', []),
-                                config.get('operational_jobs', []))
+                                config.get('operational_jobs', []),config=config)
     if (config.get('supervisor_receipt') and
             receipts.get(config['initial_supervisor_cluster'], {}).get('kind') != 'supervisor'):
         raise ValueError('Explicit supervisor receipt differs from the configured native cluster')
