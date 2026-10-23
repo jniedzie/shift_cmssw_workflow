@@ -152,6 +152,18 @@ the change.
   Check the eligibility logic against actual report field types. Preserve
   failures and keep independent points progressing without silently dropping
   failed or zero-selected cohorts from their full GEN normalization.
+- Test the frozen controller's real preparation and submission subprocesses
+  under its deployed environment. LCG exports `PYTHONHOME` and library paths:
+  invoking `/usr/bin/python3` with those settings can fail before the script
+  starts. Clean the environment before launching the system interpreter, or
+  use the matching LCG interpreter when its ROOT packages are needed. Exercise
+  an interrupted preparation too, so an existing receipt does not trap every
+  later poll in the same error.
+- If a scratch-only GEN worker fails after producing its ROOT file, preserve
+  that file and the minimal raw contract/audit evidence before its temporary
+  directory is removed. Keep failed exposure separate from admitted exposure.
+  A replay must use the declared frozen contract and seeds; metadata must not
+  silently change a source-position draw keyed by a contract hash.
 - Optimize validation for time to a useful result. Run independent events and
   variants in parallel, using one event per job when that shortens iteration.
   Thousands of jobs are acceptable within actual site and storage limits;
