@@ -140,13 +140,25 @@ scaling. Detailed findings and current repair status belong in
 not establish inclusive material response, normalization or better tail precision.
 Do not rebuild a live shared release or edit its pinned runtime files.
 
-The bounded repair session retained a tested `PromptDecaySupport` component
-for exactly zero flight/time only. Its fourteen native HepMC2/3 controls pass;
-it is not yet connected to the production converter. A separate proposed
-energy-conversion repair passed three simple controls but failed its broader
-native test. That implementation remains private and unqualified, with the
-maintained integration restored. Resume from `../../SHIFT_RECONSTRUCTION.md`;
-do not enable these changes or count prototype replays as new statistics.
+The 23 October private repair passes 114 native controls, including 18 decay
+kinematics cases, stopped and nested parents, exact default controls and actual
+stacking integration. Preserve the generated four-momentum at primary birth;
+for a decay daughter, restore only its recorded mass while retaining its actual
+parent-derived momentum. Never reset a daughter's momentum after parent energy
+loss. Exact-zero unknown nodes can be expanded; nonzero unknown flights still
+fail explicitly. The coherent three-library worker deployment and resolved
+configuration pass their pinned-runtime checks with inherited PYTHONPATH removed.
+
+Four corrected QCD/DY/Jpsi single-original tests now have a separate campaign
+`decay_conversion_canary_20261023_v1`, with independent downstream comparisons
+and verified old controls reused. These replays add no GEN exposure and cannot
+be merged as independent statistics. Full material/reconstruction closure,
+finite unknown resonances and a useful Both-Both tail gain remain open. The
+completed 295-original QCD benchmark has no retained target-tail pair; it does
+not establish zero physical background. Exact results, failures and current
+qualification belong in `../../SHIFT_RECONSTRUCTION.md`. No shared release or
+live production configuration changed; do not enable this private canary for
+full production based on component tests alone.
 
 ## GEN-tail diagnosis and finer high bins (2026-10-21)
 
