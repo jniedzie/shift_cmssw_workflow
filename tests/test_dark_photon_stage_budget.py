@@ -57,7 +57,9 @@ class StageBudget(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);production,policy,path=self.fixture(root)
             wrapper=production/'detector_worker.sh'
-            wrapper.write_text('#!/bin/bash\n/usr/bin/env -u PYTHONHOME /usr/bin/python3 bootstrap.py --entry '+str(production/'chunk_worker.py')+' -- "$@"\n')
+            bootstrap=root/'bootstrap.py'
+            bootstrap.write_text('import runpy,sys\nentry=sys.argv[sys.argv.index("--entry")+1];sys.argv=[entry]+sys.argv[sys.argv.index("--")+1:];runpy.run_path(entry,run_name="__main__")\n')
+            wrapper.write_text('#!/bin/bash\n/usr/bin/env -u PYTHONHOME -u PYTHONPATH /usr/bin/python3 '+str(bootstrap)+' --entry '+str(production/'chunk_worker.py')+' -- "$@"\n')
             preparer.freeze_absolute_stage_budget(production,[43200,7200,14400,14400])
             pinned=budget.load_policy(production/'stage_budget_policy.json')
             self.assertEqual(pinned['allowed_slices'],'all_planned')
@@ -65,6 +67,13 @@ class StageBudget(unittest.TestCase):
             self.assertNotIn('--entry '+str(production/'chunk_worker.py'),wrapper.read_text())
             subprocess.run(['bash','-n',str(wrapper)],check=True)
             self.assertEqual(pinned['worker_sha256'],policy['worker_sha256'])
+            scratch=root/'scratch';scratch.mkdir()
+            environment=dict(os.environ,PYTHONHOME='/invalid/LCG/python312',PYTHONPATH='/invalid/LCG/site')
+            result=subprocess.run(['bash',str(wrapper),'m0p3_prompt','38',budget.sha(production/'seal.json')],
+                cwd=scratch,env=environment,text=True,capture_output=True,check=True)
+            self.assertTrue(json.loads(result.stdout)['complete'])
+            self.assertEqual(json.loads((scratch/'observed.json').read_text())[-3:],
+                ['--absolute-stage-timeouts','--stage-timeouts','43200,7200,14400,14400'])
 
     def test_new_handoff_preserves_submitted_old_owner_and_uses_new_workers_for_future_batches(self):
         with tempfile.TemporaryDirectory() as temporary:
