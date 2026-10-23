@@ -144,23 +144,39 @@ def _leptonic_rate_settings(current,settings):
     return json.dumps(current,sort_keys=True,separators=(',',':'),allow_nan=False)
 
 
-def _leptonic_mass_gate(parent_mass,signal_mass,model):
+def _leptonic_mass_gate(parent_mass,signal_mass,model,*,defer_to_full_source=False):
     """Separate numerical p4/endpoint guard; never infer shape closure from C."""
     nominal=model['mass_min_gev'];settings=model['native_kinematic_precision']
     delta=abs(parent_mass-nominal)
     gap=abs(nominal-signal_mass-model['charged_lepton_mass_gev'])
     mass_shift=delta/nominal
     endpoint_shift=delta/gap if gap else (0. if delta==0 else math.inf)
-    if (mass_shift>settings['relative_mass_limit'] or
-            endpoint_shift>settings['relative_endpoint_limit']):
+    threshold=signal_mass+model['charged_lepton_mass_gev']
+    if (parent_mass>threshold)!=(nominal>threshold):
+        raise ValueError('Native precision changes whether the leptonic-kaon decay is open')
+    closed=nominal<=threshold
+    exceptional=(not closed and (mass_shift>settings['relative_mass_limit'] or
+                 endpoint_shift>settings['relative_endpoint_limit']))
+    if type(defer_to_full_source) is not bool:
+        raise ValueError('Full-source deferral requires an explicit boolean')
+    if exceptional and not defer_to_full_source:
         raise ValueError('K_l2 native/invariant mass or endpoint numerical precision gate failed')
-    return dict(channel=model['channel'],coefficient_authority='fixed-native-M0',
+    report=dict(channel=model['channel'],coefficient_authority='fixed-native-M0',
         conditional_sampler_mass_authority='unchanged-p4-invariant',
         relative_mass_shift=mass_shift,relative_endpoint_shift=endpoint_shift,
         limits=dict(settings),scope='Numerical mass/endpoint gate; not a universal conditional-shape error bound')
+    if exceptional:
+        coefficient=(model['leptonic_width_over_em_coupling_squared_gev']/model['total_parent_width_gev']
+                     *model['em_mixing_over_epsilon_abs2'])
+        report.update(deferred_full_source_check=True,scope='deferred-full-source',
+            nominal_parent_coefficient=coefficient,
+            conservative_absolute_parent_measure_bound=2*coefficient,
+            bound_scope='Entire nominal-weight conditional channel; BR mumu applied once by full-source accounting')
+    if closed:report['scope']='unchanged-closed-channel-zero-measure'
+    return report
 
 
-def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
+def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=None):
     """Fixed on-shell current; invariant-mass calls only check numerical drift."""
     if signal_mass != model['signal_mass_gev']:
         raise ValueError('Resolved kaon current belongs to another fixed signal mass')
@@ -168,7 +184,8 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu):
             or not 0<=br_mumu<=1):
         raise ValueError('Physical kaon mass and separately supplied dimuon branching required')
     if model['decay_type']=='weak-kaon-leptonic':
-        _leptonic_mass_gate(parent_mass,signal_mass,model)
+        _leptonic_mass_gate(parent_mass,signal_mass,model,
+            defer_to_full_source=(native_precision or {}).get('defer_to_full_source',False))
         width=model['leptonic_width_over_em_coupling_squared_gev']
         return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
     if signal_mass+recoil_threshold(model) >= parent_mass:
@@ -505,7 +522,7 @@ def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, na
                          native_precision=native_precision)
                          for channel in exclusive_channels(model))
     if kaon_channel(model):
-        return _kaon_coefficient(parent_mass,signal_mass,model,br_mumu)
+        return _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,native_precision=native_precision)
     if dipion_channel(model):
         context = dict(native_precision or {}) if vector_dipion_channel(model) else {}
         if model.get('decay_type') not in ('neutral-vector-dipion','charged-vector-dipion'):
@@ -771,6 +788,8 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
                 raise ValueError('Native kaon mass differs from its exact stable support')
         native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
                                 native_mass_tolerance=mass_tolerance)
+        if deferred_policy and _kaon_group(model):
+            native_precision['defer_to_full_source']=True
         if deferred_policy and any(c.get('decay_type')=='neutral-vector-dipion' for c in exclusive_channels(model)):
             native_precision['defer_to_full_source']=True
         owned_rates = charged_rho_parent_rate_model(parent['pdg_id'], model)
@@ -788,8 +807,10 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
             if (mass > signal_mass + recoil) != (native > signal_mass + recoil):
                 raise ValueError('Native precision changes whether the rare decay is open')
             if channel.get('decay_type')=='weak-kaon-leptonic':
-                parent.setdefault('leptonic_kinematic_precision',[]).append(
-                    _leptonic_mass_gate(mass,signal_mass,channel))
+                report=_leptonic_mass_gate(mass,signal_mass,channel,defer_to_full_source=deferred_policy)
+                parent.setdefault('leptonic_kinematic_precision',[]).append(report)
+                if report.get('deferred_full_source_check'):
+                    parent.setdefault('native_channel_precision_reports',[]).append(report)
             nominal = parent_branching_coefficient(native, signal_mass, channel, br_mumu)
             shifted = parent_branching_coefficient(mass, signal_mass, channel, br_mumu,
                                                    native_precision=channel_precision)

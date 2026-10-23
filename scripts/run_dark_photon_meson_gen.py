@@ -80,6 +80,12 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
     if kind=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import sample_decay as sample_leptonic
         limit=model['native_kinematic_precision']['relative_mass_limit']
+        if any(report.get('channel')==model['channel'] and report.get('deferred_full_source_check')
+               for report in parent.get('leptonic_kinematic_precision',[])):
+            # The full source charges this entire conditional channel as an
+            # uncertainty. Pass its measured shell discrepancy, never repair p4.
+            p=parent['p4'];event_mass=math.sqrt(math.fsum([p[0]**2]+[-x**2 for x in p[1:]]))
+            limit=max(limit,abs(event_mass/model['mass_min_gev']-1.)+32*math.ulp(1.))
         return sample_leptonic(parent['p4'],mass,proper_ctau_mm,rng,
             model=model['leptonic_form_factor_model'],parent_pdg_id=parent['pdg_id'],
             parent_mass_relative_tolerance=2*limit+limit**2)
@@ -92,7 +98,9 @@ def kaon_mean_beta_gamma(parent,model,mass):
         from dark_photon_kaon_leptonic import mean_lab_beta_gamma as leptonic_mean
         return leptonic_mean(parent['p4'],mass,model=model['leptonic_form_factor_model'],
             quadrature_order=model['leptonic_rate_numerics']['order'],
-            native_kinematic_precision=model['native_kinematic_precision'])
+            native_kinematic_precision=model['native_kinematic_precision'],
+            defer_to_full_source=any(report.get('channel')==model['channel'] and report.get('deferred_full_source_check')
+                for report in parent.get('leptonic_kinematic_precision',[])))
     return vector_meson.mean_lab_beta_gamma(parent['p4'],model['recoil_mass_gev'],
         mass,polarization='unpolarized')
 

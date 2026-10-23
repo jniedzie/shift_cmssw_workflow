@@ -139,6 +139,36 @@ class LeptonicKaonSourceTest(unittest.TestCase):
         broken['source_com_energy_gev']=broken['p4'][0]
         with self.assertRaisesRegex(ValueError,'numerical precision gate'):self.resolve([broken])
 
+    def test_exact_open_channel_failure_uses_full_source_measure_without_changing_the_rate(self):
+        from dark_photon_meson_source import (_leptonic_mass_gate,FULL_SOURCE_NATIVE_PRECISION_POLICY,
+            deferred_native_precision_measure,full_source_native_precision_summary)
+        p=(738.441703270275,.6996026718084879,-.17576194934503012,-738.4411859286295)
+        mass=math.sqrt(math.fsum((p[0]**2,*(-v*v for v in p[1:]))))
+        reports=[]
+        for model in exclusive_channels(self.models[321]):
+            with self.assertRaisesRegex(ValueError,'numerical precision gate'):
+                _leptonic_mass_gate(mass,MASS,model)
+            report=_leptonic_mass_gate(mass,MASS,model,defer_to_full_source=True)
+            coefficient=parent_branching_coefficient(model['mass_min_gev'],MASS,model,1.)
+            self.assertEqual(report['conservative_absolute_parent_measure_bound'],2*coefficient)
+            actual=parent_branching_coefficient(mass,MASS,model,1.,native_precision=dict(defer_to_full_source=True))
+            self.assertEqual(actual,coefficient)
+            reports.append(report)
+        measure,count=deferred_native_precision_measure([dict(native_channel_precision_reports=reports)],BR,FULL_SOURCE_NATIVE_PRECISION_POLICY)
+        self.assertEqual(count,1)
+        self.assertAlmostEqual(measure,sum(r['conservative_absolute_parent_measure_bound'] for r in reports)*BR)
+        summary=full_source_native_precision_summary(FULL_SOURCE_NATIVE_PRECISION_POLICY,measure,measure,1)
+        self.assertFalse(summary['complete'])
+
+    def test_closed_leptonic_sibling_is_zero_but_endpoint_flips_still_fail(self):
+        from dark_photon_meson_source import _leptonic_mass_gate
+        models=resolved_parent_models(self.card,self.native,.4,epsilon=EPSILON)
+        channel=next(row for row in exclusive_channels(models[321]) if row['charged_lepton_mass_gev']>.1)
+        report=_leptonic_mass_gate(.4936771002126913,.4,channel)
+        self.assertEqual(report['scope'],'unchanged-closed-channel-zero-measure')
+        with self.assertRaisesRegex(ValueError,'whether.*open'):
+            _leptonic_mass_gate(.51,.4,channel,defer_to_full_source=True)
+
     def test_endpoint_gate_catches_small_mass_shift_before_mass_limit(self):
         signal=.387
         models=resolved_parent_models(self.card,self.native,signal,epsilon=EPSILON)

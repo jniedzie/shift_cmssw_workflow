@@ -322,7 +322,7 @@ def _normalized_boost_spectrum(model_json,mass,quadrature_order):
 
 
 def mean_lab_beta_gamma(parent,mass,*,model,quadrature_order=24,
-                        native_kinematic_precision=None):
+                        native_kinematic_precision=None,defer_to_full_source=False):
     """Rate-weighted LAB mean for the full three-body IB+SD spectrum.
 
     The spin-zero parent's overall direction is isotropic. At each W² node
@@ -351,7 +351,8 @@ def mean_lab_beta_gamma(parent,mass,*,model,quadrature_order=24,
     if gap<=0 or event_mass<=mass+ml:
         raise ValueError('Open leptonic-kaon channel required')
     delta=abs(event_mass-nominal)
-    if delta/nominal>limits['relative_mass_limit'] or delta/gap>limits['relative_endpoint_limit']:
+    if type(defer_to_full_source) is not bool:raise ValueError('Full-source deferral requires an explicit boolean')
+    if not defer_to_full_source and (delta/nominal>limits['relative_mass_limit'] or delta/gap>limits['relative_endpoint_limit']):
         raise ValueError('Mean-boost native/invariant mass or endpoint precision gate failed')
     key=json.dumps(model,sort_keys=True,separators=(',',':'),allow_nan=False)
     spectrum=_normalized_boost_spectrum(key,mass,quadrature_order)
