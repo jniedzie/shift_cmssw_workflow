@@ -64,7 +64,7 @@ def combine_plans(paths, output):
     return dict(plan=str(output / 'plan.json'), points=len(rows), events=result['events'], detector_chunks=len(jobs))
 
 
-def validate_plan(plan, prior_inventories):
+def validate_plan(plan, prior_inventories, reuse_points=()):
     if (plan.get('schema') != 'shift-dark-photon-grid-plan-v1' or
             plan.get('native_width_preflight_passed') is not True or
             plan.get('detector_stage_prepared') is not True or
@@ -85,7 +85,7 @@ def validate_plan(plan, prior_inventories):
                 type(row['run_number']) is not int or not 1 <= row['run_number'] <= 4294967295 or
                 row['seed'] in seeds | old_seeds or row['run_number'] in runs | old_runs):
             raise ValueError('GEN budget or independent run/seed namespace is invalid')
-        if Path(row['gen_directory']).exists():
+        if Path(row['gen_directory']).exists() and point not in reuse_points:
             raise FileExistsError('New GEN stage would reuse an existing output directory')
         contract = read(row['signal_contract'])
         if sha256(row['signal_contract']) != row['signal_contract_sha256']:
@@ -139,9 +139,27 @@ def prepare(args):
     if output.exists():
         raise FileExistsError('Refuse to overwrite an existing GEN stage')
     plan = copy.deepcopy(read(args.plan))
-    summary = validate_plan(plan, args.prior_inventories)
+    reuse_stage = getattr(args, 'reuse_gen_stage', None)
+    reused = {}
+    if reuse_stage is not None:
+        from run_dark_photon_gen_stage import validate_population
+        old_plan = read(reuse_stage/'plan.json')
+        old_rows = {row['point']:row for row in old_plan['points']}
+        for row in plan['points']:
+            status_path = reuse_stage/'statuses'/(row['point']+'.json')
+            if status_path.is_file() and read(status_path).get('complete') is True:
+                if row != old_rows.get(row['point']):
+                    raise ValueError('Reused successful GEN row differs from its exact original plan')
+                validate_population(row)
+                reused[row['point']] = status_path
+    summary = validate_plan(plan, args.prior_inventories, reused)
     files = frozen_dependencies(plan)
+    for path in reused.values():
+        files[str(path.resolve())] = sha256(path)
     configuration = read(args.handoff_config)
+    if reused:
+        configuration['reused_gen_statuses'] = {point:dict(path=str(path.resolve()),sha256=sha256(path))
+                                              for point,path in reused.items()}
     argv_list = configuration.get('handoff_argvs', [])
     if not argv_list or any(not isinstance(argv, list) or not argv or
                             any(not isinstance(item, str) for item in argv) or
@@ -183,13 +201,16 @@ def prepare(args):
     lines = []
     parents = []
     for row in plan['points']:
+        if row['point'] in reused:
+            shutil.copy2(reused[row['point']],output/'statuses'/(row['point']+'.json'))
+            continue
         node = 'G_' + row['point']; parents.append(node)
         lines.extend([f'JOB {node} {output}/worker.sub',
                       f'VARS {node} action="run" point="{row["point"]}" seal="SEAL_DIGEST"',
                       f'CATEGORY {node} GEN'])
     lines.extend([f'JOB COLLECT {output}/worker.sub',
                   'VARS COLLECT action="collect" point="all" seal="SEAL_DIGEST"',
-                  f'PARENT {" ".join(parents)} CHILD COLLECT',
+                  *([f'PARENT {" ".join(parents)} CHILD COLLECT'] if parents else []),
                   f'JOB HANDOFF {output}/worker.sub',
                   'VARS HANDOFF action="handoff" point="all" seal="SEAL_DIGEST"',
                   'PARENT COLLECT CHILD HANDOFF', f'MAXJOBS GEN {args.gen_workers}'])
@@ -234,6 +255,7 @@ queue
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', type=Path)
+    parser.add_argument('--reuse-gen-stage', type=Path, help='Reviewed recovery: reuse exact validated successful GEN rows without regeneration')
     parser.add_argument('--combine-only', action='store_true')
     parser.add_argument('--plans', type=Path, nargs='+')
     parser.add_argument('--output', type=Path, required=True)

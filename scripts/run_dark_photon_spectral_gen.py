@@ -12,6 +12,8 @@ absent, and no physical rate/limit validation is claimed. It never rebuilds,
 submits, overwrites an existing output, or relaxes the shared native backend.
 """
 import argparse
+import copy
+import struct
 import hashlib
 import json
 import math
@@ -170,6 +172,67 @@ def build_contract(args, width, native, common, tune):
         prompt_interference_included=False, detector_simulated=False)
 
 
+
+def frozen_contract(data, path, jaw_profile):
+    """Use the pinned draw after fresh model checks, preserving exact commands.
+
+    Older spectral contracts omitted two descriptive default fields. Tiny
+    libm rounding differences also occur across Python runtimes. Neither may
+    silently change the hash that defines an already frozen jaw-position map.
+    """
+    expected = json.loads(Path(path).read_text())
+    before = copy.deepcopy(expected)
+    placement = before.pop('source_placement', None)
+    if placement is None or jaw_profile is None:
+        raise ValueError('Frozen spectral contract requires its exact jaw profile')
+    before['source_model'] = placement['preplacement_source_model']
+    if place_contract(before, jaw_profile) != expected:
+        raise ValueError('Frozen jaw positions do not reproduce their pinned contract')
+    actual = copy.deepcopy(data)
+    for key, default in [('experimental_low_mass_dy', False), ('production_scope', 'DY-only spectral pilot')]:
+        if key not in before and actual.get(key) == default:
+            actual.pop(key)
+    changes = []
+    rounded_fields = {'sampling_width_authority', 'sampling_pole_support_audit',
+        'cross_section_correction_components', 'production_rate_correction',
+        'native_proposal_br_mumu', 'physical_br_mumu', 'width_authority'}
+    def compare(left, right, location, rounded=False):
+        if left == right:
+            return
+        if isinstance(left, dict) and isinstance(right, dict) and left.keys() == right.keys():
+            for key in left:
+                compare(left[key], right[key], location+[key], rounded or key in rounded_fields)
+            return
+        if isinstance(left, list) and isinstance(right, list) and len(left) == len(right):
+            for index, (a, b) in enumerate(zip(left, right)):
+                compare(a, b, location+[index], rounded)
+            return
+        command = location and location[0] == 'process_settings'
+        if command and isinstance(left, str) and isinstance(right, str):
+            a, sep, av = left.partition('='); b, sep2, bv = right.partition('=')
+            if sep and sep2 and a == b:
+                try:
+                    left, right = float(av), float(bv)
+                    rounded = True
+                except ValueError:
+                    pass
+        if rounded and isinstance(left, (int,float)) and isinstance(right, (int,float)):
+            a, b = float(left), float(right)
+            # Eight IEEE-754 steps is a rounding check, not a physics tolerance.
+            if math.isfinite(a) and math.isfinite(b) and (a > 0) == (b > 0):
+                ulps = abs(struct.unpack('>q', struct.pack('>d',a))[0] -
+                           struct.unpack('>q', struct.pack('>d',b))[0])
+                if ulps <= 8:
+                    changes.append(dict(field=location, frozen=left, fresh=right, ulps=ulps))
+                    return
+        raise ValueError('Fresh spectral model differs from frozen contract at '+repr(location))
+    compare(before, actual, [])
+    return expected, dict(schema='shift-frozen-spectral-contract-closure-v1', complete=True,
+        frozen_contract_sha256=digest(path), exact_frozen_commands_and_jaw_positions=True,
+        maximum_ulp_difference=max((row['ulps'] for row in changes),default=0), rounding_differences=changes,
+        metadata_defaults_normalized=['experimental_low_mass_dy','production_scope'])
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mass", type=float, required=True)
@@ -187,6 +250,7 @@ def main():
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--jaw-profile", type=Path)
+    parser.add_argument("--frozen-contract", type=Path)
     parser.add_argument("--runtime-provenance", type=Path)
     parser.add_argument("--runtime-archive", type=Path)
     args = parser.parse_args()
@@ -236,8 +300,13 @@ def main():
         native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,
             args.experimental_low_mass_dy,args.experimental_large_epsilon)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
-        if args.jaw_profile is not None:
+        if args.frozen_contract is not None:
+            contract, closure = frozen_contract(contract, args.frozen_contract, args.jaw_profile)
+            (output/'frozen_contract_closure.json').write_text(json.dumps(closure,indent=2)+'\n')
+            manifest['frozen_contract_closure_sha256'] = digest(output/'frozen_contract_closure.json')
+        elif args.jaw_profile is not None:
             contract = place_contract(contract, args.jaw_profile)
+        if args.jaw_profile is not None:
             shutil.copy2(args.jaw_profile, output/"jaw_profile.json")
         (output / "contract.json").write_text(json.dumps(contract, indent=2, allow_nan=False)+"\n")
         command = ["cmsRun", str(output / "dark_photon_gen_cfg.py"), "pilotDirectory="+str(output)]

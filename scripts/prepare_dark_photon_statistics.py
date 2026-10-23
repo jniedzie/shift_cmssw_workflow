@@ -313,9 +313,10 @@ def prepare_worklist(args):
                 waves=len(waves), batches=batch_index, detector_chunks=sum(wave['detector_chunks'] for wave in waves))
 
 
-def prepare_wave(worklist_path, wave_index, output):
+def prepare_wave(worklist_path, wave_index, output, physics_scripts=None):
     worklist_path, output = Path(worklist_path).resolve(), Path(output).resolve()
     worklist = read(worklist_path)
+    physics_scripts = worklist['physics_scripts'] if physics_scripts is None else str(physics_scripts)
     if worklist.get('schema') != SCHEMA:
         raise ValueError('Unsupported adaptive statistics worklist')
     for path, expected in read(worklist_path.parent / 'seal.json')['files'].items():
@@ -368,13 +369,13 @@ def prepare_wave(worklist_path, wave_index, output):
             plan['private_gen_runtime']=copy.deepcopy(worklist['private_gen_runtime'])
             plan['detector_runtime']=copy.deepcopy(worklist['detector_runtime'])
         runtime = copy.deepcopy(previous['runtime'])
-        runtime['source_preflight_sha256'] = {name: digest(Path(worklist['physics_scripts']) / name) for name in worklist['physics_script_names']}
+        runtime['source_preflight_sha256'] = {name: digest(Path(physics_scripts) / name) for name in worklist['physics_script_names']}
         runtime['width_preflight'] = ('Inherited qualified width/coupling contracts; fresh qualified jaw law and private runtime'
             if worklist.get('private_gen_runtime') else 'Exact inherited qualified physics contracts; only MC count/run/seed changed')
         destination = output / source_name
         grid.SOURCES = tuple(worklist['physics_script_names'])
         frozen = grid.write_plan(destination, source['references'], source['templates'], plan, runtime,
-                                 scripts=worklist['physics_scripts'], executable=runtime['python_executable'])
+                                 scripts=physics_scripts, executable=runtime['python_executable'])
         if source['spectral_directory']:
             external = Path(source['spectral_directory'])
             frozen['frozen_dependencies']['spectral_width_source'] = previous['frozen_dependencies']['spectral_width_source']
@@ -387,6 +388,8 @@ def prepare_wave(worklist_path, wave_index, output):
         if worklist.get('jaw_profile'):
             for row in frozen['points']:
                 row['gen_argv'].extend(['--jaw-profile',worklist['jaw_profile']])
+                if physics_scripts != worklist['physics_scripts'] and Path(row['gen_argv'][1]).name == 'run_dark_photon_spectral_gen.py':
+                    row['gen_argv'].extend(['--frozen-contract',row['signal_contract']])
                 row['gen_command']=shlex.join(row['gen_argv'])
             (destination/'plan.json').write_text(json.dumps(frozen,indent=2,allow_nan=False)+'\n')
         plans.append(destination / 'plan.json')

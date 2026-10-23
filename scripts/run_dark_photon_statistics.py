@@ -223,6 +223,21 @@ def wave_directory(config, index):
     return Path(config['directory']) / 'waves' / f'w{index:03d}'
 
 
+def gen_stage_directory(config, index):
+    original = wave_directory(config,index)/'gen_stage'
+    authority = config.get('reviewed_gen_stage_overrides', {}).get(str(index))
+    if authority is None:
+        return original
+    proof = pinned_json(authority['review'])
+    if (config['dependencies'].get(authority['review']['path']) != authority['review']['sha256']
+            or proof.get('schema') != 'shift-reviewed-partial-GEN-recovery-v1'
+            or proof.get('original_stage') != str(original)
+            or proof.get('replacement_stage') != authority['directory']
+            or proof.get('physics_seeds_exposure_unchanged') is not True):
+        raise ValueError('GEN stage override lacks its exact reviewed partial recovery')
+    return Path(authority['directory'])
+
+
 def pinned_json(authority):
     path = Path(authority['path'])
     if not path.is_absolute() or sha(path) != authority['sha256']:
@@ -547,13 +562,18 @@ def prepare_gen(config, config_path, index):
         prepared = read(preparation_receipt)
     else:
         helper = module(Path(config['tools']) / 'prepare_dark_photon_statistics.py', '_dp_prepare')
-        prepared = helper.prepare_wave(config['worklist'], index, directory)
-    stage = directory / 'gen_stage'
+        if config.get('gen_execution_scripts'):
+            prepared = helper.prepare_wave(config['worklist'], index, directory,
+                                           physics_scripts=config['gen_execution_scripts'])
+        else:
+            prepared = helper.prepare_wave(config['worklist'], index, directory)
+    stage = gen_stage_directory(config,index)
     if not stage.is_dir():
         handoff_record = dict(handoff_argvs=[['/bin/bash', config['lcg_wrapper'],
             '--config', str(config_path), '--handoff-wave', str(index)]],
             retain_local_gen_root=False, minimum_eos_free_bytes=config['minimum_free_bytes'],
-            minimum_eos_free_files=config['minimum_free_files'], afs_metadata_reservation_mb=128)
+            minimum_eos_free_files=config['minimum_free_files'], afs_metadata_reservation_mb=128,
+            private_gen_failure_base=config['failure_base'])
         # Operational rollovers keep the scientific wave and its failed
         # handoff intact. Bind a fresh immutable handoff to these exact tools.
         handoff_digest = hashlib.sha256(json.dumps(handoff_record, sort_keys=True).encode()).hexdigest()
@@ -586,12 +606,15 @@ def production_budget(config, preparation):
 def selected_preparation(config, directory, prepared):
     """Bind frozen material admission before replanning selected detector offsets."""
     original=read(prepared['preparation'])
+    index=int(directory.name[1:])
+    stage=gen_stage_directory(config,index)
+    if stage != directory/'gen_stage':
+        original=read(stage/'plan.json')
     if original.get('private_gen_runtime') is None:
         return prepared
     from dark_photon_material_selection import bind, validate_plan
     from prepare_dark_photon_material_source import immutable
     import prepare_dark_photon_grid as grid
-    stage=directory/'gen_stage'
     inventory=read(stage/'gen_inventory.json')
     publications={row['point']:row for row in read(stage/'gen_publication.json')['inputs']}
     destination=directory/'material_preparation.json'
@@ -643,7 +666,7 @@ def handoff(config, index):
     directory = wave_directory(config, index)
     with (directory / 'handoff.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        stage, production = directory / 'gen_stage', directory / 'production'
+        stage, production = gen_stage_directory(config,index), directory / 'production'
         operations = Path(config.get('handoff_operations', directory))
         if config.get('handoff_operations'):
             operations = operations / f'w{index:03d}'
@@ -803,6 +826,10 @@ def aggregate_helper_names(config):
 
 
 def aggregate_plan(config, point, sources, directory):
+    histogram_only = config.get('merge_source_histograms', True)
+    group_events = config.get('aggregate_group_events', 2000)
+    if type(histogram_only) is not bool or type(group_events) is not int or group_events < 1:
+        raise ValueError('Aggregation requires a boolean histogram mode and positive integer group size')
     directory = Path(directory)
     helpers = aggregate_helper_names(config)
     directory.mkdir(parents=True)
@@ -829,8 +856,8 @@ def aggregate_plan(config, point, sources, directory):
         target_mean_lab_flight_m=source_rows[0].get('target_mean_lab_flight_m'),
         sources=sources, final_output_base=prefix)
     plan = dict(schema='shift-dark-photon-additive-plan-v1', campaign=campaign,
-        histogram_only=True, points=[row], events=row['events'], conditions=config['conditions'],
-        dependencies=dependencies, group_events=2000, electronics_or_trigger_changes=False,
+        histogram_only=histogram_only, points=[row], events=row['events'], conditions=config['conditions'],
+        dependencies=dependencies, group_events=group_events, electronics_or_trigger_changes=False,
         scoring_deployment=dict(path=str(guard), seal_sha256=sha(guard / 'seal.json')),
         publication_guard=dict(deployment_path=str(guard), seal_sha256=sha(guard / 'seal.json'),
                                point=read(guard / 'plan.json')['points'][0]['point']))
@@ -877,7 +904,8 @@ def aggregate_record(directory, point, populations):
     plan_path, seal_path = directory / 'plan.json', directory / 'seal.json'
     plan, seal = read(plan_path), read(seal_path)
     if (plan.get('schema') != 'shift-dark-photon-additive-plan-v1'
-            or plan.get('histogram_only') is not True
+            or type(plan.get('histogram_only')) is not bool
+            or type(plan.get('group_events',2000)) is not int or plan.get('group_events',2000) < 1
             or len(plan.get('points', [])) != 1 or plan['points'][0].get('point') != point):
         raise ValueError('Invalid existing aggregate plan: ' + str(directory))
     if seal.get('files', {}).get(str(plan_path)) != sha(plan_path):
@@ -1320,7 +1348,7 @@ def step(config, config_path, state):
         index = int(index_text)
         directory = wave_directory(config, index)
         production = directory / 'production'
-        stage = production if (production / 'submission.json').is_file() else directory / 'gen_stage'
+        stage = production if (production / 'submission.json').is_file() else gen_stage_directory(config,index)
         receipt = read(stage / 'submission.json')
         rows = jobs(config, 'ClusterId == ' + str(receipt['cluster']))
         entry.update(stage='detector' if stage == production else 'GEN',

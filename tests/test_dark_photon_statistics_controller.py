@@ -649,9 +649,13 @@ class AggregateDescription(unittest.TestCase):
                 config = dict(directory=str(directory), tools=str(tools), campaign_prefix='synthetic',
                               eos_base='/eos/synthetic', conditions={})
                 if meson:
-                    config.update(production_mechanism='eta-etaprime-radiative', aggregation_guard=str(guard))
+                    config.update(production_mechanism='eta-etaprime-radiative', aggregation_guard=str(guard),
+                                  merge_source_histograms=False,aggregate_group_events=4000)
                 target = directory / 'aggregates/m15_prompt/v0001'
                 controller.aggregate_plan(config, 'm15_prompt', sources, target)
+                plan=controller.read(target/'plan.json')
+                self.assertIs(plan['histogram_only'],not meson)
+                self.assertEqual(plan['group_events'],4000 if meson else 2000)
                 description = (target / 'aggregate.sub').read_text()
                 self.assertNotIn('OpSysMajorVer', description)
                 self.assertIn('request_memory = 4000 MB', description)
@@ -786,7 +790,7 @@ class PreparationEnvironment(unittest.TestCase):
             config = dict(directory=str(root), lcg_wrapper='/new/qualified/lcg.sh',
                 minimum_free_bytes=1000, minimum_free_files=100, tools='/new/frozen/tools',
                 runtime_fingerprint='/frozen/runtime.json', dependencies={}, prior_inventories=[],
-                workspace='/persistent/workspace')
+                failure_base='/eos/user/j/jniedzie/shift_cmssw_support/test', workspace='/persistent/workspace')
             with patch.object(controller, 'run_logged', side_effect=[RuntimeError('first failure'),None]) as prepare, \
                  patch.object(controller, 'submit_dag', return_value=dict(cluster=123)) as submit:
                 with self.assertRaises(RuntimeError):

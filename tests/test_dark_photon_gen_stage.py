@@ -171,6 +171,24 @@ class DetachedGenStageTest(unittest.TestCase):
                                             for call in remote.call_args_list), 6)
                 self.assertFalse((gen / 'gen.root').exists())
 
+    def test_recovery_collects_only_exact_original_success_without_changing_exposure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary);row,config,payload=audited_population(base)
+            with patch('run_dark_photon_gen_stage.command',side_effect=remote_transport(payload)):
+                publication,parent=publish_gen(row,config)
+                original=base/'original_status.json'
+                status=dict(complete=True,seal_sha256='old-seal',parent=parent,publication=publication)
+                write_new(original,status)
+                stage=base/'recovery';stage.mkdir();(stage/'statuses').mkdir()
+                write_new(stage/'statuses'/(row['point']+'.json'),status)
+                config['reused_gen_statuses']={row['point']:dict(path=str(original),sha256=sha256(original))}
+                with patch('run_dark_photon_gen_stage.verify_seal',return_value=(dict(points=[row]),config)):
+                    collect(stage,'new-seal')
+                    self.assertEqual(read(stage/'gen_inventory.json')['points'][row['point']],parent)
+                    changed=dict(status,parent=dict(parent,events=999))
+                    (stage/'statuses'/(row['point']+'.json')).write_text(json.dumps(changed))
+                    with self.assertRaises(ValueError):collect(stage,'new-seal')
+
     def test_remote_only_refuses_changed_audit_evidence_or_changed_canonical_root(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary); row, config, payload = audited_population(base)

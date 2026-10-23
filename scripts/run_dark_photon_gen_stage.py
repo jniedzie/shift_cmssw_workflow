@@ -318,8 +318,13 @@ def collect(directory, expected):
     for row in plan['points']:
         path = directory / 'statuses' / (row['point'] + '.json')
         status = read(path)
-        if not status.get('complete') or status['seal_sha256'] != expected:
+        if not status.get('complete'):
             raise ValueError('Full-grid GEN collection requires every complete sealed point')
+        if status['seal_sha256'] != expected:
+            origin = config.get('reused_gen_statuses', {}).get(row['point'])
+            if (not origin or sha256(origin['path']) != origin['sha256'] or
+                    read(origin['path']) != status):
+                raise ValueError('Reused GEN status differs from its pinned original successful source')
         validate_population(row, config)
         parent = status['parent']
         identities = set(map(tuple, parent['event_ids']))

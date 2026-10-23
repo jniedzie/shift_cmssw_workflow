@@ -129,5 +129,32 @@ class SpectralGenerationTest(unittest.TestCase):
                 plan_points(reference, [2.], None, 50, 251013801, 2800001, epsilons=invalid)
 
 
+class FrozenSpectralContract(unittest.TestCase):
+    def test_rounding_and_old_descriptive_defaults_preserve_exact_original_draw(self):
+        import copy, math
+        from dark_photon_source_placement import place_contract
+        from run_dark_photon_spectral_gen import frozen_contract
+        from test_shift_jaw_source import profile
+        before=dict(seed=42,run_number=101,requested_events=2,maximum_framework_events=20,
+            epsilon=1.e-6,mass_gev=2.,source_model='original fixed source',
+            process_settings=['Zprime:vmu = 0.01'],width_authority={'ctau_mm':5.})
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);jaw=root/'jaw.json';jaw.write_text(json.dumps(profile()))
+            expected=place_contract(before,jaw);path=root/'contract.json';path.write_text(json.dumps(expected))
+            fresh=copy.deepcopy(before);fresh['experimental_low_mass_dy']=False
+            fresh['production_scope']='DY-only spectral pilot'
+            fresh['process_settings']=['Zprime:vmu = '+repr(math.nextafter(.01,1.))]
+            actual,receipt=frozen_contract(fresh,path,jaw)
+            self.assertEqual(actual,expected);self.assertEqual(receipt['maximum_ulp_difference'],1)
+            self.assertEqual(actual['source_placement']['event_positions'],expected['source_placement']['event_positions'])
+            for key,value in [('epsilon',2.e-6),('seed',43),('width_authority',{'ctau_mm':5.0000001}),
+                              ('process_settings',['Zprime:vmu = 0.010000001'])]:
+                changed=copy.deepcopy(fresh);changed[key]=value
+                with self.subTest(key=key),self.assertRaises(ValueError):frozen_contract(changed,path,jaw)
+            changed=copy.deepcopy(expected);changed['source_placement']['event_positions'][0]['target_position_cm'][0]+=1.
+            path.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):frozen_contract(fresh,path,jaw)
+
+
 if __name__ == "__main__":
     unittest.main()
