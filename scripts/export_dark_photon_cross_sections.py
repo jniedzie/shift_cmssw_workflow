@@ -193,6 +193,8 @@ def same_resolved_meson_model(stored, resolved, name='resolved exclusive meson m
                         raise ValueError(name + ' CDF payload differs from its recorded SHA')
                 elif 'cdf_table_payload' in authority and authority.get('cdf_table_sha256') is not None:
                     raise ValueError(name + ' CDF SHA has no numerical payload')
+                elif 'cdf_table_payload' in authority and authority.get('width_over_em_mixing_squared_gev') != 0.:
+                    raise ValueError(name + ' closed CDF has nonzero rate')
             if 'cdf_table_payload' not in stored:
                 if stored.get('cdf_table_sha256') != resolved.get('cdf_table_sha256'):
                     raise ValueError(name + ' legacy CDF requires its original native payload')
