@@ -155,8 +155,10 @@ def scheduler_snapshot(config, receipts, previous):
     options, cli = scheduler_options(config)
     ids = sorted(set(receipts) | {config['initial_gen_manager_cluster'], config['initial_supervisor_cluster']}
                  | {int(cluster) for cluster in config.get('retired_supervisors', {})})
-    alternatives = ['ClusterId == ' + str(cluster) for cluster in ids]
-    alternatives += ['DAGManJobId == ' + str(cluster) for cluster in ids]
+    # Flat lists avoid ClassAd expression-depth failures on large campaigns.
+    clusters = '{' + ','.join(map(str, ids)) + '}'
+    alternatives = ['member(ClusterId,' + clusters + ')',
+                    'member(DAGManJobId,' + clusters + ')']
     prefix = config['production_directory']+'/'
     alternatives.append('(Iwd == '+json.dumps(config['production_directory'])+
                         ' || substr(Iwd,0,'+str(len(prefix))+') == '+json.dumps(prefix)+')')

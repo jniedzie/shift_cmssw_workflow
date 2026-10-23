@@ -362,6 +362,19 @@ class StatisticsWatchdogTest(unittest.TestCase):
         report = self.assess([self.child()])
         self.assertTrue(any(item['code'] == 'supervisor_heartbeat' for item in report['issues']))
 
+    def test_large_campaign_query_has_constant_depth(self):
+        receipts = {cluster: dict(self.receipts[100]) for cluster in range(100, 700)}
+        queued = [dict(ClusterId=cluster, ProcId=0) for cluster in receipts]
+        with patch.object(WATCH, 'scheduler_options', return_value=({}, [])), \
+                patch.object(WATCH, 'query', return_value=queued) as query, \
+                patch.object(WATCH, 'run_condor') as history:
+            _, _, condition = WATCH.scheduler_snapshot(self.config, receipts, {})
+            history.assert_not_called()
+        self.assertIn('member(ClusterId,{100,101,', condition)
+        self.assertIn('member(DAGManJobId,{100,101,', condition)
+        self.assertLess(condition.count(' || '), 5)
+        self.assertNotIn('ClusterId ==', condition)
+
     def test_history_uses_one_exact_match_and_caches_terminal_managers(self):
         receipts = dict(self.receipts)
         receipts[300] = dict(self.receipts[100])
