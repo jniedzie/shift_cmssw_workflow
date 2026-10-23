@@ -114,6 +114,21 @@ class PersistenceRoundoffTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prep.mass_shell_roundoff([0.,0.,0.,1.e-200],prep.MASS_FLOAT32_SUBNORMAL,0.,0.,0.)
 
+    def test_negative_z_cancellation_contains_native_and_cling_but_rejects_wrong_direction(self):
+        raw=[-.276547949024909,.501305280942911,-3577.858347066592,3577.858392874128]
+        low,high=prep.eta_encoding_interval(raw)
+        for eta in (-9.433364868164062,-9.433363914489746):
+            self.assertLessEqual(low,eta);self.assertLessEqual(eta,high)
+        self.assertLess(high-low,2.e-6)
+        self.assertFalse(low<=prep.float32(-9.4333)<=high)
+        for raw in ([3.,4.,5.,8.],[3.,4.,-5.,8.],[3.,4.,0.,8.]):
+            low,high=prep.eta_encoding_interval(raw)
+            zs=raw[2]/math.hypot(raw[0],raw[1])
+            eta=prep.float32(math.log(zs+math.sqrt(zs*zs+1.)))
+            self.assertLessEqual(low,eta);self.assertLessEqual(eta,high)
+        for raw in ([0.,0.,1.,1.],[1.,0.,1.e8,1.e8]):
+            with self.assertRaises(ValueError):prep.eta_encoding_interval(raw)
+
     def test_one_percent_mass_or_energy_corruption_is_rejected(self):
         with self.assertRaises(ValueError):prep.mass_shell_roundoff([0.,0.,0.,2.],prep.float32(2.02),2.,2.,0.)
         with self.assertRaises(ValueError):prep.mass_shell_roundoff([0.,0.,0.,2.],2.,2.02,2.,0.)
@@ -159,7 +174,7 @@ class PersistenceRoundoffTests(unittest.TestCase):
                     with self.assertRaises(ValueError):prep.audit_genparticles(None,timed)
                 else:
                     result=prep.audit_genparticles(None,timed)
-                    self.assertEqual(result['stock_persistence_audit_schema'],'shift-genparticles-conditioning-v2')
+                    self.assertEqual(result['stock_persistence_audit_schema'],'shift-genparticles-conditioning-v3')
                     self.assertFalse(result['stock_persistence_encoding_exact'])
                     self.assertTrue(result['mass_shell_roundoff_checks_passed'])
 

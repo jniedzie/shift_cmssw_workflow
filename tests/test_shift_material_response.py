@@ -365,6 +365,35 @@ class PreparedSourceTests(unittest.TestCase):
                 validate_prepared_source(source, dict(indices=[0], event_ids=ids,
                     native_weights=weights, probabilities=[.25]))
 
+    def test_conditioning_V3_requires_pinned_eta_operations_and_exact_other_coordinates(self):
+        from shift_material_response import (GENPARTICLE_ETA_CONDITIONING_SCHEMA,
+            GENPARTICLE_ETA_ALGORITHM, GENPARTICLE_ETA_HEADER_SHA256)
+        changes=[None, lambda t:t.update(eta_roundoff_checks_passed=False),
+            lambda t:t.update(eta_roundoff_algorithm='loose'),
+            lambda t:t.update(eta_header_sha256='e'*64),
+            lambda t:t.update(exact_encoded_pt_phi_xy_vertex=False),
+            lambda t:t.update(exact_polar_cartesian_z_cache=False),
+            lambda t:t.update(eta_reference_differences=-1),
+            lambda t:t.update(eta_reference_differences=True)]
+        for change in changes:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as directory:
+                raw,ids,weights=self.make_raw(directory)
+                path,audit=preparation_receipt_fixture(directory,raw,ids,weights)
+                truth=audit['units'][0]['events'][0]['genParticles'];self.conditioned_truth(truth)
+                truth.update(stock_persistence_audit_schema=GENPARTICLE_ETA_CONDITIONING_SCHEMA,
+                    eta_roundoff_algorithm=GENPARTICLE_ETA_ALGORITHM,
+                    eta_header_sha256=GENPARTICLE_ETA_HEADER_SHA256,
+                    eta_roundoff_checks_passed=True,eta_reference_differences=0,
+                    exact_encoded_pt_phi_xy_vertex=True,exact_polar_cartesian_z_cache=True)
+                truth.pop('exact_encoded_pt_eta_phi_xyz_vertex')
+                if change:change(truth)
+                path.write_text(json.dumps(audit));checksum=hashlib.sha256(path.read_bytes()).hexdigest()
+                if change:
+                    with self.assertRaises(ValueError):prepared_source_record(raw,path,expected_sha256=checksum)
+                else:
+                    source=prepared_source_record(raw,path,expected_sha256=checksum)
+                    self.assertEqual(source_normalization(source),source_normalization(raw))
+
     def test_conditioning_V2_requires_exact_coordinates_pinned_algorithm_and_per_particle_bounds(self):
         changes = [
             lambda t:t.pop('stock_persistence_audit_schema'),

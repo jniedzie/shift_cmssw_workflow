@@ -9,6 +9,7 @@ from collections import Counter
 import copy
 import fcntl
 import hashlib
+import heapq
 import json
 from pathlib import Path
 import re
@@ -44,6 +45,35 @@ def native_exit(path, cluster):
     return None
 
 
+def publication_charge(evidence, reserved):
+    """Keep an upper storage bound without charging empty GEN the whole reserve."""
+    if 'published_storage_bytes' in evidence:
+        amount = evidence['published_storage_bytes']
+    elif 'publication_bytes_before_receipt' in evidence:
+        amount = evidence['publication_bytes_before_receipt']+65536
+    elif (evidence.get('schema') == 'shift-smart-SM-source-v1'
+            and evidence.get('empty_source') is True):
+        if (evidence.get('selected_events') != 0
+                or evidence.get('source', {}).get('saved_events') != 0):
+            raise ValueError('Empty source storage claim contradicts its event census')
+        files = evidence['raw_publications']
+        if (not files or len({row['name'] for row in files}) != len(files)
+                or not all(type(row.get('bytes')) is int and row['bytes'] >= 0
+                           and row.get('independent_sha256_readback') is True for row in files)):
+            raise ValueError('Empty source lacks verified native publication sizes')
+        audit = next(row for row in files if row['name'] == 'validation.json')
+        # The original native receipt embeds that audit and the publication
+        # table. Bound the extra indentation/JSON wrapper conservatively;
+        # keep 64KiB overhead as well. No receipt is removed or exposure lost.
+        receipt_bound = 65536+16*audit['bytes']+4*len(json.dumps(files,indent=2).encode())
+        amount = min(reserved+65536, sum(row['bytes'] for row in files)+receipt_bound)
+    else:
+        amount = reserved+65536
+    if type(amount) is not int or amount < 0:
+        raise ValueError('Invalid publication storage charge')
+    return amount
+
+
 def observe(task, ads):
     """Credit success only after exact native closure and returned evidence."""
     if task['phase'] in ('done', 'failed', 'ready'):
@@ -77,8 +107,7 @@ def observe(task, ads):
         return
     task.update(phase='done', result_sha256=sha(result), native_exit_code=terminal,
                 finished_epoch=time.time(),
-                published_bytes=evidence.get('published_storage_bytes',
-                    evidence.get('publication_bytes_before_receipt', task['bound_bytes'])+65536))
+                published_bytes=publication_charge(evidence, task['bound_bytes']))
 
 
 def make_task(root, config, name, request, kind, stratum):
@@ -90,6 +119,8 @@ def make_task(root, config, name, request, kind, stratum):
     text = text.replace('@REQUEST_SHA@', checksum)
     if kind == 'quota':
         text = text.replace('+MaxRuntime = 45000', '+MaxRuntime = 900')
+        text = text.replace('request_memory = 6000', 'request_memory = 1000')
+        text = text.replace('request_disk = 12000000', 'request_disk = 1000000')
     elif kind == 'inventory':
         text = text.replace('+MaxRuntime = 45000', '+MaxRuntime = 1800')
     (directory/'worker.sub').write_text(text)
@@ -131,6 +162,38 @@ def source_task(root, config, state, stratum, index):
     state['tasks'][name] = make_task(root, config, name, request, 'source', stratum)
 
 
+def admission_order(tasks):
+    """Prefetch two GEN chunks per bin; balance new detector slots by bin."""
+    sources, detectors = Counter(), Counter()
+    ready = []
+    for name, task in tasks.items():
+        if task['phase'] == 'submitted':
+            if task['kind'] == 'source':
+                sources[task['stratum']] += 1
+            elif task['kind'] == 'detector':
+                detectors[task['stratum']] += 1
+        elif task['phase'] == 'ready':
+            ready.append((name, task))
+    result = sorted((item for item in ready if item[1]['kind'] in ('quota','inventory')),
+                    key=lambda item: (item[1]['kind']!='quota', item[0]))
+    for name, task in sorted(ready):
+        if task['kind']=='source' and sources[task['stratum']] < 2:
+            result.append((name,task))
+            sources[task['stratum']] += 1
+    groups = {}
+    for name, task in sorted(ready, reverse=True):
+        if task['kind']=='detector':
+            groups.setdefault(task['stratum'], []).append((name,task))
+    heap = [(detectors[stratum],stratum) for stratum in groups]
+    heapq.heapify(heap)
+    while heap:
+        count, stratum = heapq.heappop(heap)
+        result.append(groups[stratum].pop())
+        if groups[stratum]:
+            heapq.heappush(heap,(count+1,stratum))
+    return result
+
+
 def step(root, config, state):
     # One account query; no full status-tree scan for each completed event.
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
@@ -155,8 +218,9 @@ def step(root, config, state):
     done_quotas = [t for t in quota_tasks if t['phase'] == 'done']
     quota = read(Path(done_quotas[-1]['directory'])/'result.json') if done_quotas else {}
     quota_fresh = time.time()-quota.get('checked_epoch', 0) < 1800
+    quota_refresh_due = time.time()-quota.get('checked_epoch', 0) >= 900
     quota_retry_ready = not quota_tasks or time.time()-quota_tasks[-1].get('submitted_epoch', 0)>600
-    if (not quota_fresh and quota_retry_ready
+    if (quota_refresh_due and quota_retry_ready
             and not any(t['phase'] in ('ready','submitted') for t in quota_tasks)):
         name = 'quota_'+str(len(quota_tasks)).zfill(5)
         request = dict(schema='shift-stream-payload-v1', environment='cmssw', stage='smart_sm_quota',
@@ -210,8 +274,7 @@ def step(root, config, state):
     running = sum(ad['JobStatus']==2 for ad in workers)
     idle = sum(ad['JobStatus']==1 for ad in workers)
     admitted = 0
-    for name, task in sorted(state['tasks'].items(),
-            key=lambda pair: (dict(quota=0,inventory=1,detector=2,source=3)[pair[1]['kind']], pair[0])):
+    for name, task in admission_order(state['tasks']):
         if task['phase'] != 'ready' or task['stratum'] in failures:
             continue
         if task['kind'] != 'quota':
@@ -232,10 +295,13 @@ def step(root, config, state):
                 or idle+admitted >= config['maximum_idle_workers']
                 or admitted >= config['maximum_starts_per_poll']):
             break
+        description = Path(task.get('submit_description', str(Path(task['directory'])/'worker.sub')))
+        if 'submit_description' in task and sha(description) != task.get('submit_description_sha256'):
+            raise ValueError('Reviewed replacement submit description changed')
         task.update(phase='submitting', intent_epoch=time.time())
         save(root/'ledger.json', state)
         output = run_condor(['/usr/bin/condor_submit', '-terse',
-            str(Path(task['directory'])/'worker.sub')], cwd=task['directory'], timeout=45)
+            str(description)], cwd=task['directory'], timeout=45)
         match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
         if not match:
             raise RuntimeError('Unknown native submit result: '+output)
@@ -246,6 +312,7 @@ def step(root, config, state):
     record = dict(checked_epoch=time.time(), phase='running',
         task_counts=dict(Counter(t['phase'] for t in state['tasks'].values())),
         completed_by_stage=dict(Counter(t['kind'] for t in state['tasks'].values() if t['phase']=='done')),
+        failed_by_stage=dict(Counter(t['kind'] for t in state['tasks'].values() if t['phase']=='failed')),
         failed_bins=sorted(failures), combined_family_checks=families, quota_fresh=quota_fresh,
         fresh_GEN_to_Nano_checks=fresh_detector_families,
         account_running_workers=running, submitted_this_poll=admitted)
@@ -262,12 +329,12 @@ def step(root, config, state):
     return record
 
 
-def watch(root):
+def watch(root, controller_iwd=None):
     record = read(root/'heartbeat.json') if (root/'heartbeat.json').exists() else {}
     if record.get('phase') == 'ntuples_complete':
         save(root/'watchdog_heartbeat.json', dict(checked_epoch=time.time(), terminal=True))
         return True
-    ads = query('Iwd == '+json.dumps(str(root))+' && ShiftSmartSMController =?= True',
+    ads = query('Iwd == '+json.dumps(str(controller_iwd or root))+' && ShiftSmartSMController =?= True',
                 ['ClusterId','JobStatus','NumJobStarts'], timeout=45)
     problems = []
     if not ads or any(ad['JobStatus']==5 for ad in ads):
@@ -278,6 +345,10 @@ def watch(root):
         problems.append('Controller failure receipt needs review')
     if record.get('phase') == 'scheduler_unknown':
         problems.append('Scheduler state unknown; admission paused')
+    if record.get('failed_bins'):
+        problems.append('Failed bins require review: '+', '.join(record['failed_bins']))
+    if record.get('failed_by_stage'):
+        problems.append('Failed stages require review: '+json.dumps(record['failed_by_stage'],sort_keys=True))
     value = dict(checked_epoch=time.time(), problems=problems, controller_ads=ads)
     save(root/'watchdog_heartbeat.json', value)
     if problems:
@@ -289,16 +360,18 @@ def main():
     root = Path(sys.argv[1]).resolve()
     if str(root).startswith(('/tmp/', '/pool/')):
         raise ValueError('Persistent campaign directory required')
-    config = read(root/'config.json')
-    if sha(root/'config.json') != sys.argv[2]:
+    deployment = root
+    config = read(deployment/'config.json')
+    if sha(deployment/'config.json') != sys.argv[2]:
         raise ValueError('Frozen controller configuration changed')
     for name, expected in config.get('deployment_files', {}).items():
-        if sha(root/name) != expected:
+        if sha(deployment/name) != expected:
             raise ValueError('Frozen deployment changed: '+name)
+    root = Path(config.get('campaign_directory', str(deployment))).resolve()
     if '--watchdog' in sys.argv:
         while True:
             try:
-                if watch(root):
+                if watch(root, config.get('controller_iwd')):
                     return
             except NativeCondorError as error:
                 save(root/'watchdog_scheduler_unknown.json', dict(epoch=time.time(), error=repr(error)))

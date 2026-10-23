@@ -26,6 +26,9 @@ SHAPE_EDGES = {'mass': [0., 2., 4., 6., 8., 10., 15., 20., 30., 50., 75., 100., 
 GENPARTICLE_PERSISTENCE_SCHEMA_SHA256 = '66c6124fc1d1580acefe469c404ac143c95ba833aed9fcd8117698c2dcec62fa'
 GENPARTICLE_ENCODING = 'native reco::GenParticle constructed from newly timed HepMC, then stock ROOT dictionary roundtrip'
 GENPARTICLE_CONDITIONING_SCHEMA = 'shift-genparticles-conditioning-v2'
+GENPARTICLE_ETA_CONDITIONING_SCHEMA = 'shift-genparticles-conditioning-v3'
+GENPARTICLE_ETA_ALGORITHM = 'outward-double-stock-root-eta-float32-v1'
+GENPARTICLE_ETA_HEADER_SHA256 = '223df67c797b352d10c7c8170ef920f14c975575b370ef3bae907eab394caee5'
 GENPARTICLE_ROUNDOFF_ALGORITHM = 'gamma8-signed-mass2-float32-stock-polar-energy-v1'
 
 
@@ -571,13 +574,12 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
             encoding_valid = (truth.get('stock_persistence_encoding_exact') is True
                 and type(truth.get('expected_encoded_p4_residual_GeV')) in (int, float)
                 and truth['expected_encoded_p4_residual_GeV'] == 0.)
-        elif mode == GENPARTICLE_CONDITIONING_SCHEMA:
+        elif mode in (GENPARTICLE_CONDITIONING_SCHEMA, GENPARTICLE_ETA_CONDITIONING_SCHEMA):
             residuals = ('expected_encoded_p4_residual_GeV',
                 'maximum_signed_mass2_residual_GeV2', 'maximum_signed_mass2_bound_GeV2',
                 'maximum_signed_mass2_bound_fraction', 'maximum_energy2_residual_GeV2',
                 'maximum_energy2_bound_GeV2', 'maximum_energy2_bound_fraction')
             encoding_valid = (truth.get('stock_persistence_encoding_exact') is False
-                and truth.get('exact_encoded_pt_eta_phi_xyz_vertex') is True
                 and truth.get('mass_shell_roundoff_checks_passed') is True
                 and truth.get('roundoff_algorithm') == GENPARTICLE_ROUNDOFF_ALGORITHM
                 and type(truth.get('roundoff_operations')) is int and truth['roundoff_operations'] == 8
@@ -585,9 +587,21 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
                 and truth.get('mass_float32_unit') == 2.**-24
                 and truth.get('mass_float32_min_subnormal') == 2.**-149
                 and type(truth.get('expected_encoded_xyz_residual_GeV')) in (int, float)
-                and truth['expected_encoded_xyz_residual_GeV'] == 0.
+                and math.isfinite(truth['expected_encoded_xyz_residual_GeV'])
+                and truth['expected_encoded_xyz_residual_GeV'] >= 0.
                 and all(type(truth.get(key)) in (int, float) and math.isfinite(truth[key])
                         and truth[key] >= 0. for key in residuals))
+            if mode == GENPARTICLE_CONDITIONING_SCHEMA:
+                encoding_valid = (encoding_valid and truth.get('exact_encoded_pt_eta_phi_xyz_vertex') is True
+                    and truth.get('expected_encoded_xyz_residual_GeV') == 0.)
+            else:
+                encoding_valid = (encoding_valid and truth.get('exact_encoded_pt_phi_xy_vertex') is True
+                    and truth.get('eta_roundoff_checks_passed') is True
+                    and truth.get('exact_polar_cartesian_z_cache') is True
+                    and truth.get('eta_roundoff_algorithm') == GENPARTICLE_ETA_ALGORITHM
+                    and truth.get('eta_header_sha256') == GENPARTICLE_ETA_HEADER_SHA256
+                    and type(truth.get('eta_reference_differences')) is int
+                    and 0 <= truth['eta_reference_differences'] <= truth['particles'])
             if encoding_valid:
                 for prefix in ('maximum_signed_mass2', 'maximum_energy2'):
                     residual, bound, fraction = (truth[prefix+suffix] for suffix in

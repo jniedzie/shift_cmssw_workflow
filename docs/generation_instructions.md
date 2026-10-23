@@ -3101,3 +3101,26 @@ precision-per-CPU gain; zero observations do not establish zero background.
 The new conservative default is provisional and was not the frozen V2 policy
 used by that benchmark. Keep its complete native/EOS evidence and PDFs; do not
 use a CPU-saving estimate alone as a physics qualification.
+
+### Live SM controller repair, October 23 evening
+
+The current SM campaign remains `20261023_sm_material_csc_v1`. Its replacement
+supervisor is recorded by `validation/sm_smart_production_20261023_v1/active_supervisor.json`
+in the workspace; the authoritative ledger and heartbeats retain their original
+`weekend_controller_v3` paths. Do not restart its retired managers. Preserve the
+shared75GB storage registration and existing submitted jobs when repairing this
+campaign. Source prefetch now precedes and is bounded separately from detector
+admission, which balances bins. Native stock-truth V3 receipts allow only the
+operation-bounded ROOT eta rounding checked by the worker; V2 remains strict.
+A reviewed fixed-trial source recovery can use `resume_raw` with its original
+published native receipt URL and SHA. It independently verifies all artifacts,
+source counts, identities and W, then reuses the original GEN and placement
+seeds. Replace the failed ledger slot once; never add another exposure or adopt
+control replays as new production. See `../SHIFT_RECONSTRUCTION.md` in the
+workspace for qualification results and the operational handoff.
+
+The final accounting-only V6 supervisor reuses V5 workers and their qualified
+runtime. For zero-saved GEN chunks, storage charging uses verified published
+sizes plus a conservative native-receipt bound instead of the whole in-flight
+reservation. Their original trials/exposure remain in the source inventory.
+Unknown legacy output sizes still consume the conservative full reservation.

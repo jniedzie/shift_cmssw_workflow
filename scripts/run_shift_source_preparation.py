@@ -121,6 +121,9 @@ MASS_FLOAT32_UNIT=2.**-24
 MASS_FLOAT32_SUBNORMAL=2.**-149
 ROUND_OPERATIONS=8
 ROUND_ALGORITHM='gamma8-signed-mass2-float32-stock-polar-energy-v1'
+ETA_ALGORITHM='outward-double-stock-root-eta-float32-v1'
+ETA_HEADER=P('/cvmfs/cms.cern.ch/el9_amd64_gcc13/lcg/root/6.36.07-c07336da844a23928e13a54faaf449a6/include/Math/GenVector/eta.h')
+ETA_HEADER_SHA='223df67c797b352d10c7c8170ef920f14c975575b370ef3bae907eab394caee5'
 
 def float32(value):
     return struct.unpack('f',struct.pack('f',value))[0]
@@ -130,6 +133,39 @@ def signed_square(value):
 
 def signed_sqrt(value):
     return math.copysign(math.sqrt(abs(value)),value)
+
+def eta_encoding_interval(raw):
+    """Enclose the stock ROOT eta operations, including negative-z cancellation.
+
+    A native optimized expression and the Cling reference can straddle a
+    Float32 midpoint. Outward rounding of every double operation encloses
+    both fused and separate evaluations; this is not an angular tolerance.
+    Only a branch wholly inside ROOT's ordinary formula is admitted here.
+    Other branches must match the native dictionary roundtrip exactly.
+    """
+    def outward(values):
+        require(all(math.isfinite(x) for x in values),'Nonfinite eta operation')
+        return (math.nextafter(min(values),-math.inf),math.nextafter(max(values),math.inf))
+    def add(a,b):return outward([a[0]+b[0],a[1]+b[1]])
+    def multiply(a,b):return outward([x*y for x in a for y in b])
+    def divide(a,b):
+        require(b[0]>0.,'Nonpositive eta divisor')
+        return outward([x/y for x in a for y in b])
+    x,y,z=map(float,raw[:3])
+    rho2=add(multiply((x,x),(x,x)),multiply((y,y),(y,y)))
+    require(rho2[0]>0.,'Eta interval requires positive transverse momentum')
+    rho=outward([math.sqrt(v) for v in rho2])
+    scaled=divide((z,z),rho)
+    require(max(map(abs,scaled)) < (2.**-52)**-.25,'Eta interval crosses stock Taylor branch')
+    # Squaring an interval crossing zero has a zero lower endpoint.
+    squared=multiply(scaled,scaled)
+    if scaled[0]<=0.<=scaled[1]:squared=(0.,squared[1])
+    radicand=add(squared,(1.,1.))
+    root=outward([math.sqrt(v) for v in radicand])
+    argument=add(scaled,root)
+    require(argument[0]>0.,'Eta interval logarithm is not positive')
+    encoded=outward([math.log(v) for v in argument])
+    return [float32(v) for v in encoded]
 
 def mass_shell_roundoff(raw,mass,energy,polar_energy,polar_p2):
     """Bound Cartesian cancellation, then explicitly round the mass interval.
@@ -173,6 +209,7 @@ def encoded_expected_particles(timed):
     schema=P('/cvmfs/cms.cern.ch/el9_amd64_gcc13/cms/cmssw/CMSSW_17_0_0_pre4/src/DataFormats/Candidate/src/classes_def.xml')
     schema_sha=sha(schema)
     require(schema_sha=='66c6124fc1d1580acefe469c404ac143c95ba833aed9fcd8117698c2dcec62fa','Stock truth persistence dictionary changed')
+    require(sha(ETA_HEADER)==ETA_HEADER_SHA,'Stock ROOT eta formula changed')
     vertices={v['barcode']:v for v in timed['vertices']}
     expected=ROOT.std.vector('reco::GenParticle')()
     for p in timed['particles']:
@@ -207,15 +244,25 @@ def audit_genparticles(event,timed):
     expected,encoding=encoded_expected_particles(timed)
     maxima={name:0. for name in ('signed_mass2_residual_GeV2','signed_mass2_bound_GeV2',
         'signed_mass2_bound_fraction','energy2_residual_GeV2','energy2_bound_GeV2','energy2_bound_fraction')}
-    maximum_p4=0.;maximum_raw_p4=0.
+    maximum_p4=0.;maximum_raw_p4=0.;maximum_xyz=0.;eta_differences=0
     for index,cand in enumerate(candidates):
         barcode=codes[index];p=particles[barcode];encoded=expected[barcode]
         require(int(cand.pdgId())==p['pdg'] and int(cand.status())==p['status'],'Rebuilt truth PDG/status differs for barcode '+str(barcode))
         actual=[float(cand.px()),float(cand.py()),float(cand.pz()),float(cand.energy())]
         polar=[float(cand.pt()),float(cand.eta()),float(cand.phi())]
-        require(polar==encoded['polar'] and actual[:3]==encoded['momentum'][:3],
-                'Persisted truth encoded pt/eta/phi or Cartesian xyz differs')
         native_polar=cand.polarP4()
+        require(polar[0]==encoded['polar'][0] and polar[2]==encoded['polar'][2]
+                and actual[:2]==encoded['momentum'][:2],
+                'Persisted truth pt, phi or Cartesian x/y differs')
+        if polar[1]!=encoded['polar'][1]:
+            low,high=eta_encoding_interval(p['momentum'])
+            require(math.isfinite(polar[1]) and polar[1]==float32(polar[1]) and low<=polar[1]<=high,
+                    'Persisted eta lies outside stock operation/Float32 interval')
+            require(actual[2]==float(native_polar.Pz()),'Cartesian z cache differs from persisted polar direction')
+            eta_differences+=1
+        else:
+            require(actual[2]==encoded['momentum'][2],'Cartesian z cache differs from exact expected encoding')
+        maximum_xyz=max(maximum_xyz,*[abs(a-b) for a,b in zip(actual[:3],encoded['momentum'][:3])])
         rounded=mass_shell_roundoff(p['momentum'],float(cand.mass()),actual[3],
                                    float(native_polar.E()),float(native_polar.P2()))
         for name,value in rounded.items():maxima[name]=max(maxima[name],value)
@@ -232,9 +279,12 @@ def audit_genparticles(event,timed):
     _,latest=product(event,'genParticles','std::vector<reco::GenParticle>')
     require(len(latest)==len(candidates),'Unqualified truth lookup found stale products')
     encoding['maximum_p4_raw_to_encoded_residual_GeV']=maximum_raw_p4
-    return dict(particles=len(candidates),stock_persistence_audit_schema='shift-genparticles-conditioning-v2',
-        stock_persistence_encoding_exact=False,exact_encoded_pt_eta_phi_xyz_vertex=True,
-        expected_encoded_xyz_residual_GeV=0.,expected_encoded_p4_residual_GeV=maximum_p4,
+    return dict(particles=len(candidates),stock_persistence_audit_schema='shift-genparticles-conditioning-v3',
+        stock_persistence_encoding_exact=False,exact_encoded_pt_phi_xy_vertex=True,
+        eta_roundoff_checks_passed=True,eta_roundoff_algorithm=ETA_ALGORITHM,
+        eta_header_sha256=ETA_HEADER_SHA,eta_reference_differences=eta_differences,
+        exact_polar_cartesian_z_cache=True,
+        expected_encoded_xyz_residual_GeV=maximum_xyz,expected_encoded_p4_residual_GeV=maximum_p4,
         expected_encoded_vertex_residual_cm=0.,exact_PDG_status_and_barcode_ancestry=True,
         mass_shell_roundoff_checks_passed=True,roundoff_algorithm=ROUND_ALGORITHM,
         roundoff_operations=ROUND_OPERATIONS,roundoff_unit=ROUND_UNIT,mass_float32_unit=MASS_FLOAT32_UNIT,

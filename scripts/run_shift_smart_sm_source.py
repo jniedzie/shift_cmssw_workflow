@@ -131,6 +131,11 @@ process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization
                     '--lower', str(low), '--upper', str(high), '--output', 'validation.json']
         run(argv, directory/'audit.log', cwd=directory, timeout=900)
         audit = json.loads((directory/'validation.json').read_text())
+    return inspect_source(row, directory, audit, config, weighted)
+
+
+def inspect_source(row, directory, audit, config, weighted):
+    family, count = row['family'], row['events_or_trials']
     from audit_shift_material_scout import identity, metadata, product
     from DataFormats.FWLite import Events
     gen = directory/'gen.root'
@@ -172,6 +177,55 @@ process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization
     return source, identities, weights, audit, config
 
 
+def resume_source(request, directory):
+    """Reuse an audited published raw source without redrawing GEN or depth."""
+    reference = request['resume_raw']
+    directory.mkdir()
+    receipt = directory/'native_source_receipt.json'
+    command(['xrdcp', '--silent', '--cksum', 'adler32', reference['url'], str(receipt)], timeout=900)
+    if sha(receipt) != reference['sha256']:
+        raise ValueError('Recovery raw receipt changed')
+    native = json.loads(receipt.read_text())
+    if native.get('schema') != 'shift-smart-SM-native-source-v1':
+        raise ValueError('Recovery requires the original published native receipt')
+    publications = native['publications']
+    for artifact in publications:
+        name = artifact['name']
+        if (Path(name).name != name or artifact.get('independent_sha256_readback') is not True):
+            raise ValueError('Invalid recovery artifact or original readback proof')
+        target = directory/name
+        command(['xrdcp', '--silent', '--cksum', 'adler32',
+                 'root://eosuser.cern.ch/'+artifact['path'], str(target)], timeout=900)
+        if target.stat().st_size != artifact['bytes'] or sha(target) != artifact['sha256']:
+            raise ValueError('Recovery raw artifact differs: '+name)
+    audit = json.loads((directory/'validation.json').read_text())
+    if audit != native['semantic_audit']['native_audit']:
+        raise ValueError('Recovery native audit differs from its original receipt')
+    row = request['source_request']
+    weighted = row['family'] != 'dy' and row['bounds'][0] > 0
+    if not weighted:
+        raise ValueError('This reviewed raw recovery currently supports fixed-trial sources only')
+    from audit_shift_weighted_gen import validate_ledger
+    ledger = json.loads((directory/'proposal_ledger.json').read_text())
+    validate_ledger(ledger)
+    if ([ledger['run'], ledger['requested_trials'], ledger['lower'], ledger['upper']]
+            != [row['run'], row['events_or_trials'], *row['bounds']]):
+        raise ValueError('Recovery changed the source run, exposure or bin')
+    run(['python3', str(TOOLS/'scripts/audit_shift_weighted_gen.py'), '--input', 'gen.root',
+         '--ledger', 'proposal_ledger.json', '--config', 'resolved_gen_cfg.py',
+         '--generator-profile', 'ordinary', '--output', 'replayed_audit.json'],
+        directory/'audit.log', cwd=directory, timeout=900)
+    source, identities, weights, audit, config = inspect_source(row, directory, audit,
+        directory/'resolved_gen_cfg.py', weighted)
+    if identities != native['event_ids'] or weights != native['semantic_audit']['weights']:
+        raise ValueError('Recovery changed the full original event census')
+    gen = next(row for row in publications if row['name'] == 'gen.root')
+    source.update(url='root://eosuser.cern.ch/'+gen['path'],
+        original_receipt=reference['url'].removeprefix('root://eosuser.cern.ch/'),
+        original_receipt_sha256=reference['sha256'])
+    return source, identities, weights, publications
+
+
 def main(request_path):
     request = json.loads(Path(request_path).read_text())
     row = request['source_request']
@@ -198,24 +252,29 @@ def main(request_path):
                      or 'ShiftWeightedGenRun' in line])
         if not any('ShiftMpiWeightedProposalHook CustomHookFactory' in line for line in cache.splitlines()):
             raise ValueError('Weighted GEN hook missing from refreshed worker-local plugin cache')
-        source, identities, weights, audit, config = generate(request, Path('raw').resolve())
-        raw_base = request['publication_directory']+'/raw'
-        files = [(Path('raw/gen.root'), 'gen.root'), (config, 'resolved_gen_cfg.py'),
-                 (Path('raw/validation.json'), 'validation.json')]
-        if Path('raw/proposal_ledger.json').exists():
-            files.append((Path('raw/proposal_ledger.json'), 'proposal_ledger.json'))
-        if sum(path.stat().st_size for path, _ in files) > request['source_publication_bound_bytes']:
-            raise ValueError('Raw source exceeds its reserved publication bound')
-        raw_publications = publish(files, raw_base)
-        source['url'] = 'root://eosuser.cern.ch/'+raw_base+'/gen.root'
-        save('native_source_receipt.json', dict(schema='shift-smart-SM-native-source-v1',
-            events=len(identities), event_ids=identities,
-            semantic_audit=dict(event_ids=identities, weights=weights, native_audit=audit),
-            publications=raw_publications))
-        source['original_receipt'] = raw_base+'/source.json'
-        # The source audit is separate from the descriptor that refers to it.
-        source['original_receipt_sha256'] = sha('native_source_receipt.json')
-        publish([(Path('native_source_receipt.json'), 'source.json')], raw_base)
+        if request.get('resume_raw'):
+            source, identities, weights, raw_publications = resume_source(request, Path('raw').resolve())
+            report.update(reused_raw_source=True, new_GEN_exposure=0,
+                          raw_source_receipt_sha256=request['resume_raw']['sha256'])
+        else:
+            source, identities, weights, audit, config = generate(request, Path('raw').resolve())
+            raw_base = request['publication_directory']+'/raw'
+            files = [(Path('raw/gen.root'), 'gen.root'), (config, 'resolved_gen_cfg.py'),
+                     (Path('raw/validation.json'), 'validation.json')]
+            if Path('raw/proposal_ledger.json').exists():
+                files.append((Path('raw/proposal_ledger.json'), 'proposal_ledger.json'))
+            if sum(path.stat().st_size for path, _ in files) > request['source_publication_bound_bytes']:
+                raise ValueError('Raw source exceeds its reserved publication bound')
+            raw_publications = publish(files, raw_base)
+            source['url'] = 'root://eosuser.cern.ch/'+raw_base+'/gen.root'
+            save('native_source_receipt.json', dict(schema='shift-smart-SM-native-source-v1',
+                events=len(identities), event_ids=identities,
+                semantic_audit=dict(event_ids=identities, weights=weights, native_audit=audit),
+                publications=raw_publications))
+            source['original_receipt'] = raw_base+'/source.json'
+            # The source audit is separate from the descriptor that refers to it.
+            source['original_receipt_sha256'] = sha('native_source_receipt.json')
+            publish([(Path('native_source_receipt.json'), 'source.json')], raw_base)
         save('raw_source.json', source)
         if not identities:
             report.update(complete=True, empty_source=True, selected_events=0,
@@ -272,7 +331,7 @@ def main(request_path):
             population_scope='representative_census', sources=[authority_source], events=authorities))
         ledger = prepare_default_selection(bundle)
         descriptor = dict(gen=prepared['url'].removeprefix('root://eosuser.cern.ch/'),
-            gen_sha256=prepared['gen_sha256'], receipt=raw_base+'/source.json',
+            gen_sha256=prepared['gen_sha256'], receipt=source['original_receipt'],
             receipt_sha256=source['original_receipt_sha256'], event_ids=identities, weights=weights,
             stratum=row['stratum'], normalization_record=source,
             missing_filter_lumi=row['family'] == 'dy',
