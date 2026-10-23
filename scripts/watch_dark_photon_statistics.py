@@ -157,7 +157,9 @@ def scheduler_snapshot(config, receipts, previous):
                  | {int(cluster) for cluster in config.get('retired_supervisors', {})})
     alternatives = ['ClusterId == ' + str(cluster) for cluster in ids]
     alternatives += ['DAGManJobId == ' + str(cluster) for cluster in ids]
-    alternatives.append('regexp(' + json.dumps(re.escape(config['production_directory'])) + ',Iwd)')
+    prefix = config['production_directory']+'/'
+    alternatives.append('(Iwd == '+json.dumps(config['production_directory'])+
+                        ' || substr(Iwd,0,'+str(len(prefix))+') == '+json.dumps(prefix)+')')
     constraint = 'Owner == ' + json.dumps(config['owner']) + ' && (' + ' || '.join(alternatives) + ')'
     rows = query(constraint, ATTRIBUTES, timeout=45, **options)
     present = {row['ClusterId'] for row in rows}

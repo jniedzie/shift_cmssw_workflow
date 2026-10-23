@@ -55,6 +55,17 @@ def read_pinned(authority):
     return read(pinned_path(authority))
 
 
+def directory_condition(directory, attribute='Iwd'):
+    """Match native paths without double-escaping regex backslashes in ClassAds."""
+    path = str(directory)
+    if attribute == 'Iwd':
+        prefix = path+'/'
+        return '('+attribute+' == '+json.dumps(path)+' || substr('+attribute+',0,'+str(len(prefix))+') == '+json.dumps(prefix)+')'
+    if attribute != 'Args' or not re.fullmatch(r'[A-Za-z0-9_./-]+', path):
+        raise ValueError('Unsupported native directory argument match')
+    return 'regexp('+json.dumps(path.replace('.', '[.]'))+',Args)'
+
+
 def source_mechanism(config):
     mechanism = config.get('production_mechanism', 'eta-etaprime-radiative')
     if mechanism not in MECHANISMS:
@@ -89,11 +100,13 @@ def prior_meson_configuration(config):
         gen_runtime(previous)
         old_seeds = {row['seed'] for row in batches}
         old_runs = {row['run_number'] for row in batches}
+        previous_reference = read_pinned(previous['lifetime_reference_authority'])
+        current_reference = read_pinned(config['lifetime_reference_authority'])
         for row in config['batches']:
             if row['seed'] in old_seeds or row['run_number'] in old_runs:
                 raise ValueError('Replacement meson sources reuse prior seeds or runs')
-            expected = reference_point(previous, row)
-            actual = reference_point(config, row)
+            expected = point_from_reference(previous_reference, row)
+            actual = point_from_reference(current_reference, row)
             if expected != actual:
                 raise ValueError('Replacement meson model changed its physical point or LAB reference')
     return previous
@@ -349,8 +362,8 @@ def reviewed_meson_retirement(config, authority, expected, check_queue=True):
         read_pinned(pin)
     alternatives = []
     for directory in sorted(roots | owners):
-        alternatives.append('regexp('+json.dumps('^'+re.escape(directory)+'(/|$)')+',Iwd)')
-        alternatives.append('regexp('+json.dumps(re.escape(directory)) + ',Args)')
+        alternatives.append(directory_condition(directory))
+        alternatives.append(directory_condition(directory, 'Args'))
     for cluster in sorted({row['ClusterId'] for row in records}):
         alternatives += ['ClusterId == '+str(cluster), 'DAGManJobId == '+str(cluster)]
     if check_queue and durable.jobs(config, ' || '.join(alternatives)):
@@ -389,8 +402,7 @@ def reviewed_source_closure(config, authority, expected):
                   for file in ('submission.json', 'submission_intent.json')]
         if any(path.exists() for path in paths):
             raise ValueError('Canceled source batch was already attempted: '+name)
-    constraint = ('regexp('+json.dumps(re.escape(str(root)))+',Iwd) || regexp('
-                  +json.dumps(re.escape(str(root)))+',Args)')
+    constraint = directory_condition(root)+' || '+directory_condition(root, 'Args')
     for row in durable.jobs(config, constraint):
         path = Path(row['Iwd'])
         if not path.is_relative_to(root) and path != owner_directory:
@@ -582,6 +594,11 @@ def reference_point(config, batch):
     if source_mechanism(config) != 'meson-radiative':
         return None
     authority = read_pinned(config['lifetime_reference_authority'])
+    return point_from_reference(authority, batch)
+
+
+def point_from_reference(authority, batch):
+    """Check a physical point after its immutable reference was read once."""
     if authority.get('schema') != 'shift-meson-physical-point-reference-v1':
         raise ValueError('Unified meson source requires a pinned physical point reference')
     point = authority.get('points', {}).get(batch['point'])
@@ -1572,6 +1589,20 @@ def storage_gate(config, observation, bulk=False, state=None):
         additional_reserved_worklists=claims, required_free_bytes=required)
 
 
+def poll_storage_gate(config, state, decisions, bulk):
+    """Reuse a full-campaign reservation for at most five minutes of admissions."""
+    now = time.monotonic()
+    previous = decisions.get(bulk)
+    if previous is not None and now-previous[0] < 300:
+        return previous[1]
+    observation = durable.quota(config)
+    result = storage_gate(config, observation, bulk=bulk, state=state)
+    if time.monotonic()-now >= 300:
+        raise RuntimeError('Storage review exceeded its freshness window; no new admission')
+    decisions[bulk] = (now, result)
+    return result
+
+
 def cumulative_result(config,state,batch,transport,primitive):
     """Keep the independent canary population when the bulk batch completes."""
     point=batch['point']
@@ -1822,8 +1853,7 @@ def production_queue_snapshot(config):
     """Read a large campaign once per poll, including its native DAG links."""
     if config.get('batch_native_queries') is not True:
         return None
-    root=re.escape(str(Path(config['directory'])))
-    constraint='regexp('+json.dumps('^'+root+'/(batches|aggregates|coverage)(/|$)')+',Iwd)'
+    constraint=directory_condition(config['directory'])
     before=time.time()
     output=durable.run_condor(['/usr/bin/condor_q',*durable.scheduler_arguments(config),
         '-constraint',constraint,'-json','-attributes',
@@ -1980,6 +2010,7 @@ def step(config,state):
             return state
         state['coverage_audit'] = dict(cluster=receipt['cluster'], **coverage_result(config))
     queue_snapshot=production_queue_snapshot(config)
+    storage_decisions={}
     source_active, detector_active=0,0
     detector_claims=detector_reservations(config, entries)
     for batch in config['batches']:
@@ -2028,9 +2059,12 @@ def step(config,state):
                 entry['stage']='waiting_for_detector_capacity'
                 continue
             if scope is not None:
-                observation = durable.quota(config)
-                allowed, evidence = storage_gate(config, observation,
-                    bulk=not batch['operational_canary'], state=state)
+                if config.get('batch_native_queries') is True:
+                    allowed,evidence=poll_storage_gate(config,state,storage_decisions,not batch['operational_canary'])
+                else:
+                    observation = durable.quota(config)
+                    allowed, evidence = storage_gate(config, observation,
+                        bulk=not batch['operational_canary'], state=state)
                 state['storage_admission'] = evidence
                 if not allowed:
                     entry['stage'] = 'waiting_for_detector_storage'
@@ -2064,7 +2098,7 @@ def step(config,state):
     canaries=[row for row in config['batches'] if row['operational_canary']]
     canary_ready=all(entries[row['batch']].get('published') for row in canaries)
     state['canary_published']=canary_ready
-    observation=durable.quota(config)
+    observation=durable.quota(config) if config.get('batch_native_queries') is not True else None
     if config.get('source_admission_closed') is True:
         state['source_admission_closed']=True
     for batch in config['batches']:
@@ -2077,7 +2111,10 @@ def step(config,state):
             continue
         if source_active>=config['simultaneous_sources']:
             break
-        allowed,evidence=storage_gate(config,observation,bulk=not batch['operational_canary'],state=state)
+        if config.get('batch_native_queries') is True:
+            allowed,evidence=poll_storage_gate(config,state,storage_decisions,not batch['operational_canary'])
+        else:
+            allowed,evidence=storage_gate(config,observation,bulk=not batch['operational_canary'],state=state)
         state['storage_admission']=evidence
         if not allowed:
             continue

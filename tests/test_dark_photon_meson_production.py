@@ -1430,6 +1430,42 @@ class NativeHealth(unittest.TestCase):
             command.assert_called_once()
             self.assertIn('DAGManJobId',command.call_args.args[0][-1])
 
+    def test_native_directory_match_does_not_double_escape_CERN_path_dots(self):
+        path='/afs/cern.ch/work/user/production'
+        condition=production.directory_condition(path)
+        self.assertIn('substr(Iwd,0,',condition)
+        self.assertIn(json.dumps(path+'/'),condition)
+        self.assertNotIn('regexp',condition)
+        self.assertNotIn('\\',condition)
+        arguments=production.directory_condition(path,'Args')
+        self.assertIn('cern[.]ch',arguments)
+        self.assertNotIn('\\',arguments)
+
+    def test_full_campaign_storage_check_is_shared_but_expires_before_more_admission(self):
+        decisions={}
+        with patch.object(production.time,'monotonic',return_value=100) as clock, \
+             patch.object(production.durable,'quota',return_value=dict(free_bytes=1000)) as quota, \
+             patch.object(production,'storage_gate',return_value=(True,dict(full_allocation=900))) as gate:
+            self.assertTrue(production.poll_storage_gate({}, {}, decisions, True)[0])
+            clock.return_value=150
+            for _ in range(256):production.poll_storage_gate({}, {}, decisions, True)
+            self.assertEqual(quota.call_count,1)
+            self.assertEqual(gate.call_count,1)
+            production.poll_storage_gate({}, {}, decisions, False)
+            self.assertEqual(gate.call_count,2)
+            clock.return_value=401
+            production.poll_storage_gate({}, {}, decisions, True)
+            self.assertEqual(gate.call_count,3)
+
+    def test_slow_storage_review_never_admits_using_an_expired_observation(self):
+        decisions={}
+        with patch.object(production.time,'monotonic',side_effect=[0,301]), \
+             patch.object(production.durable,'quota',return_value=dict(free_bytes=1000)), \
+             patch.object(production,'storage_gate',return_value=(True,{})):
+            with self.assertRaisesRegex(RuntimeError,'freshness'):
+                production.poll_storage_gate({}, {}, decisions, True)
+        self.assertEqual(decisions,{})
+
     def test_new_submission_or_external_recovery_cannot_use_an_earlier_snapshot(self):
         config=dict(directory='/production')
         snapshot=dict(before_epoch=1,rows=[])
