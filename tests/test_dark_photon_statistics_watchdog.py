@@ -440,6 +440,41 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertEqual(report['health'], 'critical')
         self.assertTrue(any(item['code'] == 'queue_101' for item in report['issues']))
 
+    def test_stage_budget_recovery_preserves_gen_counts_and_follows_new_handoff(self):
+        stage=self.root/'waves/w001/gen_stage';stage.mkdir(parents=True)
+        (stage/'submission.json').write_text(json.dumps(dict(cluster=100,utc='1970-01-01T00:00:00+00:00')))
+        for name in ('gen_inventory.json','gen_publication.json'):
+            (stage/name).write_text(json.dumps(dict(complete=True)))
+        descriptor=stage.parent/'material_selected_source.json'
+        descriptor.write_text('{"selected_indices":[1,3]}')
+        replacement=self.root/'operations/handoffs/w001';replacement.mkdir(parents=True)
+        (replacement/'submission.json').write_text(json.dumps(dict(cluster=301,task=str(replacement),
+            utc='1970-01-01T00:00:00+00:00')))
+        native=dict(ClusterId=100,ProcId=0,Iwd=str(stage),JobStatus=4,ExitBySignal=False,ExitCode=1)
+        value=dict(schema='shift-reviewed-gen-handoff-v1',wave_index=1,gen_cluster=100,
+            failure_kind='detector_stage_budget_upgrade_before_SIM',science_rerun=False,
+            terminal_native_ad=native,files={name:WATCH.sha(stage/name) for name in ('gen_inventory.json','gen_publication.json')},
+            absolute_stage_timeouts=[43200,7200,14400,14400],
+            preserved_material_descriptors={str(descriptor):WATCH.sha(descriptor)},
+            replacement_handoff_directory=str(replacement))
+        proof=self.root/'budget_recovery.json'
+        def pin():
+            proof.write_text(json.dumps(value))
+            self.config.update(reviewed_gen_handoffs=[dict(path=str(proof),sha256=WATCH.sha(proof))],
+                               dependencies={str(proof):WATCH.sha(proof)})
+        pin()
+        receipts=WATCH.manager_receipts(self.root,config=self.config)
+        self.assertEqual(receipts[100]['kind'],'gen_stage')
+        self.assertEqual(receipts[301]['kind'],'handoff')
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['recovery_submission'],str(replacement/'submission.json'))
+        value['absolute_stage_timeouts'][0]=1800;pin()
+        with self.assertRaisesRegex(ValueError,'deadline or handoff authority'):
+            WATCH.manager_receipts(self.root,config=self.config)
+        value['absolute_stage_timeouts'][0]=43200;pin()
+        descriptor.write_text('{"selected_indices":[2]}')
+        with self.assertRaisesRegex(ValueError,'preserved material descriptor'):
+            WATCH.manager_receipts(self.root,config=self.config)
+
     def test_running_classad_alone_does_not_prove_execution(self):
         report = self.assess([self.child(status=2, starts=1)])
         self.assertFalse(report['stages']['100']['execution_verified'])

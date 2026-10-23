@@ -190,6 +190,9 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
     paths += sorted((root / 'waves').glob('w*/gen_stage/submission.json'))
     recoveries=operational_recoveries(config) if config else {}
     paths += [Path(item['recovery_submission']) for item in recoveries.values()]
+    budget_recoveries = {cluster: item for cluster, item in reviewed_terminal_failures(config).items()
+                         if item.get('kind') == 'stage_budget_handoff_recovery'} if config else {}
+    paths += [Path(item['recovery_submission']) for item in budget_recoveries.values()]
     if config and config.get('operational_handoffs'):
         paths += sorted(Path(config['operational_handoffs']['directory']).glob('*/submission.json'))
         paths += [directory/'submission.json' for directory in preserved_handoffs(config).values()]
@@ -228,6 +231,8 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
     preserved = set(preserved_handoffs(config).values()) if config else set()
     for record in result.values():
         if Path(record['directory']) in preserved:
+            record['kind'] = 'handoff'
+        if any(record['receipt'] == item['recovery_submission'] for item in budget_recoveries.values()):
             record['kind'] = 'handoff'
     operations = operational_receipts(operational_jobs)
     if set(result) & set(operations):
@@ -439,8 +444,9 @@ def reviewed_terminal_failures(config):
         wave = Path(config['production_directory']) / 'waves' / f'w{index:03d}'
         directory = wave / 'gen_stage'
         native = proof['terminal_native_ad']
+        budget_upgrade = proof.get('failure_kind') == 'detector_stage_budget_upgrade_before_SIM'
         if (proof.get('schema') != 'shift-reviewed-gen-handoff-v1'
-                or proof.get('failure_kind') != 'downstream_prepare_ImportError_only'
+                or (not budget_upgrade and proof.get('failure_kind') != 'downstream_prepare_ImportError_only')
                 or proof.get('science_rerun') is not False or native.get('JobStatus') != 4
                 or native.get('ExitBySignal') is not False or native.get('ExitCode') != 1
                 or native.get('ProcId') != 0 or native.get('Iwd') != str(directory)
@@ -450,6 +456,23 @@ def reviewed_terminal_failures(config):
         for name in ('gen_inventory.json', 'gen_publication.json'):
             if sha(directory / name) != proof['files'][name] or read(directory / name).get('complete') is not True:
                 raise ValueError('Reviewed GEN population is changed or unfinished')
+        if budget_upgrade:
+            replacement = Path(proof.get('replacement_handoff_directory', ''))
+            descriptors = proof.get('preserved_material_descriptors')
+            if (proof.get('absolute_stage_timeouts') != [43200, 7200, 14400, 14400]
+                    or not replacement.is_absolute() or '..' in replacement.parts
+                    or not replacement.is_relative_to(Path(config['production_directory']).parent)
+                    or replacement.name != wave.name
+                    or not isinstance(descriptors, dict)):
+                raise ValueError('Stage-budget recovery changed its reviewed deadline or handoff authority')
+            for filename, digest in descriptors.items():
+                descriptor = Path(filename)
+                if (not descriptor.is_absolute() or '..' in descriptor.parts
+                        or not descriptor.is_relative_to(wave) or sha(descriptor) != digest):
+                    raise ValueError('Stage-budget recovery changed a preserved material descriptor')
+            result[native['ClusterId']] = dict(authority=authority, native=native,
+                kind='stage_budget_handoff_recovery', recovery_submission=str(replacement/'submission.json'))
+            continue
         result[native['ClusterId']] = dict(authority=authority, native=native,
             recovery_submission=str(wave / 'production' / 'submission.json'))
     for authority in config.get('reviewed_meson_finalizer_recoveries', []):
