@@ -2962,3 +2962,16 @@ weighted Both-Both tail support and the remaining process/bin normalization
 checks. A completed replay with zero tails must remain an unresolved rate/tail
 measurement, not proof of zero background or a statistics gain. No full-scale
 production or analysis-alias change is authorized by this validation.
+
+
+The corrected295 validation replay was submitted on 23 October: manager13055690,
+watchdog13055905 and existing policy-analysis worker13055891. All 149 science
+workers have native execute events and entered SIM. The standalone reader
+credential canary13055861 passed. The predeclared 0.1/0.01/0.001 control-floor
+comparison, with adjusted 99.1667% intervals and original-event errors, follows
+the full reference automatically. Its real credential/plot preflight passed;
+the watcher covers that final analysis as well as detector/readback stages.
+Full production remains unsubmitted. All runtime/worklist/qualification receipts
+and the current storage authority are linked from the material-study handoff.
+The old raw-input replay controllers were also retired after terminal failure;
+keep their unqualified comparison and reconstruction inputs unchanged.
