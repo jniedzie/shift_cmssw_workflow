@@ -573,6 +573,20 @@ class StatisticsWatchdogTest(unittest.TestCase):
         report = self.assess([self.child()])
         self.assertTrue(any(item['code'] == 'supervisor_heartbeat' for item in report['issues']))
 
+    def test_completed_supervisor_can_wait_for_recovery_without_an_expected_heartbeat(self):
+        (self.root/'state.json').write_text(json.dumps(dict(complete=True,checked_epoch=self.now-10000)))
+        receipts=dict(self.receipts)
+        receipts[200]=dict(directory=str(self.root),receipt='supervisor',kind='supervisor',submitted=self.now-20000)
+        manager=dict(ClusterId=100,ProcId=0,JobStatus=2,Iwd=str(self.directory),JobStartDate=self.now-120)
+        ended=dict(ClusterId=200,ProcId=0,JobStatus=4,Iwd=str(self.root),ExitCode=0,ExitBySignal=False)
+        with patch.object(WATCH,'stage_counts',return_value=self.counts),patch.object(WATCH,'execute_events',return_value=[]):
+            successful=WATCH.assess(self.config,{},[manager,self.child()],[ended],receipts,self.now)
+            failed=WATCH.assess(self.config,{},[manager,self.child()],[dict(ended,ExitCode=1)],receipts,self.now)
+            live=WATCH.assess(self.config,{},[manager,self.child(),dict(ended,JobStatus=2)],[],receipts,self.now)
+        self.assertFalse(any(x['code']=='supervisor_heartbeat' for x in successful['issues']))
+        for report in (failed,live):
+            self.assertTrue(any(x['code']=='supervisor_heartbeat' for x in report['issues']))
+
     def test_large_campaign_query_has_constant_depth(self):
         receipts = {cluster: dict(self.receipts[100]) for cluster in range(100, 700)}
         queued = [dict(ClusterId=cluster, ProcId=0) for cluster in receipts]

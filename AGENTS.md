@@ -182,6 +182,9 @@ the change.
   events and verify GEN hashes and ordered identities. Keep this fast scan
   separate from full tracking. Numerical fixes need a derived precision bound,
   failed-event tests and good reconstructed dimuon controls.
+  Resolve each point's CMSSW configuration in a fresh interpreter: imported
+  producer objects can be mutated by the previous point. Test a multi-point
+  cohort as well as a single-point canary before freezing the preparer.
 - Recover a qualified numerical failure once in its original DAG, keeping GEN,
   sampling, seeds, weights and exposure. Preserve the original failure and
   report the actual new runtime. Do not automatically release unknown errors,

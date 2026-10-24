@@ -699,12 +699,18 @@ def assess(config, previous, rows, history, receipts, now):
     controller_state = root / 'state.json'
     controller = read(controller_state) if controller_state.is_file() else {}
     supervisor = queued.get(config['initial_supervisor_cluster'])
+    terminal_supervisor = ended.get(config['initial_supervisor_cluster'], {})
+    supervisor_complete = (not supervisor
+        and controller.get('finished', controller.get('complete', False)) is True
+        and terminal_supervisor.get('JobStatus') == 4
+        and terminal_supervisor.get('ExitCode') == 0
+        and terminal_supervisor.get('ExitBySignal') is False)
     controller_epoch = record_epoch(controller, 'checked_utc', 'checked_epoch')
     heartbeat_path = config.get('supervisor_heartbeat_path')
     if heartbeat_path and Path(heartbeat_path).is_file():
         heartbeat_epoch = record_epoch(read(heartbeat_path), 'checked_utc', 'checked_epoch')
         controller_epoch = max(value for value in (controller_epoch, heartbeat_epoch) if value is not None)
-    if controller_epoch is not None:
+    if controller_epoch is not None and not supervisor_complete:
         age_issue('supervisor_heartbeat', now - controller_epoch,
                   config['heartbeat_warning_seconds'], config['heartbeat_warning_seconds'] * 2,
                   'Supervisor heartbeat is stale')

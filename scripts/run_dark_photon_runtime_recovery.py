@@ -174,22 +174,35 @@ def production_preflight(config, state, review):
     root = Path(config['directory'])
     authority = pinned(review['authority'])
     profile_pin = authority['new_profile']
-    identity = hashlib.sha256((review['production'] + profile_pin['sha256']).encode()).hexdigest()
+    # A physical point is an independent GEN cohort. Another mass in the same
+    # scheduling wave must not block this point's complete, checked census.
+    scope = [review['point']]
+    identity = hashlib.sha256((review['production'] + profile_pin['sha256'] +
+                               ':' + ','.join(scope)).encode()).hexdigest()
     scans = state.setdefault('preflights', {})
     directory = root/'preflights'/identity
     if identity not in scans:
-        scans[identity] = dict(production=review['production'], profile=profile_pin,
+        scans[identity] = dict(production=review['production'], profile=profile_pin, point_scope=scope,
                                directory=str(directory), phase='preparation_intent')
         save(root/'state.json', state)
         # An interrupted preparation is preserved and requires review. It is
         # never mistaken for a submitted scan or a successful qualification.
-        scans[identity]['preparation'] = prepare(review['production'], profile_pin, directory)
+        scans[identity]['preparation'] = prepare(review['production'], profile_pin, directory,
+                                                point_scope=scope)
         scans[identity]['phase'] = 'prepared'
         save(root/'state.json', state)
     scan = scans[identity]
+    if (scan['production'] != review['production'] or scan['profile'] != profile_pin
+            or scan.get('point_scope') != scope):
+        raise ValueError('Preflight cache changed its physical point or qualified runtime')
+    directory = Path(scan['directory'])
+    if not directory.is_relative_to(root/'preflights'):
+        raise ValueError('Preflight cache moved outside its persistent recovery directory')
     if scan['phase'] == 'preparation_intent':
         raise RuntimeError('Interrupted preflight preparation needs review: ' + str(directory))
     if scan['phase'] == 'complete':
+        if native(config, 'ClusterId == ' + str(scan['submission']['cluster'])):
+            raise RuntimeError('A completed preflight unexpectedly became live again')
         pinned(scan['receipt'])
         return scan['receipt']
     prepared = scan['preparation']
