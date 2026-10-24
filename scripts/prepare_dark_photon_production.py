@@ -219,7 +219,7 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
             lines.extend([f'JOB {node} {output}/detector.sub',
                 f'VARS {node} point="{row["point"]}" chunk="{chunk["chunk"]}" kind="detector" seal="SEAL_DIGEST"',
                 f'CATEGORY {node} DETECTOR'])
-            if node not in gate_nodes:
+            if gate_nodes and node not in gate_nodes:
                 lines.append(f'PARENT {" ".join(gate_nodes)} CHILD {node}')
             parents.append(node)
         finalizer = 'F_' + row['point']
@@ -233,6 +233,71 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
         f'PARENT {" ".join(finalizers)} CHILD COLLECT',
         f'MAXJOBS DETECTOR {detector_cap}', f'MAXJOBS FINALIZER {finalizer_cap}'])
     return '\n'.join(lines) + '\n'
+
+
+def qualified_detector_gates(plan, canary_points, authority_path=None):
+    """Reuse a measured global gate only under an explicit frozen authority."""
+    names = [row['point'] for row in plan['points']]
+    gates = list(canary_points or [])
+    if (len(names) != len(set(names)) or len(gates) != len(set(gates))
+            or not set(gates) <= set(names)):
+        raise ValueError('Require distinct physical points and existing distinct detector gates')
+    if authority_path is None:
+        if not gates:
+            raise ValueError('Require local detector gates or qualified global canary authority')
+        return gates, None
+    if gates:
+        raise ValueError('Choose local detector gates or the qualified global canary, not both')
+    dependencies = []
+    def pinned(item):
+        path = Path(item['path'])
+        if not path.is_absolute() or sha256(path) != item['sha256']:
+            raise ValueError('Global detector canary dependency changed: ' + str(path))
+        dependencies.append(dict(path=str(path), sha256=item['sha256']))
+        return read(path)
+    authority_path = Path(authority_path).resolve()
+    authority = pinned(dict(path=str(authority_path), sha256=sha256(authority_path)))
+    if (authority.get('schema') != 'shift-qualified-global-detector-canary-v1'
+            or authority.get('complete') is not True
+            or authority.get('full_GEN_preflight_required') is not True):
+        raise ValueError('Unqualified global detector canary authority')
+    runtime = plan.get('detector_runtime', {}).get('runtime_sha256')
+    if not runtime or authority.get('runtime_sha256') != runtime:
+        raise ValueError('Global detector canary runtime differs from this detector plan')
+    qualification = pinned(authority['runtime_qualification'])
+    if qualification.get('complete') is not True:
+        raise ValueError('Global detector runtime qualification is incomplete')
+    profiles = [pinned(row['replacement_profile']) for row in qualification['profiles']]
+    if runtime not in {profile['runtime_sha256'] for profile in profiles}:
+        raise ValueError('Global detector runtime is absent from its qualification')
+    weighted = [pinned(item) for item in qualification['weighted_fullchain']]
+    if (not weighted or not any(row.get('complete') is True
+            and row.get('replacement_runtime_sha256') == runtime for row in weighted)):
+        raise ValueError('Global detector runtime lacks a completed weighted full chain')
+    pilot = pinned(authority['handoff_qualification'])
+    if (pilot.get('schema') != 'shift-reviewed-meson-handoff-qualification-v1'
+            or pilot.get('complete') is not True
+            or pilot.get('original_GEN_and_material_selection_unchanged') is not True):
+        raise ValueError('Global detector handoff qualification is incomplete')
+    for key in ('full_GEN_preflight', 'rates'):
+        if pinned(pilot[key]).get('complete') is not True:
+            raise ValueError('Global detector pilot stage is incomplete: ' + key)
+    pilot_plan = pinned(pilot['detector_plan'])
+    if pilot_plan.get('detector_runtime', {}).get('runtime_sha256') != runtime:
+        raise ValueError('Global detector pilot used another runtime')
+    native = pinned(pilot['replacement_successful_native'])
+    if (native.get('ExitCode') != 0 or native.get('ExitBySignal') is not False
+            or native.get('JobStatus') != 4):
+        raise ValueError('Global detector pilot handoff lacks native success')
+    executed = pinned(pilot['real_detector_execute'])
+    submission = pinned(pilot['detector_DAG_submission'])
+    if not any(row.get('DAGManJobId') == submission.get('cluster')
+            and row.get('JobCurrentStartDate', 0) > 0 for row in executed):
+        raise ValueError('Global detector pilot lacks an executed detector child')
+    if pinned(authority['merged_histogram_canary']).get('complete') is not True:
+        raise ValueError('Global detector canary has no complete merged histograms')
+    return [], dict(authority=dict(path=str(authority_path), sha256=sha256(authority_path)),
+                    dependencies=dependencies)
 
 
 def extend_worker(text, publication_profile, runtime_profile=None):
@@ -455,10 +520,9 @@ def prepare(args):
     validate_physical_preflight(plan)
     if plan.get('detector_stage_prepared') is not True:
         raise ValueError('Production requires a prepared complete physical-width-qualified detector grid')
+    gates, global_gate = qualified_detector_gates(plan, args.canary_points,
+        getattr(args, 'qualified_global_canary', None))
     names = [row['point'] for row in plan['points']]
-    if (len(names) != len(set(names)) or not args.canary_points or
-            len(set(args.canary_points)) != len(args.canary_points) or not set(args.canary_points) <= set(names)):
-        raise ValueError('Require distinct physical points and existing distinct detector gates')
     template_jobs = {chunk['job'] for row in read(template / 'plan.json')['points'] for chunk in row['chunks']}
     jobs = [chunk['job'] for row in plan['points'] for chunk in row['chunks']]
     if len(jobs) != len(set(jobs)) or template_jobs.intersection(jobs):
@@ -569,8 +633,8 @@ def prepare(args):
     (output / 'scoring_components.json').write_text(score)
     plan.update(schema='shift-bdt-independent-signal-stage-v1', prepared=True, submitted=False,
         sample_role='validation_only', new_worker_cap=args.detector_workers,
-        finalizer_concurrency=args.finalizers, detector_gate_points=args.canary_points,
-        detector_gate_chunk=0, **timeouts,
+        finalizer_concurrency=args.finalizers, detector_gate_points=gates,
+        detector_gate_chunk=(0 if gates else None), **timeouts,
         frozen_dependencies=dependencies, selection_applied=False, model_training_on_signals=False,
         reference_preparation=str(args.preparation.resolve()), reference_preparation_sha256=sha256(args.preparation),
         runtime_fingerprint=str(frozen / 'runtime_fingerprint.json'),
@@ -579,6 +643,8 @@ def prepare(args):
         detector_intermediates_policy=('Audited in worker scratch; retain all non-ROOT audit metadata and tier SHA-256/bytes'
                                       if profile == 'nano-metadata-v1' else 'Retain all audited detector ROOT tiers'),
         finalizer_contract='Complete ordered GEN union; all bounded Nano groups precede histogramming; validated histogram sum')
+    if global_gate is not None:
+        plan['qualified_global_detector_canary'] = global_gate['authority']
     write(output / 'plan.json', plan)
     write(output / 'gen_inventory.json', inventory)
     write(output / 'gen_publication.json', publication)
@@ -588,12 +654,15 @@ def prepare(args):
     independence.update(plan_sha256=sha256(output / 'plan.json'),
                         actual_gen_inventory_sha256=sha256(output / 'gen_inventory.json'))
     write(output / 'independence_gate.json', independence)
-    write(output / 'historical_qualification.json', dict(qualification_role='Earlier recipe qualification; new detector gates are required',
+    write(output / 'historical_qualification.json', dict(qualification_role=(
+        'Qualified global weighted full chain; this cohort still requires its complete GEN preflight'
+        if global_gate else 'Earlier recipe qualification; new detector gates are required'),
         template_directory=str(template), template_seal_sha256=sha256(template / 'seal.json'),
-        new_detector_gates_complete=False, dag_gates=args.canary_points,
+        new_detector_gates_complete=False, dag_gates=gates,
+        qualified_global_detector_canary=(global_gate['authority'] if global_gate else None),
         final_recording_acceptance_validated=False))
     freeze_absolute_stage_budget(output, getattr(args, 'absolute_stage_timeouts', None))
-    dag = dag_text(plan, output, args.canary_points, args.detector_workers, args.finalizers)
+    dag = dag_text(plan, output, gates, args.detector_workers, args.finalizers)
     (output / 'pipeline.dag.template').write_text(dag)
     common = [path for path in output.iterdir() if path.is_file()]
     common.extend(path for path in (output / 'canary').rglob('*') if path.is_file())
@@ -604,6 +673,8 @@ def prepare(args):
         common.extend([frozen / 'detector_runtime.json', frozen / 'detector_runtime_manifest.json'])
     if qualification is not None:
         common.extend(Path(item['path']) for item in qualification['dependencies'])
+    if global_gate is not None:
+        common.extend(Path(item['path']) for item in global_gate['dependencies'])
     scoring = [output / 'scoring_components.json']
     scoring.extend(path for path in (frozen / 'scoring').rglob('*') if path.is_file())
     gen = {row['point']: sorted(str(path) for path in Path(row['gen_directory']).rglob('*')
@@ -617,7 +688,8 @@ def prepare(args):
                                  scoring=sorted(set(map(str, scoring)))),
         events=plan['events'], signal_points=len(names), detector_jobs=plan['detector_chunks'], finalizer_jobs=len(names),
         selection_applied=False, sample_role='validation_only',
-        detector_bulk_gated_by_new_native_canaries=True,
+        detector_bulk_gated_by_new_native_canaries=bool(gates),
+        qualified_global_detector_canary=(global_gate['authority'] if global_gate else None),
         canonical_GEN_payloads_pinned_by_inventory_and_verified_on_worker_stage_in=True)
     write(output / 'seal.json', seal)
     (output / 'pipeline.dag').write_text(dag.replace('SEAL_DIGEST', sha256(output / 'seal.json')))
@@ -630,7 +702,9 @@ def main():
     for name in ('preparation', 'template', 'gen-inventory', 'gen-publication', 'storage-budget', 'output'):
         parser.add_argument('--' + name, required=True, type=Path)
     parser.add_argument('--prior-inventories', required=True, nargs='+', type=Path)
-    parser.add_argument('--canary-points', required=True, nargs='+')
+    parser.add_argument('--canary-points', nargs='+')
+    parser.add_argument('--qualified-global-canary', type=Path,
+                        help='Pinned measured runtime/full-chain/handoff authority replacing repeated local canary barriers')
     parser.add_argument('--failure-base', required=True)
     parser.add_argument('--detector-workers', type=int, default=100)
     parser.add_argument('--finalizers', type=int, default=3)

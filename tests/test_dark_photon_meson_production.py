@@ -352,6 +352,55 @@ class ReviewedRemainingStorage(unittest.TestCase):
         path.write_text(json.dumps(value))
         return dict(path=str(path), sha256=production.durable.sha(path))
 
+    def test_storage_reader_retries_only_bounded_transient_failures_and_checks_the_same_bytes(self):
+        import errno
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)/'evidence.json'
+            pin = self.pin(path, dict(complete=True))
+            original = Path.open
+            attempts = []
+            def flaky(p, *args, **kwargs):
+                attempts.append(str(p))
+                if len(attempts) < 3:
+                    raise OSError(errno.EIO, 'test transient')
+                return original(p, *args, **kwargs)
+            with patch.object(Path, 'open', flaky), patch.object(production.time, 'sleep') as pause:
+                self.assertEqual(production.storage_pinned_read(pin), dict(complete=True))
+            self.assertEqual(len(attempts), 3)
+            self.assertEqual(pause.call_count, 2)
+            path.write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'evidence changed'):
+                production.storage_pinned_read(pin)
+
+    def test_persistent_storage_error_has_the_exact_path_and_does_not_admit_partial_data(self):
+        import errno
+        path = Path('/afs/test/exact_failed_seed.json')
+        with patch.object(Path, 'open', side_effect=OSError(errno.EIO, 'test persistent')) as opened, \
+             patch.object(production.time, 'sleep'):
+            with self.assertRaises(OSError) as caught:
+                production.storage_payload(path)
+        self.assertEqual(opened.call_count, 3)
+        self.assertEqual(caught.exception.filename, str(path))
+        self.assertIn(str(path), str(caught.exception))
+        with patch.object(Path, 'open', side_effect=OSError(errno.EACCES, 'test permission')) as opened, \
+             patch.object(production.time, 'sleep') as pause:
+            with self.assertRaises(OSError):
+                production.storage_payload(path)
+        self.assertEqual(opened.call_count, 1)
+        pause.assert_not_called()
+
+    def test_storage_closed_primitive_keeps_the_existing_exact_completion_contract(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            plan = self.pin(root/'plan.json', dict(points=[]))
+            seal = self.pin(root/'seal.json', dict(files={str(root/'plan.json'): plan['sha256']}))
+            self.pin(root/'completed_points/p.json', dict(complete=True, point='p', events=1,
+                full_gen_events=2, plan_sha256=plan['sha256'], seal_sha256=seal['sha256']))
+            self.assertTrue(production.storage_closed_primitive(root, 'p', 2, float('inf')))
+            with self.assertRaisesRegex(ValueError, 'sealed complete population'):
+                production.storage_closed_primitive(root, 'p', 3, float('inf'))
+            self.assertFalse(production.storage_closed_primitive(root, 'missing', 2, float('inf')))
+
     def remaining_fixture(self, root):
         science = root/'science'
         science.mkdir()
@@ -390,7 +439,7 @@ class ReviewedRemainingStorage(unittest.TestCase):
             with patch.object(production, 'fresh_production_authority', return_value=fresh), \
                  patch.object(production, 'aggregation_reservation', return_value=22000000000), \
                  patch.object(production, 'reviewed_sm_storage_credit', return_value=(10000000000, set(), {})), \
-                 patch.object(production.durable, 'closed_primitive', return_value=False):
+                 patch.object(production, 'storage_closed_primitive', return_value=False):
                 peer, own, evidence = production.reviewed_remaining_storage(config,
                     dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
             self.assertEqual(peer, 163144000000)
@@ -406,7 +455,7 @@ class ReviewedRemainingStorage(unittest.TestCase):
             with patch.object(production, 'fresh_production_authority', return_value=fresh), \
                  patch.object(production, 'aggregation_reservation', return_value=22000000000), \
                  patch.object(production, 'reviewed_sm_storage_credit', return_value=(0, set(), {})), \
-                 patch.object(production.durable, 'closed_primitive', side_effect=lambda p, point, n, t: point == 'a'):
+                 patch.object(production, 'storage_closed_primitive', side_effect=lambda p, point, n, t: point == 'a'):
                 _, own, evidence = production.reviewed_remaining_storage(config,
                     dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
             self.assertEqual(own, 2*5000000+3*326000)
@@ -1756,3 +1805,73 @@ class OperationalAdoption(unittest.TestCase):
 
 if __name__=='__main__':
     unittest.main()
+
+
+class QualifiedBulkDetectorArguments(unittest.TestCase):
+    def test_default_and_operational_canary_keep_local_gate(self):
+        self.assertEqual(production.detector_gate_arguments({},dict(point='p')),['--canary-points','p'])
+        self.assertEqual(production.detector_gate_arguments(
+            dict(qualified_global_detector_canary={}),dict(point='p',operational_canary=True)),
+            ['--canary-points','p'])
+
+    def test_bulk_requires_pinned_authority_and_native_future_gate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            p=Path(tmp)/'authority.json';p.write_text('{}')
+            config=dict(qualified_global_detector_canary=dict(path=str(p),sha256=production.durable.sha(p)))
+            with self.assertRaisesRegex(ValueError,'future runtime'):
+                production.detector_gate_arguments(config,dict(point='p'))
+            config['future_detector_runtime']={}
+            self.assertEqual(production.detector_gate_arguments(config,dict(point='p')),
+                             ['--qualified-global-canary',str(p)])
+            p.write_text('changed')
+            with self.assertRaises(ValueError):
+                production.detector_gate_arguments(config,dict(point='p'))
+
+
+class HandoffStartThrottle(unittest.TestCase):
+    def test_throttle_only_new_launches_existing_jobs_still_reconcile(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);config=dict(maximum_new_detector_handoffs_per_poll=10)
+            state=dict(detector_handoff_starts_this_poll=10);entry={};batch=dict(batch='a')
+            with patch.object(production,'handoff_directory',return_value=directory), \
+                 patch.object(production.durable,'submission') as submit:
+                self.assertEqual(production.parallel_handoff(config,state,batch,entry,{}),('waiting',None))
+                submit.assert_not_called()
+            (directory/'submission.json').write_text('{}')
+            with patch.object(production,'handoff_directory',return_value=directory), \
+                 patch.object(production,'existing_receipt',return_value=dict(cluster=12)), \
+                 patch.object(production,'batch_job_status',return_value='active') as check:
+                self.assertEqual(production.parallel_handoff(config,state,batch,entry,{}),('active',None))
+                check.assert_called_once()
+            self.assertEqual(state['detector_handoff_starts_this_poll'],10)
+
+    def test_one_actual_new_submission_consumes_one_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(production,'handoff_directory',return_value=Path(tmp)), \
+                 patch.object(production.durable,'submission',return_value=dict(cluster=12)), \
+                 patch.object(production,'batch_job_status',return_value='active'):
+                state={}
+                production.parallel_handoff(dict(maximum_new_detector_handoffs_per_poll=10),
+                    state,dict(batch='a'),{}, {})
+                self.assertEqual(state['detector_handoff_starts_this_poll'],1)
+
+
+class HandoffStartPollReset(unittest.TestCase):
+    def test_two_real_poll_entries_each_allow_ten_new_starts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config=dict(directory=tmp,batches=[],maximum_new_detector_handoffs_per_poll=10)
+            state=dict(detector_handoff_starts_this_poll=10)
+            for poll in range(2):
+                with patch.object(production,'completion_scope',return_value={}), \
+                     patch.object(production,'reviewed_coverage_recovery',return_value=None), \
+                     patch.object(production.durable,'submission',return_value=dict(cluster=1)), \
+                     patch.object(production,'native_status',return_value='active'):
+                    production.step(config,state)
+                self.assertEqual(state['detector_handoff_starts_this_poll'],0)
+                with patch.object(production,'handoff_directory',return_value=Path(tmp)), \
+                     patch.object(production.durable,'submission',return_value=dict(cluster=12)), \
+                     patch.object(production,'batch_job_status',return_value='active'):
+                    for i in range(10):
+                        self.assertEqual(production.parallel_handoff(config,state,dict(batch=str(i)),{},{}),('active',None))
+                    self.assertEqual(production.parallel_handoff(config,state,dict(batch='next'),{},{}),('waiting',None))
+                self.assertEqual(state['detector_handoff_starts_this_poll'],10)

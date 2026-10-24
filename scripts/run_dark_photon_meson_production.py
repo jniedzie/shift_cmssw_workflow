@@ -73,12 +73,13 @@ def source_mechanism(config):
     return mechanism
 
 
-def fresh_production_authority(config):
+def fresh_production_authority(config, reader=None):
     """Verify a new campaign without inheriting cancelled exposure or claims."""
     authority = config.get('fresh_production_authority')
     if authority is None:
         return None
-    record = read_pinned(authority)
+    read_record = reader or read_pinned
+    record = read_record(authority)
     forbidden = ('prior_meson_publication', 'prior_meson_controller_directory',
                  'adaptive_directory', 'adaptive_terminal_completion',
                  'reviewed_prior_meson_retirement')
@@ -89,7 +90,7 @@ def fresh_production_authority(config):
             or record.get('preserve_previous_ready_outputs') is not True
             or any(key in config for key in forbidden)):
         raise ValueError('Fresh production must preserve previous outputs without inheriting cancelled work')
-    registration = read_pinned(record['storage_registration'])
+    registration = read_record(record['storage_registration'])
     claims = registration.get('peer_reservations', [])
     if (registration.get('schema') != 'shift-fresh-dp-storage-registration-v1'
             or registration.get('complete') is not True
@@ -101,7 +102,10 @@ def fresh_production_authority(config):
             or not registration.get('native_queue_evidence')
             or not registration.get('registered_controller_directories')):
         raise ValueError('Fresh production requires its verified shared-storage registration')
-    pinned_path(registration['native_queue_evidence'])
+    if reader is None:
+        pinned_path(registration['native_queue_evidence'])
+    else:
+        reader(registration['native_queue_evidence'])
     return dict(authority=record, storage_registration=registration,
                 reserved_peer_bytes=sum(row['reserved_bytes'] for row in claims))
 
@@ -885,13 +889,29 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
                                    'historical_anchor_calibration', 'operational_stage_timeouts_seconds',
                                    'reviewed_regrouping_canary_recovery', 'future_detector_runtime',
-                                   'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority'}:
+                                   'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
+                                   'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
     stage_budgets = config.get('operational_stage_timeouts_seconds')
     if stage_budgets is not None and stage_budgets != [43200,7200,14400,14400]:
         raise ValueError('Unreviewed operational detector stage budgets')
+    if ('maximum_new_detector_handoffs_per_poll' in config
+            and (type(config['maximum_new_detector_handoffs_per_poll']) is not int
+                 or config['maximum_new_detector_handoffs_per_poll'] != 10)):
+        raise ValueError('Unreviewed detector handoff start throttle')
+    global_canary=config.get('qualified_global_detector_canary')
+    if global_canary is not None:
+        from prepare_dark_photon_production import qualified_detector_gates
+        authority=read_pinned(global_canary)
+        profile=read_pinned(config['future_detector_runtime']['profile'])
+        qualified_detector_gates(dict(points=[],detector_runtime=profile),None,pinned_path(global_canary))
+        scheduling=authority.get('operational_scheduling',{})
+        for key in ('simultaneous_detector_points','maximum_active_detector_workers',
+                    'maximum_new_detector_handoffs_per_poll','dag_max_idle'):
+            if scheduling.get(key)!=config.get(key):
+                raise ValueError('Global detector canary scheduling authority differs: '+key)
     if config.get('physics_tools')!=original['tools']:
         raise ValueError('Replacement controller lost the original GEN source authority')
     if config.get('prior_meson_controller_directory') != original.get('prior_meson_controller_directory'):
@@ -1371,6 +1391,17 @@ def actual_source_storage(config, batch, row, status):
     return result
 
 
+def detector_gate_arguments(config, batch):
+    """Keep local canaries unless this bulk handoff has explicit qualification."""
+    authority = config.get('qualified_global_detector_canary')
+    if authority is None or batch.get('operational_canary'):
+        return ['--canary-points', batch['point']]
+    if config.get('future_detector_runtime') is None:
+        raise ValueError('Global detector canary requires the qualified future runtime gate')
+    path = pinned_path(authority)
+    return ['--qualified-global-canary', str(path)]
+
+
 def handoff(config, batch):
     directory = batch_directory(config, batch)
     plan = adopt(config, batch)
@@ -1397,7 +1428,7 @@ def handoff(config, batch):
             '--preparation', preparation, '--template', config['qualified_template'],
             '--gen-inventory', directory/'gen_inventory.json', '--gen-publication', directory/'gen_publication.json',
             '--storage-budget', directory/'storage_budget.json', '--output', production,
-            '--prior-inventories', *config['prior_inventories'], '--canary-points', batch['point'],
+            '--prior-inventories', *config['prior_inventories'], *detector_gate_arguments(config, batch),
             '--failure-base', config['failure_base'], '--detector-workers',
             str(config.get('detector_workers_per_point', 100)), '--finalizers', '2',
             '--publication-profile', 'nano-metadata-v1', '--publication-canary', config['publication_canary'],
@@ -1553,8 +1584,17 @@ def reconcile_handoff_failure(config,state,batch,entry,receipt):
 def parallel_handoff(config,state,batch,entry,queue_snapshot):
     directory=handoff_directory(config,batch,queue_snapshot)
     description=directory/'worker.sub'
+    new_submission=not (directory/'submission.json').is_file() and not (directory/'submission_intent.json').is_file()
+    if new_submission:
+        starts=state.get('detector_handoff_starts_this_poll',0)
+        limit=config.get('maximum_new_detector_handoffs_per_poll')
+        if limit is not None and starts>=limit:
+            entry['stage']='waiting_for_detector_handoff_start'
+            return 'waiting',None
     receipt=(existing_receipt(directory,description) if (directory/'submission.json').is_file()
              else durable.submission(config,directory,description))
+    if new_submission and config.get('maximum_new_detector_handoffs_per_poll') is not None:
+        state['detector_handoff_starts_this_poll']=state.get('detector_handoff_starts_this_poll',0)+1
     entry.update(handoff_cluster=receipt['cluster'],stage='detector_preparation')
     status=batch_job_status(config,state,batch,entry,receipt,'detector_preparation',queue_snapshot)
     if status!='complete':
@@ -1816,7 +1856,7 @@ def adaptive_reservation(config):
     return 2000000000 + (total - credited)*326000
 
 
-def aggregation_reservation(config):
+def aggregation_reservation(config, reader=None):
     """Protect the independently registered final Nano regrouping allocation."""
     if config.get('regroup_complete_points') is not True:
         return 0
@@ -1825,7 +1865,7 @@ def aggregation_reservation(config):
             or config.get('merge_source_histograms') is not False
             or config.get('aggregate_group_events') != 4000):
         raise ValueError('Final regrouping needs its explicit storage and 4000-event grouping policy')
-    proof=read_pinned(config['aggregation_storage_registration'])
+    proof=(reader or read_pinned)(config['aggregation_storage_registration'])
     if (proof.get('schema') != 'shift-dp-shared-aggregation-reservation-v1'
             or proof.get('complete') is not True
             or proof.get('science_directory') != config['directory']
@@ -1836,7 +1876,10 @@ def aggregation_reservation(config):
         raise ValueError('Final regrouping does not match the registered shared-storage allocation')
     if proof.get('combined_DP_reservation_bytes',0) > proof['protected_sm_external_envelope_bytes']:
         raise ValueError('Final regrouping exceeds the registered shared external envelope')
-    pinned_path(proof['shared_SM_registration'])
+    if reader is None:
+        pinned_path(proof['shared_SM_registration'])
+    else:
+        reader(proof['shared_SM_registration'])
     return reserved
 
 
@@ -1865,10 +1908,49 @@ def point_grouping_readiness(config):
 _REVIEWED_STORAGE_CACHES = {}
 
 
+def storage_payload(path):
+    """Bound AFS reads and identify the failed file without trusting partial data."""
+    import errno
+    path = Path(path)
+    for attempt in range(3):
+        try:
+            with path.open('rb') as stream:
+                return b''.join(iter(lambda: stream.read(65536), b''))
+        except OSError as error:
+            if error.errno not in (errno.EIO, errno.ESTALE, errno.ETIMEDOUT) or attempt == 2:
+                raise OSError(error.errno, 'Storage evidence read failed: '+str(path), str(path)) from error
+            time.sleep(attempt+1)
+
+
 def storage_ledger(path):
-    """The live SM ledger can exceed a single reliable AFS read."""
-    with Path(path).open('rb') as stream:
-        return json.loads(b''.join(iter(lambda: stream.read(65536), b'')))
+    return json.loads(storage_payload(path))
+
+
+def storage_pinned_read(authority):
+    path = Path(authority['path'])
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('Storage authority requires an absolute evidence path')
+    payload = storage_payload(path)
+    if hashlib.sha256(payload).hexdigest() != authority['sha256']:
+        raise ValueError('Pinned storage evidence changed: '+str(path))
+    return json.loads(payload)
+
+
+def storage_closed_primitive(directory, point, events, observed):
+    """Use the existing closed-primitive contract with bounded, named reads."""
+    root = Path(directory)
+    names = [root/'plan.json', root/'seal.json', root/'completed_points'/(point+'.json')]
+    if not all(path.is_file() and path.stat().st_mtime <= observed for path in names):
+        return False
+    payloads = [storage_payload(path) for path in names]
+    plan, seal, report = [json.loads(data) for data in payloads]
+    plan_hash = hashlib.sha256(payloads[0]).hexdigest()
+    if (seal['files'].get(str(names[0])) != plan_hash or report.get('complete') is not True
+            or report.get('full_gen_events', report.get('events')) != events or report.get('point') != point
+            or report.get('plan_sha256') != plan_hash
+            or report.get('seal_sha256') != hashlib.sha256(payloads[1]).hexdigest()):
+        raise ValueError('Published primitive differs from its sealed complete population')
+    return True
 
 
 def committed_sm_storage_entry(task, directory):
@@ -1913,12 +1995,12 @@ def committed_sm_storage_entry(task, directory):
 def reviewed_sm_storage_credit(config, authority, observed):
     """Reuse terminal proofs; inspect only newly closed chunks on later polls."""
     import shift_condor_native as native
-    peer = read_pinned(authority['SM_configuration'])
+    peer = storage_pinned_read(authority['SM_configuration'])
     directory = Path(authority['SM_directory'])
     if peer.get('campaign_directory') != str(directory) or peer.get('own_reservation_bytes') != 137000000000:
         raise ValueError('Reviewed SM budget or producer directory changed')
     if authority.get('SM_active_supervisor_path'):
-        active = read(authority['SM_active_supervisor_path'])
+        active = storage_ledger(authority['SM_active_supervisor_path'])
         if (active.get('directory') != str(Path(authority['SM_configuration']['path']).parent)
                 or active.get('config_sha256') != authority['SM_configuration']['sha256']):
             raise RuntimeError('SM supervisor changed; review its protected storage before new admission')
@@ -1930,13 +2012,13 @@ def reviewed_sm_storage_credit(config, authority, observed):
     if records is None:
         records = {}
         for pin in authority.get('terminal_seed_parts', []):
-            for row in read_pinned(pin)['producers']:
+            for row in storage_pinned_read(pin)['producers']:
                 if row['cluster'] in records:
                     raise ValueError('SM storage seed repeats a producer')
                 records[row['cluster']] = row
         if cache.is_dir():
             for path in cache.glob('*.json'):
-                saved = read(path)
+                saved = storage_ledger(path)
                 row = saved['producer']
                 checksum = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
                 if saved.get('sha256') != checksum:
@@ -1970,10 +2052,13 @@ def reviewed_sm_storage_credit(config, authority, observed):
             path = cache/(str(cluster)+'.json')
             saved = dict(producer=row, sha256=hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest())
             if path.exists():
-                if read(path) != saved:
+                if storage_ledger(path) != saved:
                     raise ValueError('Preserve changed SM storage terminal evidence')
             else:
-                durable.save(path, saved)
+                try:
+                    durable.save(path, saved)
+                except OSError as error:
+                    raise OSError(error.errno, 'Storage terminal-cache write failed: '+str(path), str(path)) from error
             records[cluster] = row
     objects = {}
     for cluster, row in records.items():
@@ -2004,18 +2089,19 @@ def reviewed_sm_storage_credit(config, authority, observed):
 
 def reviewed_remaining_storage(config, observation, state):
     """Count remaining writes of a closed GEN census; quota already paid for GEN."""
-    authority = read_pinned(config['reviewed_remaining_storage_authority'])
-    fresh = fresh_production_authority(config)
+    authority = storage_pinned_read(config['reviewed_remaining_storage_authority'])
+    fresh = fresh_production_authority(config, reader=storage_pinned_read)
     original = Path(config['directory'])/'config.json'
     if (authority.get('schema') != 'shift-dp-reviewed-remaining-storage-v1'
-            or authority.get('science_configuration') != dict(path=str(original), sha256=durable.sha(original))
+            or authority.get('science_configuration') != dict(path=str(original),
+                sha256=hashlib.sha256(storage_payload(original)).hexdigest())
             or authority.get('original_storage_registration') != fresh['authority']['storage_registration']
             or authority.get('minimum_eos_free_bytes') != config['minimum_eos_free_bytes']
-            or authority.get('aggregate_storage_reservation_bytes') != aggregation_reservation(config)
+            or authority.get('aggregate_storage_reservation_bytes') != aggregation_reservation(config, reader=storage_pinned_read)
             or authority.get('bytes_per_selected_event') != 326000
             or authority.get('fixed_bytes_per_batch') != 5000000):
         raise ValueError('Reviewed remaining storage changed its frozen science or safety margins')
-    registrations = [read_pinned(pin) for pin in authority['SM_registrations']]
+    registrations = [storage_pinned_read(pin) for pin in authority['SM_registrations']]
     if (len(registrations) != 2
             or sorted(row['new_SM_reservation_bytes'] for row in registrations) != [62000000000, 75000000000]
             or max(row.get('total_SM_reservation_bytes', 0) for row in registrations) != 137000000000):
@@ -2026,15 +2112,15 @@ def reviewed_remaining_storage(config, observation, state):
         raise ValueError('Reviewed storage changed the original protected peer budgets')
     observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
     committed, live_ids, detail = reviewed_sm_storage_credit(config, authority, observed)
-    census = read_pinned(authority['source_census'])
+    census = storage_pinned_read(authority['source_census'])
     batches = {row['batch']: row for row in config['batches']}
     if set(census['batches']) != set(batches):
         raise ValueError('Remaining storage census must cover every frozen GEN cohort')
     future = full_gen = selected_bound = completed_selected = 0
     for name, row in census['batches'].items():
         batch = batches[name]
-        source = read_pinned(row['source_status'])
-        receipt = read_pinned(row['source_submission'])
+        source = storage_pinned_read(row['source_status'])
+        receipt = storage_pinned_read(row['source_submission'])
         if (source.get('complete') is not True or source.get('batch') != name
                 or source.get('point') != batch['point'] or source.get('source_collisions') != batch['source_collisions']
                 or type(source.get('events')) is not int or source['events'] < 0
@@ -2045,7 +2131,7 @@ def reviewed_remaining_storage(config, observation, state):
         full_gen += source['events']
         bound = source['events']
         if row.get('material_source'):
-            descriptor = read_pinned(row['material_source'])
+            descriptor = storage_pinned_read(row['material_source'])
             indices = descriptor['selected_indices']
             if (descriptor.get('gen_sha256') != source['parent']['gen_sha256']
                     or len(indices) != len(set(indices)) or any(type(i) is not int or not 0 <= i < bound for i in indices)):
@@ -2055,8 +2141,8 @@ def reviewed_remaining_storage(config, observation, state):
             continue
         production = batch_directory(config, batch)/'production'
         processed = 0
-        if durable.closed_primitive(production, batch['point'], source['events'], observed):
-            processed = read(production/'completed_points'/(batch['point']+'.json'))['events']
+        if storage_closed_primitive(production, batch['point'], source['events'], observed):
+            processed = storage_ledger(production/'completed_points'/(batch['point']+'.json'))['events']
             if type(processed) is not int or not 0 <= processed <= bound:
                 raise ValueError('Completed Nano exceeds its frozen selection bound')
         selected_bound += bound
@@ -2071,7 +2157,8 @@ def reviewed_remaining_storage(config, observation, state):
 
 
 def storage_gate(config, observation, bulk=False, state=None):
-    reservation = adaptive_reservation(config)
+    reviewed = bulk and config.get('reviewed_remaining_storage_authority')
+    reservation = 0 if reviewed else adaptive_reservation(config)
     additional = 500000000 if not bulk else None
     if bulk:
         from prepare_dark_photon_meson_production import meson_storage_limit
@@ -2095,12 +2182,13 @@ def storage_gate(config, observation, bulk=False, state=None):
         published=(state or {}).get('batches',{})
         additional=sum(value for batch,value in forecasts.items() if not published.get(batch,{}).get('published'))
     accounting = None
-    if bulk and config.get('reviewed_remaining_storage_authority'):
+    if reviewed:
         import shift_condor_native as native
         try:
             reservation, additional, accounting = reviewed_remaining_storage(config, observation, state or {})
         except (OSError, native.NativeCondorError) as error:
-            return False, dict(reason='waiting_for_verified_remaining_storage', native_or_storage_error=repr(error))
+            return False, dict(reason='waiting_for_verified_remaining_storage', native_or_storage_error=repr(error),
+                               evidence_traceback=traceback.format_exc(limit=8))
     reserved, claims = additional_reservations(config)
     regrouping=aggregation_reservation(config)
     required = config['minimum_eos_free_bytes'] + reservation + additional + reserved + regrouping
@@ -2786,6 +2874,7 @@ def detector_reservations(config, entries):
 
 def step(config,state):
     state.update(checked_utc=datetime.now(timezone.utc).isoformat(),heartbeat=state.get('heartbeat',0)+1)
+    state['detector_handoff_starts_this_poll']=0
     scope = completion_scope(config)
     if scope is not None:
         state['meson_completion'] = scope

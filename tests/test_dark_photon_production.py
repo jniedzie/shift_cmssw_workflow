@@ -240,6 +240,60 @@ class ProductionBarriers(unittest.TestCase):
         self.assertIn('MAXJOBS DETECTOR 300\nMAXJOBS FINALIZER 2',weekend)
 
 
+class QualifiedGlobalDetectorGate(unittest.TestCase):
+    def setUp(self):
+        self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
+        self.base=Path(self.temp.name)
+        def pin(name,data):
+            path=self.base/name;write(path,data)
+            return dict(path=str(path),sha256=sha256(path))
+        self.pin=pin
+        profile=pin('profile.json',dict(runtime_sha256='a'*64))
+        chain=pin('chain.json',dict(complete=True,replacement_runtime_sha256='a'*64))
+        qualification=pin('qualification.json',dict(complete=True,
+            profiles=[dict(replacement_profile=profile)],weighted_fullchain=[chain]))
+        pilot=pin('pilot.json',dict(schema='shift-reviewed-meson-handoff-qualification-v1',
+            complete=True,original_GEN_and_material_selection_unchanged=True,
+            full_GEN_preflight=pin('preflight.json',dict(complete=True)),
+            rates=pin('rates.json',dict(complete=True)),
+            detector_plan=pin('plan.json',dict(detector_runtime=dict(runtime_sha256='a'*64))),
+            replacement_successful_native=pin('native.json',dict(ExitCode=0,ExitBySignal=False,JobStatus=4)),
+            real_detector_execute=pin('execute.json',[dict(DAGManJobId=12,JobCurrentStartDate=1)]),
+            detector_DAG_submission=pin('submission.json',dict(cluster=12))))
+        self.authority=dict(schema='shift-qualified-global-detector-canary-v1',complete=True,
+            runtime_sha256='a'*64,full_GEN_preflight_required=True,runtime_qualification=qualification,
+            handoff_qualification=pilot,merged_histogram_canary=pin('hist.json',dict(complete=True)))
+        self.path=self.base/'authority.json';write(self.path,self.authority)
+        self.plan=dict(detector_runtime=dict(runtime_sha256='a'*64),
+            points=[dict(point='p',chunks=[dict(chunk=0),dict(chunk=1)])])
+
+    def test_explicit_qualification_removes_only_detector_barriers(self):
+        gates,proof=production_preparation.qualified_detector_gates(self.plan,None,self.path)
+        self.assertEqual(gates,[]);self.assertGreater(len(proof['dependencies']),7)
+        dag=dag_text(self.plan,Path('/unsubmitted'),gates,100,2)
+        self.assertNotIn('PARENT  CHILD',dag)
+        self.assertIn('PARENT D_p_000 D_p_001 CHILD F_p',dag)
+        self.assertIn('PARENT F_p CHILD COLLECT',dag)
+        self.assertEqual(sum(line.startswith('JOB D_') for line in dag.splitlines()),2)
+
+    def test_default_still_requires_nonempty_local_canary(self):
+        with self.assertRaisesRegex(ValueError,'Require local'):
+            production_preparation.qualified_detector_gates(self.plan,None)
+        self.assertEqual(production_preparation.qualified_detector_gates(self.plan,['p']),(['p'],None))
+        with self.assertRaisesRegex(ValueError,'not both'):
+            production_preparation.qualified_detector_gates(self.plan,['p'],self.path)
+
+    def test_wrong_runtime_incomplete_or_changed_evidence_fails(self):
+        for changes in [dict(runtime_sha256='b'*64),dict(complete=False),dict(full_GEN_preflight_required=False)]:
+            write(self.path,dict(self.authority,**changes))
+            with self.assertRaises(ValueError):
+                production_preparation.qualified_detector_gates(self.plan,None,self.path)
+        write(self.path,self.authority)
+        (self.base/'chain.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError,'changed'):
+            production_preparation.qualified_detector_gates(self.plan,None,self.path)
+
+
 class DetectorDeadlines(unittest.TestCase):
     def test_defaults_and_reviewed_long_event_deadlines(self):
         self.assertEqual(detector_timeout_settings(SimpleNamespace()), dict(

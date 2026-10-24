@@ -3196,3 +3196,21 @@ Exercise the actual saved cohort through adoption, preparation, full-GEN
 converter checking, detector-DAG submission and rate export before handing
 production to a new controller. Imports and synthetic profile fixtures alone
 missed both boundaries during the October 24 repair.
+
+### Qualified global canaries and detector scheduling
+
+After the runtime's weighted full chain, a saved-cohort handoff and merged
+histograms are qualified, do not serialize every independent bulk cohort behind
+another hours-long first chunk. A newly prepared production may use an explicit
+`--qualified-global-canary` authority pinning those results and its exact runtime.
+The default still requires local canary points. Every new cohort must pass its
+complete original GEN converter preflight before its detector DAG is submitted;
+all chunks still precede point finalization and final collection. Existing sealed
+DAGs and operational canary batches retain their original barriers.
+
+Keep concurrent cohorts, reserved workers and new starts separate. The reviewed
+meson deployment permits 1,800 cohorts only within its unchanged 1,800 total
+worker reservation, including downstream slots. To limit observed AFS start
+bursts, it submits at most ten new detector handoffs per 60-second controller
+poll; existing handoffs continue reconciliation. Per-DAG idle limits remain in
+force. Measure the actual critical path before promising a completion date.

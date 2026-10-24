@@ -245,3 +245,12 @@ the change.
   handoff are verified, stop manual monitoring. Leave detached supervision
   active; check again only at the user's request, on a reported failure, or
   to validate a specific intervention.
+
+## Qualified bulk scheduling
+
+After a measured global weighted full chain and real saved-cohort handoff pass,
+use an explicit pinned authority to avoid repeating a serial first-chunk canary
+for every bulk cohort. Keep the complete original GEN converter preflight for
+each cohort and all finalizer/collection dependencies. Existing sealed DAGs
+stay unchanged. Keep cohort count, total worker reservations and new-start
+throttles separate; measure the critical path before promising completion.
