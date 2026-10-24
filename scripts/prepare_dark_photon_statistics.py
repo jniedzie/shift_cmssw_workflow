@@ -24,6 +24,9 @@ from prepare_dark_photon_gen_stage import combine_plans, validate_plan
 
 MC_FIELDS = {'requested_events', 'maximum_framework_events', 'seed', 'run_number'}
 SCHEMA = 'shift-dp-adaptive-statistics-worklist-v1'
+OPERATIONAL_TOOLS = ('prepare_dark_photon_statistics.py', 'prepare_dark_photon_grid.py',
+                     'prepare_dark_photon_gen_stage.py', 'run_dark_photon_gen_stage.py',
+                     'dark_photon_detector_runtime.py') + grid.RUNTIME_HELPER_SOURCES
 
 
 def read(path):
@@ -282,8 +285,7 @@ def prepare_worklist(args):
     for name, source in physics_sources.items():
         copy_checked(source, output / 'physics_scripts' / name, files)
         copy_checked(source, output / 'tools' / name, files)
-    for name in ('prepare_dark_photon_statistics.py', 'prepare_dark_photon_grid.py',
-                 'prepare_dark_photon_gen_stage.py', 'run_dark_photon_gen_stage.py'):
+    for name in OPERATIONAL_TOOLS:
         copy_checked(here / name, output / 'tools' / name, files)
     worklist = dict(schema=SCHEMA, created_utc=datetime.now(timezone.utc).isoformat(), submitted=False,
                     total_additional_events=sum(wave['events'] for wave in waves),

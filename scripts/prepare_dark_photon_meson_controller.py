@@ -10,11 +10,12 @@ import shutil
 
 import run_dark_photon_meson_production as production
 from prepare_dark_photon_meson_production import source_execution_limits, detector_point_limit
+from prepare_dark_photon_grid import RUNTIME_HELPER_SOURCES
 
 
-REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py',
-                     'prepare_dark_photon_production.py', 'dark_photon_stage_budget.py',
-                     'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py')
+REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'prepare_dark_photon_production.py',
+                     'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py',
+                     'dark_photon_detector_runtime.py') + RUNTIME_HELPER_SOURCES
 
 
 def replacement_tool_names(original):

@@ -11,7 +11,7 @@ import re
 import shutil
 
 from dark_photon_sample_names import physical_point_name
-from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES
+from prepare_dark_photon_grid import SOURCES as DETECTOR_SOURCES, RUNTIME_HELPER_SOURCES
 from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
 from run_dark_photon_statistics import sha, new
 from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
@@ -20,7 +20,7 @@ from run_dark_photon_meson_production import (source_mechanism, completion_scope
 from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
 
 
-TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + MATERIAL_SOURCES + (
+TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + MATERIAL_SOURCES + RUNTIME_HELPER_SOURCES + (
     'prepare_dark_photon_meson_production.py', 'run_dark_photon_meson_production.py',
     'dark_photon_automatic_admission.py',
     'prepare_dark_photon_production.py', 'dark_photon_production_support.py',

@@ -29,12 +29,16 @@ from dark_photon_source_placement import DEPENDENCIES as SOURCE_PLACEMENT_SOURCE
 
 
 REFERENCE_SCHEMA = 'shift-dark-photon-grid-reference-v1'
+RUNTIME_HELPER_SOURCES = ('dark_photon_stage_budget.py', 'dark_photon_runtime_recovery.py',
+                          'prepare_dark_photon_kinematics_preflight.py',
+                          'run_dark_photon_runtime_recovery.py', 'run_dark_photon_statistics.py',
+                          'shift_condor_native.py')
 SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'run_dark_photon_private_gen.py', 'dark_photon_gen_cfg.py',
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
            'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
-           'dark_photon_detector_runtime.py', 'dark_photon_material_selection.py') + tuple(dict.fromkeys(
+           'dark_photon_detector_runtime.py', 'dark_photon_material_selection.py') + RUNTIME_HELPER_SOURCES + tuple(dict.fromkeys(
                MATERIAL_SELECTION_SOURCES + SOURCE_PLACEMENT_SOURCES))
 VALIDATION_REQUIREMENTS = (
     'GEN audit must pass with all generated identities, weights and out-of-envelope decays retained.',
