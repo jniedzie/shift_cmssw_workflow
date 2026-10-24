@@ -1,0 +1,13 @@
+<!-- Code style: AI-code. AI-generated opt-in, tracking-free converter preflight. -->
+<library file="*.cc" name="ConfigurationShiftKinematicsValidationPlugins">
+  <flags EDM_PLUGIN="1"/>
+  <use name="FWCore/Framework"/>
+  <use name="FWCore/ParameterSet"/>
+  <use name="FWCore/Utilities"/>
+  <use name="SimDataFormats/GeneratorProducts"/>
+  <use name="SimG4Core/Generators"/>
+  <use name="SimG4Core/ShiftDarkPhotonPhysics"/>
+  <use name="geant4core"/>
+  <use name="hepmc"/>
+  <use name="json"/>
+</library>

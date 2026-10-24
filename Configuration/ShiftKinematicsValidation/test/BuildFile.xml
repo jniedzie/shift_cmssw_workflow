@@ -1,0 +1,6 @@
+<!-- Code style: AI-code. AI-generated exact-vector and numerical-envelope regression. -->
+<bin file="testRecordedPrimaryPrecision.cc" name="testRecordedPrimaryPrecision">
+  <use name="SimG4Core/Generators"/>
+  <use name="geant4core"/>
+</bin>
+<test name="testRecordedPrimaryInvariantPrecision" command="testRecordedPrimaryPrecision"/>
