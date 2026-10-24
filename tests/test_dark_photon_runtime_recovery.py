@@ -162,6 +162,50 @@ class RuntimeRecoveryStrictness(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'helper changed'):
                     budget.load_policy(path)
 
+    def scoped_fixture(self,root):
+        production,authority,_=self.fixture(root)
+        plan_path=production/'plan.json';plan=json.loads(plan_path.read_text())
+        plan['points'].append(dict(point='m15_prompt',chunks=[dict(chunk=8)]));plan_path.write_text(json.dumps(plan))
+        inventory_path=production/'gen_inventory.json';inventory=json.loads(inventory_path.read_text())
+        inventory['points']['m15_prompt']=copy.deepcopy(inventory['points']['m2_prompt']);inventory_path.write_text(json.dumps(inventory))
+        seal_path=production/'seal.json';seal=json.loads(seal_path.read_text())
+        for path in (plan_path,inventory_path):seal['files'][str(path)]=recovery.sha(path)
+        seal_path.write_text(json.dumps(seal))
+        auth_path=Path(authority['path']);auth=json.loads(auth_path.read_text())
+        preflight_path=Path(auth['production_preflight']['path']);preflight=json.loads(preflight_path.read_text())
+        preflight.update(original_plan_sha256=recovery.sha(plan_path),original_seal_sha256=recovery.sha(seal_path),
+            original_inventory_sha256=recovery.sha(inventory_path),point_scope=['m2_prompt'])
+        preflight_path.write_text(json.dumps(preflight));auth['production_preflight']['sha256']=recovery.sha(preflight_path)
+        auth_path.write_text(json.dumps(auth));authority['sha256']=recovery.sha(auth_path)
+        return production,authority,preflight_path
+
+    def test_point_scoped_full_GEN_receipt_authorizes_only_its_exact_recovery_slices(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);production,authority,_=self.scoped_fixture(root)
+            view=recovery.prepare_view(production,authority,root/'view',allowed_slices=[dict(point='m2_prompt',chunk=7)])
+            policy=json.loads(Path(view['policy']).read_text())
+            recovery.validate_override(policy)
+            for slices in ('all_planned',[dict(point='m15_prompt',chunk=8)],
+                    [dict(point='m2_prompt',chunk=7),dict(point='m15_prompt',chunk=8)],
+                    [dict(point='m2_prompt',chunk=7),dict(point='m2_prompt',chunk=7)]):
+                with self.subTest(slices=slices),self.assertRaises(ValueError):
+                    recovery.validate_override(dict(policy,allowed_slices=slices))
+
+    def test_scoped_receipts_reject_dropped_GEN_forged_scope_and_changed_inventory(self):
+        for mutation in ('selected_only','missing_scope','extra_scope','duplicate_scope','inventory_hash','extra_rows'):
+            with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);production,authority,preflight_path=self.scoped_fixture(root)
+                report=json.loads(preflight_path.read_text());profile=json.loads((root/'new_profile.json').read_text())
+                if mutation=='selected_only':report['points']['m2_prompt']['converted_count']=1
+                elif mutation=='missing_scope':report.pop('point_scope')
+                elif mutation=='extra_scope':report['point_scope']=['m15_prompt','m2_prompt']
+                elif mutation=='duplicate_scope':report['point_scope']=['m2_prompt','m2_prompt']
+                elif mutation=='inventory_hash':report['original_inventory_sha256']='0'*64
+                else:report['points']['m15_prompt']=copy.deepcopy(report['points']['m2_prompt'])
+                with self.assertRaises(ValueError):
+                    recovery.validate_full_gen_preflight(production,profile,report,point_scope=['m2_prompt'])
+
+
 class FutureDetectorHandoff(unittest.TestCase):
     fixture=RuntimeRecovery.fixture
 

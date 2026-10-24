@@ -50,22 +50,39 @@ def clone_text(original, runtime_sha256, override):
     return original.replace(PROVENANCE_MARKER,replacement)
 
 
-def validate_full_gen_preflight(production,profile,preflight):
+def validate_full_gen_preflight(production,profile,preflight,point_scope=None):
     production=Path(production)
     inventory=read(production/'gen_inventory.json')
     rows=read(production/'plan.json')['points']
     points={row['point'] for row in rows}
+    if point_scope is not None and (not isinstance(point_scope,list) or not point_scope
+            or any(not isinstance(name,str) for name in point_scope)
+            or len(set(point_scope))!=len(point_scope)):
+        raise ValueError('Required runtime-preflight points must be explicit and unique')
+    required=points if point_scope is None else set(point_scope)
+    scope=preflight.get('point_scope')
+    if scope is not None and (not isinstance(scope,list) or not scope
+            or any(not isinstance(name,str) for name in scope)
+            or scope!=sorted(set(scope)) or not set(scope)<=points):
+        raise ValueError('Runtime preflight has a mismatched explicit point scope')
+    covered=points if scope is None else set(scope)
+    if (len(rows)!=len(points) or not required or not required<=points or not required<=covered
+            or set(inventory.get('points',{}))!=points
+            or (scope is not None and preflight.get('original_inventory_sha256')!=sha(production/'gen_inventory.json'))
+            or (preflight.get('original_inventory_sha256') is not None
+                and preflight['original_inventory_sha256']!=sha(production/'gen_inventory.json'))):
+        raise ValueError('Runtime preflight does not cover the requested original GEN points')
     if (preflight.get('complete') is not True or inventory.get('complete') is not True
             or preflight.get('original_plan_sha256')!=sha(production/'plan.json')
             or preflight.get('original_seal_sha256')!=sha(production/'seal.json')
             or preflight.get('replacement_runtime_sha256')!=profile['runtime_sha256']
-            or set(preflight.get('points',{}))!=points):
+            or set(preflight.get('points',{}))!=covered):
         raise ValueError('Runtime preflight does not cover this complete original GEN cohort')
     for key in ('converter_source_sha256','configuration_sha256'):
         digest=preflight.get(key,'')
         if not isinstance(digest,str) or len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):
             raise ValueError('Runtime preflight lacks native converter/configuration fingerprints')
-    for point in points:
+    for point in covered:
         parent=inventory['points'][point];checked=preflight['points'][point]
         identities=parent['event_ids']
         digest=hashlib.sha256(json.dumps(identities,separators=(',',':')).encode()).hexdigest()
@@ -115,7 +132,18 @@ def validate_override(policy):
     for name in CORE_SOURCES:
         if manifest['files']['workflow_helpers/'+name]['sha256']!=sha(production/'frozen/sources'/name):
             raise ValueError('Replacement capsule changes a frozen core source: '+name)
-    validate_full_gen_preflight(production,profile,pinned(authority['production_preflight']))
+    slices=policy.get('allowed_slices','all_planned')
+    if slices=='all_planned':
+        point_scope=None
+    else:
+        planned={(row['point'],chunk['chunk']) for row in read(production/'plan.json')['points'] for chunk in row['chunks']}
+        if (not isinstance(slices,list) or not slices
+                or any(not isinstance(item,dict) or set(item)!= {'point','chunk'}
+                    or type(item['chunk']) is not int or (item['point'],item['chunk']) not in planned for item in slices)
+                or len({(item['point'],item['chunk']) for item in slices})!=len(slices)):
+            raise ValueError('Runtime preflight requires unique exact original recovery slices')
+        point_scope=sorted({item['point'] for item in slices})
+    validate_full_gen_preflight(production,profile,pinned(authority['production_preflight']),point_scope=point_scope)
     clone=Path(override['worker_clone']['path'])
     if not clone.is_absolute() or sha(clone)!=override['worker_clone']['sha256']:
         raise ValueError('Runtime worker clone changed')

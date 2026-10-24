@@ -34,7 +34,21 @@ def read_pin(row):
     return json.loads(path.read_text())
 
 
-def prepare(production, new_profile_pin, output_dir):
+def scoped_points(plan, point_scope=None):
+    """Select whole physical points without changing their original GEN census."""
+    points=[row['point'] for row in plan['points']]
+    if len(points)!=len(set(points)):
+        raise ValueError('Original plan has duplicate point names')
+    if point_scope is None:
+        return plan['points']
+    if (not isinstance(point_scope,list) or not point_scope
+            or any(not isinstance(name,str) for name in point_scope)
+            or len(set(point_scope))!=len(point_scope) or not set(point_scope)<=set(points)):
+        raise ValueError('Explicit preflight point scope must be unique original plan points')
+    return [row for row in plan['points'] if row['point'] in point_scope]
+
+
+def prepare(production, new_profile_pin, output_dir, *, point_scope=None):
     """Prepare a standalone worker; return the pinned config and submit paths."""
     production, output = Path(production).resolve(), Path(output_dir).resolve()
     if output.exists():
@@ -46,6 +60,7 @@ def prepare(production, new_profile_pin, output_dir):
         raise ValueError('Require complete original full-GEN inventory')
     if set(inventory['points']) != {p['point'] for p in plan['points']}:
         raise ValueError('Original GEN and plan point sets differ')
+    scoped_points(plan,point_scope)
     output.mkdir(parents=True)
     helpers = output/'helpers'; helpers.mkdir()
     for name in (Path(__file__).name, 'dark_photon_detector_runtime.py'):
@@ -58,6 +73,8 @@ def prepare(production, new_profile_pin, output_dir):
               'replacement_profile': new_profile_pin,
               'replacement_runtime_sha256': profile['runtime_sha256'],
               'helpers': [pin(p) for p in sorted(helpers.iterdir())]}
+    if point_scope is not None:
+        config['point_scope']=sorted(point_scope)
     cfg = output/'preflight.json'; cfg.write_text(json.dumps(config, indent=2)+'\n')
     command = ['/usr/bin/env', '-u', 'PYTHONHOME', '-u', 'PYTHONPATH', '/usr/bin/python3',
                str(helpers/'dark_photon_detector_runtime.py'), '--profile', new_profile_pin['path'],
@@ -81,7 +98,7 @@ def resolve_point(config_path, name, local, scratch):
     config = json.loads(Path(config_path).read_text())
     plan = read_pin(config['original_plan'])
     inventory = read_pin(config['inventory'])
-    point = next(p for p in plan['points'] if p['point'] == name)
+    point = next(p for p in scoped_points(plan,config.get('point_scope')) if p['point'] == name)
     parent = inventory['points'][name]
     production = Path(config['production']); output = Path(config['output'])
     sources = production/'frozen/sources'; sys.path.insert(0, str(sources))
@@ -102,6 +119,9 @@ def resolve_point(config_path, name, local, scratch):
         Path(scratch)/'unused.root', 0, parent['events'], point['seed'], True,
         False, None, False, contract, selection)
     generator = process.g4SimHits.Generator.clone()
+    if (hasattr(process,'MessageLogger') and hasattr(process.MessageLogger,'cerr')
+            and hasattr(process.MessageLogger.cerr,'FwkReport')):
+        process.MessageLogger.cerr.FwkReport.reportEvery=cms.untracked.int32(1000)
     process.kinematicsPreflight = cms.EDAnalyzer('ShiftPrimaryKinematicsPreflight',
         src=generator.HepMCProductLabel, generator=generator,
         massGeV=cms.double(point['mass_gev']), properCTauMm=cms.double(point['proper_ctau_mm']),
@@ -139,13 +159,16 @@ def scan(config_path):
     report = {'schema': 'shift-production-primary-kinematics-preflight-v1', 'complete': False,
               'original_plan_sha256': config['original_plan']['sha256'],
               'original_seal_sha256': config['original_seal']['sha256'],
+              'original_inventory_sha256': config['inventory']['sha256'],
               'replacement_runtime_sha256': profile['runtime_sha256'],
               'converter_source_sha256': hashlib.sha256(json.dumps(converter, sort_keys=True).encode()).hexdigest(),
               'points': {}}
+    if config.get('point_scope') is not None:
+        report['point_scope']=sorted(config['point_scope'])
     configurations = {}
     from DataFormats.FWLite import Events
     try:
-        for point in plan['points']:
+        for point in scoped_points(plan,config.get('point_scope')):
             name = point['point']; parent = inventory['points'][name]
             with tempfile.TemporaryDirectory(prefix='dp-kinematics-') as scratch:
                 local = Path(scratch)/'gen.root'
@@ -190,6 +213,7 @@ def main():
     parser.add_argument('--production', type=Path)
     parser.add_argument('--profile', type=Path)
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--point-scope', nargs='+', metavar='POINT')
     args = parser.parse_args()
     if args.build_point:
         cfg, name, local, scratch = args.build_point
@@ -197,7 +221,7 @@ def main():
     elif args.scan:
         scan(args.scan)
     else:
-        print(json.dumps(prepare(args.production, pin(args.profile), args.output), indent=2))
+        print(json.dumps(prepare(args.production, pin(args.profile), args.output, point_scope=args.point_scope), indent=2))
 
 
 if __name__ == '__main__':

@@ -90,5 +90,75 @@ class PreflightPreparation(unittest.TestCase):
         self.assertNotEqual(first,second)
 
 
+    def test_explicit_point_scope_freezes_full_original_plan_and_inventory(self):
+        plan={'points':[{'point':'m2_prompt'},{'point':'m15_prompt'},{'point':'m40_prompt'}]}
+        inventory={'complete':True,'points':{name:{'events':1000} for name in ('m2_prompt','m15_prompt','m40_prompt')}}
+        (self.production/'plan.json').write_text(json.dumps(plan))
+        (self.production/'gen_inventory.json').write_text(json.dumps(inventory))
+        before={name:MODULE.sha(self.production/name) for name in ('plan.json','gen_inventory.json','seal.json')}
+        result=MODULE.prepare(self.production,MODULE.pin(self.profile),self.out,point_scope=['m15_prompt'])
+        config=MODULE.read_pin(result['config'])
+        self.assertEqual(config['point_scope'],['m15_prompt'])
+        self.assertEqual(config['original_plan']['sha256'],before['plan.json'])
+        self.assertEqual(config['inventory']['sha256'],before['gen_inventory.json'])
+        self.assertEqual(config['original_seal']['sha256'],before['seal.json'])
+        self.assertEqual(MODULE.scoped_points(plan,config['point_scope']),[plan['points'][1]])
+        self.assertEqual({name:MODULE.sha(self.production/name) for name in before},before)
+        # The actual frozen scanner contains the scope gate, rather than a
+        # worker wrapper filtering the GEN or material-selected event list.
+        frozen=next(pin for pin in config['helpers'] if Path(pin['path']).name==SCRIPT.name)
+        self.assertEqual(frozen['sha256'],MODULE.sha(SCRIPT))
+        spec=importlib.util.spec_from_file_location('frozen_scoped_scan',frozen['path'])
+        scanner=importlib.util.module_from_spec(spec);spec.loader.exec_module(scanner)
+        self.assertEqual(scanner.scoped_points(plan,config['point_scope']),[plan['points'][1]])
+        self.assertEqual(scanner.scoped_points(plan),plan['points'])
+
+    def test_empty_duplicate_unknown_or_malformed_scope_is_rejected_before_freezing(self):
+        for scope in ([],['m2_prompt','m2_prompt'],['m15_prompt'],'m2_prompt',[123]):
+            with self.subTest(scope=scope),self.assertRaises(ValueError):
+                MODULE.prepare(self.production,MODULE.pin(self.profile),self.out,point_scope=scope)
+            self.assertFalse(self.out.exists())
+
+    def test_native_scan_receipt_contains_only_requested_whole_point(self):
+        import hashlib
+        import os
+        from types import SimpleNamespace,ModuleType
+        from unittest.mock import patch
+        points=['m2_prompt','m15_prompt','m40_prompt'];identities=[[1,1,index] for index in range(1,4)]
+        payload=b'full original GEN including material-rejected events'
+        inventory={'complete':True,'points':{name:{'events':3,'event_ids':identities,
+            'gen_sha256':hashlib.sha256(payload).hexdigest(),'gen_path':'/eos/'+name+'.root'} for name in points}}
+        plan={'points':[{'point':name,'material_selection':{'selected_indices':[0]}} for name in points]}
+        (self.production/'plan.json').write_text(json.dumps(plan));(self.production/'gen_inventory.json').write_text(json.dumps(inventory))
+        release=self.base/'release';files={}
+        for name in ('SimG4Core/Generators/src/Generator.cc','SimG4Core/Generators/src/Generator3.cc',
+                     'SimG4Core/Generators/interface/RecordedPrimaryMomentum.h'):
+            path=release/'src'/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('frozen converter')
+            files['CMSSW_17_0_0_pre4/src/'+name]={'sha256':MODULE.sha(path)}
+        manifest=self.base/'manifest.json';manifest.write_text(json.dumps({'files':files}))
+        self.profile.write_text(json.dumps({'runtime_sha256':'a'*64,'manifest':MODULE.pin(manifest)}))
+        result=MODULE.prepare(self.production,MODULE.pin(self.profile),self.out,point_scope=['m15_prompt'])
+        fw=ModuleType('DataFormats.FWLite')
+        fw.Events=lambda path:[SimpleNamespace(eventAuxiliary=lambda identity=identity:SimpleNamespace(
+            run=lambda:identity[0],luminosityBlock=lambda:identity[1],event=lambda:identity[2])) for identity in identities]
+        calls=[]
+        def run(command,**kwargs):
+            calls.append(command)
+            if command[0]=='/usr/bin/xrdcp':Path(command[-1]).write_bytes(payload)
+            elif '--build-point' in command:
+                name=command[4];(self.out/(name+'_cfg.py')).write_text('full census configuration')
+            elif command[0]=='cmsRun':
+                (self.out/'m15_prompt_converter.json').write_text(json.dumps({'complete':True,'events':3}))
+        with patch.dict(os.environ,CMSSW_BASE=str(release)),patch.dict(sys.modules,{'DataFormats.FWLite':fw}),patch.object(MODULE.subprocess,'run',side_effect=run):
+            MODULE.scan(result['config']['path'])
+        receipt=json.loads(Path(result['receipt']).read_text())
+        self.assertTrue(receipt['complete']);self.assertEqual(receipt['point_scope'],['m15_prompt'])
+        self.assertEqual(set(receipt['points']),{'m15_prompt'})
+        self.assertEqual(receipt['points']['m15_prompt']['full_count'],3)
+        self.assertEqual(receipt['points']['m15_prompt']['converted_count'],3)
+        self.assertEqual(receipt['original_inventory_sha256'],MODULE.sha(self.production/'gen_inventory.json'))
+        self.assertEqual([command[4] for command in calls if '--build-point' in command],['m15_prompt'])
+
+
 if __name__ == '__main__':
     unittest.main()
