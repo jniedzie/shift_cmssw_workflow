@@ -235,6 +235,16 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
     return '\n'.join(lines) + '\n'
 
 
+def detector_category_ceiling(args):
+    """A larger frozen category permits later reviewed live global throttles."""
+    ceiling = getattr(args, 'detector_category_ceiling', None)
+    if ceiling is None:
+        return args.detector_workers
+    if type(ceiling) is not int or not args.detector_workers <= ceiling <= 600:
+        raise ValueError('Detector category ceiling must cover the initial workers and be at most600')
+    return ceiling
+
+
 def qualified_detector_gates(plan, canary_points, authority_path=None):
     """Reuse a measured global gate only under an explicit frozen authority."""
     names = [row['point'] for row in plan['points']]
@@ -552,6 +562,7 @@ def prepare(args):
         raise ValueError('Reviewed budget publication profile differs from the requested worker')
     if not 1 <= args.detector_workers <= 300 or not 1 <= args.finalizers <= 3:
         raise ValueError('Require bounded concurrency up to300detectorworkers and3finalizers')
+    category_ceiling = detector_category_ceiling(args)
     output.mkdir(parents=True, exist_ok=False)
     for directory in ('logs', 'failures', 'statuses', 'completed_points'):
         (output / directory).mkdir()
@@ -645,6 +656,8 @@ def prepare(args):
         finalizer_contract='Complete ordered GEN union; all bounded Nano groups precede histogramming; validated histogram sum')
     if global_gate is not None:
         plan['qualified_global_detector_canary'] = global_gate['authority']
+    if getattr(args, 'detector_category_ceiling', None) is not None:
+        plan['detector_category_ceiling'] = category_ceiling
     write(output / 'plan.json', plan)
     write(output / 'gen_inventory.json', inventory)
     write(output / 'gen_publication.json', publication)
@@ -662,7 +675,7 @@ def prepare(args):
         qualified_global_detector_canary=(global_gate['authority'] if global_gate else None),
         final_recording_acceptance_validated=False))
     freeze_absolute_stage_budget(output, getattr(args, 'absolute_stage_timeouts', None))
-    dag = dag_text(plan, output, gates, args.detector_workers, args.finalizers)
+    dag = dag_text(plan, output, gates, category_ceiling, args.finalizers)
     (output / 'pipeline.dag.template').write_text(dag)
     common = [path for path in output.iterdir() if path.is_file()]
     common.extend(path for path in (output / 'canary').rglob('*') if path.is_file())
@@ -707,6 +720,8 @@ def main():
                         help='Pinned measured runtime/full-chain/handoff authority replacing repeated local canary barriers')
     parser.add_argument('--failure-base', required=True)
     parser.add_argument('--detector-workers', type=int, default=100)
+    parser.add_argument('--detector-category-ceiling', type=int,
+                        help='Frozen category ceiling for reviewed live worker redistribution; initial workers stay unchanged')
     parser.add_argument('--finalizers', type=int, default=3)
     parser.add_argument('--event-stall-timeout', type=int, default=1800)
     parser.add_argument('--first-event-stall-timeout', type=int, default=3600)

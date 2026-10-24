@@ -94,6 +94,14 @@ def validate_capacity(config):
     if (type(workers) is not int or type(waves) is not int or
             not 1 <= workers <= 300 or not 1 <= waves <= 8 or workers * waves > 2400):
         raise ValueError('Reviewed capacity permits at most eight waves and 2400 detector workers')
+    redistribution = config.get('detector_worker_redistribution')
+    if redistribution is not None:
+        total = redistribution.get('total_workers')
+        ceiling = redistribution.get('future_category_ceiling')
+        if (type(total) is not int or total != workers * waves or total > 600 or
+                type(ceiling) is not int or not workers <= ceiling <= total or
+                config.get('dag_max_idle') != 5):
+            raise ValueError('Redistribution must preserve the existing total worker budget and five-job start queue')
     breakdown = config.get('fixed_publication_breakdown', {})
     if 'global_2400_inflight_detector_bound_bytes' in breakdown:
         if (breakdown['global_2400_inflight_detector_bound_bytes'] < workers * waves * 9900801
@@ -125,7 +133,8 @@ def jobs(config, constraint):
     arguments = scheduler_arguments(config)
     output = run_condor(['/usr/bin/condor_q', *arguments, '-constraint', constraint,
                          '-json', '-attributes',
-                         'ClusterId,ProcId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask'], timeout=45)
+                         'ClusterId,ProcId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask,'
+                         'JobUniverse,Cmd,DAGMan_MaxJobs,DAGMan_MaxIdle,DAG_AdUpdateTime'], timeout=45)
     return parse_ads(output)
 
 
@@ -728,6 +737,9 @@ def handoff(config, index):
                 '--detector-workers', str(config.get('detector_workers_per_wave', 100)), '--finalizers', '2', '--publication-profile', 'nano-metadata-v1',
                 '--publication-canary', config['publication_canary'], '--event-stall-timeout', '7200',
                 '--first-event-stall-timeout', '7200', '--detector-timeout', '43200']
+            if config.get('detector_worker_redistribution'):
+                command.extend(['--detector-category-ceiling',
+                    str(config['detector_worker_redistribution']['future_category_ceiling'])])
             budgets=config.get('absolute_stage_timeouts')
             if budgets is not None:
                 if (not isinstance(budgets,list) or len(budgets)!=4
@@ -740,7 +752,10 @@ def handoff(config, index):
         if config.get('future_detector_runtime') is not None:
             from dark_photon_runtime_recovery import future_preflight
             future_preflight(production,config['future_detector_runtime'],operations,sys.modules[__name__],config)
-        receipt = submit_dag(config, production, config.get('detector_workers_per_wave', 100) + 2)
+        initial_cap = config.get('detector_workers_per_wave', 100)
+        if not config.get('detector_worker_redistribution'):
+            initial_cap += 2
+        receipt = submit_dag(config, production, initial_cap)
         rates = directory / 'rates.json'
         if not rates.exists():
             run_logged([sys.executable, Path(config['tools']) / 'export_dark_photon_cross_sections.py',
@@ -1515,6 +1530,94 @@ def fresh_storage_admission(config, observation):
         own_completed_GEN_events=own_credit,meson_closed_bytes=meson_credit)
 
 
+def redistribute_detector_workers(config, state, worklist):
+    """Reuse freed slots through DAGMan's supported live global throttle.
+
+    Old category limits stay frozen. Reserve an initial share for active GEN
+    handoffs and the next admissible waves before increasing a detector DAG.
+    Limits only increase, so healthy payloads never need to be interrupted.
+    """
+    policy = config.get('detector_worker_redistribution')
+    if policy is None:
+        return
+    baseline = config.get('detector_workers_per_wave', 100)
+    active = [(index, entry) for index, entry in state['waves'].items() if not entry.get('terminal')]
+    upcoming = min(len(worklist['waves']) - len(state['waves']),
+                   max(0, config['simultaneous_waves'] - len(active)))
+    committed = baseline * (len(active) + upcoming)
+    managers = []
+    observations = state.setdefault('detector_worker_allocation', {})
+    for index, entry in active:
+        if entry.get('stage') != 'detector' or len(entry.get('queue', [])) != 1:
+            continue
+        ad = entry['queue'][0]
+        if ad.get('JobStatus') != 2:
+            continue
+        production = wave_directory(config, int(index)) / 'production'
+        directory = Path(entry.get('replacement_detector_directory', str(production)))
+        receipt = read(directory / 'submission.json')
+        if (ad.get('ClusterId') != receipt['cluster'] or ad.get('ProcId') != 0 or
+                ad.get('Iwd') != str(directory) or ad.get('JobUniverse') != 7 or
+                ad.get('Cmd') != '/usr/bin/condor_dagman'):
+            raise ValueError('Worker allocation manager differs from its native submission')
+        current, idle = ad.get('DAGMan_MaxJobs'), ad.get('DAGMan_MaxIdle')
+        if (type(current) is not int or not 1 <= current <= policy['total_workers'] + 2 or
+                type(idle) is not int or not 1 <= idle <= 5):
+            raise ValueError('Worker allocation requires bounded initialized native throttles')
+        with (directory / 'pipeline.dag.dagman.out').open() as stream:
+            startup = stream.read(65536)
+        if ('$CondorVersion: 25.0.' not in startup or
+                'DAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False' not in startup):
+            raise ValueError('Live throttle contract must preserve healthy workers')
+        categories = re.findall(r'^MAXJOBS DETECTOR (\d+)\s*$',
+                                (directory / 'pipeline.dag').read_text(), re.M)
+        if len(categories) != 1:
+            raise ValueError('Require one immutable detector category ceiling')
+        ceiling = int(categories[0])
+        committed += max(0, min(ceiling, current) - baseline)
+        old = observations.get(index)
+        if ceiling > baseline:
+            allowed = {baseline} if old is None else {old['requested_max_jobs']}
+            if old is not None and 'native_edit_output' not in old:
+                allowed.add(old['previous_max_jobs'])  # Reconcile an ambiguous idempotent limit edit.
+            if current not in allowed:
+                raise ValueError('Expandable manager has an unreviewed changed live throttle')
+        if old and current == old.get('requested_max_jobs'):
+            old.setdefault('edited_epoch', time.time())
+            old['consumed'] = (ad.get('DAG_AdUpdateTime', 0) > old['edited_epoch'])
+            old['manager_ad_update_epoch'] = ad.get('DAG_AdUpdateTime')
+            old['readback_max_jobs'] = current
+        managers.append((index, ad, ceiling, current))
+    if committed > policy['total_workers']:
+        raise ValueError('Existing live allocations exceed the unchanged worker budget')
+    available = policy['total_workers'] - committed
+    state['detector_worker_budget'] = dict(total_workers=policy['total_workers'],
+        committed_workers=committed, reserved_upcoming_waves=upcoming, spare_workers=available)
+    for index, ad, ceiling, current in sorted(managers, key=lambda item: int(item[0])):
+        increase = min(available, max(0, ceiling - current))
+        if increase <= 0:
+            continue
+        target = current + increase
+        intent = dict(cluster=ad['ClusterId'], directory=ad['Iwd'],
+            previous_max_jobs=current, requested_max_jobs=target, maximum_idle=ad['DAGMan_MaxIdle'],
+            immutable_detector_category_ceiling=ceiling, intent_utc=datetime.now(timezone.utc).isoformat(),
+            consumed=False)
+        observations[index] = intent
+        persist_controller_state(Path(config['directory']) / 'state.json', state)
+        constraint = (f'ClusterId == {ad["ClusterId"]} && ProcId == 0 && JobStatus == 2'
+            ' && JobUniverse == 7 && Cmd == "/usr/bin/condor_dagman" && Iwd == ' + json.dumps(ad['Iwd']) +
+            f' && DAGMan_MaxJobs == {current} && DAGMan_MaxIdle == {ad["DAGMan_MaxIdle"]}')
+        output = run_condor(['/usr/bin/condor_qedit', *scheduler_arguments(config), '-constraint', constraint,
+            'DAGMan_MaxJobs', str(target)], timeout=45)
+        if 'for 1 matching jobs.' not in output:
+            raise RuntimeError('Native scheduler did not confirm one exact manager limit edit')
+        intent.update(edited_epoch=time.time(), native_edit_output=output)
+        persist_controller_state(Path(config['directory']) / 'state.json', state)
+        available -= increase
+        state['detector_worker_budget'].update(committed_workers=policy['total_workers'] - available,
+                                               spare_workers=available)
+
+
 def step(config, config_path, state):
     now = datetime.now(timezone.utc).isoformat()
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
@@ -1561,6 +1664,7 @@ def step(config, config_path, state):
         publish(config, state)
     canary_ready = published_canary(config, state)
     state['canary_published'] = canary_ready
+    redistribute_detector_workers(config, state, worklist)
     for index in range(len(worklist['waves'])):
         if str(index) in state['waves']:
             continue

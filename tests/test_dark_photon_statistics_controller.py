@@ -4,10 +4,104 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import run_dark_photon_statistics as controller
+
+
+class WorkerRedistribution(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.config = dict(directory=str(self.root), detector_workers_per_wave=150,
+            simultaneous_waves=4, dag_max_idle=5,
+            condor_pool='pool.example', condor_schedd='schedd.example',
+            detector_worker_redistribution=dict(total_workers=600, future_category_ceiling=600))
+        self.state = dict(waves={})
+        self.worklist = dict(waves=[{}] * 8)
+
+    def manager(self, index, category=150, current=152):
+        directory = controller.wave_directory(self.config, index) / 'production'
+        directory.mkdir(parents=True, exist_ok=True)
+        controller.new(directory / 'submission.json', dict(cluster=100 + index))
+        (directory / 'pipeline.dag').write_text(f'MAXJOBS DETECTOR {category}\nMAXJOBS FINALIZER 2\n')
+        (directory / 'pipeline.dag.dagman.out').write_text(
+            '$CondorVersion: 25.0.14\nDAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False\n')
+        ad = dict(ClusterId=100 + index, ProcId=0, JobStatus=2, Iwd=str(directory),
+            JobUniverse=7, Cmd='/usr/bin/condor_dagman', DAGMan_MaxJobs=current,
+            DAGMan_MaxIdle=5, DAG_AdUpdateTime=0)
+        self.state['waves'][str(index)] = dict(stage='detector', queue=[ad])
+        return ad
+
+    def rebalance(self):
+        with patch.object(controller, 'persist_controller_state') as save, \
+             patch.object(controller, 'run_condor', return_value='Set attribute "DAGMan_MaxJobs" for 1 matching jobs.') as edit:
+            controller.redistribute_detector_workers(self.config, self.state, self.worklist)
+        return save, edit
+
+    def test_existing_four_waves_are_unchanged(self):
+        for index in range(4): self.manager(index)
+        _, edit = self.rebalance()
+        edit.assert_not_called()
+        self.assertEqual(self.state['detector_worker_budget']['spare_workers'], 0)
+
+    def test_next_admissible_wave_keeps_its_initial_reservation(self):
+        self.manager(1); self.manager(2); self.manager(6, 600, 150)
+        # Three active entries plus two completed entries leave one admission slot.
+        self.state['waves'].update({'0': dict(terminal=True), '3': dict(terminal=True)})
+        _, edit = self.rebalance()
+        edit.assert_not_called()
+        self.assertEqual(self.state['detector_worker_budget']['reserved_upcoming_waves'], 1)
+
+    def test_drained_waves_give_future_wave_capacity_without_raising_600_total(self):
+        self.worklist = dict(waves=[{}] * 4)
+        self.state['waves']['0'] = dict(terminal=True)
+        self.manager(1); target = self.manager(2, 600, 150); self.manager(3, 600, 150)
+        save, edit = self.rebalance()
+        self.assertEqual(edit.call_args.args[0][-2:], ['DAGMan_MaxJobs', '300'])
+        self.assertEqual(save.call_count, 2)
+        self.assertIn('DAGMan_MaxIdle == 5', edit.call_args.args[0][-3])
+        target['DAGMan_MaxJobs'] = 300
+        target['DAG_AdUpdateTime'] = controller.time.time() + 1
+        _, edit = self.rebalance(); edit.assert_not_called()
+        self.assertTrue(self.state['detector_worker_allocation']['2']['consumed'])
+        self.state['waves']['1']['terminal'] = True
+        _, edit = self.rebalance()
+        self.assertEqual(edit.call_args.args[0][-1], '450')
+        target['DAGMan_MaxJobs'] = 450
+        self.state['waves']['3']['terminal'] = True
+        _, edit = self.rebalance()
+        self.assertEqual(edit.call_args.args[0][-1], '600')
+
+    def test_unknown_changed_throttle_or_removal_policy_blocks_mutation(self):
+        self.worklist = dict(waves=[{}])
+        ad = self.manager(0, 600, 149)
+        with self.assertRaisesRegex(ValueError, 'unreviewed changed'):
+            self.rebalance()
+        ad['DAGMan_MaxJobs'] = 150
+        log = Path(ad['Iwd']) / 'pipeline.dag.dagman.out'
+        log.write_text(log.read_text().replace('False', 'True'))
+        with self.assertRaisesRegex(ValueError, 'preserve healthy'):
+            self.rebalance()
+
+    def test_opt_in_budget_must_equal_existing_capacity(self):
+        controller.validate_capacity(self.config)
+        self.config['detector_worker_redistribution']['total_workers'] = 601
+        with self.assertRaises(ValueError): controller.validate_capacity(self.config)
+
+    def test_future_category_option_does_not_change_default_or_initial_worker_count(self):
+        import prepare_dark_photon_production as preparer
+        args = SimpleNamespace(detector_workers=150)
+        self.assertEqual(preparer.detector_category_ceiling(args), 150)
+        args.detector_category_ceiling = 600
+        self.assertEqual(preparer.detector_category_ceiling(args), 600)
+        self.assertEqual(args.detector_workers, 150)
+        for invalid in (149, 601, True):
+            args.detector_category_ceiling = invalid
+            with self.assertRaises(ValueError): preparer.detector_category_ceiling(args)
 
 
 class AdditionalStatistics(unittest.TestCase):
