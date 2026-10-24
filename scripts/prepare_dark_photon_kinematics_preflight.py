@@ -138,6 +138,21 @@ def point_config_command(config_path, name, local, scratch):
             str(config_path), name, str(local), str(scratch)]
 
 
+def native_point_environment(profile,manifest,release,gen_sha256):
+    native_env=dict(os.environ)
+    names=('SHIFT_RECORDED_PRIMARY_AUTHORITY','SHIFT_RECORDED_PRIMARY_AUTHORITY_SHA256',
+           'SHIFT_RECORDED_PRIMARY_GEN_SHA256')
+    for name in names:native_env.pop(name,None)
+    if profile.get('recorded_primary_authority') is not None:
+        helper=Path(release).parent/'workflow_helpers/dark_photon_stage_budget.py'
+        if sha(helper)!=manifest['files']['workflow_helpers/dark_photon_stage_budget.py']['sha256']:
+            raise ValueError('Capsule recorded-primary environment helper changed')
+        spec=importlib.util.spec_from_file_location('_dp_capsule_primary_authority',helper)
+        authority_helper=importlib.util.module_from_spec(spec);spec.loader.exec_module(authority_helper)
+        native_env.update(authority_helper.recorded_primary_environment(profile,gen_sha256))
+    return native_env
+
+
 def scan(config_path):
     config = json.loads(Path(config_path).read_text())
     for row in config['helpers']:
@@ -187,9 +202,10 @@ def scan(config_path):
                                    check=True, stdout=config_log, stderr=subprocess.STDOUT, timeout=900)
                 cfg = output/(name+'_cfg.py')
                 configurations[name] = sha(cfg)
+                native_env=native_point_environment(profile,manifest,release,parent['gen_sha256'])
                 with (output/(name+'_cmsRun.log')).open('w') as log:
                     subprocess.run(['cmsRun', str(cfg)], cwd=scratch, stdout=log, stderr=subprocess.STDOUT,
-                                   check=True, timeout=6000)
+                                   check=True, timeout=6000,env=native_env)
                 native = json.loads((output/(name+'_converter.json')).read_text())
                 if native.get('complete') is not True or native['events'] != parent['events']:
                     raise ValueError('Native converter did not cover full GEN census: '+name)

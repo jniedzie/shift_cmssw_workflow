@@ -29,6 +29,41 @@ class StageBudget(unittest.TestCase):
             allowed_slices=[dict(point='m0p3_prompt',chunk=38)])
         path=root/'policy.json';path.write_text(json.dumps(policy));return production,policy,path
 
+    def authority_fixture(self,root):
+        release=root/'CMSSW_17_0_0_pre4';release.mkdir()
+        relative='CMSSW_17_0_0_pre4/src/SimG4Core/Generators/data/recorded_primary_authority_v4.json'
+        authority=root/relative;authority.parent.mkdir(parents=True)
+        authority.write_text(json.dumps(dict(schema='shift-recorded-primary-particle-authority-v1',complete=True,source_GEN_unchanged=True,entries=[])))
+        manifest=root/'manifest.json';manifest.write_text(json.dumps(dict(files={relative:dict(sha256=budget.sha(authority),bytes=authority.stat().st_size)})))
+        profile=dict(manifest=dict(sha256=budget.sha(manifest)),recorded_primary_authority=dict(relative_path=relative,sha256=budget.sha(authority)))
+        return release,authority,manifest,profile
+
+    def test_exact_authority_is_local_capsule_and_original_gen_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release,authority,manifest,profile=self.authority_fixture(Path(temporary))
+            with mock.patch.dict(os.environ,CMSSW_BASE=str(release)):
+                actual=budget.recorded_primary_environment(profile,'a'*64)
+                self.assertEqual(actual[budget.PRIMARY_AUTHORITY_ENV[0]],str(authority))
+                self.assertEqual(actual[budget.PRIMARY_AUTHORITY_ENV[1]],budget.sha(authority))
+                self.assertEqual(actual[budget.PRIMARY_AUTHORITY_ENV[2]],'a'*64)
+                with self.assertRaisesRegex(ValueError,'original full GEN'):
+                    budget.recorded_primary_environment(profile,'single-event-not-original')
+                authority.write_text(authority.read_text()+' ')
+                with self.assertRaisesRegex(ValueError,'differs from its capsule'):
+                    budget.recorded_primary_environment(profile,'a'*64)
+
+    def test_authority_rejects_manifest_or_member_path_changes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            release,authority,manifest,profile=self.authority_fixture(Path(temporary))
+            with mock.patch.dict(os.environ,CMSSW_BASE=str(release)):
+                profile['recorded_primary_authority']['relative_path']='outside.json'
+                with self.assertRaisesRegex(ValueError,'declared capsule member'):
+                    budget.recorded_primary_environment(profile,'b'*64)
+                profile['recorded_primary_authority']['relative_path']=str(authority.relative_to(release.parent))
+                manifest.write_text(manifest.read_text()+' ')
+                with self.assertRaisesRegex(ValueError,'manifest changed'):
+                    budget.recorded_primary_environment(profile,'b'*64)
+
     def test_common_command_only_extends_existing_argv(self):
         with tempfile.TemporaryDirectory() as temporary:
             production,policy,path=self.fixture(Path(temporary))

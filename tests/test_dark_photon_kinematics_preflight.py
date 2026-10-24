@@ -1,6 +1,10 @@
 # Code style: AI-code. AI-generated contract tests for the sealed full-census scanner.
 import importlib.util
 import json
+import os
+import hashlib
+import shutil
+from unittest import mock
 from pathlib import Path
 import tempfile
 import sys
@@ -30,6 +34,22 @@ class PreflightPreparation(unittest.TestCase):
 
     def prepare(self):
         return MODULE.prepare(self.production,MODULE.pin(self.profile),self.out)
+
+    def test_scanner_uses_only_pinned_capsule_authority_helper_and_clears_inherited_authority(self):
+        release=self.base/'CMSSW_17_0_0_pre4';release.mkdir()
+        helper=self.base/'workflow_helpers/dark_photon_stage_budget.py';helper.parent.mkdir()
+        helper.write_text('def recorded_primary_environment(profile,gen):\n return {"SHIFT_RECORDED_PRIMARY_GEN_SHA256":gen}\n')
+        manifest=dict(files={'workflow_helpers/dark_photon_stage_budget.py':dict(sha256=MODULE.sha(helper))})
+        inherited={'SHIFT_RECORDED_PRIMARY_AUTHORITY':'bad','SHIFT_RECORDED_PRIMARY_AUTHORITY_SHA256':'bad','SHIFT_RECORDED_PRIMARY_GEN_SHA256':'bad'}
+        with mock.patch.dict(os.environ,inherited):
+            plain=MODULE.native_point_environment({},manifest,release,'a'*64)
+            for name in inherited:self.assertNotIn(name,plain)
+            actual=MODULE.native_point_environment(dict(recorded_primary_authority={}),manifest,release,'a'*64)
+            self.assertEqual(actual['SHIFT_RECORDED_PRIMARY_GEN_SHA256'],'a'*64)
+            self.assertNotIn('SHIFT_RECORDED_PRIMARY_AUTHORITY',actual)
+            helper.write_text(helper.read_text()+'# modified\n')
+            with self.assertRaisesRegex(ValueError,'helper'):
+                MODULE.native_point_environment(dict(recorded_primary_authority={}),manifest,release,'a'*64)
 
     def test_frozen_entry_and_native_identity(self):
         original = MODULE.sha(self.production/'plan.json')
