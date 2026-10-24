@@ -978,10 +978,19 @@ def retired_aggregate_attempt(config, directory, point, record):
             continue
         native=proof.get('terminal_native_ad',{})
         submission=read(directory/'submission.json')
+        removed_failed_hold=False
+        if native.get('JobStatus')==3:
+            held=proof.get('original_held_native_ad',{})
+            removed_failed_hold=(proof.get('failure_kind')=='GEN_ledger_log_path_relocation'
+                and held.get('JobStatus')==5 and held.get('ExitCode')==1
+                and held.get('ExitBySignal') is False
+                and all(held.get(key)==native.get(key) for key in
+                    ('ClusterId','ProcId','Iwd','ExitCode','ExitBySignal'))
+                and bool(proof.get('failure_evidence_sha256')))
         if (proof.get('schema')!='shift-reviewed-aggregate-retirement-v1' or
                 proof.get('point')!=point or proof.get('aggregate_record')!=record or
                 proof.get('payload_started') is not False or proof.get('queue_absent') is not True or
-                native.get('Iwd')!=str(directory) or native.get('JobStatus')!=4 or
+                native.get('Iwd')!=str(directory) or (native.get('JobStatus')!=4 and not removed_failed_hold) or
                 native.get('ClusterId')!=submission.get('cluster') or native.get('ProcId')!=0 or
                 native.get('ExitBySignal') is not False or native.get('ExitCode') in (None,0)):
             raise ValueError('Retired aggregate differs from its exact failed operational attempt')

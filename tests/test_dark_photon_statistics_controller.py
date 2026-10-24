@@ -956,3 +956,31 @@ class ReviewedDetectorStage(unittest.TestCase):
                     with self.assertRaises((RuntimeError,ValueError)):
                         controller.adopt_reviewed_detector_stages(config,state)
                     submit.assert_not_called()
+
+class RemovedFailedAggregate(unittest.TestCase):
+    def test_removed_relocated_log_failure_keeps_exact_original_failed_hold(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);directory=root/'v0001';directory.mkdir()
+            controller.new(directory/'submission.json',dict(cluster=123))
+            failure=directory/'failure.err';failure.write_text('Source full GEN audit differs: retained log_path\n')
+            record=dict(directory=str(directory),plan_sha256='a'*64)
+            held=dict(ClusterId=123,ProcId=0,JobStatus=5,ExitCode=1,ExitBySignal=False,Iwd=str(directory))
+            proof=dict(schema='shift-reviewed-aggregate-retirement-v1',failure_kind='GEN_ledger_log_path_relocation',
+                directory=str(directory),point='m2_prompt',aggregate_record=record,payload_started=False,queue_absent=True,
+                terminal_native_ad=dict(held,JobStatus=3),original_held_native_ad=held,
+                failure_evidence_sha256={str(failure):controller.sha(failure)})
+            def config_for(value):
+                path=root/'proof.json';controller.save(path,value);digest=controller.sha(path)
+                return dict(dependencies={str(path):digest},retired_aggregate_attempts=[dict(path=str(path),sha256=digest)])
+            with patch.object(controller,'jobs',return_value=[]):
+                self.assertTrue(controller.retired_aggregate_attempt(config_for(proof),directory,'m2_prompt',record))
+                for change in [dict(failure_kind='arbitrary failure'),dict(original_held_native_ad=dict(held,ExitCode=0)),
+                    dict(original_held_native_ad=dict(held,Iwd='/unrelated')),dict(failure_evidence_sha256={}),
+                    dict(terminal_native_ad=dict(held,JobStatus=3,ExitBySignal=True))]:
+                    with self.subTest(change=change),self.assertRaises(ValueError):
+                        controller.retired_aggregate_attempt(config_for(dict(proof,**change)),directory,'m2_prompt',record)
+            with patch.object(controller,'jobs',return_value=[held]),self.assertRaises(RuntimeError):
+                controller.retired_aggregate_attempt(config_for(proof),directory,'m2_prompt',record)
+            failure.write_text('changed evidence')
+            with self.assertRaises(ValueError):
+                controller.retired_aggregate_attempt(config_for(proof),directory,'m2_prompt',record)

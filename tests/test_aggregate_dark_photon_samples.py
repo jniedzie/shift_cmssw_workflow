@@ -674,3 +674,66 @@ class SemanticRoot(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+class RelocatedDirectGenSource(unittest.TestCase):
+    """Retained DY logs may move; their content and full exposure may not."""
+    def fixture(self, root, change=None):
+        from aggregate_dark_photon_samples import write
+        from pythia_generation_ledger import read_pythia_generation_ledger
+        from test_pythia_generation_ledger import table
+        directory=root/'production';gen=root/'retained_GEN';gen.mkdir();directory.mkdir()
+        identities=[[1762350000,1,1],[1762350000,1,2]]
+        model=dict(mass_gev=2.,epsilon=.001,proper_ctau_mm=9.7e-6,sampling_epsilon=.01)
+        row=dict(model,point='m2_prompt',events=2,full_gen_events=2,gen_directory=str(gen),
+            final_output_base='/eos/user/test/darkphoton_m2_prompt/example')
+        (gen/'cmsRun.log').write_text(table(
+            ['f fbar -> gamma*/Z0/Zprime0 3001 | 100 2 2 | 6.984e-11 3.247e-12'],
+            '100 2 2 | 6.984e-11 3.247e-12'))
+        ledger=read_pythia_generation_ledger(gen/'cmsRun.log',expected_accepted=2)
+        ledger['log_path']='/pool/condor/dir_12345/dp-private-GEN-example/gen/cmsRun.log'
+        audit=dict(event_ids=identities,sum_weights=2.,sum_weights_squared=2.,proposal_ledger=ledger)
+        manifest=dict(output_sha256='a'*64)
+        if change=='counter':audit['proposal_ledger']['n_tried']+=1
+        elif change=='log_hash':audit['proposal_ledger']['log_sha256']='b'*64
+        elif change=='sumw':audit['sum_weights']=3.
+        elif change=='sumw2':audit['sum_weights_squared']=3.
+        elif change=='IDs':audit['event_ids']=[[1762350000,1,2],[1762350000,1,1]]
+        elif change=='GEN_hash':manifest['output_sha256']='b'*64
+        write(gen/'contract.json',dict(production_mechanism='pure-on-shell-DY'))
+        write(gen/'validation.json',audit);write(gen/'manifest.json',manifest)
+        parent=dict(events=2,event_ids=identities,native_sumw=2.,native_sumw2=2.,gen_sha256='a'*64,
+            gen_path='/eos/user/test/GEN.root',**{key:sha(gen/name) for name,key in [
+                ('contract.json','contract_sha256'),('validation.json','validation_sha256'),('manifest.json','manifest_sha256')]})
+        write(directory/'gen_inventory.json',dict(complete=True,points={'m2_prompt':parent}))
+        write(directory/'plan.json',dict(campaign='example',points=[row]))
+        write(directory/'seal.json',dict(files={str(directory/name):sha(directory/name)
+            for name in ('plan.json','gen_inventory.json')}))
+        source=dict(plan_path=str(directory/'plan.json'),plan_sha256=sha(directory/'plan.json'),
+            seal_sha256=sha(directory/'seal.json'),point='m2_prompt',conditions_sha256='c'*64)
+        write(directory/'completed_points/m2_prompt.json',dict(complete=True,point='m2_prompt',events=2,
+            plan_sha256=source['plan_sha256'],seal_sha256=source['seal_sha256'],final_output_base=row['final_output_base'],
+            union=dict(complete=True,parent_gen_ledger_count=1,parent_gen=parent,event_ids=identities,
+                native_sumw=2.,native_sumw2=2.,grouped=dict(path=row['final_output_base']+'/nanoAOD_merged_unscored/ntuple_0.root'))))
+        return source,model,identities
+
+    def test_retained_direct_log_relocation_preserves_full_source_checks(self):
+        from aggregate_dark_photon_samples import load_source
+        with tempfile.TemporaryDirectory() as temporary:
+            source,model,identities=self.fixture(Path(temporary))
+            with patch('aggregate_dark_photon_samples.rate_record',return_value={'validated_elsewhere':True}) as rate:
+                population=load_source(source,model,'c'*64)
+            rate.assert_called_once()
+            self.assertEqual(population['parent']['events'],2)
+            self.assertEqual(population['selected_event_ids'],identities)
+            self.assertEqual(population['inputs'][0]['event_ids'],identities)
+            self.assertTrue(population['contract']['production_mechanism']=='pure-on-shell-DY')
+
+    def test_moved_direct_source_still_rejects_physics_and_hash_changes(self):
+        from aggregate_dark_photon_samples import load_source
+        for change in ('counter','log_hash','sumw','sumw2','IDs','GEN_hash'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temporary:
+                source,model,_=self.fixture(Path(temporary),change)
+                with patch('aggregate_dark_photon_samples.rate_record') as rate:
+                    with self.assertRaisesRegex(ValueError,'Source full GEN audit'):
+                        load_source(source,model,'c'*64)
+                    rate.assert_not_called()

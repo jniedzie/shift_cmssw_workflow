@@ -373,8 +373,9 @@ def load_source(source, expected_model, conditions_digest):
     meson = contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     native_count = contract['source_exposure']['source_collisions'] if meson else row.get('full_gen_events', row['events'])
     fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
-    ledger_matches = (same_ledger_content(fresh_ledger, audit['proposal_ledger']) if meson
-                      else fresh_ledger == audit['proposal_ledger'])
+    # GEN logs move from worker scratch into retained production storage.
+    # Their path is provenance; content hashes and every counter remain exact.
+    ledger_matches = same_ledger_content(fresh_ledger, audit['proposal_ledger'])
     if (audit['event_ids'] != parent['event_ids'] or audit['sum_weights'] != parent['native_sumw']
             or audit['sum_weights_squared'] != parent['native_sumw2']
             or manifest['output_sha256'] != parent['gen_sha256']
