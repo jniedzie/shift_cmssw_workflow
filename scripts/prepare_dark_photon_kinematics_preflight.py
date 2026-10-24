@@ -76,6 +76,48 @@ def prepare(production, new_profile_pin, output_dir):
     return result
 
 
+def resolve_point(config_path, name, local, scratch):
+    """Resolve one point in a fresh CMS interpreter, as the original chain does."""
+    config = json.loads(Path(config_path).read_text())
+    plan = read_pin(config['original_plan'])
+    inventory = read_pin(config['inventory'])
+    point = next(p for p in plan['points'] if p['point'] == name)
+    parent = inventory['points'][name]
+    production = Path(config['production']); output = Path(config['output'])
+    sources = production/'frozen/sources'; sys.path.insert(0, str(sources))
+    spec = importlib.util.spec_from_file_location('original_common', sources/'run_shift_gen_to_nano.py')
+    common = importlib.util.module_from_spec(spec); spec.loader.exec_module(common)
+    import FWCore.ParameterSet.Config as cms
+    contract = {'schema':'shift-predefined-dark-photon-transport-v1',
+                'mass_gev':point['mass_gev'], 'proper_ctau_mm':point['proper_ctau_mm']}
+    # Read the exact production support; never guess a narrower interval.
+    original_contract = Path(point['signal_contract'])
+    if sha(original_contract) != point['signal_contract_sha256']:
+        raise ValueError('Original signal contract changed')
+    card = json.loads(original_contract.read_text())
+    # run_dark_photon_detector uses the same explicit mass support.
+    contract['generated_mass_support_gev'] = card['generated_mass_support_gev']
+    selection = point['material_selection']['production_selection']
+    process = common.build_config(production/'frozen/templates/step1.py', 1, local,
+        Path(scratch)/'unused.root', 0, parent['events'], point['seed'], True,
+        False, None, False, contract, selection)
+    generator = process.g4SimHits.Generator.clone()
+    process.kinematicsPreflight = cms.EDAnalyzer('ShiftPrimaryKinematicsPreflight',
+        src=generator.HepMCProductLabel, generator=generator,
+        massGeV=cms.double(point['mass_gev']), properCTauMm=cms.double(point['proper_ctau_mm']),
+        output=cms.string(str(output/(name+'_converter.json'))))
+    process.kinematics_step = cms.Path(process.generatorSmeared + process.shiftDarkPhotonHepMC + process.kinematicsPreflight)
+    process.schedule = cms.Schedule(process.kinematics_step)
+    cfg = output/(name+'_cfg.py'); cfg.write_text(process.dumpPython())
+
+
+def point_config_command(config_path, name, local, scratch):
+    # CMSSW customizations mutate imported ESProducers. Never reuse those
+    # Python module objects across points, masses or model configurations.
+    return [sys.executable, str(Path(__file__).resolve()), '--build-point',
+            str(config_path), name, str(local), str(scratch)]
+
+
 def scan(config_path):
     config = json.loads(Path(config_path).read_text())
     for row in config['helpers']:
@@ -101,11 +143,6 @@ def scan(config_path):
               'converter_source_sha256': hashlib.sha256(json.dumps(converter, sort_keys=True).encode()).hexdigest(),
               'points': {}}
     configurations = {}
-    production = Path(config['production']); sources = production/'frozen/sources'
-    sys.path.insert(0, str(sources))
-    spec = importlib.util.spec_from_file_location('original_common', sources/'run_shift_gen_to_nano.py')
-    common = importlib.util.module_from_spec(spec); spec.loader.exec_module(common)
-    import FWCore.ParameterSet.Config as cms
     from DataFormats.FWLite import Events
     try:
         for point in plan['points']:
@@ -122,27 +159,10 @@ def scan(config_path):
                     identities.append([int(aux.run()), int(aux.luminosityBlock()), int(aux.event())])
                 if identities != parent['event_ids'] or len(identities) != parent['events']:
                     raise ValueError('Full original GEN identity census changed: '+name)
-                contract = {'schema':'shift-predefined-dark-photon-transport-v1',
-                            'mass_gev':point['mass_gev'], 'proper_ctau_mm':point['proper_ctau_mm']}
-                # Read the exact production support; never guess a narrower interval.
-                original_contract = Path(point['signal_contract'])
-                if sha(original_contract) != point['signal_contract_sha256']:
-                    raise ValueError('Original signal contract changed')
-                card = json.loads(original_contract.read_text())
-                # run_dark_photon_detector uses the same explicit mass support.
-                contract['generated_mass_support_gev'] = card['generated_mass_support_gev']
-                selection = point['material_selection']['production_selection']
-                process = common.build_config(production/'frozen/templates/step1.py', 1, local,
-                    Path(scratch)/'unused.root', 0, len(identities), point['seed'], True,
-                    False, None, False, contract, selection)
-                generator = process.g4SimHits.Generator.clone()
-                process.kinematicsPreflight = cms.EDAnalyzer('ShiftPrimaryKinematicsPreflight',
-                    src=generator.HepMCProductLabel, generator=generator,
-                    massGeV=cms.double(point['mass_gev']), properCTauMm=cms.double(point['proper_ctau_mm']),
-                    output=cms.string(str(output/(name+'_converter.json'))))
-                process.kinematics_step = cms.Path(process.generatorSmeared + process.shiftDarkPhotonHepMC + process.kinematicsPreflight)
-                process.schedule = cms.Schedule(process.kinematics_step)
-                cfg = output/(name+'_cfg.py'); cfg.write_text(process.dumpPython())
+                with (output/(name+'_config.log')).open('w') as config_log:
+                    subprocess.run(point_config_command(config_path, name, local, scratch),
+                                   check=True, stdout=config_log, stderr=subprocess.STDOUT, timeout=900)
+                cfg = output/(name+'_cfg.py')
                 configurations[name] = sha(cfg)
                 with (output/(name+'_cmsRun.log')).open('w') as log:
                     subprocess.run(['cmsRun', str(cfg)], cwd=scratch, stdout=log, stderr=subprocess.STDOUT,
@@ -166,11 +186,15 @@ def scan(config_path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--scan', type=Path)
+    parser.add_argument('--build-point', nargs=4, metavar=('CONFIG','POINT','INPUT','SCRATCH'))
     parser.add_argument('--production', type=Path)
     parser.add_argument('--profile', type=Path)
     parser.add_argument('--output', type=Path)
     args = parser.parse_args()
-    if args.scan:
+    if args.build_point:
+        cfg, name, local, scratch = args.build_point
+        resolve_point(cfg, name, Path(local), Path(scratch))
+    elif args.scan:
         scan(args.scan)
     else:
         print(json.dumps(prepare(args.production, pin(args.profile), args.output), indent=2))

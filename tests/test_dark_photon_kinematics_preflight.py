@@ -3,6 +3,7 @@ import importlib.util
 import json
 from pathlib import Path
 import tempfile
+import sys
 import unittest
 
 SCRIPT = Path(__file__).resolve().parents[1]/'scripts/prepare_dark_photon_kinematics_preflight.py'
@@ -77,6 +78,16 @@ class PreflightPreparation(unittest.TestCase):
         (self.production/'plan.json').write_text('{}')
         with self.assertRaisesRegex(ValueError,'Changed preflight dependency'):
             MODULE.read_pin(config['original_plan'])
+
+    def test_each_point_configuration_uses_fresh_native_interpreter(self):
+        config = self.base/'preflight.json'
+        first = MODULE.point_config_command(config,'m2_prompt',self.base/'one.root',self.base/'first')
+        second = MODULE.point_config_command(config,'m15_prompt',self.base/'two.root',self.base/'second')
+        self.assertEqual(first[:3],[sys.executable,str(SCRIPT),'--build-point'])
+        self.assertEqual(second[:3],[sys.executable,str(SCRIPT),'--build-point'])
+        self.assertEqual(first[4],'m2_prompt')
+        self.assertEqual(second[4],'m15_prompt')
+        self.assertNotEqual(first,second)
 
 
 if __name__ == '__main__':
