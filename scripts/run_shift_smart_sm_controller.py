@@ -57,6 +57,18 @@ def native_exit(path, cluster):
     return None
 
 
+def native_exit_hold(path, cluster, ad):
+    """OnExitHold records event 012, without the successful-job 005 event."""
+    if native_exit(path,cluster)==1:
+        return True
+    if (ad.get('JobStatus')!=5 or ad.get('ExitCode')!=1
+            or ad.get('ExitBySignal') is not False or ad.get('HoldReasonCode')!=3):
+        return False
+    blocks=Path(path).read_text(errors='replace').split('\n...\n')[:-1]
+    return any(re.match(r'012 \('+str(cluster)+r'\.000\.',block)
+               and 'Code 3 Subcode 0' in block for block in blocks)
+
+
 def publication_charge(evidence, reserved):
     """Keep an upper storage bound without charging empty GEN the whole reserve."""
     if 'published_storage_bytes' in evidence:
@@ -279,7 +291,7 @@ def retry_stalled_sim(root,config,state,ads):
         live=[a for a in ads if a['ClusterId']==task['cluster'] and a.get('ProcId')==0]
         if (len(live)!=1 or live[0]['JobStatus']!=5 or live[0].get('ExitCode')!=1
                 or live[0].get('RemoteUserCpu',0)<3600 or live[0]['Iwd']!=str(directory)
-                or native_exit(directory/'events.log',task['cluster'])!=1):continue
+                or not native_exit_hold(directory/'events.log',task['cluster'],live[0])):continue
         request=read(directory/'request.json')
         descriptor=dict(request['detector_source'],gen_path_resolved=True)
         start,count=request['selected_skip'],request['selected_count']
@@ -362,7 +374,7 @@ def admission_order(tasks):
 def step(root, config, state):
     # One account query; no full status-tree scan for each completed event.
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
-        'Iwd', 'NumJobStarts', 'HoldReason','ExitCode','RemoteUserCpu'], timeout=45)
+        'Iwd', 'NumJobStarts', 'HoldReason','ExitCode','RemoteUserCpu','ExitBySignal','HoldReasonCode'], timeout=45)
     for task in list(state['tasks'].values()):
         observe(task, ads)
         if task['phase'] == 'done' and task['kind'] == 'source' and not task.get('children_created'):

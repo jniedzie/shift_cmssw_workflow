@@ -83,6 +83,17 @@ class SchedulingTests(unittest.TestCase):
 
 
 class SupplyAndRetryTests(unittest.TestCase):
+    def test_native_on_exit_hold_does_not_require_a_termination_event(self):
+        from run_shift_smart_sm_controller import native_exit_hold
+        with tempfile.TemporaryDirectory() as directory:
+            log=Path(directory)/'events.log'
+            log.write_text('012 (123.000.000) job held\nCode 3 Subcode 0\n...\n')
+            ad=dict(JobStatus=5,ExitCode=1,ExitBySignal=False,HoldReasonCode=3)
+            self.assertTrue(native_exit_hold(log,123,ad))
+            self.assertFalse(native_exit_hold(log,124,ad))
+            self.assertFalse(native_exit_hold(log,123,dict(ad,ExitBySignal=True)))
+            self.assertFalse(native_exit_hold(log,123,dict(ad,HoldReasonCode=34)))
+
     def test_saved_GEN_is_counted_once_across_raw_and_prepared_sources(self):
         tasks={str(i):dict(kind=kind,phase='done',stratum='qcd_2to5',
             raw_gen_sha256='a'*64,saved_GEN_events=600) for i,kind in enumerate(['raw_source','source'])}
