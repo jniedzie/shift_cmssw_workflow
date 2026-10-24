@@ -177,6 +177,13 @@ the change.
   use the matching LCG interpreter when its ROOT packages are needed. Exercise
   an interrupted preparation too, so an existing receipt does not trap every
   later poll in the same error.
+- A transient AFS outage must pause state persistence rather than kill a
+  detached controller. Retry the same snapshot before another scheduler action;
+  never rerun a production step just to retry its final save. Test long outages
+  as well as short retries, and retain quota/permission/semantic failures.
+- Exercise new handoffs on a real completed GEN cohort through adoption, native
+  preflight, detector DAG submission and rate export before bulk admission.
+  Imports and seal checks alone miss helper lookups and relocated manifest paths.
 - Check each new detector runtime with its actual primary converter on the
   complete original GEN census before SIM admission. Include material-rejected
   events and verify GEN hashes and ordered identities. Keep this fast scan
