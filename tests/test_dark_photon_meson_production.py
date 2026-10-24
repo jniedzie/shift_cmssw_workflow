@@ -599,6 +599,185 @@ class ReviewedRemainingStorage(unittest.TestCase):
                 self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100)[0], 0)
 
 
+class UnsubmittedRuntimeRecovery(unittest.TestCase):
+    def fixture(self, root):
+        def pin(path, value):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value))
+            return dict(path=str(path), sha256=production.durable.sha(path))
+        original = root/'science/batches/a/production'
+        original.mkdir(parents=True)
+        batch = dict(batch='a', point='p')
+        point = dict(point='p', chunks=[dict(chunk=0, nano='/eos/user/test/Nano.root',
+            metadata='/eos/user/test/metadata')], groups=[dict(nano='/eos/user/test/group.root',
+            histograms='/eos/user/test/hist.root')], merged_histograms='/eos/user/test/merged.root')
+        pin(original/'plan.json', dict(points=[point]))
+        parent = dict(gen_sha256='a'*64, event_ids=[[1, 1, 1]])
+        pin(original/'gen_inventory.json', dict(points=dict(p=parent)))
+        pin(original.parent/'source_status.json', dict(complete=True, batch='a', point='p', parent=parent))
+        (original/'pipeline.dag.template').write_text('JOB D '+str(original/'detector.sub')+'\nVARS D seal="SEAL_DIGEST"\n')
+        (original/'detector.sub').write_text('initialdir = '+str(original)+'\nexecutable = '+str(original/'detector_worker.sh')+'\narguments = $(point) $(chunk) $(seal)\n')
+        for name in ('finalizer.sub', 'collect.sub'):
+            (original/name).write_text('unchanged '+name)
+        pin(original/'seal.json', dict(files={str(path): production.durable.sha(path)
+            for path in original.iterdir() if path.is_file()}))
+        (original/'pipeline.dag').write_text((original/'pipeline.dag.template').read_text().replace(
+            'SEAL_DIGEST', production.durable.sha(original/'seal.json')))
+        authority = pin(root/'runtime_authority.json', dict(complete=True))
+        view_root = root/'view'
+        policy = dict(production_directory=str(original), allowed_slices='all_planned',
+            runtime_override=dict(authority=authority))
+        pin(view_root/'stage_budget_policy.json', policy)
+        (view_root/'detector_worker.sh').write_text('qualified wrapper')
+        pin(view_root/'seal.json', dict(original_production=str(original),
+            original_seal_sha256=production.durable.sha(original/'seal.json'), authority=authority,
+            files={str(path): production.durable.sha(path) for path in view_root.iterdir() if path.is_file()}))
+        view = dict(directory=str(view_root), policy=str(view_root/'stage_budget_policy.json'),
+            wrapper=str(view_root/'detector_worker.sh'), seal_sha256=production.durable.sha(view_root/'seal.json'))
+        old = root/'old/handoffs/a'
+        old.mkdir(parents=True)
+        (old/'worker.sub').write_text('preserved failed handoff')
+        handoff = pin(old/'submission.json', dict(cluster=10, task=str(old),
+            submit_sha256=production.durable.sha(old/'worker.sub')))
+        preflight = old/'runtime_preflight'
+        preflight.mkdir()
+        (preflight/'worker.sub').write_text('preserved failed preflight')
+        pin(preflight/'submission.json', dict(cluster=11, task=str(preflight),
+            submit_sha256=production.durable.sha(preflight/'worker.sub')))
+        failed = pin(preflight/'receipt.json', dict(complete=False, error='preserved converter failure',
+            original_plan_sha256=production.durable.sha(original/'plan.json'),
+            original_seal_sha256=production.durable.sha(original/'seal.json')))
+        native = pin(root/'native.json', dict(schema='shift-meson-unsubmitted-runtime-native-review-v1',
+            original_directory=str(original), original_detector_queue=[],
+            failed_handoff=dict(ClusterId=10, ProcId=0, Iwd=str(old), Cmd=str(old/'run.sh'),
+                JobStatus=5, ExitCode=1, ExitBySignal=False),
+            failed_preflight=dict(ClusterId=11, ProcId=0, Iwd=str(preflight), Cmd=str(preflight/'worker.sh'),
+                JobStatus=5, ExitCode=66, ExitBySignal=False)))
+        absent = pin(root/'absent.json', dict(schema='shift-meson-unsubmitted-output-absence-v1',
+            original_directory=str(original), absent_paths=production.unsubmitted_runtime_output_paths(dict(points=[point]))))
+        with patch('dark_photon_runtime_recovery.validate_override'):
+            proof = production.prepare_unsubmitted_runtime_recovery(original, batch, authority, view,
+                root/'recovery', failed_handoff_submission=handoff, failed_preflight_receipt=failed,
+                native_review=native, output_absence=absent)
+        return original, batch, proof
+
+    def test_pure_review_preserves_graph_arguments_and_rejects_changed_dependencies(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original, batch, pin = self.fixture(Path(temporary))
+            with patch('dark_photon_runtime_recovery.validate_override') as qualified, \
+                 patch.object(production.durable, 'jobs', side_effect=AssertionError('pure validation')):
+                proof = production.validate_unsubmitted_runtime_recovery(original, batch, pin)
+                qualified.assert_called_once()
+                self.assertEqual(proof['original_plan_sha256'], production.durable.sha(original/'plan.json'))
+                self.assertFalse((original/'submission.json').exists())
+                replacement = Path(proof['recovery_directory'])
+                (replacement/'pipeline.dag').write_text((replacement/'pipeline.dag').read_text()+'JOB EXTRA unsafe.sub\n')
+                with self.assertRaisesRegex(ValueError, 'exact DAG'):
+                    production.validate_unsubmitted_runtime_recovery(original, batch, pin)
+
+    def test_submitted_original_or_incomplete_output_absence_cannot_be_adopted(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original, batch, pin = self.fixture(Path(temporary))
+            with patch('dark_photon_runtime_recovery.validate_override'):
+                (original/'submission_intent.json').write_text('{}')
+                with self.assertRaisesRegex(ValueError, 'unsubmitted original'):
+                    production.validate_unsubmitted_runtime_recovery(original, batch, pin)
+                (original/'submission_intent.json').unlink()
+                proof = production.read_pinned(pin)
+                absent = Path(proof['output_absence']['path'])
+                value = production.read(absent); value['absent_paths'].pop()
+                absent.write_text(json.dumps(value)); proof['output_absence']['sha256']=production.durable.sha(absent)
+                with self.assertRaisesRegex(ValueError, 'output-absence'):
+                    production.validate_unsubmitted_runtime_recovery(original, batch, proof)
+
+    def test_first_admission_checks_held_attempts_outputs_and_never_submits_twice(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original, batch, pin = self.fixture(Path(temporary))
+            config = dict(directory=str(original.parents[2]), detector_workers_per_point=100)
+            proof = production.read_pinned(pin); replacement=Path(proof['recovery_directory'])
+            review = production.read_pinned(proof['native_review'])
+            queue = [review['failed_handoff'], review['failed_preflight']]
+            def submit(config, directory, cap):
+                self.assertEqual(directory,replacement)
+                (directory/'pipeline.dag.condor.sub').write_text('prepared DAG manager')
+                receipt=dict(cluster=20,task=str(directory),submit_sha256=production.durable.sha(directory/'pipeline.dag.condor.sub'))
+                production.durable.new(directory/'submission.json',receipt)
+                return receipt
+            with patch('dark_photon_runtime_recovery.validate_override'), \
+                 patch.object(production.durable,'jobs',return_value=queue), \
+                 patch('run_dark_photon_runtime_recovery.verify_output_absence') as absence, \
+                 patch.object(production.durable,'submit_dag',side_effect=submit) as launched:
+                first=production.submit_unsubmitted_runtime_recovery(config,batch,pin)
+                self.assertEqual(production.submit_unsubmitted_runtime_recovery(config,batch,pin),first)
+                launched.assert_called_once(); absence.assert_called_once()
+                self.assertFalse((original/'submission.json').exists())
+
+    def test_unknown_scheduler_active_old_attempt_or_foreign_payload_owner_cannot_submit(self):
+        import shift_condor_native as native
+        with tempfile.TemporaryDirectory() as temporary:
+            original,batch,pin=self.fixture(Path(temporary)); config=dict(directory=str(original.parents[2]))
+            proof=production.read_pinned(pin);review=production.read_pinned(proof['native_review'])
+            cases=[native.NativeCondorError('unknown'), [dict(review['failed_handoff'],JobStatus=2)],
+                   [dict(ClusterId=99,ProcId=0,Iwd=str(original),JobStatus=2)]]
+            for case in cases:
+                with patch('dark_photon_runtime_recovery.validate_override'), \
+                     patch.object(production.durable,'jobs',**({'side_effect':case} if isinstance(case,Exception) else {'return_value':case})), \
+                     patch.object(production.durable,'submit_dag') as submit, \
+                     patch('run_dark_photon_runtime_recovery.verify_output_absence') as absence:
+                    with self.assertRaises((native.NativeCondorError,RuntimeError)):
+                        production.submit_unsubmitted_runtime_recovery(config,batch,pin)
+                    submit.assert_not_called();absence.assert_not_called()
+
+    def test_recovery_manager_accepts_only_original_payload_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original,batch,pin=self.fixture(Path(temporary));proof=production.read_pinned(pin)
+            replacement=Path(proof['recovery_directory'])
+            config=dict(directory=str(original.parents[2]),reviewed_unsubmitted_runtime_recoveries=dict(a=pin))
+            receipt=dict(cluster=20,task=str(replacement))
+            queue=[dict(ClusterId=20,ProcId=0,Iwd=str(replacement),JobStatus=2),
+                   dict(ClusterId=21,ProcId=0,DAGManJobId=20,Iwd=str(original),JobStatus=2)]
+            with patch('dark_photon_runtime_recovery.validate_override'), \
+                 patch.object(production.durable,'jobs',return_value=queue), \
+                 patch('watch_dark_photon_statistics.execute_events',return_value=1):
+                self.assertEqual(production.native_status(config,receipt),'active')
+                queue[1]['Iwd']=str(replacement)
+                with self.assertRaisesRegex(RuntimeError,'child has an unexpected'):
+                    production.native_status(config,receipt)
+
+    def test_handoff_bypasses_failed_old_runtime_and_exports_only_original_rates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original,batch,pin=self.fixture(Path(temporary))
+            config=dict(directory=str(original.parents[2]),reviewed_unsubmitted_runtime_recoveries=dict(a=pin),
+                future_detector_runtime=dict(profile='old_failed_runtime'))
+            with patch.object(production,'adopt',return_value={}), \
+                 patch.object(production,'submit_unsubmitted_runtime_recovery',return_value=dict(cluster=20)) as submit, \
+                 patch.object(production,'export_original_rates') as rates, \
+                 patch('dark_photon_runtime_recovery.future_preflight',side_effect=AssertionError('do not rerun failed preflight')):
+                self.assertEqual(production.handoff(config,batch),dict(cluster=20))
+                submit.assert_called_once_with(config,batch,pin)
+                rates.assert_called_once_with(config,original.parent,original)
+
+    def test_parallel_handoff_adopts_recovery_receipt_without_original_submission(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            original,batch,pin=self.fixture(Path(temporary));root=Path(temporary)
+            proof=production.read_pinned(pin);replacement=Path(proof['recovery_directory'])
+            (replacement/'pipeline.dag.condor.sub').write_text('qualified manager')
+            detector=dict(cluster=20,task=str(replacement),submit_sha256=production.durable.sha(replacement/'pipeline.dag.condor.sub'))
+            production.durable.new(replacement/'submission.json',detector)
+            worker=root/'new_handoff';worker.mkdir();(worker/'worker.sub').write_text('new handoff')
+            handoff=dict(cluster=19,task=str(worker),submit_sha256=production.durable.sha(worker/'worker.sub'))
+            production.durable.new(worker/'submission.json',handoff)
+            production.durable.new(original.parent/'rates.json',dict(complete=True,
+                production_plan_sha256=production.durable.sha(original/'plan.json')))
+            config=dict(directory=str(original.parents[2]),reviewed_unsubmitted_runtime_recoveries=dict(a=pin))
+            with patch('dark_photon_runtime_recovery.validate_override'), \
+                 patch.object(production,'handoff_directory',return_value=worker), \
+                 patch.object(production,'batch_job_status',return_value='complete'), \
+                 patch.object(production.durable,'submit_dag',side_effect=AssertionError('already owned')):
+                self.assertEqual(production.parallel_handoff(config,{},batch,{},None),('complete',detector))
+            self.assertFalse((original/'submission.json').exists())
+
+
 class Admission(unittest.TestCase):
     def test_newer_worklists_keep_their_full_storage_claim(self):
         with tempfile.TemporaryDirectory() as temporary:

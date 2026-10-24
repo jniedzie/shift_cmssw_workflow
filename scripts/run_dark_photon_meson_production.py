@@ -890,6 +890,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'historical_anchor_calibration', 'operational_stage_timeouts_seconds',
                                    'reviewed_regrouping_canary_recovery', 'future_detector_runtime',
                                    'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
+                                   'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
@@ -1406,6 +1407,11 @@ def handoff(config, batch):
     directory = batch_directory(config, batch)
     plan = adopt(config, batch)
     production = directory / 'production'
+    recovery = config.get('reviewed_unsubmitted_runtime_recoveries', {}).get(batch['batch'])
+    if recovery is not None:
+        receipt = submit_unsubmitted_runtime_recovery(config, batch, recovery)
+        export_original_rates(config, directory, production)
+        return receipt
     operations=handoff_directory(config,batch) if config.get('future_detector_runtime') is not None else None
     preparation=directory/'preparation.json'
     if not production.exists():
@@ -1442,16 +1448,21 @@ def handoff(config, batch):
     receipt = (existing_receipt(production, production/'pipeline.dag.condor.sub')
                if (production/'submission.json').is_file() else durable.submit_dag(
                    config, production, config.get('detector_workers_per_point', 100) + 2))
+    export_original_rates(config, directory, production)
+    authority = config.get('reviewed_detector_recoveries', {}).get(batch['batch'])
+    if authority is not None:
+        return reviewed_detector_recovery(config, batch, receipt, authority)
+    return receipt
+
+
+def export_original_rates(config, directory, production):
+    """Keep the original physical source/rate authority for runtime repairs."""
     rates = directory / 'rates.json'
     if not rates.exists():
         durable.run_logged([os.sys.executable, Path(config['tools'])/'export_dark_photon_cross_sections.py',
             '--plan', production/'plan.json', '--output', directory/'rates', '--publish', '--eos-rpc'],
             directory/'export_rates.log', timeout=1800)
         durable.new(rates, dict(complete=True, production_plan_sha256=durable.sha(production/'plan.json')))
-    authority = config.get('reviewed_detector_recoveries', {}).get(batch['batch'])
-    if authority is not None:
-        return reviewed_detector_recovery(config, batch, receipt, authority)
-    return receipt
 
 
 def prepare_handoff_worker(config, batch, operational_directory=None, original_seal=None):
@@ -1600,7 +1611,13 @@ def parallel_handoff(config,state,batch,entry,queue_snapshot):
     if status!='complete':
         return status,None
     production=batch_directory(config,batch)/'production'
-    detector=existing_receipt(production,production/'pipeline.dag.condor.sub')
+    recovery=config.get('reviewed_unsubmitted_runtime_recoveries',{}).get(batch['batch'])
+    if recovery is not None:
+        proof=validate_unsubmitted_runtime_recovery(production,batch,recovery)
+        replacement=Path(proof['recovery_directory'])
+        detector=existing_receipt(replacement,replacement/'pipeline.dag.condor.sub')
+    else:
+        detector=existing_receipt(production,production/'pipeline.dag.condor.sub')
     rates=batch_directory(config,batch)/'rates.json'
     if (not rates.is_file() or read(rates)!=dict(complete=True,
             production_plan_sha256=durable.sha(production/'plan.json'))):
@@ -1610,6 +1627,193 @@ def parallel_handoff(config,state,batch,entry,queue_snapshot):
         detector=reviewed_detector_recovery(config,batch,detector,
                                            config['reviewed_detector_recoveries'][batch['batch']])
     return status,detector
+
+
+def unsubmitted_runtime_output_paths(plan):
+    """List the canonical products that must be absent before first admission."""
+    paths = set()
+    for point in plan['points']:
+        paths.add(point['merged_histograms'])
+        for chunk in point['chunks']:
+            paths.update((chunk['nano'], chunk['metadata']+'/complete.json',
+                          chunk['metadata']+'/metadata.tar.gz'))
+        for group in point['groups']:
+            paths.update((group['nano'], group['histograms']))
+    return sorted(paths)
+
+
+def validate_unsubmitted_runtime_recovery(production, batch, proof_or_pin):
+    """Validate one immutable first-admission repair without scheduler actions."""
+    import dark_photon_runtime_recovery as adapter
+    production = Path(production)
+    proof = read_pinned(proof_or_pin) if set(proof_or_pin) == {'path', 'sha256'} else proof_or_pin
+    if (proof.get('schema') != 'shift-meson-unsubmitted-runtime-recovery-v1'
+            or proof.get('batch') != batch['batch'] or proof.get('point') != batch['point']
+            or proof.get('original_directory') != str(production)
+            or not production.is_absolute() or production.resolve() != production
+            or any((production/name).exists() for name in ('submission.json', 'submission_intent.json'))):
+        raise ValueError('Runtime first admission differs from its unsubmitted original cohort')
+    for key, name in (('original_plan_sha256', 'plan.json'), ('original_seal_sha256', 'seal.json'),
+                      ('original_inventory_sha256', 'gen_inventory.json')):
+        if proof.get(key) != durable.sha(production/name):
+            raise ValueError('Runtime first admission changed its original population: '+name)
+    seal = read(production/'seal.json')
+    required_originals = {str(production/name) for name in ('plan.json', 'gen_inventory.json',
+        'pipeline.dag.template', 'detector.sub', 'finalizer.sub', 'collect.sub')}
+    if not required_originals.issubset(seal['files']):
+        raise ValueError('Runtime first admission omitted an original sealed dependency')
+    for path, expected in seal['files'].items():
+        if durable.sha(path) != expected:
+            raise ValueError('Runtime first admission changed a sealed dependency: '+path)
+    if (production/'pipeline.dag').read_text() != (production/'pipeline.dag.template').read_text().replace(
+            'SEAL_DIGEST', proof['original_seal_sha256']):
+        raise ValueError('Original detector DAG differs from its sealed dependency graph')
+    plan = read(production/'plan.json')
+    inventory = read(production/'gen_inventory.json')
+    source_path = production.parent/'source_status.json'
+    source = read(source_path)
+    if (proof.get('source_status_sha256') != durable.sha(source_path)
+            or source.get('complete') is not True or source.get('batch') != batch['batch']
+            or source.get('point') != batch['point'] or set(inventory['points']) != {batch['point']}
+            or source['parent']['gen_sha256'] != inventory['points'][batch['point']]['gen_sha256']
+            or source['parent']['event_ids'] != inventory['points'][batch['point']]['event_ids']):
+        raise ValueError('Runtime first admission lost its complete original GEN source')
+    view = proof['runtime_view']
+    view_root = Path(view['directory'])
+    recovery = Path(proof['recovery_directory'])
+    for path in (view_root, recovery):
+        if (not path.is_absolute() or path.resolve() != path or path.is_relative_to(production)
+                or not path.is_relative_to(production.parents[3])):
+            raise ValueError('Runtime first admission requires a separate persistent recovery directory')
+    if (view.get('wrapper') != str(view_root/'detector_worker.sh')
+            or view.get('policy') != str(view_root/'stage_budget_policy.json')
+            or durable.sha(view_root/'seal.json') != view.get('seal_sha256')):
+        raise ValueError('Runtime first admission changed its qualified runtime view')
+    view_seal = read(view_root/'seal.json')
+    policy = read(view['policy'])
+    if (view_seal.get('original_production') != str(production)
+            or view_seal.get('original_seal_sha256') != proof['original_seal_sha256']
+            or view_seal.get('authority') != proof['runtime_authority']
+            or policy.get('allowed_slices') != 'all_planned'
+            or policy.get('production_directory') != str(production)
+            or policy.get('runtime_override', {}).get('authority') != proof['runtime_authority']):
+        raise ValueError('Runtime first admission must cover every original planned chunk')
+    for path, expected in view_seal['files'].items():
+        if durable.sha(path) != expected:
+            raise ValueError('Runtime first admission view changed: '+path)
+    adapter.validate_override(policy)
+    files = proof.get('recovery_files', {})
+    required = {str(recovery/name) for name in ('pipeline.dag', 'detector.sub')}
+    if set(files) != required or any(durable.sha(path) != expected for path, expected in files.items()):
+        raise ValueError('Runtime first admission must pin its exact DAG and detector descriptor')
+    old = str(production/'detector.sub')
+    graph = (production/'pipeline.dag').read_text()
+    executable = 'executable = '+str(production/'detector_worker.sh')
+    descriptor = (production/'detector.sub').read_text()
+    if (graph.count(old) != sum(len(row['chunks']) for row in plan['points'])
+            or descriptor.count(executable) != 1
+            or (recovery/'pipeline.dag').read_text() != graph.replace(old, str(recovery/'detector.sub'))
+            or (recovery/'detector.sub').read_text() != descriptor.replace(
+                executable, 'executable = '+view['wrapper'])):
+        raise ValueError('Runtime first admission may change only the qualified detector executable')
+    handoff = read_pinned(proof['failed_handoff_submission'])
+    failed = read_pinned(proof['failed_preflight_receipt'])
+    failure_root = Path(proof['failed_preflight_receipt']['path']).parent
+    review = read_pinned(proof['native_review'])
+    handoff_ad, preflight_ad = review['failed_handoff'], review['failed_preflight']
+    if (Path(proof['failed_handoff_submission']['path']) != Path(handoff['task'])/'submission.json'
+            or handoff.get('submit_sha256') != durable.sha(Path(handoff['task'])/'worker.sub')
+            or failure_root != Path(handoff['task'])/'runtime_preflight'
+            or failed.get('complete') is not False or not failed.get('error')
+            or failed.get('original_plan_sha256') != proof['original_plan_sha256']
+            or failed.get('original_seal_sha256') != proof['original_seal_sha256']
+            or review.get('schema') != 'shift-meson-unsubmitted-runtime-native-review-v1'
+            or review.get('original_directory') != str(production) or review.get('original_detector_queue') != []
+            or handoff_ad.get('ClusterId') != handoff['cluster'] or handoff_ad.get('Iwd') != handoff['task']
+            or handoff_ad.get('Cmd') != str(Path(handoff['task'])/'run.sh')
+            or preflight_ad.get('Iwd') != str(failure_root)
+            or preflight_ad.get('Cmd') != str(failure_root/'worker.sh')):
+        raise ValueError('Runtime first admission lost its exact preserved failed preparation')
+    old_preflight = read(failure_root/'submission.json')
+    if (old_preflight.get('task') != str(failure_root)
+            or old_preflight.get('submit_sha256') != durable.sha(failure_root/'worker.sub')
+            or preflight_ad.get('ClusterId') != old_preflight.get('cluster')):
+        raise ValueError('Runtime first admission lost its exact failed converter job')
+    for native in (handoff_ad, preflight_ad):
+        if (native.get('ProcId') != 0 or native.get('JobStatus') != 5
+                or type(native.get('ExitCode')) is not int or native['ExitCode'] == 0
+                or native.get('ExitBySignal') is not False):
+            raise ValueError('Runtime first admission requires its pinned native failed holds')
+    absent = read_pinned(proof['output_absence'])
+    expected_paths = unsubmitted_runtime_output_paths(plan)
+    if (absent.get('schema') != 'shift-meson-unsubmitted-output-absence-v1'
+            or absent.get('original_directory') != str(production)
+            or absent.get('absent_paths') != expected_paths):
+        raise ValueError('Runtime first admission lacks its complete original output-absence review')
+    return proof
+
+
+def submit_unsubmitted_runtime_recovery(config, batch, authority):
+    """Admit a qualified new owner once; never submit the failed original DAG."""
+    from run_dark_photon_runtime_recovery import verify_output_absence
+    production = batch_directory(config, batch)/'production'
+    proof = validate_unsubmitted_runtime_recovery(production, batch, authority)
+    replacement = Path(proof['recovery_directory'])
+    receipt = (existing_receipt(replacement, replacement/'pipeline.dag.condor.sub')
+               if (replacement/'submission.json').is_file() else None)
+    if receipt is None and (replacement/'submission_intent.json').is_file():
+        receipt = durable.submission(config, replacement, replacement/'pipeline.dag.condor.sub')
+    native_review = read_pinned(proof['native_review'])
+    old_ids = [native_review[key]['ClusterId'] for key in ('failed_handoff', 'failed_preflight')]
+    constraint = ('Iwd == '+json.dumps(str(production))+
+        ' || member(ClusterId,{'+','.join(map(str, old_ids))+'})'+
+        ' || Iwd == '+json.dumps(str(replacement)))
+    if receipt is not None:
+        constraint += ' || ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])
+    rows = durable.jobs(config, constraint)
+    for row in rows:
+        if row['ClusterId'] in old_ids:
+            previous = next(native_review[key] for key in ('failed_handoff', 'failed_preflight')
+                            if native_review[key]['ClusterId'] == row['ClusterId'])
+            if (row.get('ProcId') != 0 or row.get('Iwd') != previous['Iwd']
+                    or row.get('JobStatus') != 5):
+                raise RuntimeError('Original failed preparation is active or changed; preserve its owner')
+        elif receipt is None or not ((row['ClusterId'] == receipt['cluster']
+                and row.get('ProcId') == 0 and row.get('Iwd') == str(replacement))
+                or (row.get('DAGManJobId') == receipt['cluster'] and row.get('Iwd') == str(production))):
+            raise RuntimeError('Original detector population has an unexpected live owner')
+    if receipt is None:
+        verify_output_absence(unsubmitted_runtime_output_paths(read(production/'plan.json')))
+        receipt = durable.submit_dag(config, replacement, config.get('detector_workers_per_point', 100)+2)
+    return receipt
+
+
+def prepare_unsubmitted_runtime_recovery(production, batch, runtime_authority, runtime_view,
+        output, *, failed_handoff_submission, failed_preflight_receipt, native_review, output_absence):
+    """Freeze a reviewed new DAG without modifying or submitting the original."""
+    production, output = Path(production), Path(output)
+    if output.exists() or output.is_relative_to(production):
+        raise ValueError('Runtime first admission needs a new separate recovery directory')
+    output.mkdir(parents=True)
+    graph = (production/'pipeline.dag').read_text().replace(
+        str(production/'detector.sub'), str(output/'detector.sub'))
+    descriptor = (production/'detector.sub').read_text().replace(
+        'executable = '+str(production/'detector_worker.sh'), 'executable = '+runtime_view['wrapper'])
+    (output/'pipeline.dag').write_text(graph)
+    (output/'detector.sub').write_text(descriptor)
+    proof = dict(schema='shift-meson-unsubmitted-runtime-recovery-v1', batch=batch['batch'], point=batch['point'],
+        original_directory=str(production), original_plan_sha256=durable.sha(production/'plan.json'),
+        original_seal_sha256=durable.sha(production/'seal.json'),
+        original_inventory_sha256=durable.sha(production/'gen_inventory.json'),
+        source_status_sha256=durable.sha(production.parent/'source_status.json'),
+        runtime_authority=runtime_authority, runtime_view=runtime_view, recovery_directory=str(output),
+        recovery_files={str(output/name): durable.sha(output/name) for name in ('pipeline.dag', 'detector.sub')},
+        failed_handoff_submission=failed_handoff_submission, failed_preflight_receipt=failed_preflight_receipt,
+        native_review=native_review, output_absence=output_absence)
+    validate_unsubmitted_runtime_recovery(production, batch, proof)
+    path = output/'review.json'
+    durable.new(path, proof)
+    return dict(path=str(path), sha256=durable.sha(path))
 
 
 def reviewed_detector_recovery(config, batch, original, authority):
@@ -2671,6 +2875,14 @@ def production_queue_snapshot(config):
 
 
 def native_status(config, receipt, queue_snapshot=None):
+    payload_directory = receipt['task']
+    for name, authority in config.get('reviewed_unsubmitted_runtime_recoveries', {}).items():
+        proof = read_pinned(authority)
+        if proof['recovery_directory'] == receipt['task']:
+            proof = validate_unsubmitted_runtime_recovery(proof['original_directory'],
+                dict(batch=name, point=proof['point']), authority)
+            payload_directory = proof['original_directory']
+            break
     constraint = 'ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster'])
     if config.get('reviewed_terminal_native_jobs') is not None:
         constraint += ' || Iwd == '+json.dumps(receipt['task'])
@@ -2698,14 +2910,14 @@ def native_status(config, receipt, queue_snapshot=None):
             if managers[0].get('ExitBySignal') or managers[0].get('ExitCode')!=0:
                 raise MesonJobFailure('Meson manager completed unsuccessfully; no automatic retry', rows)
             return 'complete'
-        if any(row.get('Iwd')!=receipt['task'] for row in children):
+        if any(row.get('Iwd')!=payload_directory for row in children):
             raise RuntimeError('Meson child has an unexpected persistent working directory')
         directory=Path(receipt['task'])
         health_path=directory/'manager_health.json'
         health=read(health_path) if health_path.exists() else {}
         if (directory/'pipeline.dag').is_file():
             from watch_dark_photon_statistics import execute_events
-            health.update(executed_children=execute_events(directory),children=len(children),
+            health.update(executed_children=execute_events(Path(payload_directory)),children=len(children),
                           checked_utc=datetime.now(timezone.utc).isoformat())
             if managers[0]['JobStatus']==2 and not children:
                 since=health.setdefault('no_children_since_epoch',time.time())
