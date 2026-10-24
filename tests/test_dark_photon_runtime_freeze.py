@@ -48,7 +48,24 @@ print(json.dumps({m.__name__:str(Path(m.__file__).relative_to(root)) for m in mo
     def test_rollover_updates_the_whole_runtime_helper_set_instead_of_retaining_old_imports(self):
         self.assertTrue(set(grid.RUNTIME_HELPER_SOURCES)<=set(rollover.REPLACEMENT_TOOLS))
         self.assertIn('dark_photon_detector_runtime.py',rollover.REPLACEMENT_TOOLS)
+        self.assertIn('prepare_dark_photon_grid.py',rollover.REPLACEMENT_TOOLS)
         self.assertTrue(set(grid.RUNTIME_HELPER_SOURCES)<=set(direct.OPERATIONAL_TOOLS))
+
+
+    def test_legacy_meson_rollover_overlays_import_as_an_isolated_coherent_set(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            frozen=Path(temporary)
+            for filename in meson.TOOLS:
+                shutil.copy2(SCRIPTS/filename,frozen/filename)
+            # A real legacy deployment predates the shared runtime-helper name.
+            grid_path=frozen/'prepare_dark_photon_grid.py'
+            grid_path.write_text(grid_path.read_text().replace('RUNTIME_HELPER_SOURCES','LEGACY_RUNTIME_HELPER_SOURCES'))
+            for filename in rollover.REPLACEMENT_TOOLS:
+                shutil.copy2(SCRIPTS/filename,frozen/filename)
+            result=subprocess.run(['/usr/bin/python3','-I','-c',
+                'import sys;sys.path.insert(0,sys.argv[1]);import prepare_dark_photon_meson_production;import run_dark_photon_meson_production',
+                str(frozen)],cwd=frozen,text=True,capture_output=True)
+            self.assertEqual(result.returncode,0,result.stderr)
 
 
 if __name__=='__main__':unittest.main()

@@ -14,6 +14,7 @@ from prepare_dark_photon_grid import RUNTIME_HELPER_SOURCES
 
 
 REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'prepare_dark_photon_production.py',
+                     'prepare_dark_photon_grid.py',
                      'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py',
                      'dark_photon_detector_runtime.py') + RUNTIME_HELPER_SOURCES
 
