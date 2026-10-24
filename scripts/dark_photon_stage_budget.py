@@ -38,6 +38,11 @@ def load_policy(path):
             ('frozen/sources/run_shift_gen_to_nano.py','common_runner_sha256')]:
         if sha(directory/filename)!=policy.get(key):
             raise ValueError('Operational stage launcher changed an original worker source: '+filename)
+    if policy.get('runtime_override') is not None:
+        if sha(Path(__file__))!=policy.get('stage_budget_helper_sha256'):
+            raise ValueError('Frozen stage-budget helper changed')
+        from dark_photon_runtime_recovery import validate_override
+        validate_override(policy)
     return policy
 
 
@@ -76,8 +81,14 @@ def execute(mode,policy_path,arguments):
         if allowed!='all_planned' and dict(point=point,chunk=index) not in allowed:
             raise ValueError('Slice is outside this bounded reviewed retry')
         sys.path.insert(0,str(directory))
-        spec=importlib.util.spec_from_file_location('_dp_original_budgeted_worker',directory/'chunk_worker.py')
+        worker_path=directory/'chunk_worker.py'
+        if policy.get('runtime_override') is not None:
+            from dark_photon_runtime_recovery import validate_override
+            worker_path=validate_override(policy)
+        spec=importlib.util.spec_from_file_location('_dp_original_budgeted_worker',worker_path)
         worker=importlib.util.module_from_spec(spec);spec.loader.exec_module(worker)
+        if policy.get('runtime_override') is not None:
+            worker.B=directory
         subprocess.run=lambda command,*args,**kwargs: original_run(worker_command(command,policy,policy_path),*args,**kwargs)
         try:
             return worker.run(point,index,seal)
