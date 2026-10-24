@@ -14,9 +14,10 @@ apply it to a shared live CMSSW release. It leaves the source four-vectors,
 generated masses, converter class layouts and momentum setters unchanged.
 
 The numerical guard uses `s = max(1 GeV, event energy scale, E, E_on)`,
-`a = 32 epsilon_double s` and an invariant uncertainty `a s` in GeV².
+`a = 32 epsilon_double s` and an invariant uncertainty `4 a s` in GeV², retaining all four signed
+square terms of the invariant.
 Since `E_on² - E² = (E_on - E)(E_on + E)`, the allowed energy residual is
-`min(1e-7 max(1 GeV,E,E_on), max(a, a s/(E+E_on)))`.
+`min(1e-7 max(1 GeV,E,E_on), max(a, 4 a s/(E+E_on)))`.
 At zero denominator the propagated term is `a`. Nonfinite values, negative
 mass, energy below mass and an overflowing numerical envelope are rejected.
 This accounts for event-scale conditioning in native fragmentation and
@@ -32,7 +33,7 @@ The largest observed residual was 1.55e-9 GeV, compared with an old bound of
 1e-15 GeV. This is a numerical representation defect, not evidence for a
 change to detector conditions or signal physics.
 
-The native regression contains 35 exact failed/control vectors and 78
+The native regression contains 36 exact failed/control vectors and 114
 threshold, soft, highly boosted and malformed cases. Passing these tests
 does not qualify a runtime by itself. A full accepted-GEN scan and paired
 weighted detector-chain tests must pass before production migration.

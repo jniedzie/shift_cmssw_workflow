@@ -1,7 +1,7 @@
 # Code style: AI-code. AI-generated private-runtime numerical precision repair.
 --- a/SimG4Core/Generators/interface/RecordedPrimaryMomentum.h
 +++ b/SimG4Core/Generators/interface/RecordedPrimaryMomentum.h
-@@ -7,8 +7,26 @@
+@@ -7,8 +7,29 @@
  #include <limits>
  #include <algorithm>
  #include <stdexcept>
@@ -15,7 +15,10 @@
 +    // Native generator boosts/fragmentation carry an event-scale invariant
 +    // uncertainty in GeV^2. Propagate it through E_on^2-E^2, rather than
 +    // demanding that each soft descendant has only local energy roundoff.
-+    const double invariantRoundoff=energyRoundoff*scale;
++    // E^2-px^2-py^2-pz^2 has four signed square terms. Each
++    // component is bounded by the original event scale; retain all four
++    // contributions rather than using a single-component invariant bound.
++    const double invariantRoundoff=4.*energyRoundoff*scale;
 +    if (!std::isfinite(invariantRoundoff))
 +      throw std::runtime_error("Preassigned source numerical envelope overflow");
 +    const double denominator=energy+physicalEnergy;
@@ -28,7 +31,7 @@
    template <typename Momentum>
    void setRecordedPrimaryMomentum(G4PrimaryParticle& target, const Momentum& p, double generatedMass,
                                    double sourcePrecisionScaleGeV=1.) {
-@@ -18,14 +36,15 @@
+@@ -18,14 +39,15 @@
          !std::isfinite(sourcePrecisionScaleGeV) || sourcePrecisionScaleGeV<0.)
        throw std::runtime_error("Preassigned source requires finite physical momentum and generated mass");
      const double physicalEnergy=std::hypot(std::hypot(px,py,pz),generatedMass);

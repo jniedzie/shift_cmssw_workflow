@@ -45,6 +45,7 @@ int main(){ G4BosonConstructor().ConstructParticle(); G4ParticleTable::GetPartic
   {0x1.83c24ffcc1111p-3,0x1.470b1c4aa0ab0p-9,-0x1.aa58e730020dap+2,0x1.aa9b60e118974p+2,0x1.147064ece9a2cp-3,0x1.a8ffffffffffep+12,true},
   {0x1.91d7175797343p-3,-0x1.12c37988a6926p-7,-0x1.a5b28b829d6a6p+2,0x1.a5e27c8ab43c9p+2,0x0.0p+0,0x1.a8ffffffffffep+12,true},
   {0x1.78bd0838d7ea0p-6,-0x1.c052c60c799ccp-2,-0x1.7541d4728181fp+11,0x1.7541d588cc826p+11,0x1.8cb0890dd7514p-1,0x1.a8ffffffffffep+12,false},
+  {0x1.33b020f2707dcp-1,0x1.93e68c8e0cd3cp-2,-0x1.681fadbff7559p+8,0x1.681fde8a1aec0p+8,0x1.1dd6e04c05921p-3,0x1.a8ffffffffffep+12,true},
  };
  unsigned saved=0,synthetic=0;
  for(const auto& c:cases){
@@ -66,6 +67,15 @@ int main(){ G4BosonConstructor().ConstructParticle(); G4ParticleTable::GetPartic
    require(!accept({0.,0.,momentum,e+.01*std::max(1.,e)},mass,scale),"Genuine off-shell vector accepted");
    synthetic+=2;
   }
+ for(double mass:{0.,0.21131675078,0.22})for(double momentum:{.1,4.,1000.}){
+  const double e=std::hypot(momentum,mass),scale=6800.;
+  const double tolerance=sim::recordedPrimaryEnergyTolerance(e,e,scale);
+  for(double sign:{-1.,1.}){
+   require(accept({0.,0.,momentum,e+sign*.5*tolerance},mass,scale),"Inside invariant envelope rejected");
+   require(!accept({0.,0.,momentum,e+sign*2.*tolerance},mass,scale),"Outside invariant envelope accepted");
+   synthetic+=2;
+  }
+ }
  const double nan=std::numeric_limits<double>::quiet_NaN(),inf=std::numeric_limits<double>::infinity();
  for(const auto& c:std::vector<Case>{{0,0,0,1,-1,6800,false},{0,0,0,1,2,6800,false},{nan,0,0,1,0,6800,false},
   {0,0,0,inf,0,6800,false},{0,0,0,1,0,nan,false},{0,0,1.e308,1.e308,0,1.e308,false}}){
