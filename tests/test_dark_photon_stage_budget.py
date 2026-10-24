@@ -64,6 +64,22 @@ class StageBudget(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'manifest changed'):
                     budget.recorded_primary_environment(profile,'b'*64)
 
+    def test_worker_dispatch_binds_whole_original_point_gen_and_restores_parent_environment(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);production,policy,path=self.fixture(root)
+            capsule=root/'capsule';capsule.mkdir()
+            release,authority,manifest,profile=self.authority_fixture(capsule)
+            (production/'plan.json').write_text(json.dumps(dict(detector_runtime=profile)))
+            (production/'gen_inventory.json').write_text(json.dumps(dict(points=dict(m0p3_prompt=dict(gen_sha256='c'*64)))))
+            worker=production/'chunk_worker.py'
+            worker.write_text('import os\nfrom pathlib import Path\ndef run(point,chunk,seal):\n assert os.environ["SHIFT_RECORDED_PRIMARY_GEN_SHA256"]=="c"*64\n assert Path(os.environ["SHIFT_RECORDED_PRIMARY_AUTHORITY"]).is_file()\n return dict(complete=True)\n')
+            policy.update(plan_sha256=budget.sha(production/'plan.json'),worker_sha256=budget.sha(worker))
+            path.write_text(json.dumps(policy))
+            with mock.patch.dict(os.environ,CMSSW_BASE=str(release),SHIFT_RECORDED_PRIMARY_GEN_SHA256='inherited-wrong-source'):
+                result=budget.execute('worker',path,['m0p3_prompt','38',budget.sha(production/'seal.json')])
+                self.assertTrue(result['complete'])
+                self.assertEqual(os.environ['SHIFT_RECORDED_PRIMARY_GEN_SHA256'],'inherited-wrong-source')
+
     def test_common_command_only_extends_existing_argv(self):
         with tempfile.TemporaryDirectory() as temporary:
             production,policy,path=self.fixture(Path(temporary))
