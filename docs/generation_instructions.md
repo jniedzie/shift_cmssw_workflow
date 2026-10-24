@@ -3155,3 +3155,27 @@ Keep existing ledger paths and queued working directories unchanged. Recover
 through a separately frozen controller, checking uncommitted job directories
 against native queue state and exact requests before recreating their tasks.
 Keep the original failure and incomplete detector cohorts recorded.
+
+
+### Safe recovery while the campaign runs unattended
+
+The SM controller reloads its durable ledger after known temporary AFS/storage
+or scheduler failures and retries at a bounded rate. It never continues from a
+partially mutated poll. A persisted or in-memory `submitting` intent is uncertain
+and still stops for native review; neither a lost reply nor a failed receipt save
+may cause another submission. Original physics/data failures stay visible.
+
+New task setup writes an intent containing exact request and submit hashes.
+After an interrupted setup, reuse requires the same request, no execution files
+or symlinks and a fresh native query proving no queued worker in that Iwd.
+Unbound partial inputs and changed weights/requests fail closed. Completed task
+setup removes its temporary intent. Inventory draft timestamps are checkpointed
+before preparation so a retry cannot change the identity of the same draft.
+
+The watchdog also retries temporary storage/scheduler failures. It reports a
+recovering controller separately from healthy processing. Short quota jobs have
+priority1000 among the owner's jobs; this changes no site ceiling and evicts no
+worker. A real scheduler canary must inject interrupted preparation, reuse its
+exact task and complete exactly one credentialed quota worker before deployment.
+Keep existing frozen jobs byte-identical and switch supervisors at a verified
+checkpoint; do not automatically release or duplicate held workers.

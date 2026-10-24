@@ -20,6 +20,8 @@ import time
 
 from shift_condor_native import NativeCondorError, query, run_condor
 
+TEMPORARY_STORAGE_ERRORS={errno.EIO,errno.ESTALE,errno.ETIMEDOUT,errno.ENOSPC,errno.EDQUOT}
+
 
 def read(path):
     # Large single AFS reads can return EIO while the rolling ledger grows.
@@ -150,12 +152,12 @@ def make_task(root, config, name, request, kind, stratum):
     # Existing ledger paths stay fixed; only newly created tasks use shards.
     shard = hashlib.sha256(name.encode()).hexdigest()[:2]
     directory = root/'jobs_sharded'/shard/name
-    directory.mkdir(parents=True, exist_ok=False)
-    save(directory/'request.json', request)
-    checksum = sha(directory/'request.json')
+    payload=json.dumps(request,indent=2,allow_nan=False)+'\n'
+    checksum=hashlib.sha256(payload.encode()).hexdigest()
     text = config['worker_template'].replace('@DIRECTORY@', str(directory))
     text = text.replace('@REQUEST_SHA@', checksum)
     if kind == 'quota':
+        text=text.replace('queue 1','priority = 1000\nqueue 1')
         text = text.replace('+MaxRuntime = 45000', '+MaxRuntime = 900')
         text = text.replace('request_memory = 6000', 'request_memory = 1000')
         text = text.replace('request_disk = 12000000', 'request_disk = 1000000')
@@ -163,7 +165,36 @@ def make_task(root, config, name, request, kind, stratum):
         text = text.replace('+MaxRuntime = 45000', '+MaxRuntime = 1800')
     if request.get('same_seed_CPU_recovery'):
         text=text.replace('+MaxRuntime = 45000','+MaxRuntime = 86400')
-    (directory/'worker.sub').write_text(text)
+    directory.parent.mkdir(parents=True,exist_ok=True)
+    intent=directory.parent/('.'+name+'.preparing.json')
+    expected=dict(request_sha256=checksum,submit_sha256=hashlib.sha256(text.encode()).hexdigest())
+    if intent.exists() and read(intent)!=expected:
+        raise ValueError('Interrupted task preparation changed its request: '+name)
+    if directory.exists():
+        # Every actual submission first persists the full task with phase
+        # "submitting". Recovery reloads that checkpoint and refuses ambiguous
+        # submissions before reaching here. Also require fresh queue absence.
+        if query('Iwd == '+json.dumps(str(directory)),['ClusterId','Iwd'],timeout=45):
+            raise ValueError('Interrupted task already has a queued worker: '+name)
+        allowed={'request.json','request.tmp','worker.sub','worker.tmp'}
+        files=list(directory.iterdir())
+        if any(p.name not in allowed or p.is_symlink() or not p.is_file() for p in files):
+            raise ValueError('Interrupted task has execution evidence: '+name)
+        complete=((directory/'request.json').exists() and (directory/'worker.sub').exists()
+                  and (directory/'request.json').read_text()==payload
+                  and (directory/'worker.sub').read_text()==text)
+        if not complete and not intent.exists():
+            raise ValueError('Partial task lacks its original preparation intent: '+name)
+        for path,wanted in [(directory/'request.json',payload),(directory/'worker.sub',text)]:
+            if path.exists() and path.read_text()!=wanted:
+                raise ValueError('Interrupted task content changed: '+name)
+    save(intent,expected)
+    directory.mkdir(exist_ok=True)
+    save(directory/'request.json',request)
+    temporary=directory/'worker.tmp'
+    temporary.write_text(text)
+    temporary.replace(directory/'worker.sub')
+    intent.unlink()
     return dict(directory=str(directory), phase='ready', request_sha256=checksum,
                 kind=kind, stratum=stratum, bound_bytes=request.get('reservation_bytes', 16777216))
 
@@ -421,6 +452,11 @@ def step(root, config, state):
                      or (all_science_complete and inventory_change != state.get('last_inventory_count', 0)))
     if inventory_due and not any(t['kind']=='inventory' and t['phase'] in ('ready','submitted')
                                  for t in state['tasks'].values()):
+        epoch=state.get('inventory_preparation_epoch',{})
+        if epoch.get('change')!=inventory_change:
+            epoch=dict(change=inventory_change,checked_epoch=time.time())
+            state['inventory_preparation_epoch']=epoch
+            save(root/'ledger.json',state)
         sources = [read(Path(t['directory'])/'result.json')['source'] for t in finished_sources]
         if len({s['gen_sha256'] for s in sources}) != len(sources):
             raise ValueError('Duplicate GEN exposure in production inventory')
@@ -437,7 +473,7 @@ def step(root, config, state):
             raw_GEN_reserve=[dict(source_GEN_sha256=t['raw_gen_sha256'],saved_events=t['saved_GEN_events'],
                 receipt_url=t['raw_receipt_url'],receipt_sha256=t['raw_receipt_sha256']) for t in finished_raw],
             raw_GEN_reserve_is_detector_exposure=False,
-            checked_epoch=time.time())
+            checked_epoch=epoch['checked_epoch'])
         save(root/'source_inventory.json', inventory)
         name='inventory_'+str(inventory_change).zfill(7)
         request=dict(schema='shift-stream-payload-v1', environment='cmssw',
@@ -551,6 +587,8 @@ def watch(root, controller_iwd=None):
         problems.append('Controller failure receipt needs review')
     if record.get('phase') == 'scheduler_unknown':
         problems.append('Scheduler state unknown; admission paused')
+    if record.get('phase') == 'storage_retry':
+        problems.append('Temporary storage failure; controller is retrying safely')
     if record.get('failed_bins'):
         problems.append('Failed bins require review: '+', '.join(record['failed_bins']))
     if record.get('failed_by_stage'):
@@ -562,6 +600,65 @@ def watch(root, controller_iwd=None):
     if problems:
         save(root/'watchdog_attention_required.json', value)
     return False
+
+
+def run_controller(root,config,once=False):
+    """Reload committed state after a temporary failure; never replay a submit."""
+    state=None
+    while True:
+        try:
+            if state is None:
+                state=read(root/'ledger.json')
+                if any(t['phase']=='submitting' for t in state['tasks'].values()):
+                    raise RuntimeError('Uncertain persisted submission needs native review')
+            record=step(root,config,state)
+        except (NativeCondorError,OSError) as error:
+            if isinstance(error,OSError) and error.errno not in TEMPORARY_STORAGE_ERRORS:
+                save(root/'controller_failure.json',dict(epoch=time.time(),error=repr(error)))
+                raise
+            if state and any(t['phase']=='submitting' for t in state['tasks'].values()):
+                save(root/'controller_failure.json',dict(epoch=time.time(),error=repr(error),
+                    action='Uncertain submission requires native review; never repeat it'))
+                raise
+            # A previous poll may have made uncommitted directories or observed
+            # finished workers. Rebuild from the durable ledger, never that
+            # partially mutated state. Exact unsubmitted task files are reusable.
+            state=None
+            phase='scheduler_unknown' if isinstance(error,NativeCondorError) else 'storage_retry'
+            record=dict(checked_epoch=time.time(),phase=phase,error=repr(error))
+            print(json.dumps(record),file=sys.stderr,flush=True)
+            try:
+                save(root/'heartbeat.json',record)
+                save(root/('scheduler_unknown.json' if phase=='scheduler_unknown' else
+                           'controller_transient.json'),record)
+            except OSError as report_error:
+                if report_error.errno not in TEMPORARY_STORAGE_ERRORS:raise
+                print('Storage also prevented writing the recovery heartbeat: '+repr(report_error),
+                      file=sys.stderr,flush=True)
+        except BaseException as error:
+            save(root/'controller_failure.json',dict(epoch=time.time(),error=repr(error)))
+            raise
+        if once or record['phase']=='ntuples_complete':
+            return record
+        time.sleep(30)
+
+
+def run_watchdog(root,controller_iwd=None,once=False):
+    while True:
+        try:
+            if watch(root,controller_iwd):return
+        except (NativeCondorError,OSError) as error:
+            if isinstance(error,OSError) and error.errno not in TEMPORARY_STORAGE_ERRORS:raise
+            record=dict(epoch=time.time(),error=repr(error))
+            print(json.dumps(record),file=sys.stderr,flush=True)
+            path=root/('watchdog_scheduler_unknown.json' if isinstance(error,NativeCondorError)
+                       else 'watchdog_storage_retry.json')
+            try:save(path,record)
+            except OSError as report_error:
+                if report_error.errno not in TEMPORARY_STORAGE_ERRORS:raise
+                print('Watchdog storage unavailable: '+repr(report_error),file=sys.stderr,flush=True)
+        if once:return
+        time.sleep(60)
 
 
 def main():
@@ -577,37 +674,11 @@ def main():
             raise ValueError('Frozen deployment changed: '+name)
     root = Path(config.get('campaign_directory', str(deployment))).resolve()
     if '--watchdog' in sys.argv:
-        while True:
-            try:
-                if watch(root, config.get('controller_iwd')):
-                    return
-            except NativeCondorError as error:
-                save(root/'watchdog_scheduler_unknown.json', dict(epoch=time.time(), error=repr(error)))
-            if '--once' in sys.argv:
-                return
-            time.sleep(60)
+        run_watchdog(root,config.get('controller_iwd'),once='--once' in sys.argv)
+        return
     with (root/'controller.lock').open('w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        state = read(root/'ledger.json')
-        while True:
-            try:
-                record = step(root, config, state)
-            except NativeCondorError as error:
-                if any(t['phase']=='submitting' for t in state['tasks'].values()):
-                    save(root/'controller_failure.json', dict(epoch=time.time(), error=repr(error),
-                        action='Uncertain submission requires native review; never repeat it'))
-                    raise
-                record = dict(checked_epoch=time.time(), phase='scheduler_unknown', error=repr(error))
-                save(root/'heartbeat.json', record)
-                save(root/'scheduler_unknown.json', record)
-            except BaseException as error:
-                save(root/'controller_failure.json', dict(epoch=time.time(), error=repr(error)))
-                raise
-            if '--once' in sys.argv:
-                break
-            if record['phase'] == 'ntuples_complete':
-                break
-            time.sleep(30)
+        run_controller(root,config,once='--once' in sys.argv)
 
 
 if __name__ == '__main__':

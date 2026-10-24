@@ -38,6 +38,14 @@ class PublicationChargeTests(unittest.TestCase):
 
 
 class SchedulingTests(unittest.TestCase):
+    def test_short_quota_jobs_have_priority_before_the_queue_statement(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            task=controller.make_task(Path(directory),dict(worker_template='universe = vanilla\nqueue 1\n'),
+                'quota_1',dict(stage='quota'),'quota','')
+            text=(Path(task['directory'])/'worker.sub').read_text()
+            self.assertLess(text.index('priority = 1000'),text.index('queue 1'))
+
     def test_new_tasks_bypass_a_full_legacy_AFS_directory(self):
         import errno
         import run_shift_smart_sm_controller as controller
@@ -219,6 +227,115 @@ class CompletionTests(unittest.TestCase):
     def test_uncertain_submission_is_never_repeated(self):
         with self.assertRaisesRegex(RuntimeError, 'Uncertain submission'):
             observe(dict(directory='/persistent/job', phase='submitting'), [])
+
+
+class ControllerRecoveryTests(unittest.TestCase):
+    def test_watchdog_survives_temporary_storage_and_scheduler_failures(self):
+        import run_shift_smart_sm_controller as controller
+        import errno
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            with patch.object(controller,'watch',side_effect=[OSError(errno.EIO,'AFS unavailable'),
+                    controller.NativeCondorError('Scheduler unavailable'),True]) as watch, patch.object(controller.time,'sleep'):
+                controller.run_watchdog(root)
+            self.assertEqual(watch.call_count,3)
+            self.assertTrue((root/'watchdog_storage_retry.json').exists())
+            self.assertTrue((root/'watchdog_scheduler_unknown.json').exists())
+
+    def test_interrupted_preparation_reuses_the_exact_unsubmitted_request(self):
+        import run_shift_smart_sm_controller as controller
+        import errno
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config=dict(worker_template='@DIRECTORY@ @REQUEST_SHA@\nqueue 1\n')
+            request=dict(events=5,weights=[.25,2.])
+            original_replace=Path.replace
+            def fail_worker_commit(path,target):
+                if path.name=='worker.tmp':raise OSError(errno.EIO,'temporary AFS failure')
+                return original_replace(path,target)
+            with patch.object(Path,'replace',fail_worker_commit):
+                with self.assertRaises(OSError):
+                    controller.make_task(root,config,'detector_1',request,'detector','qcd_2to5')
+            with patch.object(controller,'query',return_value=[]) as query:
+                task=controller.make_task(root,config,'detector_1',request,'detector','qcd_2to5')
+            query.assert_called_once()
+            path=Path(task['directory'])
+            self.assertEqual(json.loads((path/'request.json').read_text()),request)
+            self.assertFalse(list(path.parent.glob('*.preparing.json')))
+
+    def test_existing_task_never_overwrites_execution_or_changed_inputs(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config=dict(worker_template='@DIRECTORY@ @REQUEST_SHA@')
+            task=controller.make_task(root,config,'detector_1',dict(events=5),'detector','qcd_low')
+            path=Path(task['directory'])
+            with patch.object(controller,'query',return_value=[]):
+                with self.assertRaisesRegex(ValueError,'original preparation intent'):
+                    controller.make_task(root,config,'detector_1',dict(events=6),'detector','qcd_low')
+                (path/'events.log').write_text('native execute evidence')
+                with self.assertRaisesRegex(ValueError,'execution evidence'):
+                    controller.make_task(root,config,'detector_1',dict(events=5),'detector','qcd_low')
+            (path/'events.log').unlink()
+            with patch.object(controller,'query',return_value=[dict(ClusterId=123,Iwd=str(path))]):
+                with self.assertRaisesRegex(ValueError,'queued worker'):
+                    controller.make_task(root,config,'detector_1',dict(events=5),'detector','qcd_low')
+            self.assertEqual(json.loads((path/'request.json').read_text()),dict(events=5))
+
+    def test_temporary_failure_reloads_committed_state_before_retrying(self):
+        import run_shift_smart_sm_controller as controller
+        import errno
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);controller.save(root/'ledger.json',dict(tasks={},next_detector_job=10))
+            attempts=[]
+            def poll(root,config,state):
+                attempts.append(state['next_detector_job'])
+                if len(attempts)==1:
+                    state['next_detector_job']=999
+                    raise OSError(errno.EIO,'temporary read failure')
+                return dict(phase='ntuples_complete')
+            with patch.object(controller,'step',side_effect=poll),patch.object(controller.time,'sleep'):
+                result=controller.run_controller(root,{})
+            self.assertEqual(attempts,[10,10]);self.assertEqual(result['phase'],'ntuples_complete')
+            self.assertEqual(controller.read(root/'controller_transient.json')['phase'],'storage_retry')
+            self.assertFalse((root/'controller_failure.json').exists())
+
+    def test_lost_submit_reply_stops_without_a_second_submit(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);controller.save(root/'ledger.json',dict(tasks={}))
+            def uncertain(root,config,state):
+                state['tasks']['job']=dict(phase='submitting')
+                controller.save(root/'ledger.json',state)
+                raise controller.NativeCondorError('Lost native submit reply')
+            with patch.object(controller,'step',side_effect=uncertain) as poll:
+                with self.assertRaises(controller.NativeCondorError):controller.run_controller(root,{})
+            self.assertEqual(poll.call_count,1)
+            self.assertEqual(controller.read(root/'ledger.json')['tasks']['job']['phase'],'submitting')
+
+    def test_failed_save_after_submit_cannot_replay_the_persisted_intent(self):
+        import run_shift_smart_sm_controller as controller
+        import errno
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);controller.save(root/'ledger.json',dict(tasks={}))
+            def save_failed(root,config,state):
+                state['tasks']['job']=dict(phase='submitting')
+                controller.save(root/'ledger.json',state)
+                state['tasks']['job'].update(phase='submitted',cluster=123)
+                raise OSError(errno.EIO,'Lost receipt checkpoint')
+            with patch.object(controller,'step',side_effect=save_failed) as poll,patch.object(controller.time,'sleep'):
+                with self.assertRaisesRegex(RuntimeError,'Uncertain persisted submission'):
+                    controller.run_controller(root,{})
+            self.assertEqual(poll.call_count,1)
+
+    def test_unknown_errors_still_stop_for_review(self):
+        import run_shift_smart_sm_controller as controller
+        import errno
+        for error in [ValueError('bad source weights'),OSError(errno.EINVAL,'invalid storage operation')]:
+            with self.subTest(error=error),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);controller.save(root/'ledger.json',dict(tasks={}))
+                with patch.object(controller,'step',side_effect=error) as poll:
+                    with self.assertRaises(type(error)):controller.run_controller(root,{})
+                self.assertEqual(poll.call_count,1)
+                self.assertTrue((root/'controller_failure.json').exists())
 
 
 if __name__ == '__main__':
