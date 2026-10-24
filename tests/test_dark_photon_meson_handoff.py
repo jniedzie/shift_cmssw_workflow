@@ -129,6 +129,16 @@ class FutureMesonDetectorGate(unittest.TestCase):
 
 
 class ReviewedRuntimeFailure(unittest.TestCase):
+    def test_retry_uses_pinned_guard_even_when_supervisor_adapter_differs(self):
+        import dark_photon_runtime_recovery as adapter
+        with tempfile.TemporaryDirectory(prefix='.runtime-reconcile-test-',dir=Path(__file__).resolve().parents[1]) as temporary:
+            config,batch,entry,state,receipt,snapshot,_=self.fixture(Path(temporary))
+            # Simulate a supervisor whose imported adapter belongs to a later
+            # deployment. The completed retry still uses its original pin.
+            with patch.object(adapter,'pinned',side_effect=AssertionError('new adapter used')):
+                production.reconcile_runtime_failures(config,state,batch,entry,receipt,snapshot)
+            self.assertEqual(state['failed_batches'],{})
+
     def fixture(self,root):
         import run_dark_photon_runtime_recovery as guard
         import dark_photon_runtime_recovery as adapter

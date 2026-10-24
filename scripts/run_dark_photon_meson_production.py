@@ -2959,8 +2959,6 @@ def reconcile_runtime_failures(config, state, batch, entry, receipt, queue_snaps
     authority=config.get('reviewed_runtime_recovery')
     if not failures or authority is None:
         return
-    import run_dark_photon_runtime_recovery as recovery
-    import dark_photon_runtime_recovery as adapter
     guard=read_pinned(authority)
     if guard.get('schema')!='shift-dp-runtime-recovery-controller-v1':
         raise ValueError('Unknown reviewed runtime-recovery controller')
@@ -2968,10 +2966,19 @@ def reconcile_runtime_failures(config, state, batch, entry, receipt, queue_snaps
     for path,digest in dependencies.items():
         if durable.sha(path)!=digest:
             raise ValueError('Reviewed runtime-recovery dependency changed')
-    for module in (recovery,adapter):
-        matches=[digest for path,digest in dependencies.items() if Path(path).name==Path(module.__file__).name]
-        if len(matches)!=1 or durable.sha(module.__file__)!=matches[0]:
-            raise ValueError('Meson retry validator differs from its frozen guard')
+    modules={}
+    for name in ('dark_photon_runtime_recovery', 'run_dark_photon_runtime_recovery'):
+        matches=[path for path in dependencies if Path(path).name==name+'.py']
+        if len(matches)!=1:
+            raise ValueError('Meson retry validator is missing from its frozen guard')
+        modules[name]=durable.module(Path(matches[0]), '_meson_guard_'+name)
+    # A newer supervisor may use a newer adapter for unrelated first admissions.
+    # Validate completed retries with the guard's exact original implementation.
+    adapter=modules['dark_photon_runtime_recovery']
+    recovery=modules['run_dark_photon_runtime_recovery']
+    recovery.original_pinned=adapter.pinned
+    recovery.original_read=adapter.read
+    recovery.original_sha=adapter.sha
     production=batch_directory(config,batch)/'production'
     if not any(production.is_relative_to(Path(root)) for root in guard['production_directories']):
         raise ValueError('Meson production is outside the reviewed retry scope')
