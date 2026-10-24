@@ -970,6 +970,66 @@ class PreSubmissionMonitor(unittest.TestCase):
                     WATCH.poll(config, {})
                 self.assertEqual(native.call_count, 1)
 
+    def unsubmitted_runtime_fixture(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name)
+        helpers = self.root / 'validator'
+        helpers.mkdir()
+        helper = helpers / 'run_dark_photon_meson_production.py'
+        helper.write_text('import json\nfrom pathlib import Path\n'
+            'def validate_unsubmitted_runtime_recovery(production, batch, pin):\n'
+            '    proof = json.loads(Path(pin["path"]).read_text())\n'
+            '    assert str(production) == proof["original_directory"]\n'
+            '    assert batch == {"batch": "bulk_0135", "point": "m0p9_lab_30m"}\n'
+            '    return proof\n')
+        original = self.root / 'batches/bulk_0135/production'
+        original.mkdir(parents=True)
+        replacement = self.root / 'recovery/bulk_0135'
+        replacement.mkdir(parents=True)
+        submit = replacement / 'pipeline.dag.condor.sub'
+        submit.write_text('initialdir = ' + str(replacement) + '\nqueue\n')
+        receipt = replacement / 'submission.json'
+        receipt.write_text(json.dumps(dict(cluster=300, task=str(replacement),
+            submit_sha256=WATCH.sha(submit), utc='2026-10-24T20:00:00+00:00')))
+        proof = self.root / 'review.json'
+        proof.write_text(json.dumps(dict(point='m0p9_lab_30m',
+            original_directory=str(original), recovery_directory=str(replacement))))
+        config = dict(production_directory=str(self.root), reviewed_unsubmitted_runtime_recoveries={
+            'bulk_0135':dict(path=str(proof),sha256=WATCH.sha(proof))},
+            unsubmitted_runtime_validator=dict(path=str(helper),sha256=WATCH.sha(helper)),
+            dependencies={str(helper):WATCH.sha(helper),str(proof):WATCH.sha(proof)})
+        return config, original, replacement, helper, receipt
+
+    def test_unsubmitted_runtime_manager_keeps_original_payload_directory(self):
+        config, original, replacement, helper, receipt = self.unsubmitted_runtime_fixture()
+        records = WATCH.unsubmitted_runtime_managers(config)
+        self.assertEqual(set(records), {300})
+        self.assertEqual(records[300]['directory'], str(replacement))
+        self.assertEqual(records[300]['payload_directory'], str(original))
+        self.assertEqual(records[300]['kind'], 'production')
+        receipt.unlink()
+        self.assertEqual(WATCH.unsubmitted_runtime_managers(config), {})
+
+    def test_unsubmitted_runtime_manager_rejects_changed_helper_inventory(self):
+        config, original, replacement, helper, receipt = self.unsubmitted_runtime_fixture()
+        extra = helper.with_name('unreviewed.py')
+        extra.write_text('pass\n')
+        with self.assertRaisesRegex(ValueError, 'helper is not pinned'):
+            WATCH.unsubmitted_runtime_managers(config)
+        extra.unlink()
+        helper.write_text(helper.read_text() + '# changed\n')
+        with self.assertRaisesRegex(ValueError, 'validator is outside'):
+            WATCH.unsubmitted_runtime_managers(config)
+
+    def test_unsubmitted_runtime_manager_rejects_wrong_native_receipt_scope(self):
+        config, original, replacement, helper, receipt = self.unsubmitted_runtime_fixture()
+        saved = json.loads(receipt.read_text())
+        saved['task'] = str(original)
+        receipt.write_text(json.dumps(saved))
+        with self.assertRaisesRegex(ValueError, 'replacement receipt changed'):
+            WATCH.unsubmitted_runtime_managers(config)
+
 
 if __name__ == '__main__':
     unittest.main()

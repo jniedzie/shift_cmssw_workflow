@@ -3228,3 +3228,18 @@ blocking the other points' finalizers and publication. Final collection still
 requires all original points; this option never drops an event or pretends the
 whole cohort is complete. The post-seal `point_preflights/manifest.json` pins
 each task and the original plan, seal, inventory, runtime and DAG.
+
+### Native generator precision failures
+
+Do not keep increasing a generic floating-point tolerance until a saved event
+passes. First identify where its four-vector becomes inconsistent. Preserve raw
+GEN and replay the exact native generator, settings and seed when needed. Pythia
+8.317 final-two string fragmentation can inherit a poorly conditioned string
+basis; this is different from HepMC serialization or final boost roundoff.
+
+An exact-event correction must bind the original GEN hash, event, particle ID,
+barcode and binary64 four-vector/mass to a derived source-error bound. Keep the
+general guard and conservation cap unchanged, preserve the first failure and
+qualify the actual converter, failed events and successful weighted controls in
+a private runtime. An input-contract tolerance is not a proof of machine
+precision. Numerical recovery must never bypass an unrelated transport guard.

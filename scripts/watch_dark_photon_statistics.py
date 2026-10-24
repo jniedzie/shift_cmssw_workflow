@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import errno
 import fcntl
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -237,6 +238,55 @@ def operational_recoveries(config):
     return result
 
 
+def unsubmitted_runtime_managers(config):
+    """Track an exact reviewed first detector DAG without inventing an old owner."""
+    authorities = config.get('reviewed_unsubmitted_runtime_recoveries', {})
+    if not authorities:
+        return {}
+    helper = config.get('unsubmitted_runtime_validator', {})
+    helper_path = Path(helper.get('path', ''))
+    dependencies = config.get('dependencies', {})
+    if (not helper_path.is_absolute() or dependencies.get(str(helper_path)) != helper.get('sha256')
+            or sha(helper_path) != helper.get('sha256')):
+        raise ValueError('Unsubmitted runtime validator is outside frozen watchdog authority')
+    # Use the same coherent helper inventory as the operational supervisor.
+    for path in helper_path.parent.glob('*.py'):
+        if dependencies.get(str(path)) != sha(path):
+            raise ValueError('Unsubmitted runtime validator helper is not pinned: ' + str(path))
+    spec = importlib.util.spec_from_file_location('_watch_unsubmitted_runtime', helper_path)
+    module = importlib.util.module_from_spec(spec)
+    previous_path = list(sys.path)
+    sys.path.insert(0, str(helper_path.parent))
+    try:
+        spec.loader.exec_module(module)
+        result = {}
+        root = Path(config['production_directory'])
+        for name, authority in authorities.items():
+            path = Path(authority['path'])
+            if (not path.is_absolute() or dependencies.get(str(path)) != authority['sha256']
+                    or sha(path) != authority['sha256']):
+                raise ValueError('Unsubmitted runtime review is outside frozen watchdog authority')
+            proof = read(path)
+            original = root / 'batches' / name / 'production'
+            proof = module.validate_unsubmitted_runtime_recovery(
+                original, dict(batch=name, point=proof['point']), authority)
+            directory = Path(proof['recovery_directory'])
+            receipt_path = directory / 'submission.json'
+            if not receipt_path.exists():
+                continue
+            receipt = read(receipt_path)
+            if (receipt.get('task') != str(directory)
+                    or receipt.get('submit_sha256') != sha(directory / 'pipeline.dag.condor.sub')
+                    or type(receipt.get('cluster')) is not int or receipt['cluster'] <= 0):
+                raise ValueError('Unsubmitted runtime replacement receipt changed')
+            result[receipt['cluster']] = dict(directory=str(directory), receipt=str(receipt_path),
+                kind='production', payload_directory=str(original), external_prerequisite=False,
+                submitted=record_epoch(receipt, 'utc', 'submitted_epoch'))
+        return result
+    finally:
+        sys.path[:] = previous_path
+
+
 def manager_receipts(root, supervisor_receipt=None, external_productions=(), operational_jobs=(), config=None):
     explicit_supervisor = supervisor_receipt is not None
     supervisor_receipt = Path(supervisor_receipt) if supervisor_receipt else root / 'submission.json'
@@ -296,6 +346,10 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
             record['kind'] = 'handoff'
         if any(record['receipt'] == item['recovery_submission'] for item in budget_recoveries.values()):
             record['kind'] = 'handoff'
+    runtime_managers = unsubmitted_runtime_managers(config) if config else {}
+    if set(result) & set(runtime_managers):
+        raise ValueError('Unsubmitted runtime manager duplicates another monitored manager')
+    result.update(runtime_managers)
     operations = operational_receipts(operational_jobs)
     if set(result) & set(operations):
         raise ValueError('Operational job duplicates another monitored manager')
