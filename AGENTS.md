@@ -177,6 +177,18 @@ the change.
   use the matching LCG interpreter when its ROOT packages are needed. Exercise
   an interrupted preparation too, so an existing receipt does not trap every
   later poll in the same error.
+- Check each new detector runtime with its actual primary converter on the
+  complete original GEN census before SIM admission. Include material-rejected
+  events and verify GEN hashes and ordered identities. Keep this fast scan
+  separate from full tracking. Numerical fixes need a derived precision bound,
+  failed-event tests and good reconstructed dimuon controls.
+- Recover a qualified numerical failure once in its original DAG, keeping GEN,
+  sampling, seeds, weights and exposure. Preserve the original failure and
+  report the actual new runtime. Do not automatically release unknown errors,
+  retry a failed recovery again, or overwrite partial canonical outputs.
+- Compare relocated GEN ledgers through the shared content helper; a scratch
+  log path may change, its checksum and accounting may not. Test both single-
+  and combined-source publication against the same canary protection floor.
 - If a scratch-only GEN worker fails after producing its ROOT file, preserve
   that file and the minimal raw contract/audit evidence before its temporary
   directory is removed. Keep failed exposure separate from admitted exposure.
