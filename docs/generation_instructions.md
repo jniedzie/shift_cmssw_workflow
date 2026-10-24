@@ -3248,3 +3248,8 @@ When repackaging a runtime, verify the final extracted bytes of every manifest
 member, including generated `.SCRAM` metadata for changed build files. A
 successful build does not validate those cached checksums. Run the downloaded capsule's
 actual bootstrap from scratch before submitting its parallel physics tests.
+
+Completed runtime retries must be reconciled with the recovery guard's pinned
+helpers. A newer supervisor may need a newer adapter for first admissions;
+do not use that adapter to reinterpret older retry receipts. Exercise the
+replacement supervisor on saved failures as well as its new-admission path.
