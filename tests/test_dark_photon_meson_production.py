@@ -346,6 +346,190 @@ class UnifiedSource(unittest.TestCase):
             self.assertFalse((scratch/'runtime/CMSSW_17_0_0_pre4/forbidden.gdml').exists())
 
 
+class ReviewedRemainingStorage(unittest.TestCase):
+    def pin(self, path, value):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value))
+        return dict(path=str(path), sha256=production.durable.sha(path))
+
+    def remaining_fixture(self, root):
+        science = root/'science'
+        science.mkdir()
+        original = self.pin(science/'config.json', dict(frozen=True))
+        registration = self.pin(root/'registration.json', {})
+        batches = [dict(batch=name, point=name, source_collisions=10) for name in ('a', 'b')]
+        census = {}
+        for batch, events in zip(batches, (4, 3)):
+            work = science/'batches'/batch['batch']
+            census[batch['batch']] = dict(
+                source_status=self.pin(work/'source_status.json', dict(batch=batch['batch'],
+                    point=batch['point'], source_collisions=10, complete=True, events=events,
+                    finished_utc='2020-01-01T00:00:00+00:00', parent=dict(gen_sha256='a'*64))),
+                source_submission=self.pin(work/'submission.json', dict(cluster=events, task=str(work))))
+        census['a']['material_source'] = self.pin(science/'batches/a/material.json',
+            dict(gen_sha256='a'*64, selected_indices=[1, 3]))
+        authority = dict(schema='shift-dp-reviewed-remaining-storage-v1', science_configuration=original,
+            original_storage_registration=registration, minimum_eos_free_bytes=50000000000,
+            aggregate_storage_reservation_bytes=22000000000, bytes_per_selected_event=326000,
+            fixed_bytes_per_batch=5000000, SM_registrations=[
+                self.pin(root/'SM75.json', dict(new_SM_reservation_bytes=75000000000)),
+                self.pin(root/'SM62.json', dict(new_SM_reservation_bytes=62000000000,
+                    total_SM_reservation_bytes=137000000000))],
+            source_census=self.pin(root/'census.json', dict(batches=census)))
+        config = dict(directory=str(science), batches=batches, minimum_eos_free_bytes=50000000000,
+            reviewed_remaining_storage_authority=self.pin(root/'authority.json', authority))
+        fresh = dict(authority=dict(storage_registration=registration), storage_registration=dict(
+            peer_reservations=[dict(name=name, reserved_bytes=amount) for name, amount in [
+                ('SM_weekend', 75000000000), ('direct_DY_weekend', 30000000000),
+                ('prior_SM_parent_protection', 6144000000)]]))
+        return config, authority, fresh
+
+    def test_closed_census_keeps_unknown_material_selection_at_full_GEN_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, fresh = self.remaining_fixture(Path(temporary))
+            with patch.object(production, 'fresh_production_authority', return_value=fresh), \
+                 patch.object(production, 'aggregation_reservation', return_value=22000000000), \
+                 patch.object(production, 'reviewed_sm_storage_credit', return_value=(10000000000, set(), {})), \
+                 patch.object(production.durable, 'closed_primitive', return_value=False):
+                peer, own, evidence = production.reviewed_remaining_storage(config,
+                    dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
+            self.assertEqual(peer, 163144000000)
+            self.assertEqual(own, 2*5000000+5*326000)
+            self.assertEqual(evidence['full_gen_events'], 7)
+            self.assertEqual(evidence['selected_event_upper_bound'], 5)
+
+    def test_only_a_sealed_completed_primitive_releases_its_Nano_future_claim(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, authority, fresh = self.remaining_fixture(root)
+            self.pin(Path(config['directory'])/'batches/a/production/completed_points/a.json', dict(events=2))
+            with patch.object(production, 'fresh_production_authority', return_value=fresh), \
+                 patch.object(production, 'aggregation_reservation', return_value=22000000000), \
+                 patch.object(production, 'reviewed_sm_storage_credit', return_value=(0, set(), {})), \
+                 patch.object(production.durable, 'closed_primitive', side_effect=lambda p, point, n, t: point == 'a'):
+                _, own, evidence = production.reviewed_remaining_storage(config,
+                    dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
+            self.assertEqual(own, 2*5000000+3*326000)
+            self.assertEqual(evidence['completed_selected_events'], 2)
+
+    def test_live_GEN_or_changed_source_is_not_a_closed_census(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, fresh = self.remaining_fixture(Path(temporary))
+            with patch.object(production, 'fresh_production_authority', return_value=fresh), \
+                 patch.object(production, 'aggregation_reservation', return_value=22000000000), \
+                 patch.object(production, 'reviewed_sm_storage_credit', return_value=(0, {4}, {})):
+                with self.assertRaisesRegex(ValueError, 'source identity'):
+                    production.reviewed_remaining_storage(config,
+                        dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
+            source = Path(config['directory'])/'batches/a/source_status.json'
+            source.write_text('{}')
+            with patch.object(production, 'fresh_production_authority', return_value=fresh), \
+                 patch.object(production, 'aggregation_reservation', return_value=22000000000), \
+                 patch.object(production, 'reviewed_sm_storage_credit', return_value=(0, set(), {})):
+                with self.assertRaises(ValueError):
+                    production.reviewed_remaining_storage(config,
+                        dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
+
+    def test_reviewed_policy_cannot_lower_the_floor_or_omit_SM_raw_supply(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, authority, fresh = self.remaining_fixture(root)
+            for change in [dict(minimum_eos_free_bytes=1), dict(SM_registrations=authority['SM_registrations'][:1])]:
+                altered = dict(authority, **change)
+                config['reviewed_remaining_storage_authority'] = self.pin(root/'changed.json', altered)
+                with patch.object(production, 'fresh_production_authority', return_value=fresh), \
+                     patch.object(production, 'aggregation_reservation', return_value=22000000000):
+                    with self.assertRaises(ValueError):
+                        production.reviewed_remaining_storage(config,
+                            dict(observed_utc='2021-01-01T00:00:00+00:00'), {})
+
+    def SM_fixture(self, root):
+        science, peer = root/'science', root/'SM'
+        science.mkdir()
+        peer.mkdir()
+        work = peer/'jobs/one'
+        task = dict(cluster=22, directory=str(work), phase='done', kind='detector',
+            native_exit_code=0, finished_epoch=10, request_sha256='a'*64, result_sha256='b'*64)
+        row = dict(cluster=22, proc=0, iwd=str(work), finished_epoch=10,
+            request_sha256='a'*64, result_sha256='b'*64,
+            native_exit_event='005 (22.000.000) Job terminated.\nNormal termination (return value 0)',
+            objects=[dict(path='/eos/user/j/jniedzie/test/Nano.root', bytes=123, sha256='c'*64)])
+        authority = dict(account_owner='jniedzie', SM_configuration=self.pin(root/'SM_config.json',
+            dict(campaign_directory=str(peer), own_reservation_bytes=137000000000)),
+            SM_directory=str(peer), terminal_cache_directory=str(science/'cache'),
+            terminal_seed_parts=[self.pin(root/'seed.json', dict(producers=[row]))])
+        config = dict(directory=str(science), owner='jniedzie', condor_pool='collector',
+            reviewed_remaining_storage_authority=dict(sha256='fixture'))
+        production._REVIEWED_STORAGE_CACHES.clear()
+        return config, authority, task, row
+
+    def test_terminal_cache_reuses_proofs_and_rechecks_fresh_queue_every_poll(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, task, row = self.SM_fixture(Path(temporary))
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch.object(production, 'committed_sm_storage_entry') as capture, \
+                 patch('shift_condor_native.query_account', return_value=[]) as queue:
+                for _ in range(2):
+                    self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100)[0], 123)
+                capture.assert_not_called()
+                self.assertEqual(queue.call_count, 2)
+
+    def test_live_cached_producer_and_unknown_queue_cannot_release_storage(self):
+        import shift_condor_native as native
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, task, row = self.SM_fixture(Path(temporary))
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch('shift_condor_native.query_account', return_value=[dict(ClusterId=22)]):
+                with self.assertRaisesRegex(RuntimeError, 'producer is live'):
+                    production.reviewed_sm_storage_credit(config, authority, 100)
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch('shift_condor_native.query_account', side_effect=native.NativeCondorError('unknown')):
+                with self.assertRaises(native.NativeCondorError):
+                    production.reviewed_sm_storage_credit(config, authority, 100)
+
+    def test_newly_done_but_still_queued_chunk_keeps_its_claim_without_poisoning_existing_credit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, task, row = self.SM_fixture(Path(temporary))
+            pending = dict(task, cluster=23, directory=str(Path(task['directory']).with_name('two')))
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task, two=pending))), \
+                 patch('shift_condor_native.query_account', return_value=[dict(ClusterId=23, JobStatus=4)]), \
+                 patch.object(production, 'committed_sm_storage_entry') as capture:
+                self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100)[0], 123)
+                capture.assert_not_called()
+
+    def test_identical_EOS_objects_are_credited_once_and_conflicts_reject(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config, authority, task, row = self.SM_fixture(root)
+            second_task = dict(task, cluster=23, directory=str(Path(task['directory']).with_name('two')))
+            second_row = dict(row, cluster=23, iwd=second_task['directory'],
+                native_exit_event='005 (23.000.000) Job terminated.\nNormal termination (return value 0)')
+            authority['terminal_seed_parts'] = [self.pin(root/'both.json', dict(producers=[row, second_row]))]
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task, two=second_task))), \
+                 patch('shift_condor_native.query_account', return_value=[]):
+                self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100)[0], 123)
+                production._REVIEWED_STORAGE_CACHES['fixture'][23]['objects'] = [dict(row['objects'][0], bytes=124)]
+                with self.assertRaisesRegex(ValueError, 'duplicate EOS'):
+                    production.reviewed_sm_storage_credit(config, authority, 100)
+
+    def test_new_chunk_is_captured_once_but_reserved_byte_fallback_is_never_credit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, task, row = self.SM_fixture(Path(temporary))
+            authority['terminal_seed_parts'] = []
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch.object(production, 'committed_sm_storage_entry', return_value=row) as capture, \
+                 patch('shift_condor_native.query_account', return_value=[]):
+                production.reviewed_sm_storage_credit(config, authority, 100)
+                production.reviewed_sm_storage_credit(config, authority, 100)
+                self.assertEqual(capture.call_count, 1)
+            production._REVIEWED_STORAGE_CACHES.clear()
+            authority['terminal_cache_directory'] = str(Path(config['directory'])/'other_cache')
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch.object(production, 'committed_sm_storage_entry', side_effect=ValueError('not verified')), \
+                 patch('shift_condor_native.query_account', return_value=[]):
+                self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100)[0], 0)
+
+
 class Admission(unittest.TestCase):
     def test_newer_worklists_keep_their_full_storage_claim(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1483,6 +1667,91 @@ class NativeHealth(unittest.TestCase):
              patch.object(production.durable,'run_condor',side_effect=RuntimeError('schedd unavailable')):
             with self.assertRaisesRegex(RuntimeError,'schedd unavailable'):
                 production.production_queue_snapshot(dict(directory='/production',batch_native_queries=True))
+
+
+
+class OperationalAdoption(unittest.TestCase):
+    def test_new_runtime_helpers_do_not_replace_scientific_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);science=root/'science';operations=root/'operations'
+            science.mkdir();operations.mkdir()
+            (science/'run_shift_gen_to_nano.py').write_text('original science')
+            (operations/'run_shift_gen_to_nano.py').write_text('unqualified replacement')
+            (operations/'dark_photon_runtime_recovery.py').write_text('new operational helper')
+            names={'run_shift_gen_to_nano.py','dark_photon_runtime_recovery.py'}
+            with patch.object(production,'__file__',str(operations/'run.py')):
+                rows=production.adoption_sources(dict(tools=str(science)),names,
+                    {'dark_photon_runtime_recovery.py'})
+            self.assertEqual(rows['run_shift_gen_to_nano.py']['frozen_copy'],str(science/'run_shift_gen_to_nano.py'))
+            self.assertEqual(rows['dark_photon_runtime_recovery.py']['frozen_copy'],str(operations/'dark_photon_runtime_recovery.py'))
+            self.assertEqual(rows['run_shift_gen_to_nano.py']['sha256'],production.durable.sha(science/'run_shift_gen_to_nano.py'))
+
+    def test_interrupted_adoption_keeps_its_pinned_operational_helper(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);old=root/'old.py';old.write_text('sealed helper')
+            previous=dict(frozen_dependencies=dict(sources={'old.py':dict(
+                frozen_copy=str(old),sha256=production.durable.sha(old))}))
+            with patch.object(production,'__file__',str(root/'new_owner/run.py')):
+                actual=production.adoption_sources(dict(tools='/unused'),{'old.py'},{'old.py'},previous)
+            self.assertEqual(actual,previous['frozen_dependencies']['sources'])
+            old.write_text('changed')
+            with self.assertRaisesRegex(ValueError,'Previously adopted'):
+                production.adoption_sources({}, {'old.py'}, {'old.py'}, previous)
+
+    def test_missing_operational_helper_stops_before_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            with patch.object(production,'__file__',str(Path(temporary)/'run.py')):
+                with self.assertRaises(FileNotFoundError):
+                    production.adoption_sources(dict(tools='/unused'),{'missing.py'},{'missing.py'})
+
+    def reviewed_owner(self,root):
+        science=root/'science';(science/'batches/a').mkdir(parents=True)
+        status=science/'batches/a/source_status.json';status.write_text('{}')
+        owners=[]
+        for name in ['old','new']:
+            owner=root/name;handoff=owner/'handoffs/a';handoff.mkdir(parents=True)
+            (handoff/'run.sh').write_text('sealed '+name)
+            (handoff/'worker.sub.in').write_text('seal=OPERATIONS_SEAL_DIGEST')
+            seal=owner/'seal.json';seal.write_text(json.dumps(dict(files={
+                str(p):production.durable.sha(p) for p in [handoff/'run.sh',handoff/'worker.sub.in']})))
+            (handoff/'worker.sub').write_text((handoff/'worker.sub.in').read_text().replace(
+                'OPERATIONS_SEAL_DIGEST',production.durable.sha(seal)))
+            owners.append(handoff)
+        old,new=owners;receipt=dict(cluster=17,task=str(old),submit_sha256=production.durable.sha(old/'worker.sub'))
+        (old/'submission.json').write_text(json.dumps(receipt))
+        proof=dict(schema='shift-meson-handoff-recovery-v1',original_submission=receipt,
+            original_handoff_directory=str(old),original_controller_seal=dict(path=str(root/'old/seal.json'),
+                sha256=production.durable.sha(root/'old/seal.json')),
+            source_status_sha256=production.durable.sha(status),gen_or_detector_rerun_allowed=False)
+        authority=root/'review.json';authority.write_text(json.dumps(proof));pin=dict(
+            path=str(authority),sha256=production.durable.sha(authority))
+        config=dict(directory=str(science),operational_handoffs=dict(directory=str(new.parent),
+            reviewed_failures=dict(a=pin)))
+        return config,old,new,receipt
+
+    def test_reviewed_operational_failure_uses_its_exact_old_owner(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config,old,new,receipt=self.reviewed_owner(Path(temporary))
+            with patch.object(production,'native_status',side_effect=production.MesonJobFailure('held',[])) as status:
+                self.assertEqual(production.handoff_directory(config,dict(batch='a')),new)
+                self.assertEqual(status.call_args.args[1],receipt)
+            with patch.object(production,'native_status',return_value='active'):
+                with self.assertRaisesRegex(RuntimeError,'preserve its owner'):
+                    production.handoff_directory(config,dict(batch='a'))
+            (old/'run.sh').write_text('changed')
+            with self.assertRaisesRegex(ValueError,'launcher changed'):
+                production.handoff_directory(config,dict(batch='a'))
+
+    def test_handoff_completion_archives_only_the_reviewed_preparation_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config,old,new,receipt=self.reviewed_owner(Path(temporary))
+            failure=dict(stage='detector_preparation',cluster=17,native_jobs=[dict(ClusterId=17,ProcId=0)])
+            unrelated=dict(stage='detector',cluster=99,native_jobs=[dict(ClusterId=99,ProcId=0)])
+            state=dict(failed_batches=dict(a=[failure,unrelated]));entry=dict(failure=failure)
+            production.reconcile_handoff_failure(config,state,dict(batch='a'),entry,dict(cluster=18,task=str(new)))
+            self.assertEqual(state['failed_batches']['a'],[unrelated])
+            self.assertEqual(state['resolved_failed_batches']['a'][0]['failure'],failure)
+            self.assertNotIn('failure',entry)
 
 
 if __name__=='__main__':

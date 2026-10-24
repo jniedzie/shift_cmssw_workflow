@@ -885,7 +885,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
                                    'historical_anchor_calibration', 'operational_stage_timeouts_seconds',
                                    'reviewed_regrouping_canary_recovery', 'future_detector_runtime',
-                                   'reviewed_runtime_recovery'}:
+                                   'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1244,6 +1244,27 @@ def qualify_gen_source(config, batch):
     return proof
 
 
+def adoption_sources(config, names, operational_names, previous=None):
+    """Keep scientific sources original and freeze orchestration from this owner.
+
+    An interrupted handoff keeps its already pinned operational helpers, even
+    when a later controller resumes it from another sealed directory.
+    """
+    frozen = {}
+    old = (previous or {}).get('frozen_dependencies', {}).get('sources', {})
+    for name in sorted(names):
+        if name in operational_names and name in old:
+            item = old[name]
+            path = Path(item['frozen_copy'])
+            if not path.is_absolute() or path.name != name or durable.sha(path) != item['sha256']:
+                raise ValueError('Previously adopted operational helper changed: '+name)
+            frozen[name] = copy.deepcopy(item)
+            continue
+        source = (Path(__file__).resolve().parent if name in operational_names else Path(config['tools']))/name
+        frozen[name] = dict(frozen_copy=str(source), sha256=durable.sha(source))
+    return frozen
+
+
 def adopt(config, batch):
     import prepare_dark_photon_grid as grid
     directory = batch_directory(config, batch)
@@ -1274,14 +1295,15 @@ def adopt(config, batch):
     from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
     from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
     sources=set(grid.SOURCES)|set(MESON_SOURCES)|set(MATERIAL_SOURCES)
-    plan['frozen_dependencies'] = dict(sources={name: dict(frozen_copy=str(Path(config['tools'])/name),
-        sha256=durable.sha(Path(config['tools'])/name)) for name in sorted(sources)},
+    preparation = directory / 'preparation.json'
+    previous = read(preparation) if preparation.exists() else None
+    plan['frozen_dependencies'] = dict(sources=adoption_sources(
+        config,sources,set(grid.RUNTIME_HELPER_SOURCES),previous),
         templates={name:dict(frozen_copy=str(path),sha256=durable.sha(path))
             for path in sorted((Path(config['directory'])/'templates').glob('step*.py')) for name in [path.name]})
     # Generic downstream workers consume the real audited GEN source directly.
     row = plan['points'][0]
     row['gen_argv'] = ['python3', str(Path(config.get('physics_tools',config['tools']))/'run_dark_photon_meson_gen.py')]
-    preparation = directory / 'preparation.json'
     if preparation.exists():
         if read(preparation) != plan:
             raise ValueError('An earlier post-GEN detector adoption differs')
@@ -1432,6 +1454,7 @@ transfer_output_files = ""
 request_cpus = 1
 request_memory = 3000MB
 request_disk = 4000MB
+priority = 1000000
 +JobFlavour = "tomorrow"
 +MaxRuntime = 86400
 +SendCredential = True
@@ -1468,9 +1491,26 @@ def handoff_directory(config, batch, queue_snapshot=None):
             raise ValueError('Operational handoff launcher changed after freezing')
     if (directory/'worker.sub').read_text() != (directory/'worker.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST',seal_digest):
         raise ValueError('Operational handoff differs from its sealed submit template')
+    authority=operational.get('reviewed_failures',{}).get(batch['batch'])
+    proof=read_pinned(authority) if authority is not None else None
+    if proof is not None and proof.get('original_handoff_directory') is not None:
+        original=Path(proof['original_handoff_directory'])
+        owner_seal=pinned_path(proof['original_controller_seal'])
+        if (not original.is_absolute() or original.resolve()!=original
+                or original.parent.name!='handoffs'
+                or owner_seal!=original.parents[1]/'seal.json'):
+            raise ValueError('Reviewed failed handoff is outside its sealed owner')
+        owner_files=read(owner_seal)['files']
+        for path in (original/'run.sh',original/'worker.sub.in'):
+            if owner_files.get(str(path))!=durable.sha(path):
+                raise ValueError('Reviewed failed handoff launcher changed')
+        if (original/'worker.sub').read_text()!=(original/'worker.sub.in').read_text().replace(
+                'OPERATIONS_SEAL_DIGEST',durable.sha(owner_seal)):
+            raise ValueError('Reviewed failed handoff submit description changed')
     if (original/'submission.json').exists():
         receipt = existing_receipt(original,original/'worker.sub')
-        proof = read_pinned(operational.get('reviewed_failures',{}).get(batch['batch'],{}))
+        if proof is None:
+            raise ValueError('Operational handoff requires its reviewed failed launch')
         if (proof.get('schema') != 'shift-meson-handoff-recovery-v1'
                 or proof.get('original_submission') != receipt
                 or proof.get('source_status_sha256') != durable.sha(batch_directory(config,batch)/'source_status.json')
@@ -1483,6 +1523,31 @@ def handoff_directory(config, batch, queue_snapshot=None):
         else:
             raise RuntimeError('Original handoff is active or successful; preserve its owner')
     return directory
+
+
+def reconcile_handoff_failure(config,state,batch,entry,receipt):
+    """Archive only the exact old preparation failure after its successor passes."""
+    pin=config.get('operational_handoffs',{}).get('reviewed_failures',{}).get(batch['batch'])
+    if pin is None:
+        return
+    proof=read_pinned(pin)
+    old=proof['original_submission']
+    if receipt['cluster']==old['cluster']:
+        return
+    failures=state.get('failed_batches',{}).get(batch['batch'],[])
+    for failure in list(failures):
+        if (failure.get('stage')!='detector_preparation' or failure.get('cluster')!=old['cluster']
+                or any(row.get('ClusterId')!=old['cluster'] or row.get('ProcId')!=0
+                       for row in failure.get('native_jobs',[]))):
+            continue
+        state.setdefault('resolved_failed_batches',{}).setdefault(batch['batch'],[]).append(
+            dict(failure=copy.deepcopy(failure),handoff_recovery=pin,
+                 replacement_submission=copy.deepcopy(receipt)))
+        failures.remove(failure)
+        if entry.get('failure')==failure:
+            entry.pop('failure')
+    if not failures:
+        state.get('failed_batches',{}).pop(batch['batch'],None)
 
 
 def parallel_handoff(config,state,batch,entry,queue_snapshot):
@@ -1500,6 +1565,7 @@ def parallel_handoff(config,state,batch,entry,queue_snapshot):
     if (not rates.is_file() or read(rates)!=dict(complete=True,
             production_plan_sha256=durable.sha(production/'plan.json'))):
         raise RuntimeError('Preparation worker exited without its complete rate export')
+    reconcile_handoff_failure(config,state,batch,entry,receipt)
     if batch['batch'] in config.get('reviewed_detector_recoveries',{}):
         detector=reviewed_detector_recovery(config,batch,detector,
                                            config['reviewed_detector_recoveries'][batch['batch']])
@@ -1796,6 +1862,214 @@ def point_grouping_readiness(config):
     return result
 
 
+_REVIEWED_STORAGE_CACHES = {}
+
+
+def storage_ledger(path):
+    """The live SM ledger can exceed a single reliable AFS read."""
+    with Path(path).open('rb') as stream:
+        return json.loads(b''.join(iter(lambda: stream.read(65536), b'')))
+
+
+def committed_sm_storage_entry(task, directory):
+    """Capture immutable successful chunk evidence, never a reserved-byte charge."""
+    root = Path(directory)
+    work = Path(task['directory'])
+    if not work.is_relative_to(root) or task.get('phase') != 'done' or task.get('native_exit_code') != 0:
+        raise ValueError('SM storage credit lacks a closed native producer')
+    request, result, status = work/'request.json', work/'result.json', work/'status.json'
+    if durable.sha(request) != task['request_sha256'] or durable.sha(result) != task['result_sha256']:
+        raise ValueError('SM committed request or result changed')
+    evidence, returned = read(result), read(status)
+    if (evidence.get('complete') is not True or evidence.get('exit_code') != 0
+            or evidence.get('request_sha256') != task['request_sha256']
+            or returned.get('complete') is not True or returned.get('exit_code') != 0):
+        raise ValueError('SM storage credit lacks successful returned receipts')
+    blocks = (work/'events.log').read_text().split('\n...\n')[:-1]
+    terminal = next((block for block in reversed(blocks)
+        if re.match(r'005 \('+str(task['cluster'])+r'\.000\.', block)), None)
+    if terminal is None or 'Normal termination (return value 0)' not in terminal:
+        raise ValueError('SM storage credit lacks its exact native zero-exit event')
+    objects = {}
+    for name in ('raw_publications', 'publications', 'prepared_publications'):
+        for item in evidence.get(name, []):
+            if item.get('independent_sha256_readback') is True:
+                value = {key: item[key] for key in ('path', 'bytes', 'sha256')}
+                old = objects.setdefault(value['path'], value)
+                if old != value:
+                    raise ValueError('One SM output has inconsistent committed identities')
+    if (type(evidence.get('nano_bytes')) is int and evidence.get('nano_bytes', 0) > 0
+            and evidence.get('nano_sha256') == evidence.get('nano_readback_sha256')):
+        value = dict(path=evidence['nano_path'], bytes=evidence['nano_bytes'], sha256=evidence['nano_sha256'])
+        old = objects.setdefault(value['path'], value)
+        if old != value:
+            raise ValueError('One SM Nano has inconsistent committed identities')
+    return dict(cluster=task['cluster'], proc=0, iwd=str(work),
+        request_sha256=task['request_sha256'], result_sha256=task['result_sha256'],
+        finished_epoch=task['finished_epoch'], native_exit_event=terminal,
+        objects=list(objects.values()))
+
+
+def reviewed_sm_storage_credit(config, authority, observed):
+    """Reuse terminal proofs; inspect only newly closed chunks on later polls."""
+    import shift_condor_native as native
+    peer = read_pinned(authority['SM_configuration'])
+    directory = Path(authority['SM_directory'])
+    if peer.get('campaign_directory') != str(directory) or peer.get('own_reservation_bytes') != 137000000000:
+        raise ValueError('Reviewed SM budget or producer directory changed')
+    if authority.get('SM_active_supervisor_path'):
+        active = read(authority['SM_active_supervisor_path'])
+        if (active.get('directory') != str(Path(authority['SM_configuration']['path']).parent)
+                or active.get('config_sha256') != authority['SM_configuration']['sha256']):
+            raise RuntimeError('SM supervisor changed; review its protected storage before new admission')
+    cache_key = config['reviewed_remaining_storage_authority']['sha256']
+    records = _REVIEWED_STORAGE_CACHES.get(cache_key)
+    cache = Path(authority['terminal_cache_directory'])
+    if not cache.is_absolute() or not cache.is_relative_to(Path(config['directory'])):
+        raise ValueError('Storage terminal cache must have its persistent science directory')
+    if records is None:
+        records = {}
+        for pin in authority.get('terminal_seed_parts', []):
+            for row in read_pinned(pin)['producers']:
+                if row['cluster'] in records:
+                    raise ValueError('SM storage seed repeats a producer')
+                records[row['cluster']] = row
+        if cache.is_dir():
+            for path in cache.glob('*.json'):
+                saved = read(path)
+                row = saved['producer']
+                checksum = hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest()
+                if saved.get('sha256') != checksum:
+                    raise ValueError('Immutable SM storage terminal cache checksum differs')
+                old = records.setdefault(row['cluster'], row)
+                if old != row:
+                    raise ValueError('Immutable SM storage terminal cache differs')
+        _REVIEWED_STORAGE_CACHES[cache_key] = records
+    # A newly completed ad may briefly remain in the queue. Retain that chunk's
+    # claim without discarding independently closed chunks' existing credit.
+    live = native.query_account(authority['account_owner'], 'true', ['ClusterId', 'ProcId', 'Iwd'],
+                                pool=config['condor_pool'], timeout=45)
+    live_ids = {row['ClusterId'] for row in live}
+    ledger = storage_ledger(directory/'ledger.json')
+    completed_rows = [task for task in ledger['tasks'].values()
+        if task.get('phase') == 'done' and task.get('native_exit_code') == 0
+        and task.get('kind') in ('source', 'raw_source', 'detector')
+        and task.get('finished_epoch', float('inf')) <= observed]
+    completed = {task['cluster']: task for task in completed_rows}
+    if len(completed) != len(completed_rows):
+        raise ValueError('SM ledger repeats a completed native producer')
+    for cluster, task in completed.items():
+        if cluster not in records and cluster not in live_ids:
+            try:
+                row = committed_sm_storage_entry(task, directory)
+            except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                # This chunk retains its future claim. Other exact terminal
+                # proofs can still release their independently committed bytes.
+                continue
+            cache.mkdir(exist_ok=True)
+            path = cache/(str(cluster)+'.json')
+            saved = dict(producer=row, sha256=hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest())
+            if path.exists():
+                if read(path) != saved:
+                    raise ValueError('Preserve changed SM storage terminal evidence')
+            else:
+                durable.save(path, saved)
+            records[cluster] = row
+    objects = {}
+    for cluster, row in records.items():
+        task = completed.get(cluster)
+        if task is None or cluster in live_ids:
+            raise RuntimeError('Credited SM producer is live or no longer verified complete')
+        if (row.get('proc') != 0 or row.get('iwd') != task['directory']
+                or not Path(row['iwd']).is_relative_to(directory)
+                or row.get('request_sha256') != task['request_sha256']
+                or row.get('result_sha256') != task['result_sha256']
+                or row.get('finished_epoch') != task['finished_epoch']
+                or not re.match(r'005 \('+str(cluster)+r'\.000\.', row.get('native_exit_event', ''))
+                or 'Normal termination (return value 0)' not in row['native_exit_event']):
+            raise ValueError('Cached SM storage proof lost its native identity')
+        for item in row['objects']:
+            if (not item['path'].startswith('/eos/user/j/jniedzie/')
+                    or '..' in Path(item['path']).parts or type(item['bytes']) is not int or item['bytes'] < 0
+                    or not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])):
+                raise ValueError('Invalid committed EOS object')
+            old = objects.setdefault(item['path'], item)
+            if old != item:
+                raise ValueError('Conflicting duplicate EOS storage credit')
+    amount = sum(row['bytes'] for row in objects.values())
+    if amount > peer['own_reservation_bytes']:
+        raise ValueError('Committed SM objects exceed their registered budget')
+    return amount, live_ids, dict(producers=len(records), unique_objects=len(objects), committed_bytes=amount)
+
+
+def reviewed_remaining_storage(config, observation, state):
+    """Count remaining writes of a closed GEN census; quota already paid for GEN."""
+    authority = read_pinned(config['reviewed_remaining_storage_authority'])
+    fresh = fresh_production_authority(config)
+    original = Path(config['directory'])/'config.json'
+    if (authority.get('schema') != 'shift-dp-reviewed-remaining-storage-v1'
+            or authority.get('science_configuration') != dict(path=str(original), sha256=durable.sha(original))
+            or authority.get('original_storage_registration') != fresh['authority']['storage_registration']
+            or authority.get('minimum_eos_free_bytes') != config['minimum_eos_free_bytes']
+            or authority.get('aggregate_storage_reservation_bytes') != aggregation_reservation(config)
+            or authority.get('bytes_per_selected_event') != 326000
+            or authority.get('fixed_bytes_per_batch') != 5000000):
+        raise ValueError('Reviewed remaining storage changed its frozen science or safety margins')
+    registrations = [read_pinned(pin) for pin in authority['SM_registrations']]
+    if (len(registrations) != 2
+            or sorted(row['new_SM_reservation_bytes'] for row in registrations) != [62000000000, 75000000000]
+            or max(row.get('total_SM_reservation_bytes', 0) for row in registrations) != 137000000000):
+        raise ValueError('Reviewed storage must protect both registered SM allocations')
+    peer_claims = {row['name']: row['reserved_bytes'] for row in fresh['storage_registration']['peer_reservations']}
+    if peer_claims != dict(SM_weekend=75000000000, direct_DY_weekend=30000000000,
+                           prior_SM_parent_protection=6144000000):
+        raise ValueError('Reviewed storage changed the original protected peer budgets')
+    observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
+    committed, live_ids, detail = reviewed_sm_storage_credit(config, authority, observed)
+    census = read_pinned(authority['source_census'])
+    batches = {row['batch']: row for row in config['batches']}
+    if set(census['batches']) != set(batches):
+        raise ValueError('Remaining storage census must cover every frozen GEN cohort')
+    future = full_gen = selected_bound = completed_selected = 0
+    for name, row in census['batches'].items():
+        batch = batches[name]
+        source = read_pinned(row['source_status'])
+        receipt = read_pinned(row['source_submission'])
+        if (source.get('complete') is not True or source.get('batch') != name
+                or source.get('point') != batch['point'] or source.get('source_collisions') != batch['source_collisions']
+                or type(source.get('events')) is not int or source['events'] < 0
+                or receipt['cluster'] in live_ids
+                or receipt.get('task') != str(batch_directory(config, batch))
+                or datetime.fromisoformat(source['finished_utc']).timestamp() > observed):
+            raise ValueError('Closed GEN storage census lost its exact source identity')
+        full_gen += source['events']
+        bound = source['events']
+        if row.get('material_source'):
+            descriptor = read_pinned(row['material_source'])
+            indices = descriptor['selected_indices']
+            if (descriptor.get('gen_sha256') != source['parent']['gen_sha256']
+                    or len(indices) != len(set(indices)) or any(type(i) is not int or not 0 <= i < bound for i in indices)):
+                raise ValueError('Frozen material selection differs from its original GEN')
+            bound = len(indices)
+        if batch.get('gen_qualification_only') or state.get('batches', {}).get(name, {}).get('published'):
+            continue
+        production = batch_directory(config, batch)/'production'
+        processed = 0
+        if durable.closed_primitive(production, batch['point'], source['events'], observed):
+            processed = read(production/'completed_points'/(batch['point']+'.json'))['events']
+            if type(processed) is not int or not 0 <= processed <= bound:
+                raise ValueError('Completed Nano exceeds its frozen selection bound')
+        selected_bound += bound
+        completed_selected += processed
+        future += 5000000+(bound-processed)*326000
+    # Direct DY and the old parent stay fully protected. Only verified SM writes release a claim.
+    reservation = 137000000000+peer_claims['direct_DY_weekend']+peer_claims['prior_SM_parent_protection']-committed
+    return reservation, future, dict(full_gen_events=full_gen, selected_event_upper_bound=selected_bound,
+        completed_selected_events=completed_selected, remaining_own_bytes=future,
+        protected_SM_full_bytes=137000000000, protected_direct_bytes=30000000000,
+        SM_committed=detail, no_GEN_or_ledger_future_writes=True)
+
+
 def storage_gate(config, observation, bulk=False, state=None):
     reservation = adaptive_reservation(config)
     additional = 500000000 if not bulk else None
@@ -1820,6 +2094,13 @@ def storage_gate(config, observation, bulk=False, state=None):
             raise ValueError('Bulk storage forecast does not cover every fixed source batch')
         published=(state or {}).get('batches',{})
         additional=sum(value for batch,value in forecasts.items() if not published.get(batch,{}).get('published'))
+    accounting = None
+    if bulk and config.get('reviewed_remaining_storage_authority'):
+        import shift_condor_native as native
+        try:
+            reservation, additional, accounting = reviewed_remaining_storage(config, observation, state or {})
+        except (OSError, native.NativeCondorError) as error:
+            return False, dict(reason='waiting_for_verified_remaining_storage', native_or_storage_error=repr(error))
     reserved, claims = additional_reservations(config)
     regrouping=aggregation_reservation(config)
     required = config['minimum_eos_free_bytes'] + reservation + additional + reserved + regrouping
@@ -1827,7 +2108,8 @@ def storage_gate(config, observation, bulk=False, state=None):
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
         meson_forecast_bytes=additional, additional_reserved_bytes=reserved,
         aggregate_storage_reservation_bytes=regrouping,
-        additional_reserved_worklists=claims, required_free_bytes=required)
+        additional_reserved_worklists=claims, required_free_bytes=required,
+        **({'reviewed_remaining_storage': accounting} if accounting is not None else {}))
 
 
 def poll_storage_gate(config, state, decisions, bulk):
@@ -2719,7 +3001,7 @@ def main():
                 state=step(config,state)
             except Exception as error:
                 state.update(error=repr(error),checked_utc=datetime.now(timezone.utc).isoformat())
-            durable.save(path,state)
+            durable.persist_controller_state(path,state)
             if args.once or state.get('complete'):
                 return
             time.sleep(60)

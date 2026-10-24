@@ -3179,3 +3179,20 @@ worker. A real scheduler canary must inject interrupted preparation, reuse its
 exact task and complete exactly one credentialed quota worker before deployment.
 Keep existing frozen jobs byte-identical and switch supervisors at a verified
 checkpoint; do not automatically release or duplicate held workers.
+
+### Frozen BSM handoff dependencies
+
+A controller replacement keeps the original scientific helpers, GEN, material
+selection, seeds and weights. New orchestration helpers come from that sealed
+operational controller, not from the older science directory. An interrupted
+adoption reuses its already pinned operational helper paths and hashes; changing
+controllers must not silently rewrite an existing detector preparation.
+
+The ordinary detector preparer copies its runtime manifest into
+`production/frozen/`. A future-runtime gate must accept that exact sealed copy
+when its SHA and every other runtime field match the qualified profile. A
+changed manifest, runtime, or arbitrary relocated path must still fail.
+Exercise the actual saved cohort through adoption, preparation, full-GEN
+converter checking, detector-DAG submission and rate export before handing
+production to a new controller. Imports and synthetic profile fixtures alone
+missed both boundaries during the October 24 repair.
