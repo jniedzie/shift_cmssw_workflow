@@ -2233,9 +2233,10 @@ def reviewed_sm_storage_credit(config, authority, observed, persist_terminal_cac
         _REVIEWED_STORAGE_CACHES[cache_key] = records
     # A newly completed ad may briefly remain in the queue. Retain that chunk's
     # claim without discarding independently closed chunks' existing credit.
-    live = native.query_account(authority['account_owner'], 'true', ['ClusterId', 'ProcId', 'Iwd'],
+    live = native.query_account(authority['account_owner'], 'true', ['ClusterId', 'ProcId', 'Iwd', 'DAGManJobId'],
                                 pool=config['condor_pool'], timeout=45)
     live_ids = {row['ClusterId'] for row in live}
+    live_ids.update(row['DAGManJobId'] for row in live if type(row.get('DAGManJobId')) is int)
     ledger = storage_ledger(directory/'ledger.json')
     completed_rows = [task for task in ledger['tasks'].values()
         if task.get('phase') == 'done' and task.get('native_exit_code') == 0
@@ -2292,6 +2293,46 @@ def reviewed_sm_storage_credit(config, authority, observed, persist_terminal_cac
     if amount > peer['own_reservation_bytes']:
         raise ValueError('Committed SM objects exceed their registered budget')
     return amount, live_ids, dict(producers=len(records), unique_objects=len(objects), committed_bytes=amount)
+
+
+def committed_direct_gen_credit(authority, live_ids):
+    """Release only already-paid, immutable GEN bytes from the direct budget."""
+    pin=authority.get('committed_direct_GEN')
+    if pin is None:
+        return 0
+    evidence=storage_pinned_read(pin)
+    if (evidence.get('schema')!='shift-committed-direct-GEN-storage-v1'
+            or evidence.get('storage_registration')!=authority['original_storage_registration']
+            or evidence.get('reserved_bytes')!=30000000000
+            or not evidence.get('gen_managers') or set(evidence['gen_managers']) & live_ids):
+        raise ValueError('Direct GEN storage credit lost its closed registered producers')
+    objects={}
+    for row in evidence['objects']:
+        plan=storage_pinned_read(row['plan']);seal=storage_pinned_read(row['seal'])
+        manifest=storage_pinned_read(row['manifest']);status=storage_pinned_read(row['status'])
+        receipt=storage_pinned_read(row['gen_submission'])
+        points=[p for p in plan['points'] if p['point']==row['point']]
+        item=row['publication'];path=Path(item['path']);actual=path.stat()
+        if (len(points)!=1 or points[0]['gen_remote_path']!=str(path)
+                or seal['files'].get(row['plan']['path'])!=row['plan']['sha256']
+                or seal['files'].get(row['manifest']['path'])!=row['manifest']['sha256']
+                or receipt['cluster'] not in evidence['gen_managers']
+                or status.get('complete') is not True or status.get('publication')!=item
+                or status['parent']['events']!=points[0]['full_gen_events']
+                or status['parent']['manifest_sha256']!=row['manifest']['sha256']
+                or not path.is_relative_to(Path('/eos/user/j/jniedzie/shift_cmssw'))
+                or '..' in path.parts or path.name!='gen.root'
+                or item['sha256']!=item['readback_sha256']
+                or item['sha256']!=row['independent_sha256_readback']
+                or item['sha256']!=manifest['output_sha256']
+                or actual.st_size!=item['bytes'] or actual.st_mtime_ns!=row['eos_mtime_ns']
+                or str(path) in objects):
+            raise ValueError('Direct GEN storage credit changed its exact published object')
+        objects[str(path)]=item['bytes']
+    amount=sum(objects.values())
+    if amount!=evidence['total_bytes'] or not 0<amount<=evidence['reserved_bytes']:
+        raise ValueError('Direct GEN storage credit exceeds its original reservation')
+    return amount
 
 
 def reviewed_remaining_storage(config, observation, state, persist_terminal_cache=True):
@@ -2356,11 +2397,13 @@ def reviewed_remaining_storage(config, observation, state, persist_terminal_cach
         selected_bound += bound
         completed_selected += processed
         future += 5000000+(bound-processed)*326000
-    # Direct DY and the old parent stay fully protected. Only verified SM writes release a claim.
-    reservation = 137000000000+peer_claims['direct_DY_weekend']+peer_claims['prior_SM_parent_protection']-committed
+    direct_committed=committed_direct_gen_credit(authority,live_ids)
+    reservation = (137000000000+peer_claims['direct_DY_weekend']+
+                   peer_claims['prior_SM_parent_protection']-committed-direct_committed)
     return reservation, future, dict(full_gen_events=full_gen, selected_event_upper_bound=selected_bound,
         completed_selected_events=completed_selected, remaining_own_bytes=future,
         protected_SM_full_bytes=137000000000, protected_direct_bytes=30000000000,
+        direct_GEN_committed_bytes=direct_committed,
         SM_committed=detail, no_GEN_or_ledger_future_writes=True)
 
 
