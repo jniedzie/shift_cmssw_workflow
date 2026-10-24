@@ -1,6 +1,7 @@
 # Code style: AI-code. AI-generated checks for bounded native runtime recovery.
 import importlib.util
 import io
+import errno
 import json
 from pathlib import Path
 import sys
@@ -26,7 +27,7 @@ class RuntimeRecoveryController(unittest.TestCase):
         for name in ('statuses','failures','frozen'):(self.production/name).mkdir()
         self.point='m2_prompt'
         self.status=self.production/'statuses/m2_prompt_000.json'
-        self.chunk=dict(chunk=0,skip=0,count=2,nano='/eos/user/a/c/nanoAOD/chunk_000.root',
+        self.chunk=dict(chunk=0,skip=0,count=2,job=6508705,nano='/eos/user/a/c/nanoAOD/chunk_000.root',
                         metadata='/eos/user/a/c/metadata/chunk_000')
         self.old='a'*64
         profile=self.production/'frozen/detector_runtime.json'
@@ -215,6 +216,141 @@ class RuntimeRecoveryController(unittest.TestCase):
         self.assertEqual(state['attempts']['123']['phase'],'preparation_failed')
         self.assertTrue(self.status.exists())
         self.assertIn('review',state['error'])
+
+    def test_shared_storage_reads_survive_prolonged_outage_but_permission_errors_are_fatal(self):
+        timeout=TimeoutError(errno.ETIMEDOUT,'AFS timed out')
+        with patch.object(recovery,'original_read',side_effect=[timeout]*5+[{'complete':True}]) as read,patch.object(recovery.time,'sleep'):
+            self.assertEqual(recovery.read(self.status),{'complete':True})
+        self.assertEqual(read.call_count,6)
+        with patch.object(recovery,'original_read',side_effect=PermissionError(errno.EACCES,'denied')),patch.object(recovery.time,'sleep') as wait:
+            with self.assertRaises(PermissionError):recovery.read(self.status)
+        wait.assert_not_called()
+
+    def test_final_save_outage_cannot_repeat_a_release_or_restore_an_older_snapshot(self):
+        attempt=self.attempt();state=dict(attempts={'123':attempt});row=dict(self.row);calls=[];failures=[5]
+        actual_save=statistics.save
+        def save(path,value):
+            if value['attempts']['123']['phase']=='released' and failures[0]:
+                failures[0]-=1
+                raise TimeoutError(errno.ETIMEDOUT,'AFS timed out after native release')
+            actual_save(path,value)
+        def native(config,cluster):return dict(ClusterId=100,JobStatus=2) if cluster==100 else dict(row)
+        def command(config,exe,args):
+            calls.append(exe)
+            if exe=='condor_qedit' and args[0]!='-dry-run':
+                for key,value in zip(args[1::2],args[2::2]):row[key]=json.loads(value)
+            return 'single native action'
+        with patch.object(recovery,'exact_job',side_effect=native),patch.object(recovery,'verify_output_absence'), \
+             patch.object(recovery,'command',side_effect=command),patch.object(statistics,'save',side_effect=save), \
+             patch.object(statistics.time,'sleep'):
+            recovery.recover(self.config,state,123)
+        self.assertEqual(calls.count('condor_release'),1);self.assertEqual(failures[0],0)
+        self.assertEqual(json.loads((self.directory/'state.json').read_text())['attempts']['123']['phase'],'released')
+
+    def test_loop_reads_state_once_and_waits_for_saved_snapshot_before_the_next_poll(self):
+        state={'attempts':{},'heartbeat':0};(self.directory/'state.json').write_text(json.dumps(state))
+        actual_read=recovery.original_read;reads=[];polls=[];failures=[5];actual_save=statistics.save
+        class StopLoop(BaseException):pass
+        def read(path):reads.append(str(path));return actual_read(path)
+        def poll(config,value):
+            polls.append(value['heartbeat'])
+            if len(polls)==2:
+                self.assertEqual(value['heartbeat'],1)
+                self.assertEqual(json.loads((self.directory/'state.json').read_text())['heartbeat'],1)
+                raise StopLoop()
+            value['heartbeat']=1;return value
+        def save(path,value):
+            if failures[0]:failures[0]-=1;raise OSError(errno.ESTALE,'stale AFS handle')
+            actual_save(path,value)
+        with patch.object(recovery,'original_read',side_effect=read),patch.object(recovery,'poll',side_effect=poll), \
+             patch.object(statistics,'save',side_effect=save),patch.object(recovery.time,'sleep'):
+            with self.assertRaises(StopLoop):recovery.controller_loop(self.config)
+        self.assertEqual(reads,[str(self.directory/'state.json')]);self.assertEqual(polls,[0,1])
+
+    def test_persisted_held_release_intent_never_issues_a_second_release(self):
+        attempt=self.attempt();attempt['phase']='release_intent'
+        with patch.object(recovery,'exact_job',return_value=self.row),patch.object(recovery,'command') as command:
+            with self.assertRaisesRegex(RuntimeError,'ambiguous'):recovery.recover(self.config,{'attempts':{'123':attempt}},123)
+        command.assert_not_called()
+
+
+    def timeout_authority(self):
+        import hashlib
+        error="TimeoutError('SIM made no event progress for 7200 seconds; records started=1')"
+        report=dict(current_tier='SIM',stage_records_started=1,validated_tier_events={'SIM':0},error=error)
+        text='Begin processing the first source event; ended by the saved progress guard'
+        archive=self.production/'failures/old.tar.gz'
+        with tarfile.open(archive,'w:gz') as source:
+            for name,value in [('report.json',json.dumps(report)),('step1.log',text)]:
+                payload=value.encode();item=tarfile.TarInfo(self.point+'_000/detector/'+name);item.size=len(payload);source.addfile(item,io.BytesIO(payload))
+        cases=[];jobs=[]
+        for variant,cluster in [('original',321),('v3',322)]:
+            directory=self.root/variant;directory.mkdir();path=directory/'receipt.json';path.write_text('{"complete":true}')
+            cases.append(dict(path=str(path),sha256=recovery.sha(path)))
+            jobs.append(dict(ClusterId=cluster,ProcId=0,Iwd=str(directory),JobStatus=4,ExitCode=0,ExitBySignal=False))
+        native=self.root/'native.json';native.write_text(json.dumps(dict(complete=True,jobs=jobs)))
+        comparison=self.root/'comparison.json';comparison.write_text(json.dumps(dict(
+            schema='shift-same-seed-timeout-control-comparison-v1',complete=True,original_cluster=123,
+            job=self.chunk['job'],seed=230000000+100*self.chunk['job'],original_event_id=[1,1,1],
+            original_full_GEN_sha256='b'*64,mismatches=[],exact_original_GEN_selection_and_seed=True,
+            all_tiers_exact_identity=True,detector_electronics_unchanged=True,original_SIM_seconds=823.,v3_SIM_seconds=887.,receipts=cases)))
+        proof=dict(schema='shift-reviewed-same-seed-SIM-timeout-recovery-v1',complete=True,single_reviewed_retry=True,
+            original_cluster=123,production=str(self.production),point=self.point,chunk=0,
+            plan_sha256=recovery.sha(self.production/'plan.json'),seal_sha256=self.seal,gen_sha256='b'*64,
+            expected_event_ids=[[1,1,1],[1,1,3]],original_native=self.row,
+            failure_archive=dict(path=str(archive),sha256=recovery.sha(archive)),
+            failure_report_sha256=hashlib.sha256(json.dumps(report,sort_keys=True).encode()).hexdigest(),
+            failure_step1_log_sha256=hashlib.sha256(text.encode()).hexdigest(),retry_stage_timeouts_seconds=[43200,7200,14400,14400],
+            original_event_progress_guard_seconds=7200,timeout_cause_identified=False,
+            same_seed_comparison=dict(path=str(comparison),sha256=recovery.sha(comparison)),
+            native_test_completion=dict(path=str(native),sha256=recovery.sha(native)))
+        path=self.root/'timeout_authority.json';path.write_text(json.dumps(proof))
+        self.config['reviewed_timeout_recoveries']={'123':dict(path=str(path),sha256=recovery.sha(path))}
+        return path
+
+    def test_only_the_exact_pinned_same_seed_timeout_can_be_classified(self):
+        path=self.timeout_authority();review=recovery.inspect_failure(self.config,self.row)
+        self.assertEqual(review['failure_kind'],'reviewed_SIM_progress_timeout')
+        self.assertEqual(review['expected_event_ids'],[[1,1,1],[1,1,3]])
+        self.assertEqual(review['timeout_authority'],self.config['reviewed_timeout_recoveries']['123'])
+        del self.config['reviewed_timeout_recoveries']
+        with self.assertRaisesRegex(ValueError,'specifically qualified'):recovery.inspect_failure(self.config,self.row)
+
+    def test_timeout_review_rejects_changed_job_GEN_population_budget_or_failed_control(self):
+        for field,value in [('original_cluster',124),('gen_sha256','changed'),('expected_event_ids',[[1,1,1]]),
+                            ('retry_stage_timeouts_seconds',[21600,7200,14400,14400]),('single_reviewed_retry',False)]:
+            with self.subTest(field=field):
+                path=self.timeout_authority();proof=json.loads(path.read_text());proof[field]=value;path.write_text(json.dumps(proof))
+                self.config['reviewed_timeout_recoveries']['123']['sha256']=recovery.sha(path)
+                with self.assertRaises(ValueError):recovery.inspect_failure(self.config,self.row)
+                for variant in ('original','v3'):
+                    for child in (self.root/variant).iterdir():child.unlink()
+                    (self.root/variant).rmdir()
+
+    def test_pinned_complete_preflight_migrates_without_requerying_its_history(self):
+        import hashlib
+        profile=self.root/'replacement_profile.json';profile.write_text('{"runtime_sha256":"new"}')
+        auth=json.loads(self.authority.read_text());auth['new_profile']=dict(path=str(profile),sha256=recovery.sha(profile));self.authority.write_text(json.dumps(auth))
+        self.config['runtime_authorities'][self.old]['sha256']=recovery.sha(self.authority)
+        review=recovery.inspect_failure(self.config,self.row)
+        identity=hashlib.sha256((review['production']+auth['new_profile']['sha256']+':'+self.point).encode()).hexdigest()
+        old=self.root/'old_guard';directory=old/'preflights'/identity;directory.mkdir(parents=True)
+        result=directory/'receipt.json';result.write_text('{"complete":true}')
+        scan=dict(phase='complete',production=review['production'],profile=auth['new_profile'],point_scope=[self.point],directory=str(directory),
+            submission={'cluster':321},receipt=dict(path=str(result),sha256=recovery.sha(result)),native_terminal={'JobStatus':4})
+        original_state=self.root/'original_state.json';original_state.write_text(json.dumps(dict(preflights={identity:scan})))
+        old_config=self.root/'old_config.json';old_config.write_text(json.dumps(dict(directory=str(old))))
+        proof=self.root/'migration.json';proof.write_text(json.dumps(dict(schema='shift-reviewed-runtime-supervisor-migration-v1',
+            replacement_directory=str(self.directory),original_configuration=dict(path=str(old_config),sha256=recovery.sha(old_config)),
+            original_state_snapshot=dict(path=str(original_state),sha256=recovery.sha(original_state)))))
+        self.config['state_migration']=dict(path=str(proof),sha256=recovery.sha(proof))
+        state={'preflights':{identity:scan}}
+        with patch.object(recovery,'native',return_value=[]),patch.object(recovery,'command') as command:
+            self.assertEqual(recovery.production_preflight(self.config,state,review),scan['receipt'])
+        command.assert_not_called()
+        state['preflights'][identity]=dict(scan,submission={'cluster':999})
+        with self.assertRaisesRegex(ValueError,'migration'):recovery.production_preflight(self.config,state,review)
+
 
 
 if __name__=='__main__':unittest.main()

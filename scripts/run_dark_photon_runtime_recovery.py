@@ -7,6 +7,7 @@ the replacement worker reports its actual qualified runtime in every receipt.
 """
 import argparse
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
@@ -15,11 +16,12 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tarfile
 import time
 
 from shift_condor_native import query, run_condor, parse_ads
-from dark_photon_runtime_recovery import pinned, prepare_view, read, sha
+from dark_photon_runtime_recovery import pinned as original_pinned, prepare_view, read as original_read, sha as original_sha
 
 SCHEMA = 'shift-dp-runtime-recovery-controller-v1'
 SIGNATURE = 'Preassigned source is off shell beyond its event-scale numerical precision'
@@ -29,10 +31,32 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'Args', 
               'JobCurrentStartDate', 'NumShadowStarts', 'CompletionDate', 'ShiftNtupleProgressEpoch']
 
 
+def shared_io(operation, *arguments):
+    """Wait out only transient shared-storage errors without repeating native work."""
+    delay=5
+    while True:
+        for attempt in range(4):
+            try:
+                return operation(*arguments)
+            except OSError as error:
+                if error.errno not in (errno.ETIMEDOUT,errno.ESTALE,errno.EIO):
+                    raise
+                if attempt<3:
+                    time.sleep(attempt+1)
+                else:
+                    print('DP recovery is waiting for shared storage: '+repr(error),file=sys.stderr,flush=True)
+        time.sleep(delay)
+        delay=min(60,delay*2)
+
+
+def read(path):return shared_io(original_read,path)
+def sha(path):return shared_io(original_sha,path)
+def pinned(authority):return shared_io(original_pinned,authority)
+
+
 def save(path, value):
-    temporary = path.with_suffix(path.suffix + '.tmp')
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + '\n')
-    temporary.replace(path)
+    from run_dark_photon_statistics import persist_controller_state
+    persist_controller_state(Path(path),value)
 
 
 def now():
@@ -68,6 +92,57 @@ def validate_roots(config):
     if not roots or any(not p.is_absolute() or '..' in p.parts for p in roots):
         raise ValueError('Recovery requires explicit absolute production scopes')
     return roots
+
+
+def reviewed_timeout(config,row,production,point,index,expected,parent,chunk,archive,report,text):
+    """Accept one explicitly pinned timeout review; never classify timeouts generally."""
+    authority=config.get('reviewed_timeout_recoveries',{}).get(str(row['ClusterId']))
+    if authority is None:
+        raise ValueError('Failure is not the specifically qualified SIM precision exception')
+    proof=pinned(authority)
+    if (proof.get('schema')!='shift-reviewed-same-seed-SIM-timeout-recovery-v1'
+            or proof.get('complete') is not True or proof.get('single_reviewed_retry') is not True
+            or proof.get('original_cluster')!=row['ClusterId'] or proof.get('production')!=str(production)
+            or proof.get('point')!=point or proof.get('chunk')!=index
+            or proof.get('plan_sha256')!=sha(production/'plan.json')
+            or proof.get('seal_sha256')!=sha(production/'seal.json')
+            or proof.get('gen_sha256')!=parent['gen_sha256'] or proof.get('expected_event_ids')!=expected
+            or proof.get('failure_archive')!=dict(path=str(archive),sha256=sha(archive))
+            or proof.get('failure_report_sha256')!=hashlib.sha256(json.dumps(report,sort_keys=True).encode()).hexdigest()
+            or proof.get('failure_step1_log_sha256')!=hashlib.sha256(text.encode()).hexdigest()
+            or proof.get('retry_stage_timeouts_seconds')!=[43200,7200,14400,14400]
+            or proof.get('original_event_progress_guard_seconds')!=7200
+            or proof.get('timeout_cause_identified') is not False):
+        raise ValueError('SIM timeout lacks its exact reviewed failure/unchanged budget contract')
+    for key in ('ClusterId','ProcId','DAGManJobId','Iwd','Args','Cmd','Out','Err',
+                'NumJobStarts','JobCurrentStartDate','NumShadowStarts'):
+        if row.get(key)!=proof['original_native'].get(key):
+            raise ValueError('Reviewed timeout native identity changed: '+key)
+    if (report.get('error')!="TimeoutError('SIM made no event progress for 7200 seconds; records started=1')"
+            or report.get('current_tier')!='SIM' or report.get('stage_records_started')!=1
+            or report.get('validated_tier_events',{}).get('SIM')!=0 or SIGNATURE in text):
+        raise ValueError('Different timeout or native failure; no automatic retry')
+    comparison=pinned(proof['same_seed_comparison'])
+    if (comparison.get('schema')!='shift-same-seed-timeout-control-comparison-v1'
+            or comparison.get('complete') is not True or comparison.get('original_cluster')!=row['ClusterId']
+            or comparison.get('job')!=chunk['job'] or comparison.get('seed')!=230000000+100*chunk['job']
+            or comparison.get('original_event_id')!=expected[0]
+            or comparison.get('original_full_GEN_sha256')!=parent['gen_sha256']
+            or comparison.get('mismatches')!=[] or comparison.get('exact_original_GEN_selection_and_seed') is not True
+            or comparison.get('all_tiers_exact_identity') is not True or comparison.get('detector_electronics_unchanged') is not True
+            or any(not 0.<comparison.get(key,0.)<7200. for key in ('original_SIM_seconds','v3_SIM_seconds'))):
+        raise ValueError('SIM timeout requires exact successful same-seed valid-Nano controls')
+    native=pinned(proof['native_test_completion'])
+    cases=comparison['receipts']
+    if native.get('complete') is not True or len(native.get('jobs',[]))!=2 or len(cases)!=2:
+        raise ValueError('Timeout controls lack both native terminal proofs')
+    for case,job in zip(cases,native['jobs']):
+        result=pinned(case)
+        if (result.get('complete') is not True or job.get('Iwd')!=str(Path(case['path']).parent)
+                or job.get('JobStatus')!=4 or job.get('ExitCode')!=0 or job.get('ExitBySignal') is not False
+                or job.get('ProcId')!=0 or type(job.get('ClusterId')) is not int):
+            raise ValueError('A timeout qualification job is incomplete or changed')
+    return authority
 
 
 def inspect_failure(config, row):
@@ -130,9 +205,11 @@ def inspect_failure(config, row):
             return source.extractfile(item).read()
         report = json.loads(bounded(report_name))
         text = bounded(log_name).decode(errors='replace')
-    if (SIGNATURE not in text or report.get('current_tier') != 'SIM'
-            or not re.search(r"CalledProcessError\(66, \['cmsRun', .*step1_cfg[.]py'\]\)", report.get('error', ''))):
-        raise ValueError('Failure is not the specifically qualified SIM precision exception')
+    precision=(SIGNATURE in text and report.get('current_tier')=='SIM' and
+        re.search(r"CalledProcessError\(66, \['cmsRun', .*step1_cfg[.]py'\]\)",report.get('error','')))
+    timeout_authority=None
+    if not precision:
+        timeout_authority=reviewed_timeout(config,row,production,point,index,expected,parent,chunk,archive,report,text)
     runtime = plan['detector_runtime']['runtime_sha256']
     authority_pin = config['runtime_authorities'].get(runtime)
     if authority_pin is None:
@@ -151,6 +228,8 @@ def inspect_failure(config, row):
         expected_event_ids=expected, plan_sha256=sha(production/'plan.json'),
         seal_sha256=seal_digest, gen_sha256=parent['gen_sha256'], authority=authority_pin,
         runtime_sha256=runtime, original_native=row,
+        failure_kind='reviewed_SIM_progress_timeout' if timeout_authority else 'native_precision',
+        timeout_authority=timeout_authority,
         evidence_sha256={str(path):sha(path) for path in
             (status_path, archive, Path(row['Out']), Path(row['Err']), Path(row['Cmd']))},
         destinations=[chunk['nano'], chunk['metadata']+'/metadata.tar.gz', chunk['metadata']+'/complete.json'])
@@ -198,7 +277,16 @@ def production_preflight(config, state, review):
         raise ValueError('Preflight cache changed its physical point or qualified runtime')
     directory = Path(scan['directory'])
     if not directory.is_relative_to(root/'preflights'):
-        raise ValueError('Preflight cache moved outside its persistent recovery directory')
+        migration=pinned(config.get('state_migration',{}))
+        previous_config=pinned(migration['original_configuration'])
+        previous=pinned(migration['original_state_snapshot']).get('preflights',{}).get(identity)
+        if (migration.get('schema')!='shift-reviewed-runtime-supervisor-migration-v1'
+                or migration.get('replacement_directory')!=str(root) or previous is None
+                or not directory.is_relative_to(Path(previous_config['directory'])/'preflights')
+                or previous.get('phase')!='complete' or scan.get('phase')!='complete'
+                or any(scan.get(key)!=previous.get(key) for key in
+                    ('production','profile','point_scope','directory','submission','receipt','native_terminal','phase'))):
+            raise ValueError('Preflight cache moved outside its pinned reviewed migration')
     if scan['phase'] == 'preparation_intent':
         raise RuntimeError('Interrupted preflight preparation needs review: ' + str(directory))
     if scan['phase'] == 'complete':
@@ -291,7 +379,12 @@ def recover(config, state, cluster):
             save(root/'state.json', state)
             return
         raise RuntimeError('Job left its held state before the reviewed release')
-    if row.get('NumJobStarts') != attempt['review']['original_native']['NumJobStarts']:
+    if attempt['phase']=='release_intent':
+        raise RuntimeError('Held release intent is ambiguous; never issue a second release')
+    original=attempt['review']['original_native']
+    if (row.get('NumJobStarts') != original['NumJobStarts']
+            or any(key in original and row.get(key)!=original[key]
+                   for key in ('JobCurrentStartDate','NumShadowStarts'))):
         raise RuntimeError('A retry has already run; never release it again')
     parent = exact_job(config, row['DAGManJobId'])
     if parent['JobStatus'] != 2:
@@ -481,18 +574,23 @@ def main():
     root = Path(config['directory'])
     if not root.is_absolute() or str(root).startswith('/tmp/'):
         raise ValueError('Detached runtime recovery needs its persistent absolute directory')
-    os.chdir(root)
-    with (root/'controller.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    shared_io(os.chdir,root)
+    controller_loop(config,args.once)
+
+
+def controller_loop(config,once=False):
+    root=Path(config['directory'])
+    with shared_io(Path.open,root/'controller.lock','a') as lock:
+        shared_io(fcntl.flock,lock,fcntl.LOCK_EX | fcntl.LOCK_NB)
+        state = read(root/'state.json') if shared_io(Path.is_file,root/'state.json') else dict(attempts={})
         while True:
-            state = read(root/'state.json') if (root/'state.json').exists() else dict(attempts={})
             try:
                 state.pop('error', None)
                 state = poll(config, state)
             except Exception as error:
                 state.update(error=repr(error), checked_utc=now())
             save(root/'state.json', state)
-            if args.once or state.get('complete') is True:
+            if once or state.get('complete') is True:
                 print(json.dumps(state))
                 return
             time.sleep(config.get('poll_seconds', 120))
