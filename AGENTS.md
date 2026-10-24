@@ -185,10 +185,15 @@ the change.
   Resolve each point's CMSSW configuration in a fresh interpreter: imported
   producer objects can be mutated by the previous point. Test a multi-point
   cohort as well as a single-point canary before freezing the preparer.
+  Independent physical points may be qualified separately within a scheduling
+  wave, provided each admitted point covers its entire original GEN census.
 - Recover a qualified numerical failure once in its original DAG, keeping GEN,
   sampling, seeds, weights and exposure. Preserve the original failure and
   report the actual new runtime. Do not automatically release unknown errors,
   retry a failed recovery again, or overwrite partial canonical outputs.
+  Verify an actual native execute event or current-start timestamp after release;
+  `NumJobStarts` may lag and `JobStartDate` records the first start. Keep the
+  durable one-release state and exact new runtime/output proof as well.
 - Compare relocated GEN ledgers through the shared content helper; a scratch
   log path may change, its checksum and accounting may not. Test both single-
   and combined-source publication against the same canary protection floor.

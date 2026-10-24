@@ -25,7 +25,8 @@ SCHEMA = 'shift-dp-runtime-recovery-controller-v1'
 SIGNATURE = 'Preassigned source is off shell beyond its event-scale numerical precision'
 ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'Args', 'Cmd',
               'Out', 'Err', 'ExitCode', 'ExitBySignal', 'NumJobStarts', 'PeriodicRelease',
-              'TransferOutput', 'TransferOutputRemaps', 'TransferExecutable', 'JobStartDate']
+              'TransferOutput', 'TransferOutputRemaps', 'TransferExecutable', 'JobStartDate',
+              'JobCurrentStartDate', 'NumShadowStarts', 'CompletionDate', 'ShiftNtupleProgressEpoch']
 
 
 def save(path, value):
@@ -326,11 +327,32 @@ def recover(config, state, cluster):
             or checked.get('NumJobStarts') != attempt['review']['original_native']['NumJobStarts']
             or any(checked.get(k) != v for k,v in attempt['edits'].items())):
         raise RuntimeError('Native retry edit did not read back exactly')
-    attempt['phase'] = 'release_intent'
+    attempt.update(phase='release_intent', release_requested_utc=now())
     save(root/'state.json', state)
     attempt['release_output'] = command(config, 'condor_release', [str(cluster)+'.0'])
     attempt.update(phase='released', released_utc=now())
     save(root/'state.json', state)
+
+
+def retry_execution_seen(attempt, native_record):
+    """CERN may retain NumJobStarts when a held job is released.
+
+    The unique edited entry and receipt are checked by the caller. For an
+    unchanged counter, require a fresh execution timestamp, not the old start.
+    One controller release is enforced by the persisted phase, not this counter.
+    """
+    before = attempt['review']['original_native']['NumJobStarts']
+    after = native_record.get('NumJobStarts')
+    if type(after) is not int or after not in (before, before + 1):
+        return False
+    if after == before + 1:
+        return True
+    prepared = attempt.get('release_requested_utc', attempt.get('prepared_utc'))
+    if not prepared:
+        return False
+    epoch = datetime.datetime.fromisoformat(prepared).timestamp()
+    return any(type(native_record.get(key)) in (int, float) and native_record[key] > epoch
+               for key in ('JobCurrentStartDate', 'ShiftNtupleProgressEpoch'))
 
 
 def completed_attempt(attempt, native_record):
@@ -348,7 +370,7 @@ def completed_attempt(attempt, native_record):
             or status.get('events') != len(review['expected_event_ids'])
             or native_record.get('JobStatus') != 4 or native_record.get('ExitCode') != 0
             or native_record.get('ExitBySignal') is not False
-            or native_record.get('NumJobStarts') != review['original_native']['NumJobStarts'] + 1
+            or not retry_execution_seen(attempt, native_record)
             or any(native_record.get(k) != v for k,v in attempt['edits'].items())):
         raise ValueError('Completed retry lacks exact identities, actual runtime or successful native exit')
     same_original_job(native_record, attempt)
@@ -370,7 +392,7 @@ def reconcile_released(config, state, held_ids):
                 if any(row.get(k) != v for k,v in attempt['edits'].items()):
                     raise RuntimeError('Released job differs from its exact qualified native edit')
                 attempt.update(phase='released', queue_status=row['JobStatus'],
-                    actual_payload_started=row.get('NumJobStarts',0) > attempt['review']['original_native']['NumJobStarts'])
+                    actual_payload_started=retry_execution_seen(attempt, row))
                 continue
             if row is None:
                 text = command(config, 'condor_history', [key+'.0','-limit','1','-json',

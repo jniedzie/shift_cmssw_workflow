@@ -163,6 +163,10 @@ class RuntimeRecoveryController(unittest.TestCase):
         self.status.write_text(json.dumps(status))
         native=dict(self.row,**attempt['edits']);native.update(JobStatus=4,ExitCode=0,NumJobStarts=2)
         recovery.completed_attempt(attempt,native)
+        attempt['prepared_utc'] = '2026-10-24T12:00:00+00:00'
+        recovery.completed_attempt(attempt,dict(native,NumJobStarts=1,JobCurrentStartDate=1792843201))
+        with self.assertRaises(ValueError):
+            recovery.completed_attempt(attempt,dict(native,NumJobStarts=1,JobCurrentStartDate=1792843199))
         for key,value in [('NumJobStarts',3),('Cmd',self.row['Cmd']),('ExitCode',66),('Args','changed')]:
             with self.assertRaises((ValueError,RuntimeError)):
                 recovery.completed_attempt(attempt,dict(native,**{key:value}))
@@ -170,6 +174,18 @@ class RuntimeRecoveryController(unittest.TestCase):
         self.status.write_text(json.dumps(status))
         with self.assertRaisesRegex(ValueError,'actual runtime'):
             recovery.completed_attempt(attempt,native)
+
+    def test_held_release_can_keep_counter_but_requires_fresh_execution_evidence(self):
+        attempt = self.attempt()
+        attempt['release_requested_utc'] = '2026-10-24T12:00:00+00:00'
+        epoch = 1792843200
+        self.assertFalse(recovery.retry_execution_seen(attempt, self.row))
+        for field in ('JobCurrentStartDate', 'ShiftNtupleProgressEpoch'):
+            self.assertFalse(recovery.retry_execution_seen(attempt, dict(self.row, **{field: epoch-1})))
+            self.assertTrue(recovery.retry_execution_seen(attempt, dict(self.row, **{field: epoch+1})))
+        for count in (0, 3, True):
+            self.assertFalse(recovery.retry_execution_seen(attempt,
+                dict(self.row, NumJobStarts=count, ShiftNtupleProgressEpoch=epoch+1)))
 
     def test_interrupted_preflight_is_preserved_and_never_implicitly_resubmitted(self):
         profile=self.root/'candidate.json';profile.write_text('{}')
