@@ -17,6 +17,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sys
 import time
 
 from shift_condor_native import query, run_condor, parse_ads
@@ -28,12 +29,27 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'NumJobS
               'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu', 'Cmd']
 
 
+def retry_shared_storage(operation):
+    """Wait through transient AFS outages without losing monitor history."""
+    delay = 5
+    while True:
+        try:
+            return operation()
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT, errno.ESTALE, errno.EIO):
+                raise
+            print('Monitor is waiting for shared storage: ' + repr(error),
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(60, delay * 2)
+
+
 def read(path):
-    return json.loads(Path(path).read_text())
+    return json.loads(retry_shared_storage(lambda: Path(path).read_text()))
 
 
 def sha(path):
-    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    return hashlib.sha256(retry_shared_storage(lambda: Path(path).read_bytes())).hexdigest()
 
 
 def save(path, value):
@@ -163,12 +179,26 @@ def operational_recoveries(config):
         for batch,authority in operations.get('reviewed_failures',{}).items():
             proof=proof_at(authority)
             original=root/'batches'/batch/'handoff'
+            if proof.get('original_handoff_directory') is not None:
+                original=Path(proof['original_handoff_directory'])
+                owner_pin=proof['original_controller_seal']
+                owner=Path(owner_pin['path']).parent
+                files=proof_at(owner_pin)['files']
+                if (not original.is_absolute() or original.resolve()!=original
+                        or original!=owner/'handoffs'/batch):
+                    raise ValueError('Reviewed old handoff is outside its sealed operational owner')
+                for path in (original/'run.sh',original/'worker.sub.in'):
+                    if files.get(str(path))!=sha(path):
+                        raise ValueError('Reviewed old operational handoff launcher changed')
+                if ((original/'worker.sub').read_text()!=(original/'worker.sub.in').read_text().replace(
+                        'OPERATIONS_SEAL_DIGEST',owner_pin['sha256'])):
+                    raise ValueError('Reviewed old operational handoff submit changed')
             receipt=read(original/'submission.json')
             if (proof.get('schema') != 'shift-meson-handoff-recovery-v1'
                     or proof.get('original_submission') != receipt
                     or receipt.get('task') != str(original)
                     or proof.get('gen_or_detector_rerun_allowed') is not False
-                    or sha(original.parent/'source_status.json') != proof['source_status_sha256']
+                    or sha(root/'batches'/batch/'source_status.json') != proof['source_status_sha256']
                     or not Path(proof['failed_log']['path']).is_file()
                     or Path(proof['failed_log']['path']).parent != original):
                 raise ValueError('Meson handoff recovery changed its original failed source authority')
@@ -911,7 +941,7 @@ def main():
             except Exception as error:
                 report = unknown_report(previous, error)
                 snapshot = dict(error=repr(error))
-            record(config, previous, report, snapshot)
+            retry_shared_storage(lambda: record(config, previous, report, snapshot))
             if report['health'] != previous.get('health') or args.once:
                 print(json.dumps(dict(checked_utc=report['checked_utc'], health=report['health'],
                                       issues=report['issues'], actual_planned_progress=report.get('actual_planned_progress'))), flush=True)

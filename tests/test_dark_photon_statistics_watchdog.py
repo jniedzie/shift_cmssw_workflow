@@ -47,6 +47,46 @@ class StatisticsWatchdogTest(unittest.TestCase):
                     Iwd=kwargs.get('iwd', str(self.directory)), NumJobStarts=kwargs.get('starts', 0),
                     QDate=self.now - kwargs.get('age', 120))
 
+    def test_long_shared_storage_read_outage_keeps_the_verified_snapshot(self):
+        target = self.root / 'verified.json'
+        target.write_text('{"terminal_history": [123]}')
+        original = Path.read_text
+        failures = []
+
+        def transient(path, *args, **kwargs):
+            if path == target and len(failures) < 5:
+                failures.append(True)
+                raise OSError(errno.ETIMEDOUT, 'long AFS outage')
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, 'read_text', transient), patch.object(WATCH.time, 'sleep'), \
+                patch.object(WATCH.sys, 'stderr'):
+            self.assertEqual(WATCH.read(target), {'terminal_history': [123]})
+        self.assertEqual(len(failures), 5)
+
+    def test_retrying_record_does_not_repeat_scheduler_poll_or_discard_history(self):
+        report = {'terminal_history': [123]}
+        calls = []
+
+        def record():
+            calls.append(report)
+            if len(calls) < 6:
+                raise OSError(errno.ESTALE, 'AFS outage')
+            return report
+
+        with patch.object(WATCH.time, 'sleep'), patch.object(WATCH.sys, 'stderr'):
+            self.assertIs(WATCH.retry_shared_storage(record), report)
+        self.assertEqual(len(calls), 6)
+        self.assertTrue(all(value is report for value in calls))
+
+    def test_shared_storage_retry_does_not_hide_corrupt_or_unauthorized_state(self):
+        for error in (ValueError('changed identity'), PermissionError(errno.EACCES, 'denied'),
+                      OSError(errno.ENOSPC, 'quota')):
+            with self.subTest(error=error), patch.object(WATCH.time, 'sleep') as sleep:
+                with self.assertRaises(type(error)):
+                    WATCH.retry_shared_storage(lambda: (_ for _ in ()).throw(error))
+                sleep.assert_not_called()
+
     def test_first_minutes_in_queue_are_not_a_failure_or_execution_claim(self):
         report = self.assess([self.child()])
         self.assertEqual(report['health'], 'ok')
@@ -106,6 +146,31 @@ class StatisticsWatchdogTest(unittest.TestCase):
             self.assertTrue(any(x['code']=='reviewed_failure_active_999' for x in report['issues']))
         successful.write_text('{"complete":false}')
         with self.assertRaisesRegex(ValueError,'successful population'):WATCH.operational_recoveries(self.config)
+
+    def test_reviewed_failed_operational_handoff_keeps_its_sealed_old_identity(self):
+        batch='b000';science=self.root/'batches'/batch;science.mkdir(parents=True)
+        (science/'source_status.json').write_text('{"complete":true}')
+        owner=self.root/'old_controller';old=owner/'handoffs'/batch;old.mkdir(parents=True)
+        (old/'run.sh').write_text('original failed launcher')
+        (old/'worker.sub.in').write_text('seal=OPERATIONS_SEAL_DIGEST')
+        seal=owner/'seal.json';seal.write_text(json.dumps(dict(files={str(p):WATCH.sha(p)
+            for p in [old/'run.sh',old/'worker.sub.in']})))
+        (old/'worker.sub').write_text((old/'worker.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST',WATCH.sha(seal)))
+        receipt=dict(cluster=100,task=str(old),submit_sha256=WATCH.sha(old/'worker.sub'))
+        (old/'submission.json').write_text(json.dumps(receipt));(old/'failed.err').write_text('preserved failure')
+        review=self.root/'operational_review.json';review.write_text(json.dumps(dict(
+            schema='shift-meson-handoff-recovery-v1',original_handoff_directory=str(old),
+            original_controller_seal=dict(path=str(seal),sha256=WATCH.sha(seal)),
+            original_submission=receipt,gen_or_detector_rerun_allowed=False,
+            source_status_sha256=WATCH.sha(science/'source_status.json'),failed_log=dict(path=str(old/'failed.err')))))
+        self.config.update(operational_handoffs=dict(directory=str(self.root/'new_controller/handoffs'),
+            reviewed_failures={batch:dict(path=str(review),sha256=WATCH.sha(review))}),
+            dependencies={str(review):WATCH.sha(review),str(seal):WATCH.sha(seal)})
+        result=WATCH.operational_recoveries(self.config)[100]
+        self.assertEqual(result['original_directory'],str(old))
+        self.assertEqual(result['recovery_submission'],str(self.root/'new_controller/handoffs'/batch/'submission.json'))
+        (old/'run.sh').write_text('unreviewed replacement')
+        with self.assertRaisesRegex(ValueError,'launcher changed'):WATCH.operational_recoveries(self.config)
 
     def test_declared_meson_operational_handoff_is_discovered_with_exact_review(self):
         old=self.root/'batches/b000/handoff';old.mkdir(parents=True)
