@@ -1478,6 +1478,27 @@ def adopt_reviewed_detector_stages(config, state):
 
 def fresh_storage_admission(config, observation):
     """Protect all future DP exposure and credit only closed published batches."""
+    shared = config.get('fresh_shared_remaining_storage')
+    if shared is not None:
+        peer = pinned_json(shared['configuration'])
+        seal = pinned_json(shared['seal'])
+        if (seal['files'].get(shared['configuration']['path']) != shared['configuration']['sha256'] or
+                peer.get('reviewed_remaining_storage_authority') != shared['authority'] or
+                peer.get('eos_base') != config['eos_base'] or
+                peer.get('minimum_eos_free_files', 0) < config['minimum_free_files']):
+            raise ValueError('Shared remaining-storage gate differs from its sealed authority')
+        for pin in shared.values():
+            if config['dependencies'].get(pin['path']) != pin['sha256']:
+                raise ValueError('Shared remaining-storage authority is outside frozen dependencies')
+        # This whole-account claim already protects the complete direct30GB.
+        # Do not add our remaining source reservation a second time.
+        from run_dark_photon_meson_production import storage_gate
+        peer_state = read(Path(peer['directory']) / 'state.json')
+        allowed, evidence = storage_gate(peer, observation, bulk=True, state=peer_state,
+                                         persist_terminal_cache=False)
+        evidence = dict(evidence, shared_configuration=shared['configuration'])
+        evidence.setdefault('reason', 'reviewed_shared_remaining_storage')
+        return allowed, evidence
     allocation=read(config['worklist'])
     observed=datetime.fromisoformat(observation['observed_utc']).timestamp()
     own_total=allocation['total_additional_events']

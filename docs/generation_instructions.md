@@ -3125,6 +3125,11 @@ sizes plus a conservative native-receipt bound instead of the whole in-flight
 reservation. Their original trials/exposure remain in the source inventory.
 Unknown legacy output sizes still consume the conservative full reservation.
 
+Peer controllers must share accounting of remaining writes after GEN closes,
+protecting every SM allocation including raw GEN. Credit verified primitives
+without waiting for whole points; do not reserve their written GEN again.
+After a peer recipe changes, test actual admission from both direct and meson controllers.
+
 ### Million-event GEN supply and reviewed CPU recovery
 
 An optional `gen_supply` in the SM controller creates independent raw QCD GEN

@@ -104,6 +104,39 @@ class WorkerRedistribution(unittest.TestCase):
             with self.assertRaises(ValueError): preparer.detector_category_ceiling(args)
 
 
+class ReviewedSharedStorage(unittest.TestCase):
+    def test_direct_reuses_whole_account_bound_without_duplicate_claim_or_shared_cache_write(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            authority = root / 'authority.json'; controller.new(authority, {})
+            config_path = root / 'meson.json'
+            authority_pin = dict(path=str(authority), sha256=controller.sha(authority))
+            controller.new(root / 'state.json', dict(batches={}))
+            controller.new(config_path, dict(directory=str(root), eos_base='/eos/example',
+                minimum_eos_free_files=20000, reviewed_remaining_storage_authority=authority_pin))
+            seal = root / 'seal.json'
+            controller.new(seal, dict(files={str(config_path):controller.sha(config_path)}))
+            shared = dict(configuration=dict(path=str(config_path),sha256=controller.sha(config_path)),
+                seal=dict(path=str(seal),sha256=controller.sha(seal)), authority=authority_pin)
+            config = dict(fresh_shared_remaining_storage=shared, eos_base='/eos/example',
+                minimum_free_files=20000, dependencies={pin['path']:pin['sha256'] for pin in shared.values()})
+            observation = dict(free_bytes=217000000000)
+            with patch('run_dark_photon_meson_production.storage_gate',
+                    return_value=(True,dict(required_free_bytes=214800000000))) as gate:
+                allowed, evidence = controller.fresh_storage_admission(config, observation)
+            self.assertTrue(allowed)
+            self.assertEqual(evidence['required_free_bytes'],214800000000)
+            self.assertFalse(gate.call_args.kwargs['persist_terminal_cache'])
+            self.assertTrue(gate.call_args.kwargs['bulk'])
+            with patch('run_dark_photon_meson_production.storage_gate',
+                    return_value=(False,dict(reason='waiting_for_verified_remaining_storage'))):
+                allowed, evidence = controller.fresh_storage_admission(config, observation)
+            self.assertFalse(allowed)
+            self.assertEqual(evidence['reason'], 'waiting_for_verified_remaining_storage')
+            del config['dependencies'][str(authority)]
+            with self.assertRaises(ValueError):controller.fresh_storage_admission(config,observation)
+
+
 class AdditionalStatistics(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)

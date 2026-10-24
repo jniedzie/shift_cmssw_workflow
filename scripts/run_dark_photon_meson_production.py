@@ -1992,7 +1992,7 @@ def committed_sm_storage_entry(task, directory):
         objects=list(objects.values()))
 
 
-def reviewed_sm_storage_credit(config, authority, observed):
+def reviewed_sm_storage_credit(config, authority, observed, persist_terminal_cache=True):
     """Reuse terminal proofs; inspect only newly closed chunks on later polls."""
     import shift_condor_native as native
     peer = storage_pinned_read(authority['SM_configuration'])
@@ -2048,17 +2048,20 @@ def reviewed_sm_storage_credit(config, authority, observed):
                 # This chunk retains its future claim. Other exact terminal
                 # proofs can still release their independently committed bytes.
                 continue
-            cache.mkdir(exist_ok=True)
-            path = cache/(str(cluster)+'.json')
-            saved = dict(producer=row, sha256=hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest())
-            if path.exists():
-                if storage_ledger(path) != saved:
-                    raise ValueError('Preserve changed SM storage terminal evidence')
-            else:
-                try:
-                    durable.save(path, saved)
-                except OSError as error:
-                    raise OSError(error.errno, 'Storage terminal-cache write failed: '+str(path), str(path)) from error
+            # A peer admission controller may reuse the accounting without
+            # competing with this production's sole persistent cache writer.
+            if persist_terminal_cache:
+                cache.mkdir(exist_ok=True)
+                path = cache/(str(cluster)+'.json')
+                saved = dict(producer=row, sha256=hashlib.sha256(json.dumps(row, sort_keys=True).encode()).hexdigest())
+                if path.exists():
+                    if storage_ledger(path) != saved:
+                        raise ValueError('Preserve changed SM storage terminal evidence')
+                else:
+                    try:
+                        durable.save(path, saved)
+                    except OSError as error:
+                        raise OSError(error.errno, 'Storage terminal-cache write failed: '+str(path), str(path)) from error
             records[cluster] = row
     objects = {}
     for cluster, row in records.items():
@@ -2087,7 +2090,7 @@ def reviewed_sm_storage_credit(config, authority, observed):
     return amount, live_ids, dict(producers=len(records), unique_objects=len(objects), committed_bytes=amount)
 
 
-def reviewed_remaining_storage(config, observation, state):
+def reviewed_remaining_storage(config, observation, state, persist_terminal_cache=True):
     """Count remaining writes of a closed GEN census; quota already paid for GEN."""
     authority = storage_pinned_read(config['reviewed_remaining_storage_authority'])
     fresh = fresh_production_authority(config, reader=storage_pinned_read)
@@ -2111,7 +2114,8 @@ def reviewed_remaining_storage(config, observation, state):
                            prior_SM_parent_protection=6144000000):
         raise ValueError('Reviewed storage changed the original protected peer budgets')
     observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
-    committed, live_ids, detail = reviewed_sm_storage_credit(config, authority, observed)
+    committed, live_ids, detail = reviewed_sm_storage_credit(config, authority, observed,
+        persist_terminal_cache=persist_terminal_cache)
     census = storage_pinned_read(authority['source_census'])
     batches = {row['batch']: row for row in config['batches']}
     if set(census['batches']) != set(batches):
@@ -2156,7 +2160,7 @@ def reviewed_remaining_storage(config, observation, state):
         SM_committed=detail, no_GEN_or_ledger_future_writes=True)
 
 
-def storage_gate(config, observation, bulk=False, state=None):
+def storage_gate(config, observation, bulk=False, state=None, persist_terminal_cache=True):
     reviewed = bulk and config.get('reviewed_remaining_storage_authority')
     reservation = 0 if reviewed else adaptive_reservation(config)
     additional = 500000000 if not bulk else None
@@ -2185,7 +2189,8 @@ def storage_gate(config, observation, bulk=False, state=None):
     if reviewed:
         import shift_condor_native as native
         try:
-            reservation, additional, accounting = reviewed_remaining_storage(config, observation, state or {})
+            reservation, additional, accounting = reviewed_remaining_storage(config, observation, state or {},
+                persist_terminal_cache=persist_terminal_cache)
         except (OSError, native.NativeCondorError) as error:
             return False, dict(reason='waiting_for_verified_remaining_storage', native_or_storage_error=repr(error),
                                evidence_traceback=traceback.format_exc(limit=8))

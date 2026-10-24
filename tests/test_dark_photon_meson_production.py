@@ -523,6 +523,26 @@ class ReviewedRemainingStorage(unittest.TestCase):
                 capture.assert_not_called()
                 self.assertEqual(queue.call_count, 2)
 
+    def test_peer_reader_captures_once_in_memory_without_writing_the_shared_cache(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, authority, task, row = self.SM_fixture(Path(temporary))
+            authority['terminal_seed_parts'] = []
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch.object(production, 'committed_sm_storage_entry', return_value=row) as capture, \
+                 patch.object(production.durable, 'save', side_effect=AssertionError('peer must not write')) as save, \
+                 patch('shift_condor_native.query_account', return_value=[]) as queue:
+                for _ in range(2):
+                    self.assertEqual(production.reviewed_sm_storage_credit(config, authority, 100,
+                        persist_terminal_cache=False)[0], 123)
+                self.assertEqual(capture.call_count, 1)
+                self.assertEqual(queue.call_count, 2)
+                save.assert_not_called()
+                self.assertFalse(Path(authority['terminal_cache_directory']).exists())
+            with patch.object(production, 'storage_ledger', return_value=dict(tasks=dict(one=task))), \
+                 patch('shift_condor_native.query_account', return_value=[dict(ClusterId=22)]):
+                with self.assertRaisesRegex(RuntimeError, 'producer is live'):
+                    production.reviewed_sm_storage_credit(config, authority, 100, persist_terminal_cache=False)
+
     def test_live_cached_producer_and_unknown_queue_cannot_release_storage(self):
         import shift_condor_native as native
         with tempfile.TemporaryDirectory() as temporary:
