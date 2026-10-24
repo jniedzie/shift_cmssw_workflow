@@ -263,6 +263,34 @@ class FutureDetectorHandoff(unittest.TestCase):
             recovery.future_preflight(future,setting,ops,durable,{})
             durable.run_condor.assert_not_called()
 
+    def test_real_preparer_manifest_relocation_is_accepted_only_with_exact_seal(self):
+        from unittest.mock import patch
+        import shutil
+        for change in ['valid','manifest_hash','runtime_hash','unsealed_path','manifest_bytes']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temporary:
+                future,setting,ops,durable,result=self.gate_fixture(Path(temporary))
+                profile=json.loads(Path(setting['profile']['path']).read_text())
+                manifest=future/'frozen/detector_runtime_manifest.json'
+                shutil.copy2(profile['manifest']['path'],manifest)
+                plan=json.loads((future/'plan.json').read_text())
+                plan['detector_runtime']['manifest']=dict(path=str(manifest),sha256=recovery.sha(manifest))
+                seal=json.loads((future/'seal.json').read_text())
+                seal['files'][str(manifest)]=recovery.sha(manifest)
+                if change=='manifest_hash':plan['detector_runtime']['manifest']['sha256']='0'*64
+                elif change=='runtime_hash':plan['detector_runtime']['runtime_sha256']='0'*64
+                elif change=='unsealed_path':seal['files'].pop(str(manifest))
+                elif change=='manifest_bytes':manifest.write_text('{}')
+                (future/'plan.json').write_text(json.dumps(plan));(future/'seal.json').write_text(json.dumps(seal))
+                report=json.loads(result.read_text());report.update(original_plan_sha256=recovery.sha(future/'plan.json'),
+                    original_seal_sha256=recovery.sha(future/'seal.json'));result.write_text(json.dumps(report))
+                with patch.object(recovery.time,'sleep'):
+                    if change=='valid':
+                        recovery.future_preflight(future,setting,ops,durable,{})
+                        self.assertTrue((ops/'future_detector_ready.json').exists())
+                    else:
+                        with self.assertRaises(ValueError):recovery.future_preflight(future,setting,ops,durable,{})
+                        self.assertFalse((ops/'future_detector_ready.json').exists())
+
     def test_failed_or_incomplete_full_GEN_scan_cannot_admit_detector_jobs(self):
         for changed in ['failed','missing_records','native_failure']:
             with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temporary:

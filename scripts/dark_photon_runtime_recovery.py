@@ -281,7 +281,19 @@ def future_preflight(production,setting,operations,durable,config):
         raise ValueError('Future runtime intent differs from its frozen controller')
     pinned(intent['original_preparation']);prepared=pinned(intent['runtime_preparation'])
     profile=pinned(setting['profile'])
-    if (prepared['detector_runtime']!=profile or read(production/'plan.json')['detector_runtime']!=profile):
+    actual=read(production/'plan.json')['detector_runtime']
+    expected=copy.deepcopy(profile)
+    if actual!=profile:
+        # The ordinary preparer copies the same manifest into the new seal.
+        # Only that exact path relocation is allowed; no runtime field changes.
+        manifest=production/'frozen/detector_runtime_manifest.json'
+        relocated=dict(path=str(manifest),sha256=profile['manifest']['sha256'])
+        if (actual.get('manifest')!=relocated or manifest.resolve()!=manifest
+                or read(production/'seal.json')['files'].get(str(manifest))!=relocated['sha256']):
+            raise ValueError('Prepared runtime manifest is outside its exact production seal')
+        pinned(relocated)
+        expected['manifest']=relocated
+    if prepared['detector_runtime']!=profile or actual!=expected:
         raise ValueError('Prepared detector production does not use its qualified future runtime')
     directory=operations/'runtime_preflight';preparation_path=directory/'preparation.json'
     if not preparation_path.exists():
