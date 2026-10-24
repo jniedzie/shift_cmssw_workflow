@@ -10,6 +10,7 @@ import argparse
 import ast
 import copy
 from datetime import datetime, timezone
+import errno
 import fcntl
 import hashlib
 import importlib.util
@@ -41,8 +42,37 @@ def sha(path):
 def save(path, value):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + '.next')
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + '\n')
-    os.replace(temporary, path)
+    body = json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + '\n'
+    for attempt in range(4):
+        try:
+            temporary.write_text(body)
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT, errno.ESTALE, errno.EIO) or attempt == 3:
+                raise
+            time.sleep(2 ** attempt)
+
+
+def persist_controller_state(path, value):
+    """Finish this snapshot before another poll can perform scheduler actions.
+
+    AFS can be unavailable longer than a few write retries. Keep the controller
+    alive and its in-memory state intact; the read-only monitor will flag the
+    stale heartbeat. Never repeat the production step just to retry a save.
+    """
+    delay = 5
+    while True:
+        try:
+            save(path, value)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT, errno.ESTALE, errno.EIO):
+                raise
+            print('Controller state is waiting for shared storage: ' + repr(error),
+                  file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(60, delay * 2)
 
 
 def new(path, value):
@@ -1589,7 +1619,7 @@ def main():
                 state = step(config, config_path, state)
             except Exception as error:
                 state.update(error=repr(error), checked_utc=datetime.now(timezone.utc).isoformat())
-            save(state_path, state)
+            persist_controller_state(state_path, state)
             if args.once or state.get('finished'):
                 return
             time.sleep(config.get('poll_seconds', 120))
