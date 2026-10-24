@@ -90,6 +90,10 @@ def module(path, name):
 
 def validate_capacity(config):
     workers = config.get('detector_workers_per_wave', 100)
+    if ('independent_point_preflights' in config and
+            (type(config['independent_point_preflights']) is not bool or
+             config['independent_point_preflights'] and not config.get('future_detector_runtime'))):
+        raise ValueError('Independent point preflights require an explicitly qualified future runtime')
     waves = config['simultaneous_waves']
     if (type(workers) is not int or type(waves) is not int or
             not 1 <= workers <= 300 or not 1 <= waves <= 8 or workers * waves > 2400):
@@ -134,7 +138,8 @@ def jobs(config, constraint):
     output = run_condor(['/usr/bin/condor_q', *arguments, '-constraint', constraint,
                          '-json', '-attributes',
                          'ClusterId,ProcId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask,'
-                         'JobUniverse,Cmd,DAGMan_MaxJobs,DAGMan_MaxIdle,DAG_AdUpdateTime'], timeout=45)
+                         'JobUniverse,Cmd,DAGMan_MaxJobs,DAGMan_MaxIdle,DAG_AdUpdateTime,'
+                         'ShiftDPPointPreflightManifestSHA256'], timeout=45)
     return parse_ads(output)
 
 
@@ -156,6 +161,9 @@ def verify_submitted_job(config, directory, rows, cluster=None):
         raise RuntimeError('Submitted job does not use its persistent working directory')
     if row.get('ShiftDPStatisticsTask') != identity:
         raise RuntimeError('Submitted job has a different statistics task identity')
+    gates = Path(directory) / 'point_preflights/manifest.json'
+    if gates.is_file() and row.get('ShiftDPPointPreflightManifestSHA256') != sha(gates):
+        raise RuntimeError('Submitted detector manager lost its exact independent-point gate manifest')
     native_cluster = row.get('ClusterId')
     if (type(native_cluster) is not int or native_cluster <= 0
             or type(row.get('ProcId')) is not int or row['ProcId'] != 0
@@ -214,12 +222,19 @@ def submit_dag(config, directory, cap):
     if type(max_idle) is not int or not 1 <= max_idle <= cap:
         raise ValueError('DAG ready queue limit must be between one and its worker cap')
     submit_file = directory / 'pipeline.dag.condor.sub'
+    gates = directory / 'point_preflights/manifest.json'
+    gate_attribute = ('+ShiftDPPointPreflightManifestSHA256 = ' + json.dumps(sha(gates))) if gates.is_file() else None
     if not submit_file.is_file():
-        run_condor(['/usr/bin/condor_submit_dag', '-no_submit', '-maxjobs', str(cap),
+        command = ['/usr/bin/condor_submit_dag', '-no_submit', '-maxjobs', str(cap),
             '-maxidle', str(max_idle), '-append', 'initialdir = ' + str(directory),
             '-append', '+MaxRuntime = 604800',
-            '-append', '+ShiftDPStatisticsTask = ' + json.dumps(str(directory)),
-            str(directory / 'pipeline.dag')], cwd=directory, timeout=60)
+            '-append', '+ShiftDPStatisticsTask = ' + json.dumps(str(directory))]
+        if gate_attribute is not None:
+            command.extend(['-append', gate_attribute])
+        command.append(str(directory / 'pipeline.dag'))
+        run_condor(command, cwd=directory, timeout=60)
+    if gate_attribute is not None and gate_attribute not in submit_file.read_text().splitlines():
+        raise ValueError('Frozen native submit description lacks its independent-point gate manifest')
     return submission(config, directory, submit_file)
 
 
@@ -740,6 +755,8 @@ def handoff(config, index):
             if config.get('detector_worker_redistribution'):
                 command.extend(['--detector-category-ceiling',
                     str(config['detector_worker_redistribution']['future_category_ceiling'])])
+            if config.get('independent_point_preflights'):
+                command.append('--independent-point-preflights')
             budgets=config.get('absolute_stage_timeouts')
             if budgets is not None:
                 if (not isinstance(budgets,list) or len(budgets)!=4

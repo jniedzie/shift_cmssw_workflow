@@ -206,6 +206,68 @@ class RuntimeRecoveryStrictness(unittest.TestCase):
                     recovery.validate_full_gen_preflight(production,profile,report,point_scope=['m2_prompt'])
 
 
+class IndependentPointPreflightGates(unittest.TestCase):
+    def fixture(self,root):
+        import shutil
+        import prepare_dark_photon_production as preparer
+        production=root/'production';production.mkdir();(production/'frozen').mkdir()
+        helpers=production/'independent_preflight_helpers';helpers.mkdir()
+        for name in ('prepare_dark_photon_kinematics_preflight.py','dark_photon_detector_runtime.py'):
+            shutil.copy2(Path(recovery.__file__).with_name(name),helpers/name)
+        profile=dict(runtime_sha256='a'*64)
+        (production/'frozen/detector_runtime.json').write_text(json.dumps(profile))
+        rows=[dict(point=name,chunks=[dict(chunk=0),dict(chunk=1)]) for name in ('m15_prompt','m40_prompt')]
+        plan=dict(independent_point_preflights=True,points=rows,detector_runtime=profile)
+        (production/'plan.json').write_text(json.dumps(plan))
+        (production/'gen_inventory.json').write_text(json.dumps(dict(complete=True,points={
+            row['point']:dict(events=2,event_ids=[[10+i,1,1],[10+i,1,2]],gen_sha256='b'*64)
+            for i,row in enumerate(rows)})))
+        template=production/'pipeline.dag.template'
+        template.write_text(preparer.dag_text(plan,production,['m15_prompt'],600,2))
+        seal=dict(files={str(path):recovery.sha(path) for path in [template,production/'plan.json',
+            production/'gen_inventory.json',production/'frozen/detector_runtime.json',*helpers.iterdir()]})
+        (production/'seal.json').write_text(json.dumps(seal))
+        (production/'pipeline.dag').write_text(template.read_text().replace('SEAL_DIGEST',recovery.sha(production/'seal.json')))
+        preparer.prepare_independent_point_preflights(production)
+        return production,profile
+
+    def test_real_scoped_tasks_bind_full_plan_without_waiting_for_bad_point(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            production,profile=self.fixture(Path(temporary))
+            pin=recovery.validate_independent_point_preflights(production,profile)
+            manifest=json.loads(Path(pin['path']).read_text())
+            self.assertEqual(set(manifest['points']),{'m15_prompt','m40_prompt'})
+            for name,task in manifest['points'].items():
+                cfg=json.loads(Path(task['config']['path']).read_text())
+                self.assertEqual(cfg['point_scope'],[name])
+                inventory=json.loads(Path(cfg['inventory']['path']).read_text())
+                self.assertEqual(set(inventory['points']),{'m15_prompt','m40_prompt'})
+            # The native m40 failure is retained; its scan is not a condition
+            # for preparing or running the independent m15 branch.
+            Path(manifest['points']['m40_prompt']['receipt']).write_text(json.dumps(dict(complete=False,error='D* flight')))
+            recovery.validate_independent_point_preflights(production,profile)
+
+    def test_scope_population_helper_and_DAG_tampering_fail_closed(self):
+        for change in ('scope','inventory','helper','DAG','missing_point'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as temporary:
+                production,profile=self.fixture(Path(temporary))
+                path=production/'point_preflights/manifest.json';manifest=json.loads(path.read_text())
+                task=manifest['points']['m40_prompt'];cfg_path=Path(task['config']['path']);cfg=json.loads(cfg_path.read_text())
+                if change=='scope':
+                    cfg['point_scope']=['m15_prompt'];cfg_path.write_text(json.dumps(cfg));task['config']['sha256']=recovery.sha(cfg_path)
+                elif change=='inventory':
+                    cfg['inventory']['sha256']='0'*64;cfg_path.write_text(json.dumps(cfg));task['config']['sha256']=recovery.sha(cfg_path)
+                elif change=='helper':
+                    helper=Path(cfg['helpers'][0]['path']);helper.write_text('raise RuntimeError("tampered")\n')
+                    cfg['helpers'][0]['sha256']=recovery.sha(helper);cfg_path.write_text(json.dumps(cfg));task['config']['sha256']=recovery.sha(cfg_path)
+                elif change=='DAG':
+                    dag=production/'pipeline.dag';dag.write_text(dag.read_text().replace('PARENT P_m40_prompt CHILD','PARENT P_m15_prompt CHILD'))
+                    manifest['pipeline_dag_sha256']=recovery.sha(dag)
+                else:del manifest['points']['m40_prompt']
+                path.write_text(json.dumps(manifest))
+                with self.assertRaises(ValueError):recovery.validate_independent_point_preflights(production,profile)
+
+
 class FutureDetectorHandoff(unittest.TestCase):
     fixture=RuntimeRecovery.fixture
 
@@ -262,6 +324,21 @@ class FutureDetectorHandoff(unittest.TestCase):
             durable.jobs.side_effect=None;durable.jobs.return_value=[];durable.run_condor.reset_mock()
             recovery.future_preflight(future,setting,ops,durable,{})
             durable.run_condor.assert_not_called()
+
+    def test_independent_mode_admits_only_the_DAG_gates_without_claiming_scans_passed(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            future,setting,ops,durable,result=self.gate_fixture(Path(temporary))
+            manifest=dict(path=str(future/'point_preflights/manifest.json'),sha256='f'*64)
+            with patch('prepare_dark_photon_production.prepare_independent_point_preflights') as prepare, \
+                 patch.object(recovery,'validate_independent_point_preflights',return_value=manifest):
+                recovery.future_preflight(future,setting,ops,durable,dict(independent_point_preflights=True))
+            prepare.assert_called_once_with(future)
+            durable.submission.assert_not_called()
+            ready=json.loads((ops/'future_detector_ready.json').read_text())
+            self.assertEqual(ready['gate_mode'],'independent_full_GEN_preflights')
+            self.assertFalse(ready['full_GEN_preflight_complete'])
+            self.assertEqual(ready['point_preflight_manifest'],manifest)
 
     def test_real_preparer_manifest_relocation_is_accepted_only_with_exact_seal(self):
         from unittest.mock import patch

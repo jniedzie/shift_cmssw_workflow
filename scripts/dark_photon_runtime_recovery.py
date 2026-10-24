@@ -266,6 +266,58 @@ def future_preparation(preparation,setting,operations):
     return output
 
 
+def validate_independent_point_preflights(production,profile):
+    """Bind scoped native DAG gates without claiming their scans already passed."""
+    production=Path(production)
+    plan=read(production/'plan.json');seal=read(production/'seal.json')
+    inventory=read(production/'gen_inventory.json')
+    path=production/'point_preflights/manifest.json';manifest=read(path)
+    names={row['point'] for row in plan['points']}
+    if (plan.get('independent_point_preflights') is not True or len(names)!=len(plan['points'])
+            or manifest.get('schema')!='shift-independent-point-preflights-v1'
+            or manifest.get('complete') is not True or set(manifest.get('points',{}))!=names
+            or inventory.get('complete') is not True or set(inventory['points'])!=names
+            or manifest.get('replacement_runtime_sha256')!=profile['runtime_sha256']):
+        raise ValueError('Independent preflight gates must cover every original physical point')
+    for name,key in [('plan.json','original_plan_sha256'),('seal.json','original_seal_sha256'),
+                     ('gen_inventory.json','original_inventory_sha256'),('pipeline.dag','pipeline_dag_sha256')]:
+        if manifest.get(key)!=sha(production/name):
+            raise ValueError('Independent preflight gate changed its original population or DAG')
+    template=production/'pipeline.dag.template'
+    if (seal['files'].get(str(template))!=sha(template) or
+            (production/'pipeline.dag').read_text()!=template.read_text().replace('SEAL_DIGEST',sha(production/'seal.json'))):
+        raise ValueError('Independent preflight DAG differs from its frozen dependency graph')
+    expected_profile=dict(path=str(production/'frozen/detector_runtime.json'),
+                          sha256=sha(production/'frozen/detector_runtime.json'))
+    for name,prepared in manifest['points'].items():
+        directory=production/'point_preflights'/name
+        for key,filename in [('config','preflight.json'),('worker','worker.sh'),('submit','worker.sub')]:
+            pin=prepared[key]
+            if pin.get('path')!=str(directory/filename) or pin.get('sha256')!=sha(directory/filename):
+                raise ValueError('Independent preflight task changed: '+name)
+        if prepared.get('receipt')!=str(directory/'receipt.json'):
+            raise ValueError('Independent preflight receipt escaped its point directory')
+        cfg=read(directory/'preflight.json')
+        if (cfg.get('point_scope')!=[name] or cfg.get('production')!=str(production)
+                or cfg.get('output')!=str(directory) or cfg.get('replacement_profile')!=expected_profile
+                or cfg.get('replacement_runtime_sha256')!=profile['runtime_sha256']):
+            raise ValueError('Independent preflight must scan the complete requested physical point')
+        for key,filename in [('original_plan','plan.json'),('original_seal','seal.json'),
+                             ('inventory','gen_inventory.json')]:
+            if cfg.get(key)!=dict(path=str(production/filename),sha256=sha(production/filename)):
+                raise ValueError('Independent preflight changed its full original GEN authority')
+        helpers=cfg.get('helpers',[])
+        helper_names={'prepare_dark_photon_kinematics_preflight.py','dark_photon_detector_runtime.py'}
+        if len(helpers)!=2 or {Path(pin['path']).name for pin in helpers}!=helper_names:
+            raise ValueError('Independent preflight lost its exact native converter helpers')
+        for pin in helpers:
+            filename=Path(pin['path']).name;original=production/'independent_preflight_helpers'/filename
+            if (pin['path']!=str(directory/'helpers'/filename) or pin['sha256']!=sha(pin['path'])
+                    or seal['files'].get(str(original))!=pin['sha256']):
+                raise ValueError('Independent native preflight helper differs from the production seal')
+    return dict(path=str(path),sha256=sha(path))
+
+
 def future_preflight(production,setting,operations,durable,config):
     """Complete one detached full-GEN check before admitting a new detector DAG."""
     if setting is None:
@@ -295,6 +347,19 @@ def future_preflight(production,setting,operations,durable,config):
         expected['manifest']=relocated
     if prepared['detector_runtime']!=profile or actual!=expected:
         raise ValueError('Prepared detector production does not use its qualified future runtime')
+    if config.get('independent_point_preflights') is True:
+        from prepare_dark_photon_production import prepare_independent_point_preflights
+        prepare_independent_point_preflights(production)
+        gates=validate_independent_point_preflights(production,profile)
+        immutable_json(operations/'future_detector_ready.json',dict(
+            schema='shift-future-independent-point-preflights-ready-v1',complete=True,
+            gate_mode='independent_full_GEN_preflights',full_GEN_preflight_complete=False,
+            profile=setting['profile'],qualification=setting['qualification'],
+            production_plan_sha256=sha(production/'plan.json'),
+            production_seal_sha256=sha(production/'seal.json'),point_preflight_manifest=gates))
+        return
+    if read(production/'plan.json').get('independent_point_preflights'):
+        raise ValueError('Independent point DAG gates need the explicit reviewed controller mode')
     directory=operations/'runtime_preflight';preparation_path=directory/'preparation.json'
     if not preparation_path.exists():
         helper=Path(__file__).with_name('prepare_dark_photon_kinematics_preflight.py')

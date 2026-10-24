@@ -497,6 +497,25 @@ class DurableSubmission(unittest.TestCase):
         row.update(changes)
         return row
 
+    def test_native_manager_submission_binds_independent_preflight_manifest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);gates=directory/'point_preflights';gates.mkdir()
+            controller.new(gates/'manifest.json',dict(complete=True))
+            expected='+ShiftDPPointPreflightManifestSHA256 = '+json.dumps(controller.sha(gates/'manifest.json'))
+            def generate(argv,**kwargs):
+                self.assertIn(expected,argv)
+                (directory/'pipeline.dag.condor.sub').write_text(expected+'\n')
+            with patch.object(controller,'run_condor',side_effect=generate), \
+                 patch.object(controller,'submission',return_value=dict(cluster=123)) as submit:
+                controller.submit_dag(dict(dag_max_idle=5),directory,150)
+            submit.assert_called_once()
+            ad=self.ad(directory,ShiftDPPointPreflightManifestSHA256=controller.sha(gates/'manifest.json'))
+            self.assertEqual(controller.verify_submitted_job({},directory,[ad],123),123)
+            ad['ShiftDPPointPreflightManifestSHA256']='0'*64
+            with self.assertRaises(RuntimeError):controller.verify_submitted_job({},directory,[ad],123)
+            (directory/'pipeline.dag.condor.sub').write_text('queue\n')
+            with self.assertRaises(ValueError):controller.submit_dag(dict(dag_max_idle=5),directory,150)
+
     def test_history_lookup_uses_one_exact_match_for_a_known_job(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
