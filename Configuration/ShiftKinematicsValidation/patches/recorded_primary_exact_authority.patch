@@ -1,0 +1,103 @@
+# Code style: AI-code. AI-generated private v3-to-v4 exact-particle reconciliation patch.
+--- a/SimG4Core/Generators/interface/RecordedPrimaryMomentum.h
++++ b/SimG4Core/Generators/interface/RecordedPrimaryMomentum.h
+@@ -9,6 +9,8 @@
+ #include <stdexcept>
+ #include <sstream>
+ #include <iomanip>
++#include "SimG4Core/Generators/interface/RecordedPrimaryParticleAuthority.h"
++#include <iostream>
+ 
+ namespace sim {
+   inline double recordedPrimaryEnergyTolerance(double energy, double physicalEnergy, double sourceScaleGeV) {
+@@ -32,7 +34,7 @@
+ 
+   template <typename Momentum>
+   void setRecordedPrimaryMomentum(G4PrimaryParticle& target, const Momentum& p, double generatedMass,
+-                                  double sourcePrecisionScaleGeV=1.) {
++                                  double sourcePrecisionScaleGeV=1., long long sourceEvent=-1, int sourceBarcode=0) {
+     const double energy=p.e(),px=p.px(),py=p.py(),pz=p.pz();
+     if (!std::isfinite(energy) || !std::isfinite(px) || !std::isfinite(py) || !std::isfinite(pz) ||
+         !std::isfinite(generatedMass) || generatedMass<0. || energy<generatedMass ||
+@@ -40,7 +42,14 @@
+       throw std::runtime_error("Preassigned source requires finite physical momentum and generated mass");
+     const double physicalEnergy=std::hypot(std::hypot(px,py,pz),generatedMass);
+     const double rounding=recordedPrimaryEnergyTolerance(energy,physicalEnergy,sourcePrecisionScaleGeV);
+-    if (!std::isfinite(physicalEnergy) || std::abs(physicalEnergy-energy)>rounding) {
++    double transportedEnergy=energy;
++    const double residual=std::abs(physicalEnergy-energy);
++    if (std::isfinite(physicalEnergy) && residual>rounding) {
++      const double approved=recordedPrimaryParticleEnergyBound(sourceEvent,sourceBarcode,target.GetPDGcode(),
++          px,py,pz,energy,generatedMass,physicalEnergy);
++      if (approved>0. && residual<=approved) transportedEnergy=physicalEnergy;
++    }
++    if (!std::isfinite(physicalEnergy) || (residual>rounding && transportedEnergy!=physicalEnergy)) {
+       std::ostringstream error;
+       error << std::setprecision(17) << "Preassigned source is off shell beyond its invariant precision: pdg="
+             << target.GetPDGcode() << " p4_GeV=(" << px << "," << py << "," << pz << "," << energy
+@@ -48,9 +57,14 @@
+             << " allowed_GeV=" << rounding << " original_event_scale_GeV=" << sourcePrecisionScaleGeV;
+       throw std::runtime_error(error.str());
+     }
+-    target.Set4Momentum(px*GeV,py*GeV,pz*GeV,energy*GeV);
++    if (transportedEnergy!=energy)
++      std::clog << std::setprecision(17) << "[RecordedPrimaryExactAuthority] event=" << sourceEvent
++                << " barcode=" << sourceBarcode << " pdg=" << target.GetPDGcode()
++                << " original_energy_GeV=" << energy << " transported_energy_GeV=" << transportedEnergy
++                << " delta_energy_GeV=" << transportedEnergy-energy << std::endl;
++    target.Set4Momentum(px*GeV,py*GeV,pz*GeV,transportedEnergy*GeV);
+     target.SetMass(generatedMass*GeV);
+-    target.SetTotalEnergy(energy*GeV);
++    target.SetTotalEnergy(transportedEnergy*GeV);
+   }
+ }
+ #endif
+--- a/SimG4Core/Generators/src/Generator.cc
++++ b/SimG4Core/Generators/src/Generator.cc
+@@ -598,7 +598,7 @@
+         }
+ 
+         if (trackAllHadronDecays_)
+-          sim::setRecordedPrimaryMomentum(*g4prim, (*pitr)->momentum(), (*pitr)->generated_mass(),sourcePrecisionScaleGeV);
++          sim::setRecordedPrimaryMomentum(*g4prim, (*pitr)->momentum(), (*pitr)->generated_mass(),sourcePrecisionScaleGeV,(*pitr)->parent_event()->event_number(),(*pitr)->barcode());
+ 
+         // V.I. do not use SetWeight but the same code
+         // value of the code compute inside TrackWithHistory
+@@ -717,7 +717,7 @@
+     }
+ 
+     if (trackAllHadronDecays_)
+-      sim::setRecordedPrimaryMomentum(*g4daught, pdec, (*vpdec)->generated_mass(),sourcePrecisionScaleGeV);
++      sim::setRecordedPrimaryMomentum(*g4daught, pdec, (*vpdec)->generated_mass(),sourcePrecisionScaleGeV,(*vpdec)->parent_event()->event_number(),(*vpdec)->barcode());
+ 
+     // V.I. do not use SetWeight but the same code
+     // value of the code compute inside TrackWithHistory
+--- a/SimG4Core/Generators/src/Generator3.cc
++++ b/SimG4Core/Generators/src/Generator3.cc
+@@ -596,7 +596,7 @@
+         }
+ 
+         if (trackAllHadronDecays_)
+-          sim::setRecordedPrimaryMomentum(*g4prim, pitr->momentum(), pitr->generated_mass(),sourcePrecisionScaleGeV);
++          sim::setRecordedPrimaryMomentum(*g4prim, pitr->momentum(), pitr->generated_mass(),sourcePrecisionScaleGeV,pitr->parent_event()->event_number(),pitr->id());
+ 
+         // V.I. do not use SetWeight but the same code
+         // value of the code compute inside TrackWithHistory
+@@ -714,7 +714,7 @@
+     }
+ 
+     if (trackAllHadronDecays_)
+-      sim::setRecordedPrimaryMomentum(*g4daught, pdec, vpdec->generated_mass(),sourcePrecisionScaleGeV);
++      sim::setRecordedPrimaryMomentum(*g4daught, pdec, vpdec->generated_mass(),sourcePrecisionScaleGeV,vpdec->parent_event()->event_number(),vpdec->id());
+ 
+     // V.I. do not use SetWeight but the same code
+     // value of the code compute inside TrackWithHistory
+--- a/SimG4Core/Generators/BuildFile.xml
++++ b/SimG4Core/Generators/BuildFile.xml
+@@ -10,3 +10,6 @@
+ <use name="geant4core"/>
+ <use name="rootmath"/>
+ <use name="expat"/>
++
++<use name="json"/>
++<use name="openssl"/>

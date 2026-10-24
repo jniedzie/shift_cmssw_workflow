@@ -33,7 +33,8 @@ public:
                {"events", 0}, {"converted_particles", 0}, {"old_guard_violations", 0},
                {"maximum_energy_residual_GeV", 0.}, {"maximum_new_tolerance_fraction", 0.},
                {"source_GEN_unchanged", true}, {"detector_tracking_performed", false},
-               {"old_violations", nlohmann::json::array()}};
+               {"old_violations", nlohmann::json::array()},
+               {"exact_authority_reconciliations", nlohmann::json::array()}};
   }
 private:
   void save() const { std::ofstream file(output_); file << report_.dump(2) << '\n'; }
@@ -68,6 +69,19 @@ private:
           const double residual = std::abs(physical-q.e());
           const double old = 32.*std::numeric_limits<double>::epsilon()*std::max({1.,scale,q.e(),physical});
           const double allowed = sim::recordedPrimaryEnergyTolerance(q.e(),physical,scale);
+          if (residual > allowed) {
+            const double approved = sim::recordedPrimaryParticleEnergyBound(source->event_number(),info->id(),
+                original->pdg_id(),q.px(),q.py(),q.pz(),q.e(),mass,physical);
+            if (!(approved>0.) || residual>approved
+                || std::abs(particle->GetTotalEnergy()/GeV-physical)>4.e-16*std::max(1.,physical))
+              throw cms::Exception("KinematicsPreflight") << "Unqualified exact-particle reconciliation";
+            report_["exact_authority_reconciliations"].push_back({{"event_id",identity},
+              {"hepmc_event_number",source->event_number()},{"barcode",info->id()},
+              {"pdg",original->pdg_id()},{"p4_GeV",{q.px(),q.py(),q.pz(),q.e()}},
+              {"generated_mass_GeV",mass},{"original_energy_GeV",q.e()},
+              {"transported_energy_GeV",particle->GetTotalEnergy()/GeV},
+              {"approved_energy_bound_GeV",approved}});
+          }
           report_["maximum_energy_residual_GeV"] = std::max(report_["maximum_energy_residual_GeV"].get<double>(), residual);
           report_["maximum_new_tolerance_fraction"] = std::max(report_["maximum_new_tolerance_fraction"].get<double>(), residual/allowed);
           report_["converted_particles"] = report_["converted_particles"].get<unsigned long long>()+1;

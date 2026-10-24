@@ -10,4 +10,5 @@
   <use name="geant4core"/>
   <use name="hepmc"/>
   <use name="json"/>
+  <use name="openssl"/>
 </library>

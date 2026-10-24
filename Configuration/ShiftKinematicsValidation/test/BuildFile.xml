@@ -2,5 +2,13 @@
 <bin file="testRecordedPrimaryPrecision.cc" name="testRecordedPrimaryPrecision">
   <use name="SimG4Core/Generators"/>
   <use name="geant4core"/>
+  <use name="json"/>
+  <use name="openssl"/>
 </bin>
 <test name="testRecordedPrimaryInvariantPrecision" command="testRecordedPrimaryPrecision"/>
+<bin file="testRecordedPrimaryAuthority.cc" name="testRecordedPrimaryAuthority">
+  <use name="SimG4Core/Generators"/>
+  <use name="geant4core"/>
+  <use name="json"/>
+  <use name="openssl"/>
+</bin>

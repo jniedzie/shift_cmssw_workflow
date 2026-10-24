@@ -39,3 +39,40 @@ does not qualify a runtime by itself. A full accepted-GEN scan and paired
 weighted detector-chain tests must pass before production migration.
 The canonical production status and qualification evidence are recorded in
 `SHIFT_BSM.md` at the workspace root.
+
+A later native Pythia 8.317 audit found four additional final-string-pair
+hadrons whose stored vectors exceed the v3 envelope. An instrumented replay
+reproduced them exactly. An 80-digit decomposition of the final-pair solve
+separates the scalar, basis-metric and final-vector arithmetic contributions;
+the sum of their absolute energy contributions supplies each particle's bound.
+This is an evaluated bound for those exact particles, not a universal increase
+in the generator tolerance. The source implementation is
+[StringFragmentation.cc, Pythia 8.317](https://gitlab.com/Pythia8/releases/-/raw/pythia8317/src/StringFragmentation.cc).
+
+The optional private `recorded_primary_exact_authority.patch` applies after the
+v3 invariant patch. Copy `interface/RecordedPrimaryParticleAuthority.h` into
+the private release's `SimG4Core/Generators/interface/` first. Rebuild the
+Generators library, this validation plugin and both native tests in that
+private release; the patch adds JSON/OpenSSL dependencies and no Generator
+members or class-layout changes. Never apply it to the shared live release.
+Run the existing `testRecordedPrimaryPrecision`, then
+`python3 test/testExactParticleAuthority.py /absolute/path/to/testRecordedPrimaryAuthority`.
+
+The runtime capsule pins the compact authority by SHA-256. Its activation uses
+`SHIFT_RECORDED_PRIMARY_AUTHORITY`,
+`SHIFT_RECORDED_PRIMARY_AUTHORITY_SHA256` and
+`SHIFT_RECORDED_PRIMARY_GEN_SHA256`; the last comes from the unchanged full GEN
+inventory for the point being processed. A row must match that GEN hash,
+HepMC event number, barcode, PDG ID and the exact binary64 bits of all four
+momentum components and the generated mass. Hexadecimal doubles retain signed
+zero and avoid decimal-rounding ambiguity. Unknown particles or mismatched
+inputs retain the v3 rejection.
+
+Only a matched particle rejected by v3 can use its independently derived
+bound, plus four double epsilons of the energy scale for the final `hypot`
+evaluation. The existing `1e-7` conservation cap remains an upper bound. Its
+transport energy becomes `hypot(px,py,pz,m)`, while the three-momentum,
+generated mass, raw GEN, identities and weights stay unchanged. The original
+v3 setter path remains unchanged for all other particles. The native converter
+log and preflight receipt record every such reconciliation. The 10 nm
+undefined-hadron flight guard is unchanged.
