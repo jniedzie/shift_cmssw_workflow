@@ -195,6 +195,9 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         config['historical_anchor_calibration']=dict(path=str(target),sha256=production.durable.sha(target))
         seal_files[str(target)]=production.durable.sha(target)
     production.durable.new(output/'config.json', config)
+    maximum_workers = original.get('detector_workers_per_point', 100) * detector_points
+    if config.get('maximum_active_detector_workers') is not None:
+        maximum_workers = min(maximum_workers, config['maximum_active_detector_workers'])
     replacement = dict(schema='shift-meson-scheduling-rollover-v1',
         original_production=str(directory), original_seal_sha256=original_seal,
         previous_controller=str(template), previous_controller_seal_sha256=template_seal,
@@ -204,7 +207,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         bulk_storage_gate_worklist_sha256=production.durable.sha(directory/'config.json'),
         simultaneous_sources=sources, simultaneous_detector_points=detector_points,
         detector_workers_per_point=original.get('detector_workers_per_point', 100),
-        maximum_detector_workers=original.get('detector_workers_per_point', 100)*detector_points,
+        maximum_detector_workers=maximum_workers,
         changed_tools=changed_tools, only_configuration_changes=[
             key for key in config if config[key] != previous.get(key)])
     production.durable.new(output/'rollover.json', replacement)
