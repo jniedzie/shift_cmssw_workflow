@@ -2335,6 +2335,61 @@ def committed_direct_gen_credit(authority, live_ids):
     return amount
 
 
+def committed_direct_detector_credit(authority, live_ids):
+    """Count immutable Nano and metadata files from verified terminal workers."""
+    pin=authority.get('committed_direct_detector')
+    if pin is None:
+        return 0
+    evidence=storage_pinned_read(pin)
+    if (evidence.get('schema')!='shift-committed-terminal-direct-storage-v1'
+            or evidence.get('storage_registration')!=authority['original_storage_registration']
+            or evidence.get('reserved_bytes')!=30000000000):
+        raise ValueError('Closed direct storage changed its registered budget')
+    objects={}
+    for wave in evidence['waves']:
+        plan=storage_pinned_read(wave['plan']);seal=storage_pinned_read(wave['seal'])
+        receipt=storage_pinned_read(wave['submission'])
+        if seal['files'].get(wave['plan']['path'])!=wave['plan']['sha256']:
+            raise ValueError('Closed direct storage lost its sealed plan')
+        native=wave.get('terminal',{})
+        if not wave.get('terminal_chunks') and (
+                native.get('ClusterId')!=receipt['cluster'] or native.get('ProcId')!=0
+                or native.get('Iwd')!=receipt['task'] or native.get('JobStatus')!=4
+                or native.get('ExitCode')!=0 or native.get('ExitBySignal') is not False
+                or receipt['cluster'] in live_ids):
+            raise ValueError('Closed direct storage lost its successful native owner')
+        points={p['point']:p for p in plan['points']}
+        for row in wave['objects']:
+            if wave.get('terminal_chunks'):
+                native=row['native'];cluster=native['cluster']
+                if (type(cluster) is not int or cluster<=0 or cluster in live_ids
+                        or native['submission_event']!=f"D_{row['point']}_{row['chunk']:03d}"
+                        or not re.match(r'005 \('+str(cluster)+r'\.000\.000\)',native['terminal_event'])
+                        or 'Normal termination (return value 0)' not in native['terminal_event']):
+                    raise ValueError('Direct output lacks its exact terminal native worker')
+            status=storage_pinned_read(row['status']);point=points[row['point']]
+            chunks=[c for c in point['chunks'] if c['chunk']==row['chunk']]
+            item=row['publication'];path=Path(item['path']);actual=path.stat()
+            expected=(chunks[0]['nano'] if row['kind']=='nanoAOD' else
+                      chunks[0]['metadata']+'/metadata.tar.gz') if len(chunks)==1 else None
+            if (row['kind'] not in ('nanoAOD','metadata') or str(path)!=expected
+                    or status.get('complete') is not True or status.get('point')!=row['point']
+                    or status.get('chunk')!=row['chunk'] or status.get('events')!=chunks[0]['count']
+                    or status.get('plan_sha256')!=wave['plan']['sha256']
+                    or status.get('seal_sha256')!=wave['seal']['sha256']
+                    or status.get('published',{}).get(row['kind'])!=item
+                    or not path.is_relative_to(Path('/eos/user/j/jniedzie/shift_cmssw'))
+                    or '..' in path.parts or str(path) in objects
+                    or actual.st_size!=item['bytes'] or actual.st_mtime_ns!=row['eos_mtime_ns']
+                    or row['independent_sha256_readback']!=item['sha256']):
+                raise ValueError('Closed direct storage changed its exact output')
+            objects[str(path)]=item['bytes']
+    amount=sum(objects.values())
+    if amount!=evidence['total_bytes'] or not 0<amount<=evidence['reserved_bytes']:
+        raise ValueError('Closed direct storage exceeds its original reservation')
+    return amount
+
+
 def reviewed_remaining_storage(config, observation, state, persist_terminal_cache=True):
     """Count remaining writes of a closed GEN census; quota already paid for GEN."""
     authority = storage_pinned_read(config['reviewed_remaining_storage_authority'])
@@ -2398,12 +2453,16 @@ def reviewed_remaining_storage(config, observation, state, persist_terminal_cach
         completed_selected += processed
         future += 5000000+(bound-processed)*326000
     direct_committed=committed_direct_gen_credit(authority,live_ids)
+    detector_committed=committed_direct_detector_credit(authority,live_ids)
+    if direct_committed+detector_committed>peer_claims['direct_DY_weekend']:
+        raise ValueError('Combined direct storage credit exceeds its fixed reservation')
     reservation = (137000000000+peer_claims['direct_DY_weekend']+
-                   peer_claims['prior_SM_parent_protection']-committed-direct_committed)
+                   peer_claims['prior_SM_parent_protection']-committed-direct_committed-detector_committed)
     return reservation, future, dict(full_gen_events=full_gen, selected_event_upper_bound=selected_bound,
         completed_selected_events=completed_selected, remaining_own_bytes=future,
         protected_SM_full_bytes=137000000000, protected_direct_bytes=30000000000,
         direct_GEN_committed_bytes=direct_committed,
+        direct_detector_committed_bytes=detector_committed,
         SM_committed=detail, no_GEN_or_ledger_future_writes=True)
 
 
