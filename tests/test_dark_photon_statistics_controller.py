@@ -984,3 +984,24 @@ class RemovedFailedAggregate(unittest.TestCase):
             failure.write_text('changed evidence')
             with self.assertRaises(ValueError):
                 controller.retired_aggregate_attempt(config_for(proof),directory,'m2_prompt',record)
+
+class FreshAggregatePublicationFloor(unittest.TestCase):
+    def test_small_sources_wait_before_creating_pending_aggregate(self):
+        for exposure,expected_calls in [(70,0),(500,1)]:
+            with self.subTest(full_GEN_per_source=exposure),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);sources=[]
+                for index in range(2):
+                    p=root/f'waves/w{index:03d}/production/plan.json';p.parent.mkdir(parents=True)
+                    controller.new(p,dict(points=[dict(point='m2_prompt',events=65,full_gen_events=exposure)]))
+                    sources.append(dict(point='m2_prompt',plan_path=str(p)))
+                worklist=root/'worklist.json';controller.new(worklist,dict(waves=[dict(batches=[dict(point='m2_prompt')])]))
+                config=dict(directory=str(root),worklist=str(worklist),fresh_production=True,
+                    minimum_publish_gen_events=1000,aggregate_workers=0)
+                state={}
+                with patch('watch_dark_photon_production.EosRpc'),patch.object(controller,'available_sources',return_value={'m2_prompt':sources}), \
+                     patch.object(controller,'jobs',return_value=[]),patch.object(controller,'reconcile_aggregate',return_value=None) as reconcile, \
+                     patch.object(controller,'aggregate_plan') as prepare:
+                    controller.publish(config,state)
+                self.assertEqual(reconcile.call_count,expected_calls)
+                prepare.assert_not_called()
+                self.assertFalse(state.get('aggregates'))

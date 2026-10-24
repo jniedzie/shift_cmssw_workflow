@@ -1210,6 +1210,14 @@ def publish(config, state):
                         published_utc=datetime.now(timezone.utc).isoformat())
                     state.setdefault('published',{})[point]=ready
             continue
+        if config.get('fresh_production'):
+            full_gen_events=0
+            for source in populations:
+                rows=read(source['plan_path'])['points']
+                row,=[row for row in rows if row['point']==point]
+                full_gen_events+=row.get('full_gen_events',row['events'])
+            if full_gen_events<config.get('minimum_publish_gen_events',1000):
+                continue  # Keep small canaries private without creating a blocking aggregate.
         signature = hashlib.sha256(json.dumps(populations, sort_keys=True).encode()).hexdigest()
         old = state.setdefault('published', {}).get(point, {})
         pending = reconcile_aggregate(config, state, point, populations)
