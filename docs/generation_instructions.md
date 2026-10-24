@@ -3219,3 +3219,12 @@ worker reservation, including downstream slots. To limit observed AFS start
 bursts, it submits at most ten new detector handoffs per 60-second controller
 poll; existing handoffs continue reconciliation. Per-DAG idle limits remain in
 force. Measure the actual critical path before promising a completion date.
+
+For future multi-point detector DAGs, `--independent-point-preflights` runs the
+existing native converter check on each point's complete original GEN census.
+Each detector chunk depends on its own point's check, and the selected initial
+full-chain canary remains in force. A failed physical point stays held without
+blocking the other points' finalizers and publication. Final collection still
+requires all original points; this option never drops an event or pretends the
+whole cohort is complete. The post-seal `point_preflights/manifest.json` pins
+each task and the original plan, seal, inventory, runtime and DAG.

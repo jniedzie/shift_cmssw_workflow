@@ -213,6 +213,10 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
     gate_nodes = ['D_' + point + '_000' for point in gates]
     lines, finalizers = [], []
     for row in plan['points']:
+        preflight = 'P_' + row['point'] if plan.get('independent_point_preflights') is True else None
+        if preflight is not None:
+            lines.extend([f'JOB {preflight} {output}/point_preflights/{row["point"]}/worker.sub',
+                          f'CATEGORY {preflight} PREFLIGHT'])
         parents = []
         for chunk in row['chunks']:
             node = f"D_{row['point']}_{chunk['chunk']:03d}"
@@ -221,6 +225,8 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
                 f'CATEGORY {node} DETECTOR'])
             if gate_nodes and node not in gate_nodes:
                 lines.append(f'PARENT {" ".join(gate_nodes)} CHILD {node}')
+            if preflight is not None:
+                lines.append(f'PARENT {preflight} CHILD {node}')
             parents.append(node)
         finalizer = 'F_' + row['point']
         finalizers.append(finalizer)
@@ -232,7 +238,58 @@ def dag_text(plan, output, gates, detector_cap, finalizer_cap):
         'VARS COLLECT point="all" chunk="all" kind="collect" seal="SEAL_DIGEST"',
         f'PARENT {" ".join(finalizers)} CHILD COLLECT',
         f'MAXJOBS DETECTOR {detector_cap}', f'MAXJOBS FINALIZER {finalizer_cap}'])
+    if plan.get('independent_point_preflights') is True:
+        lines.append(f'MAXJOBS PREFLIGHT {len(plan["points"])}')
     return '\n'.join(lines) + '\n'
+
+
+def prepare_independent_point_preflights(production):
+    """Prepare independent native scans after the original plan/seal are fixed."""
+    import importlib.util
+    production = Path(production)
+    plan = read(production/'plan.json')
+    if plan.get('independent_point_preflights') is not True:
+        return None
+    helper = production/'independent_preflight_helpers/prepare_dark_photon_kinematics_preflight.py'
+    sealed = read(production/'seal.json')['files']
+    for path in (helper, helper.with_name('dark_photon_detector_runtime.py')):
+        if sealed.get(str(path)) != sha256(path):
+            raise ValueError('Per-point preflight helper differs from the production seal')
+    spec = importlib.util.spec_from_file_location('_dp_point_gen_preflight', helper)
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    profile = dict(path=str(production/'frozen/detector_runtime.json'),
+                   sha256=sha256(production/'frozen/detector_runtime.json'))
+    points = {}
+    for row in plan['points']:
+        directory = production/'point_preflights'/row['point']
+        marker = directory/'preparation.json'
+        if not directory.exists():
+            module.prepare(production, profile, directory, point_scope=[row['point']])
+        prepared = read(marker)
+        for key in ('config', 'worker', 'submit'):
+            pin = prepared[key]
+            if sha256(pin['path']) != pin['sha256']:
+                raise ValueError('Per-point GEN preflight task changed: ' + row['point'])
+        config = read(prepared['config']['path'])
+        if (config.get('point_scope') != [row['point']]
+                or config.get('original_plan', {}).get('sha256') != sha256(production/'plan.json')
+                or config.get('original_seal', {}).get('sha256') != sha256(production/'seal.json')
+                or config.get('replacement_profile') != profile):
+            raise ValueError('Per-point GEN preflight differs from its original physical point')
+        points[row['point']] = prepared
+    manifest = dict(schema='shift-independent-point-preflights-v1', complete=True,
+        original_plan_sha256=sha256(production/'plan.json'),
+        original_seal_sha256=sha256(production/'seal.json'),
+        original_inventory_sha256=sha256(production/'gen_inventory.json'),
+        replacement_runtime_sha256=plan['detector_runtime']['runtime_sha256'],
+        pipeline_dag_sha256=sha256(production/'pipeline.dag'), points=points)
+    output = production/'point_preflights/manifest.json'
+    if output.exists():
+        if read(output) != manifest:
+            raise ValueError('Earlier per-point GEN preflight preparation changed')
+    else:
+        write(output, manifest)
+    return manifest
 
 
 def detector_category_ceiling(args):
@@ -524,6 +581,9 @@ def prepare(args):
             raise ValueError('Qualified template dependency changed: ' + path)
     plan = copy.deepcopy(read(args.preparation))
     runtime_profile = plan.get('detector_runtime')
+    independent_preflights = getattr(args, 'independent_point_preflights', False)
+    if independent_preflights and runtime_profile is None:
+        raise ValueError('Independent native GEN preflights require a frozen private detector runtime')
     if runtime_profile is not None:
         from dark_photon_detector_runtime import validate_profile
         validate_profile(runtime_profile)
@@ -564,6 +624,11 @@ def prepare(args):
         raise ValueError('Require bounded concurrency up to300detectorworkers and3finalizers')
     category_ceiling = detector_category_ceiling(args)
     output.mkdir(parents=True, exist_ok=False)
+    if independent_preflights:
+        helpers = output/'independent_preflight_helpers'
+        helpers.mkdir()
+        for name in ('prepare_dark_photon_kinematics_preflight.py', 'dark_photon_detector_runtime.py'):
+            shutil.copy2(Path(__file__).with_name(name), helpers/name)
     for directory in ('logs', 'failures', 'statuses', 'completed_points'):
         (output / directory).mkdir()
     for directory in ('canary', 'frozen/scoring'):
@@ -656,6 +721,8 @@ def prepare(args):
         finalizer_contract='Complete ordered GEN union; all bounded Nano groups precede histogramming; validated histogram sum')
     if global_gate is not None:
         plan['qualified_global_detector_canary'] = global_gate['authority']
+    if independent_preflights:
+        plan['independent_point_preflights'] = True
     if getattr(args, 'detector_category_ceiling', None) is not None:
         plan['detector_category_ceiling'] = category_ceiling
     write(output / 'plan.json', plan)
@@ -678,6 +745,8 @@ def prepare(args):
     dag = dag_text(plan, output, gates, category_ceiling, args.finalizers)
     (output / 'pipeline.dag.template').write_text(dag)
     common = [path for path in output.iterdir() if path.is_file()]
+    if independent_preflights:
+        common.extend(path for path in (output/'independent_preflight_helpers').iterdir() if path.is_file())
     common.extend(path for path in (output / 'canary').rglob('*') if path.is_file())
     common.extend(path for category in ('sources', 'templates')
                   for path in (frozen / category).rglob('*') if path.is_file())
@@ -706,6 +775,8 @@ def prepare(args):
         canonical_GEN_payloads_pinned_by_inventory_and_verified_on_worker_stage_in=True)
     write(output / 'seal.json', seal)
     (output / 'pipeline.dag').write_text(dag.replace('SEAL_DIGEST', sha256(output / 'seal.json')))
+    if independent_preflights:
+        prepare_independent_point_preflights(output)
     return dict(output=str(output), campaign=plan['campaign'], events=plan['events'], points=len(names),
         detector_jobs=plan['detector_chunks'], seal_sha256=sha256(output / 'seal.json'), submitted=False)
 
@@ -718,6 +789,8 @@ def main():
     parser.add_argument('--canary-points', nargs='+')
     parser.add_argument('--qualified-global-canary', type=Path,
                         help='Pinned measured runtime/full-chain/handoff authority replacing repeated local canary barriers')
+    parser.add_argument('--independent-point-preflights', action='store_true',
+                        help='Require each physical point full-GEN scan before its own detector chunks')
     parser.add_argument('--failure-base', required=True)
     parser.add_argument('--detector-workers', type=int, default=100)
     parser.add_argument('--detector-category-ceiling', type=int,

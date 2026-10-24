@@ -240,6 +240,59 @@ class ProductionBarriers(unittest.TestCase):
         self.assertIn('MAXJOBS DETECTOR 300\nMAXJOBS FINALIZER 2',weekend)
 
 
+class IndependentPointPreflights(unittest.TestCase):
+    def test_each_complete_point_gates_only_its_own_detector_chunks(self):
+        names=['m15_prompt','m40_prompt','m2_prompt']
+        plan=dict(independent_point_preflights=True,
+            points=[dict(point=name,chunks=[dict(chunk=0),dict(chunk=1)]) for name in names])
+        dag=dag_text(plan,Path('/unsubmitted'),['m15_prompt'],600,2)
+        dependencies=[]
+        for line in dag.splitlines():
+            if line.startswith('PARENT '):
+                before,after=line.split(' CHILD ')
+                dependencies.extend((parent,child) for parent in before.split()[1:] for child in after.split())
+        for name in names:
+            for chunk in range(2):
+                self.assertIn(('P_'+name,f'D_{name}_{chunk:03d}'),dependencies)
+            self.assertIn((f'D_{name}_000','F_'+name),dependencies)
+            self.assertIn((f'D_{name}_001','F_'+name),dependencies)
+            self.assertIn(('F_'+name,'COLLECT'),dependencies)
+        self.assertIn(('D_m15_prompt_000','D_m40_prompt_000'),dependencies)
+        self.assertNotIn(('P_m40_prompt','D_m2_prompt_000'),dependencies)
+        self.assertNotIn(('P_m40_prompt','D_m15_prompt_000'),dependencies)
+        self.assertIn('MAXJOBS PREFLIGHT 3',dag)
+        self.assertIn('MAXJOBS DETECTOR 600',dag)
+
+    def test_postseal_tasks_pin_each_whole_point_and_are_immutable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base=Path(tmp);helpers=base/'independent_preflight_helpers';helpers.mkdir()
+            source=Path(production_preparation.__file__).parent
+            import shutil
+            for name in ['prepare_dark_photon_kinematics_preflight.py','dark_photon_detector_runtime.py']:
+                shutil.copy2(source/name,helpers/name)
+            (base/'frozen').mkdir();write(base/'frozen/detector_runtime.json',dict(runtime_sha256='a'*64))
+            plan=dict(independent_point_preflights=True,detector_runtime=dict(runtime_sha256='a'*64),
+                points=[dict(point='p'),dict(point='q')])
+            write(base/'plan.json',plan)
+            write(base/'gen_inventory.json',dict(complete=True,points={'p':dict(events=2),'q':dict(events=3)}))
+            write(base/'seal.json',dict(files={str(p):sha256(p) for p in helpers.iterdir()}))
+            (base/'pipeline.dag').write_text('saved original DAG')
+            seal=sha256(base/'seal.json')
+            manifest=production_preparation.prepare_independent_point_preflights(base)
+            self.assertEqual(set(manifest['points']),{'p','q'})
+            self.assertEqual(manifest['original_seal_sha256'],seal)
+            self.assertEqual(manifest['pipeline_dag_sha256'],sha256(base/'pipeline.dag'))
+            for name in ['p','q']:
+                config=production_preparation.read(manifest['points'][name]['config']['path'])
+                self.assertEqual(config['point_scope'],[name])
+                self.assertEqual(config['original_seal']['sha256'],seal)
+                self.assertIn('+SendCredential = True',Path(manifest['points'][name]['submit']['path']).read_text())
+            self.assertEqual(production_preparation.prepare_independent_point_preflights(base),manifest)
+            target=Path(manifest['points']['p']['config']['path']);target.write_text('{}')
+            with self.assertRaisesRegex(ValueError,'changed'):
+                production_preparation.prepare_independent_point_preflights(base)
+
+
 class QualifiedGlobalDetectorGate(unittest.TestCase):
     def setUp(self):
         self.temp=tempfile.TemporaryDirectory();self.addCleanup(self.temp.cleanup)
