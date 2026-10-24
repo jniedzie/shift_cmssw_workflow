@@ -134,7 +134,10 @@ def observe(task, ads):
 
 
 def make_task(root, config, name, request, kind, stratum):
-    directory = root/'jobs'/name
+    # AFS limits the size of one directory independently of volume quota.
+    # Existing ledger paths stay fixed; only newly created tasks use shards.
+    shard = hashlib.sha256(name.encode()).hexdigest()[:2]
+    directory = root/'jobs_sharded'/shard/name
     directory.mkdir(parents=True, exist_ok=False)
     save(directory/'request.json', request)
     checksum = sha(directory/'request.json')

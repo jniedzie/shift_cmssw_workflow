@@ -38,6 +38,28 @@ class PublicationChargeTests(unittest.TestCase):
 
 
 class SchedulingTests(unittest.TestCase):
+    def test_new_tasks_bypass_a_full_legacy_AFS_directory(self):
+        import errno
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            legacy=root/'jobs'/'detector_0000001'
+            legacy.mkdir(parents=True)
+            (legacy/'request.json').write_text('original frozen request')
+            original_mkdir=Path.mkdir
+            def bounded_mkdir(path,*args,**kwargs):
+                if path.parent==root/'jobs':
+                    raise OSError(errno.EFBIG,'AFS directory full')
+                return original_mkdir(path,*args,**kwargs)
+            config=dict(worker_template='initialdir = @DIRECTORY@\nrequest = @REQUEST_SHA@\n')
+            with patch.object(Path,'mkdir',bounded_mkdir):
+                task=controller.make_task(root,config,'detector_0030025',dict(events=5),'detector','qcd_2to5')
+            path=Path(task['directory'])
+            self.assertEqual(path.parent.parent,root/'jobs_sharded')
+            self.assertEqual(json.loads((path/'request.json').read_text()),dict(events=5))
+            self.assertIn(str(path),(path/'worker.sub').read_text())
+            self.assertEqual((legacy/'request.json').read_text(),'original frozen request')
+
     def test_gen_prefetch_cannot_be_starved_by_detector_backlog(self):
         tasks = {f'qcd{i}':dict(kind='detector',phase='ready',stratum='qcd_20toinf')
                  for i in range(100)}

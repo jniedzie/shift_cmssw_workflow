@@ -3146,3 +3146,12 @@ Require native hold/exit, CPU usage, exact request/source/indices and proof that
 SIM never published Nano. Independent detector work can continue; unresolved
 cohorts keep completion/normalization gates closed. Unsubmitted job grouping is
 allowed only with exact index/weight/probability coverage; live jobs stay frozen.
+
+New SM controller tasks use `jobs_sharded/<two hex digits>/<task name>`.
+The prefix is a stable hash of the task name. AFS has a per-directory size
+limit even when the volume has free space; the October 24 controller stopped
+with EFBIG after roughly 31,700 entries in its original flat jobs directory.
+Keep existing ledger paths and queued working directories unchanged. Recover
+through a separately frozen controller, checking uncommitted job directories
+against native queue state and exact requests before recreating their tasks.
+Keep the original failure and incomplete detector cohorts recorded.
