@@ -26,7 +26,8 @@ from shift_condor_native import query, run_condor, parse_ads
 ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'NumJobStarts',
               'QDate', 'JobStartDate', 'EnteredCurrentStatus', 'RemoteHost', 'HoldReason',
               'ExitCode', 'ExitBySignal', 'CompletionDate', 'Args', 'Out',
-              'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu', 'Cmd']
+              'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu', 'Cmd',
+              'ShiftDPPointPreflightManifestSHA256']
 
 
 def retry_shared_storage(operation):
@@ -583,6 +584,57 @@ def reviewed_terminal_failures(config):
     return result
 
 
+def declared_point_preflight_child(production, child, manager):
+    """Accept only the exact scoped scanner bound to its native DAG manager."""
+    production = Path(production)
+    directory = Path(child.get('Iwd', ''))
+    if (directory.parent != production / 'point_preflights'
+            or child.get('DAGManJobId') != manager.get('ClusterId')
+            or manager.get('Cmd') != '/usr/bin/condor_dagman'
+            or child.get('ProcId', 0) != 0):
+        return False
+    try:
+        manifest_path = production / 'point_preflights/manifest.json'
+        if sha(manifest_path) != manager.get('ShiftDPPointPreflightManifestSHA256'):
+            return False
+        manifest = read(manifest_path)
+        if (manifest.get('schema') != 'shift-independent-point-preflights-v1'
+                or manifest.get('complete') is not True):
+            return False
+        for name, key in [('plan.json', 'original_plan_sha256'),
+                          ('seal.json', 'original_seal_sha256'),
+                          ('gen_inventory.json', 'original_inventory_sha256'),
+                          ('pipeline.dag', 'pipeline_dag_sha256')]:
+            if sha(production / name) != manifest[key]:
+                return False
+        point = directory.name
+        task = manifest['points'][point]
+        if task.get('complete') is not True or task['receipt'] != str(directory / 'receipt.json'):
+            return False
+        for key, name in [('config', 'preflight.json'), ('worker', 'worker.sh'), ('submit', 'worker.sub')]:
+            path = directory / name
+            if task[key] != dict(path=str(path), sha256=sha(path)) or path.resolve() != path:
+                return False
+        scan = read(directory / 'preflight.json')
+        if (scan.get('point_scope') != [point] or scan.get('production') != str(production)
+                or scan.get('output') != str(directory)
+                or scan.get('replacement_runtime_sha256') != manifest['replacement_runtime_sha256']):
+            return False
+        for key, name in [('original_plan', 'plan.json'), ('original_seal', 'seal.json'),
+                          ('inventory', 'gen_inventory.json')]:
+            if scan[key] != dict(path=str(production / name), sha256=sha(production / name)):
+                return False
+        profile = scan['replacement_profile']
+        if sha(profile['path']) != profile['sha256']:
+            return False
+        if (child.get('Cmd') != str(directory / 'worker.sh') or child.get('Args', '')
+                or f'JOB P_{point} {directory}/worker.sub' not in (production / 'pipeline.dag').read_text().splitlines()):
+            return False
+        return True
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return False
+
+
 def assess(config, previous, rows, history, receipts, now):
     root = Path(config['production_directory'])
     issues, stages = [], {}
@@ -625,7 +677,10 @@ def assess(config, previous, rows, history, receipts, now):
         expected = receipts.get(parent if parent in receipts else cluster)
         expected_iwd = (expected.get('payload_directory', expected['directory']) if parent in receipts
                         else expected['directory']) if expected else None
-        if expected and row.get('Iwd') != expected_iwd:
+        scoped_preflight = (expected and parent in receipts and expected.get('kind') == 'production'
+                            and row.get('Iwd') != expected_iwd
+                            and declared_point_preflight_child(expected_iwd, row, queued.get(parent, {})))
+        if expected and row.get('Iwd') != expected_iwd and not scoped_preflight:
             issue('wrong_iwd_' + str(cluster), 'critical', 'Job does not use its exact persistent working directory',
                   job=cluster, actual=row.get('Iwd'), expected=expected_iwd)
         if status == 5:

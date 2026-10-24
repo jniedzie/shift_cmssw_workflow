@@ -47,6 +47,72 @@ class StatisticsWatchdogTest(unittest.TestCase):
                     Iwd=kwargs.get('iwd', str(self.directory)), NumJobStarts=kwargs.get('starts', 0),
                     QDate=self.now - kwargs.get('age', 120))
 
+    def point_preflight_fixture(self):
+        production = self.root / 'production'
+        directory = production / 'point_preflights/m2_prompt'
+        directory.mkdir(parents=True)
+        def write(path, value):
+            path.write_text(json.dumps(value))
+            return dict(path=str(path), sha256=WATCH.sha(path))
+        plan = write(production / 'plan.json', {'points': [{'point': 'm2_prompt'}]})
+        seal = write(production / 'seal.json', {'files': {}})
+        inventory = write(production / 'gen_inventory.json', {'points': {'m2_prompt': {}}})
+        profile = write(production / 'profile.json', {'runtime_sha256': 'a' * 64})
+        scan = write(directory / 'preflight.json', dict(point_scope=['m2_prompt'],
+            production=str(production), output=str(directory), original_plan=plan,
+            original_seal=seal, inventory=inventory, replacement_profile=profile,
+            replacement_runtime_sha256='a' * 64))
+        (directory / 'worker.sh').write_text('#!/bin/bash\nexit 0\n')
+        (directory / 'worker.sub').write_text('executable = ' + str(directory / 'worker.sh') + '\n')
+        (production / 'pipeline.dag').write_text('JOB P_m2_prompt ' + str(directory / 'worker.sub') + '\n')
+        task = dict(complete=True, config=scan,
+            worker=dict(path=str(directory / 'worker.sh'), sha256=WATCH.sha(directory / 'worker.sh')),
+            submit=dict(path=str(directory / 'worker.sub'), sha256=WATCH.sha(directory / 'worker.sub')),
+            receipt=str(directory / 'receipt.json'))
+        manifest = write(production / 'point_preflights/manifest.json', dict(
+            schema='shift-independent-point-preflights-v1', complete=True,
+            original_plan_sha256=plan['sha256'], original_seal_sha256=seal['sha256'],
+            original_inventory_sha256=inventory['sha256'],
+            pipeline_dag_sha256=WATCH.sha(production / 'pipeline.dag'),
+            replacement_runtime_sha256='a' * 64, points={'m2_prompt': task}))
+        manager = dict(ClusterId=100, Cmd='/usr/bin/condor_dagman',
+                       ShiftDPPointPreflightManifestSHA256=manifest['sha256'])
+        child = self.child(iwd=str(directory), status=2)
+        child['Cmd'] = str(directory / 'worker.sh')
+        return production, directory, manager, child
+
+    def test_native_bound_point_preflight_has_its_declared_child_directory(self):
+        production, directory, manager, child = self.point_preflight_fixture()
+        self.assertTrue(WATCH.declared_point_preflight_child(production, child, manager))
+        child['DAGManJobId'] = 999
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def test_point_preflight_requires_native_manifest_binding_and_exact_command(self):
+        production, directory, manager, child = self.point_preflight_fixture()
+        manager['ShiftDPPointPreflightManifestSHA256'] = 'b' * 64
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+        manager['ShiftDPPointPreflightManifestSHA256'] = WATCH.sha(production / 'point_preflights/manifest.json')
+        child['Cmd'] = '/bin/bash'
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def test_changed_point_scope_cannot_gain_monitor_approval(self):
+        production, directory, manager, child = self.point_preflight_fixture()
+        path = directory / 'preflight.json'
+        scan = json.loads(path.read_text())
+        scan['point_scope'] = ['m2_prompt', 'm40_prompt']
+        path.write_text(json.dumps(scan))
+        manifest_path = production / 'point_preflights/manifest.json'
+        manifest = json.loads(manifest_path.read_text())
+        manifest['points']['m2_prompt']['config']['sha256'] = WATCH.sha(path)
+        manifest_path.write_text(json.dumps(manifest))
+        manager['ShiftDPPointPreflightManifestSHA256'] = WATCH.sha(manifest_path)
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def test_undeclared_point_directory_is_not_a_general_child_iwd_exception(self):
+        production, directory, manager, child = self.point_preflight_fixture()
+        child['Iwd'] = str(production / 'point_preflights/m40_prompt')
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
     def test_long_shared_storage_read_outage_keeps_the_verified_snapshot(self):
         target = self.root / 'verified.json'
         target.write_text('{"terminal_history": [123]}')
