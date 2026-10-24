@@ -3243,3 +3243,8 @@ general guard and conservation cap unchanged, preserve the first failure and
 qualify the actual converter, failed events and successful weighted controls in
 a private runtime. An input-contract tolerance is not a proof of machine
 precision. Numerical recovery must never bypass an unrelated transport guard.
+
+When repackaging a runtime, verify the final extracted bytes of every manifest
+member, including generated `.SCRAM` metadata for changed build files. A
+successful build does not validate those cached checksums. Run the downloaded capsule's
+actual bootstrap from scratch before submitting its parallel physics tests.
