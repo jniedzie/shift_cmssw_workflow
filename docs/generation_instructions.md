@@ -3253,3 +3253,13 @@ Completed runtime retries must be reconciled with the recovery guard's pinned
 helpers. A newer supervisor may need a newer adapter for first admissions;
 do not use that adapter to reinterpret older retry receipts. Exercise the
 replacement supervisor on saved failures as well as its new-admission path.
+
+Shared storage admission counts remaining writes. Keep each original registered
+budget and safety margin, but credit immutable published GEN, Nano and metadata
+bytes already charged to quota. Require sealed source/status identities,
+independent SHA-256 readback, exact successful worker exits and fresh queue
+absence. A failed DAG callback does not invalidate separately verified closed
+GEN output; preserve its original failure. Deduplicate paths and never credit
+live workers, partial outputs or bytes beyond the registered allocation. Apply
+this consistently to SM and direct DP peers, or shared admission can stall while
+plenty of physical space remains.
