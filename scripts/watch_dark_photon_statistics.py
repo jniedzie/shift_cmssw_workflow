@@ -448,9 +448,17 @@ def reviewed_terminal_failures(config):
         native = proof['terminal_native_ad']
         directory = Path(proof['directory'])
         record = proof['aggregate_record']
+        held = proof.get('original_held_native_ad', {})
+        removed_failure = (native.get('JobStatus') == 3
+            and proof.get('failure_kind') == 'GEN_ledger_log_path_relocation'
+            and held.get('JobStatus') == 5 and held.get('ExitCode') == 1
+            and held.get('ExitBySignal') is False
+            and all(held.get(key) == native.get(key) for key in
+                    ('ClusterId', 'ProcId', 'Iwd', 'ExitCode', 'ExitBySignal')))
         if (proof.get('schema') != 'shift-reviewed-aggregate-retirement-v1'
                 or proof.get('payload_started') is not False or proof.get('queue_absent') is not True
-                or native.get('JobStatus') != 4 or native.get('ExitBySignal') is not False
+                or (native.get('JobStatus') != 4 and not removed_failure)
+                or native.get('ExitBySignal') is not False
                 or native.get('ExitCode') in (None, 0) or native.get('ProcId') != 0
                 or native.get('Iwd') != str(directory) or record.get('directory') != str(directory)
                 or read(directory / 'submission.json').get('cluster') != native.get('ClusterId')):

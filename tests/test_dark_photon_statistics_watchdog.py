@@ -405,6 +405,29 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'evidence changed'):
             WATCH.reviewed_terminal_failures(self.config)
 
+    def test_removed_held_aggregate_requires_exact_reviewed_original_failure(self):
+        self.reviewed_failure()
+        path = self.root / 'reviewed_failure.json'
+        proof = json.loads(path.read_text())
+        native = dict(proof['terminal_native_ad'], JobStatus=3, ExitCode=1)
+        proof.update(terminal_native_ad=native, failure_kind='GEN_ledger_log_path_relocation',
+                     original_held_native_ad=dict(native, JobStatus=5))
+        def pin():
+            path.write_text(json.dumps(proof))
+            authority = dict(path=str(path), sha256=WATCH.sha(path))
+            self.config.update(retired_aggregate_attempts=[authority],
+                               dependencies={str(path): authority['sha256']})
+        pin()
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native'], native)
+        for key, value in [('JobStatus', 2), ('ExitCode', 0), ('Iwd', '/another/task'),
+                           ('ClusterId', 999), ('ExitBySignal', True)]:
+            with self.subTest(key=key):
+                proof['original_held_native_ad'] = dict(native, JobStatus=5)
+                proof['original_held_native_ad'][key] = value
+                pin()
+                with self.assertRaisesRegex(ValueError, 'exact terminal attempt'):
+                    WATCH.reviewed_terminal_failures(self.config)
+
     def test_recovered_handoff_requires_complete_unchanged_gen_and_tracks_pending_detector(self):
         stage = self.root / 'waves/w001/gen_stage'
         stage.mkdir(parents=True)
