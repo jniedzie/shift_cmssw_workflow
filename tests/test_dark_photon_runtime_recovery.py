@@ -161,3 +161,82 @@ class RuntimeRecoveryStrictness(unittest.TestCase):
                 view=recovery.prepare_view(production,authority,root/'view');path=Path(view['policy']);policy=json.loads(path.read_text());policy[key]='f'*64;path.write_text(json.dumps(policy))
                 with self.assertRaisesRegex(ValueError,'helper changed'):
                     budget.load_policy(path)
+
+class FutureDetectorHandoff(unittest.TestCase):
+    fixture=RuntimeRecovery.fixture
+
+    def setting(self,authority):
+        record=json.loads(Path(authority['path']).read_text())
+        return {key:record[key] for key in ('qualification',)} | {'profile':record['new_profile']}
+
+    def test_only_detector_profile_changes_in_new_operational_preparation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);production,authority,_=self.fixture(root);setting=self.setting(authority)
+            source=root/'preparation.json';plan=json.loads((production/'plan.json').read_text())
+            plan.update(private_gen_runtime={'runtime_sha256':'e'*64},selection={'IDs':[[1,1,18]],'p':[.1]},seed=12345)
+            source.write_text(json.dumps(plan));before=recovery.sha(source)
+            output=recovery.future_preparation(source,setting,root/'ops');changed=json.loads(output.read_text())
+            expected=copy.deepcopy(plan);expected['detector_runtime']=json.loads(Path(setting['profile']['path']).read_text())
+            self.assertEqual(changed,expected);self.assertEqual(recovery.sha(source),before)
+            self.assertEqual(recovery.future_preparation(source,setting,root/'ops'),output)
+            changed['seed']=0;output.write_text(json.dumps(changed))
+            with self.assertRaises(ValueError):recovery.future_preparation(source,setting,root/'ops')
+
+    def test_incomplete_mapping_cannot_prepare_future_detector_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);production,authority,_=self.fixture(root);setting=self.setting(authority)
+            path=Path(setting['qualification']['path']);q=json.loads(path.read_text());q['complete']=False;path.write_text(json.dumps(q));setting['qualification']['sha256']=recovery.sha(path)
+            with self.assertRaises(ValueError):recovery.future_preparation(production/'plan.json',setting,root/'ops')
+            self.assertFalse((root/'ops').exists())
+
+    def gate_fixture(self,root):
+        import shutil
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        production,authority,_=self.fixture(root);setting=self.setting(authority);ops=root/'ops'
+        prepared=recovery.future_preparation(production/'plan.json',setting,ops)
+        future=root/'new_production';shutil.copytree(production,future);(future/'plan.json').write_text(prepared.read_text())
+        directory=ops/'runtime_preflight';directory.mkdir()
+        config=directory/'preflight.json';config.write_text('{}')
+        worker=directory/'worker.sh';worker.write_text('#!/bin/bash\ntrue\n')
+        submit=directory/'worker.sub';submit.write_text('queue\n')
+        result=directory/'receipt.json';report=json.loads((root/'preflight.json').read_text());report['original_plan_sha256']=recovery.sha(future/'plan.json');report['original_seal_sha256']=recovery.sha(future/'seal.json');result.write_text(json.dumps(report))
+        (directory/'preparation.json').write_text(json.dumps(dict(config=dict(path=str(config),sha256=recovery.sha(config)),worker=dict(path=str(worker),sha256=recovery.sha(worker)),submit=dict(path=str(submit),sha256=recovery.sha(submit)),receipt=str(result))))
+        native=dict(ClusterId=123,ProcId=0,Iwd=str(directory),JobStatus=4,ExitCode=0,ExitBySignal=False)
+        durable=SimpleNamespace(submission=Mock(return_value=dict(cluster=123)),jobs=Mock(side_effect=[[dict(JobStatus=2)],[]]),
+            parse_ads=json.loads,run_condor=Mock(return_value=json.dumps([native])),scheduler_arguments=lambda cfg:[],save=Mock())
+        return future,setting,ops,durable,result
+
+    def test_native_preflight_closes_before_admission_and_is_cached(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as temporary:
+            future,setting,ops,durable,result=self.gate_fixture(Path(temporary))
+            with patch.object(recovery.time,'sleep') as wait:
+                recovery.future_preflight(future,setting,ops,durable,{})
+            wait.assert_called_once_with(30)
+            self.assertTrue(json.loads((ops/'future_detector_ready.json').read_text())['complete'])
+            durable.jobs.side_effect=None;durable.jobs.return_value=[];durable.run_condor.reset_mock()
+            recovery.future_preflight(future,setting,ops,durable,{})
+            durable.run_condor.assert_not_called()
+
+    def test_failed_or_incomplete_full_GEN_scan_cannot_admit_detector_jobs(self):
+        for changed in ['failed','missing_records','native_failure']:
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temporary:
+                future,setting,ops,durable,result=self.gate_fixture(Path(temporary))
+                report=json.loads(result.read_text())
+                if changed=='failed':report['complete']=False
+                elif changed=='missing_records':report['points']['m2_prompt']['converted_count']=19
+                else:durable.run_condor.return_value=json.dumps([dict(ClusterId=123,ProcId=0,Iwd=str(result.parent),JobStatus=4,ExitCode=1,ExitBySignal=False)])
+                result.write_text(json.dumps(report));durable.jobs.side_effect=[[]]
+                with self.assertRaises((ValueError,RuntimeError)):
+                    recovery.future_preflight(future,setting,ops,durable,{})
+                self.assertFalse((ops/'future_detector_ready.json').exists())
+
+    def test_already_submitted_old_production_is_never_rewritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);production,authority,_=self.fixture(root);setting=self.setting(authority)
+            (production/'submission.json').write_text('{}');before=recovery.sha(production/'plan.json')
+            recovery.future_preflight(production,setting,root/'ops',None,{})
+            self.assertEqual(recovery.sha(production/'plan.json'),before)
+            (production/'submission.json').unlink()
+            with self.assertRaises(ValueError):recovery.future_preflight(production,setting,root/'ops',None,{})

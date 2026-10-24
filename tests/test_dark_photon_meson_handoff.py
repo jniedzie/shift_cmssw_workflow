@@ -99,6 +99,132 @@ class OperationalHandoff(unittest.TestCase):
             with patch.object(production,'native_status',side_effect=production.MesonJobFailure('held',[])):
                 self.assertEqual(production.handoff_directory(config,batch),directory)
 
+class FutureMesonDetectorGate(unittest.TestCase):
+    def test_new_runtime_profile_is_preflighted_before_any_detector_DAG(self):
+        for failed in (False,True):
+            with self.subTest(failed_scan=failed),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);batch=dict(batch='a',point='m2_prompt');directory=root/'batches/a';directory.mkdir(parents=True)
+                original=dict(events=1,detector_chunks=1,private_gen_runtime={'sha256':'original_GEN'},detector_runtime={'sha256':'old'})
+                (directory/'preparation.json').write_text(json.dumps(original));prepared=root/'new_preparation.json';prepared.write_text(json.dumps(dict(original,detector_runtime={'sha256':'new'})))
+                budget=root/'budget.json';budget.write_text('{}');(directory/'rates.json').write_text('{"complete":true}')
+                config=dict(directory=str(root),tools='/frozen',future_detector_runtime={},storage_budget_template=str(budget),
+                    minimum_eos_free_bytes=100,qualified_template='/qualified',prior_inventories=[],failure_base='/eos/failures',publication_canary='/canary')
+                order=[];commands=[]
+                def prepare(argv,*args,**kwargs):
+                    order.append('prepare');commands.append(list(map(str,argv)));(directory/'production').mkdir()
+                def scan(*args):
+                    order.append('preflight')
+                    if failed:raise RuntimeError('fullGEN preflight failed')
+                def submit(*args):order.append('detector');return dict(cluster=123)
+                with patch.object(production,'adopt',return_value=original),patch.object(production,'handoff_directory',return_value=root/'ops'), \
+                     patch.object(production.durable,'run_logged',side_effect=prepare),patch.object(production.durable,'submit_dag',side_effect=submit) as dag, \
+                     patch('dark_photon_runtime_recovery.future_preparation',return_value=prepared),patch('dark_photon_runtime_recovery.future_preflight',side_effect=scan):
+                    if failed:
+                        with self.assertRaises(RuntimeError):production.handoff(config,batch)
+                    else:production.handoff(config,batch)
+                self.assertEqual(order,['prepare','preflight']+([] if failed else ['detector']))
+                self.assertEqual(dag.call_count,0 if failed else 1)
+                self.assertEqual(commands[0][commands[0].index('--preparation')+1],str(prepared))
+                self.assertEqual(json.loads((directory/'preparation.json').read_text()),original)
+
+
+class ReviewedRuntimeFailure(unittest.TestCase):
+    def fixture(self,root):
+        import run_dark_photon_runtime_recovery as guard
+        import dark_photon_runtime_recovery as adapter
+        science=root/'science';batch=dict(batch='a',point='m2_prompt')
+        directory=science/'batches/a/production';directory.mkdir(parents=True)
+        for name in ('plan.json','seal.json'):(directory/name).write_text('{}')
+        def write(path,value):
+            path.parent.mkdir(parents=True,exist_ok=True);path.write_text(json.dumps(value))
+            return dict(path=str(path),sha256=production.durable.sha(path))
+        profile=write(root/'profile.json',dict(runtime_sha256='new_runtime'))
+        authority=write(root/'authority.json',dict(new_profile=profile))
+        old=dict(ClusterId=123,ProcId=0,DAGManJobId=100,JobStatus=5,Iwd=str(directory),
+            ExitCode=1,ExitBySignal=False,NumJobStarts=1,Args='m2_prompt 0 original_seal',Cmd='original')
+        edits=dict(Cmd='reviewed_new_worker',TransferExecutable=False)
+        terminal=dict(old,**edits);terminal.update(JobStatus=4,ExitCode=0,NumJobStarts=2)
+        review=dict(production=str(directory),point=batch['point'],original_native=old,
+            plan_sha256=production.durable.sha(directory/'plan.json'),seal_sha256=production.durable.sha(directory/'seal.json'),
+            gen_sha256='unchanged_GEN',runtime_sha256='old_runtime',expected_event_ids=[[1,1,7]],
+            status_path=str(directory/'statuses/m2_prompt_000.json'))
+        status=dict(complete=True,expected_event_ids=review['expected_event_ids'],plan_sha256=review['plan_sha256'],
+            seal_sha256=review['seal_sha256'],parent_gen_sha256=review['gen_sha256'],events=1,nano_sha256='ready_Nano',
+            private_detector_runtime_sha256='new_runtime',original_private_detector_runtime_sha256='old_runtime',
+            runtime_override=dict(authority=authority))
+        status_pin=write(Path(review['status_path']),status)
+        attempt=dict(phase='complete',review=review,authority=authority,edits=edits,native_terminal=terminal,
+            complete_status_sha256=status_pin['sha256'],nano_sha256=status['nano_sha256'],completed_utc='2026-10-24T10:00:00+00:00')
+        guard_dir=root/'guard';write(guard_dir/'state.json',dict(attempts={'123':attempt}))
+        guard_config=dict(schema=guard.SCHEMA,directory=str(guard_dir),production_directories=[str(science)],
+            dependencies={module.__file__:production.durable.sha(module.__file__) for module in (guard,adapter)})
+        config=dict(directory=str(science),reviewed_runtime_recovery=write(guard_dir/'config.json',guard_config))
+        manager=dict(ClusterId=100,ProcId=0,JobStatus=2,Iwd=str(directory))
+        healthy=dict(ClusterId=124,ProcId=0,JobStatus=2,DAGManJobId=100,Iwd=str(directory))
+        failure=dict(stage='detector',cluster=100,error='preserved original held child',native_jobs=[manager,old,healthy])
+        entry=dict(stage='detector',failure=failure)
+        state=dict(failed_batches={'a':[failure]})
+        snapshot=dict(before_epoch=1803377400,rows=[manager,healthy])
+        return config,batch,entry,state,dict(cluster=100,task=str(directory)),snapshot,attempt
+
+    def test_only_exact_completed_reviewed_child_is_archived_with_original_failure(self):
+        with tempfile.TemporaryDirectory(prefix='.runtime-reconcile-test-',dir=Path(__file__).resolve().parents[1]) as temporary:
+            config,batch,entry,state,receipt,snapshot,attempt=self.fixture(Path(temporary))
+            original=json.loads(json.dumps(state['failed_batches']['a'][0]))
+            with patch.object(production.durable,'jobs') as query:
+                production.reconcile_runtime_failures(config,state,batch,entry,receipt,snapshot)
+            query.assert_not_called()
+            self.assertEqual(state['failed_batches'],{})
+            self.assertNotIn('failure',entry)
+            archived=state['resolved_failed_batches']['a'][0]
+            self.assertEqual(archived['failure'],original)
+            self.assertEqual(archived['attempts']['123'],attempt)
+            self.assertEqual(json.loads(Path(attempt['review']['status_path']).read_text())['parent_gen_sha256'],'unchanged_GEN')
+
+    def test_unfinished_unrelated_or_additional_held_children_remain_visible(self):
+        for scenario in ('released','handoff','unknown_child','failed_manager'):
+            with self.subTest(scenario=scenario),tempfile.TemporaryDirectory(prefix='.runtime-reconcile-test-',dir=Path(__file__).resolve().parents[1]) as temporary:
+                config,batch,entry,state,receipt,snapshot,attempt=self.fixture(Path(temporary))
+                failure=state['failed_batches']['a'][0]
+                if scenario=='released':
+                    path=Path(config['reviewed_runtime_recovery']['path']).parent/'state.json'
+                    attempt['phase']='released';path.write_text(json.dumps(dict(attempts={'123':attempt})))
+                elif scenario=='handoff':failure['stage']='handoff'
+                elif scenario=='unknown_child':failure['native_jobs'].append(dict(failure['native_jobs'][1],ClusterId=125))
+                else:failure['native_jobs'][0].update(JobStatus=5,ExitCode=1,ExitBySignal=False)
+                original=json.loads(json.dumps(state))
+                production.reconcile_runtime_failures(config,state,batch,entry,receipt,snapshot)
+                self.assertEqual(state,original)
+
+    def test_changed_success_population_native_exit_or_live_retry_cannot_clear_failure(self):
+        for scenario in ('status_hash','native_exit','population','old_native','live'):
+            with self.subTest(scenario=scenario),tempfile.TemporaryDirectory(prefix='.runtime-reconcile-test-',dir=Path(__file__).resolve().parents[1]) as temporary:
+                config,batch,entry,state,receipt,snapshot,attempt=self.fixture(Path(temporary))
+                state_path=Path(config['reviewed_runtime_recovery']['path']).parent/'state.json'
+                if scenario in ('status_hash','population'):
+                    path=Path(attempt['review']['status_path']);status=json.loads(path.read_text());status['expected_event_ids']=[[1,1,8]]
+                    path.write_text(json.dumps(status))
+                    if scenario=='population':attempt['complete_status_sha256']=production.durable.sha(path)
+                elif scenario=='native_exit':attempt['native_terminal']['ExitCode']=1
+                elif scenario=='old_native':attempt['review']['original_native']['NumJobStarts']=2
+                else:snapshot['rows'].append(attempt['native_terminal'])
+                state_path.write_text(json.dumps(dict(attempts={'123':attempt})))
+                with self.assertRaises((ValueError,RuntimeError)):
+                    production.reconcile_runtime_failures(config,state,batch,entry,receipt,snapshot)
+                self.assertIn('a',state['failed_batches'])
+                self.assertNotIn('resolved_failed_batches',state)
+
+    def test_stale_snapshot_requires_native_absence_and_preserves_other_stage_failures(self):
+        with tempfile.TemporaryDirectory(prefix='.runtime-reconcile-test-',dir=Path(__file__).resolve().parents[1]) as temporary:
+            config,batch,entry,state,receipt,snapshot,attempt=self.fixture(Path(temporary))
+            snapshot['before_epoch']=0
+            unrelated=dict(stage='GEN',cluster=90,error='original GEN issue',native_jobs=[])
+            state['failed_batches']['a'].append(unrelated)
+            with patch.object(production.durable,'jobs',return_value=[]) as query:
+                production.reconcile_runtime_failures(config,state,batch,entry,receipt,snapshot)
+            query.assert_called_once_with(config,'member(ClusterId,{123})')
+            self.assertEqual(state['failed_batches']['a'],[unrelated])
+
 
 if __name__=='__main__':
     unittest.main()

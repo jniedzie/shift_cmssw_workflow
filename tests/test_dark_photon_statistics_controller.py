@@ -1005,3 +1005,36 @@ class FreshAggregatePublicationFloor(unittest.TestCase):
                 self.assertEqual(reconcile.call_count,expected_calls)
                 prepare.assert_not_called()
                 self.assertFalse(state.get('aggregates'))
+
+class FutureDirectDetectorGate(unittest.TestCase):
+    def test_new_profile_and_native_preflight_precede_detector_submission(self):
+        import copy
+        for failed in (False,True):
+            with self.subTest(failed_scan=failed),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);wave=root/'waves/w001';stage=wave/'gen_stage';stage.mkdir(parents=True)
+                for name in ('gen_inventory.json','gen_publication.json'):controller.new(stage/name,dict(complete=True))
+                source=root/'original_preparation.json';original=dict(points=[dict(point='m2_prompt')],private_gen_runtime={'sha256':'original_GEN'},detector_runtime={'sha256':'old'})
+                controller.new(source,original);prepared=root/'new_preparation.json';replacement=copy.deepcopy(original);replacement['detector_runtime']={'sha256':'new'};controller.new(prepared,replacement)
+                controller.new(wave/'preparation_receipt.json',dict(preparation=str(source)))
+                controller.new(wave/'rates.json',dict(complete=True))
+                config=dict(directory=str(root),handoff_operations=str(root/'operations'),tools='/frozen',
+                    qualified_template='/qualified',prior_inventories=[],failure_base='/eos/failures',publication_canary='/qualified/canary',future_detector_runtime={})
+                order=[];commands=[]
+                def prepare(argv,*args,**kwargs):
+                    order.append('prepare');commands.append(list(map(str,argv)));production=wave/'production';production.mkdir();controller.new(production/'plan.json',replacement)
+                def scan(*args):
+                    order.append('preflight')
+                    if failed:raise RuntimeError('native converter failed')
+                def submit(*args):order.append('detector');return dict(cluster=123)
+                with patch.object(controller,'selected_preparation',return_value=dict(preparation=str(source))), \
+                     patch.object(controller,'production_budget',return_value={}),patch.object(controller,'run_logged',side_effect=prepare), \
+                     patch.object(controller,'submit_dag',side_effect=submit) as dag, \
+                     patch('dark_photon_runtime_recovery.future_preparation',return_value=prepared), \
+                     patch('dark_photon_runtime_recovery.future_preflight',side_effect=scan):
+                    if failed:
+                        with self.assertRaises(RuntimeError):controller.handoff(config,1)
+                    else:controller.handoff(config,1)
+                self.assertEqual(order,['prepare','preflight']+([] if failed else ['detector']))
+                self.assertEqual(dag.call_count,0 if failed else 1)
+                self.assertEqual(commands[0][commands[0].index('--preparation')+1],str(prepared))
+                self.assertEqual(controller.read(source),original)

@@ -677,6 +677,10 @@ def handoff(config, index):
             raise ValueError('Detector handoff requires the complete published GEN population')
         if not production.exists():
             prepared = selected_preparation(config,directory,read(directory / 'preparation_receipt.json'))
+            if config.get('future_detector_runtime') is not None:
+                from dark_photon_runtime_recovery import future_preparation
+                path=future_preparation(prepared['preparation'],config['future_detector_runtime'],operations)
+                prepared=dict(prepared,preparation=str(path),preparation_sha256=sha(path))
             plan = read(prepared['preparation'])
             budget = operations / 'storage_budget.json'
             expected_budget = production_budget(config, plan)
@@ -703,6 +707,9 @@ def handoff(config, index):
             # Qualification imports uproot; keep its known LCG interpreter here.
             command[0] = sys.executable
             run_logged(command, operations / 'prepare_production.log')
+        if config.get('future_detector_runtime') is not None:
+            from dark_photon_runtime_recovery import future_preflight
+            future_preflight(production,config['future_detector_runtime'],operations,sys.modules[__name__],config)
         receipt = submit_dag(config, production, config.get('detector_workers_per_wave', 100) + 2)
         rates = directory / 'rates.json'
         if not rates.exists():

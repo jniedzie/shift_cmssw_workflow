@@ -884,7 +884,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'merge_source_histograms', 'aggregate_group_events',
                                    'aggregate_storage_reservation_bytes', 'aggregation_storage_registration',
                                    'historical_anchor_calibration', 'operational_stage_timeouts_seconds',
-                                   'reviewed_regrouping_canary_recovery'}:
+                                   'reviewed_regrouping_canary_recovery', 'future_detector_runtime',
+                                   'reviewed_runtime_recovery'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1352,7 +1353,12 @@ def handoff(config, batch):
     directory = batch_directory(config, batch)
     plan = adopt(config, batch)
     production = directory / 'production'
+    operations=handoff_directory(config,batch) if config.get('future_detector_runtime') is not None else None
+    preparation=directory/'preparation.json'
     if not production.exists():
+        if config.get('future_detector_runtime') is not None:
+            from dark_photon_runtime_recovery import future_preparation
+            preparation=future_preparation(preparation,config['future_detector_runtime'],operations)
         budget = copy.deepcopy(read(config['storage_budget_template']))
         budget.update(events=plan['events'], detector_chunks=plan['detector_chunks'], points=1,
             external_reservations=[], fixed_reservation_bytes=config['minimum_eos_free_bytes'],
@@ -1366,7 +1372,7 @@ def handoff(config, batch):
         # The sealed operational deployment may repair orchestration while
         # adopted GEN physics and its original source helpers stay unchanged.
         durable.run_logged([os.sys.executable, Path(__file__).with_name('prepare_dark_photon_production.py'),
-            '--preparation', directory/'preparation.json', '--template', config['qualified_template'],
+            '--preparation', preparation, '--template', config['qualified_template'],
             '--gen-inventory', directory/'gen_inventory.json', '--gen-publication', directory/'gen_publication.json',
             '--storage-budget', directory/'storage_budget.json', '--output', production,
             '--prior-inventories', *config['prior_inventories'], '--canary-points', batch['point'],
@@ -1377,6 +1383,9 @@ def handoff(config, batch):
             *(['--absolute-stage-timeouts', *map(str,config['operational_stage_timeouts_seconds'])]
               if config.get('operational_stage_timeouts_seconds') is not None else [])],
             directory/'prepare_production.log', timeout=1800)
+    if config.get('future_detector_runtime') is not None:
+        from dark_photon_runtime_recovery import future_preflight
+        future_preflight(production,config['future_detector_runtime'],operations,durable,config)
     receipt = (existing_receipt(production, production/'pipeline.dag.condor.sub')
                if (production/'submission.json').is_file() else durable.submit_dag(
                    config, production, config.get('detector_workers_per_point', 100) + 2))
@@ -2357,6 +2366,82 @@ def existing_receipt(directory, description):
     return receipt
 
 
+def reconcile_runtime_failures(config, state, batch, entry, receipt, queue_snapshot=None):
+    """Archive only held-child failures with a completed, reviewed native retry."""
+    failures=state.get('failed_batches',{}).get(batch['batch'],[])
+    authority=config.get('reviewed_runtime_recovery')
+    if not failures or authority is None:
+        return
+    import run_dark_photon_runtime_recovery as recovery
+    import dark_photon_runtime_recovery as adapter
+    guard=read_pinned(authority)
+    if guard.get('schema')!='shift-dp-runtime-recovery-controller-v1':
+        raise ValueError('Unknown reviewed runtime-recovery controller')
+    dependencies=guard['dependencies']
+    for path,digest in dependencies.items():
+        if durable.sha(path)!=digest:
+            raise ValueError('Reviewed runtime-recovery dependency changed')
+    for module in (recovery,adapter):
+        matches=[digest for path,digest in dependencies.items() if Path(path).name==Path(module.__file__).name]
+        if len(matches)!=1 or durable.sha(module.__file__)!=matches[0]:
+            raise ValueError('Meson retry validator differs from its frozen guard')
+    production=batch_directory(config,batch)/'production'
+    if not any(production.is_relative_to(Path(root)) for root in guard['production_directories']):
+        raise ValueError('Meson production is outside the reviewed retry scope')
+    guard_directory=Path(guard['directory'])
+    if not guard_directory.is_absolute() or str(guard_directory).startswith('/tmp/'):
+        raise ValueError('Reviewed retry state needs its persistent directory')
+    attempts=read(guard_directory/'state.json').get('attempts',{})
+    resolved=[]
+    for failure in failures:
+        if failure.get('stage')!='detector' or failure.get('cluster')!=receipt['cluster']:
+            continue
+        held=[row for row in failure.get('native_jobs',[]) if row.get('JobStatus') in (3,5)]
+        if not held:
+            continue
+        proofs={}
+        for original in held:
+            cluster=original.get('ClusterId');attempt=attempts.get(str(cluster))
+            if (original.get('JobStatus')!=5 or original.get('ExitCode')!=1
+                    or original.get('ExitBySignal') is not False or original.get('ProcId')!=0
+                    or original.get('DAGManJobId')!=receipt['cluster'] or original.get('Iwd')!=str(production)
+                    or attempt is None or attempt.get('phase')!='complete'):
+                break
+            review=attempt['review'];old=review['original_native']
+            if (review.get('production')!=str(production) or review.get('point')!=batch['point']
+                    or review.get('plan_sha256')!=durable.sha(production/'plan.json')
+                    or review.get('seal_sha256')!=durable.sha(production/'seal.json')
+                    or any(old.get(key)!=original.get(key) for key in
+                        ('ClusterId','ProcId','DAGManJobId','Iwd','NumJobStarts','ExitCode','ExitBySignal','JobStatus'))
+                    or durable.sha(review['status_path'])!=attempt.get('complete_status_sha256')):
+                raise ValueError('Completed retry differs from the recorded meson failure')
+            status=recovery.completed_attempt(attempt,attempt['native_terminal'])
+            if status.get('nano_sha256')!=attempt.get('nano_sha256'):
+                raise ValueError('Completed retry Nano digest changed')
+            proofs[str(cluster)]=copy.deepcopy(attempt)
+        else:
+            # A successful cached exit is usable only after a fresh queue absence.
+            completed=max(datetime.fromisoformat(a['completed_utc']).timestamp() for a in proofs.values())
+            if (queue_snapshot is not None and queue_snapshot['before_epoch']>=completed
+                    and production.is_relative_to(Path(config['directory']))):
+                live=[row for row in queue_snapshot['rows'] if str(row['ClusterId']) in proofs]
+            else:
+                live=durable.jobs(config,'member(ClusterId,{'+','.join(proofs)+'})')
+            if live:
+                raise RuntimeError('A completed reviewed meson retry is still live')
+            resolved.append(dict(failure=copy.deepcopy(failure),runtime_recovery=authority,
+                attempts=proofs,resolved_utc=datetime.now(timezone.utc).isoformat()))
+    if resolved:
+        archive=state.setdefault('resolved_failed_batches',{}).setdefault(batch['batch'],[])
+        for record in resolved:
+            archive.append(record)
+            failures.remove(record['failure'])
+            if entry.get('failure')==record['failure']:
+                entry.pop('failure')
+        if not failures:
+            state['failed_batches'].pop(batch['batch'])
+
+
 def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot=None):
     """Keep a failed batch visible while independent batches can progress.
 
@@ -2365,8 +2450,10 @@ def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot
     No failed job is released, replaced or counted as completed here.
     """
     try:
-        return (native_status(config,receipt,queue_snapshot) if queue_snapshot is not None
+        result=(native_status(config,receipt,queue_snapshot) if queue_snapshot is not None
                 else native_status(config,receipt))
+        reconcile_runtime_failures(config,state,batch,entry,receipt,queue_snapshot)
+        return result
     except MesonJobFailure as error:
         failure = dict(stage=stage, cluster=receipt['cluster'], error=str(error),
                        native_jobs=error.jobs)
