@@ -8,13 +8,19 @@ import errno
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from run_shift_sm_postprocessing import exposure, selected_rows
+from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command
 from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update
 from run_shift_smart_sm_controller import postprocessing_charge
 import run_shift_smart_sm_controller as main_controller
 
 
 class PostprocessingTest(unittest.TestCase):
+    def test_larger_hadd_file_limit_preserves_input_order_and_compression(self):
+        self.assertEqual(hadd_command('out.root', ['a.root', 'b.root'], 200),
+            ['hadd', '-fk', '-n', '200', 'out.root', 'a.root', 'b.root'])
+        with self.assertRaises(ValueError):
+            hadd_command('out.root', ['a.root'], 0)
+
     def source(self, checksum, count=100):
         return dict(stratum='jpsi_5to10', source_id=checksum, gen_sha256=checksum,
                     denominator_kind='fixed_source_trials', full_source_trials=count,

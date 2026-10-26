@@ -33,6 +33,14 @@ def hadron(pdg):
             and value % 10 != 0)
 
 
+def generator_bookkeeping_diquark(pdg, status):
+    """Recognize Pythia remnant/string diquarks, not new transport states."""
+    value = abs(int(pdg))
+    return (status in (63, 71) and 1000 <= value < 7000
+            and 1 <= (value // 1000) <= 6 and 1 <= (value // 100) % 10 <= 6
+            and value % 100 in (1, 3))
+
+
 def kinematics(momentum):
     if len(momentum) != 3 or any(not math.isfinite(float(x)) for x in momentum):
         raise ValueError('Momentum needs three finite GeV components')
@@ -142,7 +150,8 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
         known_elementary = set(range(1, 7)) | set(range(11, 17)) | {21, 22, 23, 24, 25, 32}
         unknown_ancestors.update(number for number in parents
             if particles[number]['status'] != 4 and not hadron(particles[number]['pdg'])
-            and abs(particles[number]['pdg']) not in known_elementary)
+            and abs(particles[number]['pdg']) not in known_elementary
+            and not generator_bookkeeping_diquark(particles[number]['pdg'], particles[number]['status']))
         needed_ancestors.update(parents)
         flight_numbers = [number for number in parents if hadron(particles[number]['pdg'])
                           and particles[number]['status'] != 4]

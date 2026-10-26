@@ -73,6 +73,23 @@ class GenMaterialFeatureTests(unittest.TestCase):
         for value in (130,310,211,321,511,5122):
             self.assertTrue(features.hadron(value))
 
+    def test_remnant_diquarks_do_not_make_every_muon_event_unknown(self):
+        for pdg in (1103, 2101, -2103, 2203, 3101):
+            for status in (63, 71):
+                rows=[particle(1,pdg,status=status),particle(2,211,[1]),
+                      particle(3,13,[2],status=1,end=None)]
+                row=features.event_features(rows,[1,1,1],3.,[3.])
+                self.assertEqual(row['unknown_transport_ancestor_barcodes'],[])
+                self.assertEqual(row['muons'][0]['ancestor_barcodes'],[1,2])
+                self.assertEqual(row['muons'][0]['transport_parent_barcodes'],[2])
+                self.assertEqual(row['native_weight'],3.)
+
+    def test_unclassified_BSM_and_nonbookkeeping_status_remain_unknown(self):
+        for pdg,status in ((1000021,2),(9900015,63),(2101,1),(2101,2)):
+            rows=[particle(1,pdg,status=status),particle(2,13,[1],status=1,end=None)]
+            row=features.event_features(rows,[1,1,1],1.,[1.])
+            self.assertEqual(row['unknown_transport_ancestor_barcodes'],[1])
+
 
 if __name__ == '__main__':
     unittest.main()

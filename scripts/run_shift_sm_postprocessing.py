@@ -177,7 +177,13 @@ def publish(path, directory):
     return dict(path=destination, sha256=digest(path), bytes=path.stat().st_size)
 
 
-def run(request_path):
+def hadd_command(output, inputs, maximum_open_files=50):
+    if type(maximum_open_files) is not int or not 2 <= maximum_open_files <= 1000:
+        raise ValueError('Invalid merger open-file limit')
+    return ['hadd', '-fk', '-n', str(maximum_open_files), str(output), *map(str, inputs)]
+
+
+def run(request_path, maximum_open_files=50, merge_timeout=3600):
     request = read(request_path)
     assert request['schema'] == 'shift-smart-SM-postprocessing-v1'
     assert request['complete_source_selections_only'] is True
@@ -217,8 +223,8 @@ def run(request_path):
         raise ValueError('Source selection is not completely reconstructed')
     merged = work / 'nano_merged.root'
     with (work / 'merge.log').open('w') as log:
-        subprocess.run(['hadd', '-fk', '-n', '50', str(merged), *map(str, inputs)],
-                       check=True, stdout=log, stderr=subprocess.STDOUT, timeout=3600)
+        subprocess.run(hadd_command(merged, inputs, maximum_open_files),
+                       check=True, stdout=log, stderr=subprocess.STDOUT, timeout=merge_timeout)
     from shift_nano_integrity import compare_all_branches
     integrity = compare_all_branches(inputs, merged)
     _, sumw, sumw2 = inspect_nano(merged, expected)
@@ -284,9 +290,11 @@ def run(request_path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('request', type=Path)
+    parser.add_argument('--hadd-open-files', type=int, default=50)
+    parser.add_argument('--merge-timeout', type=int, default=3600)
     args = parser.parse_args()
     try:
-        run(args.request)
+        run(args.request, args.hadd_open_files, args.merge_timeout)
     except BaseException as error:
         save('result.json', dict(complete=False, error=repr(error), checked_epoch=time.time()))
         raise
