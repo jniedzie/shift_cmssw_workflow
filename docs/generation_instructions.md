@@ -28,6 +28,29 @@ are separate stages; this controller does not claim to have completed them.
 Forced-decay and absolute-rate qualifications remain documented separately in
 `SHIFT_ANALYSIS.md`; a passing worker does not close those physics questions.
 
+## Rolling SM ntuple and histogram publication (2026-10-26)
+
+The smart SM production now has a separate detached postprocessing controller.
+`run_shift_sm_postprocessing_controller.py` follows the existing source/detector
+ledger and publishes only fully reconstructed original source selections. It
+keeps zero-selected sources in their original GEN exposure, leaves the small
+Nano inputs intact, and runs bins independently. Snapshots update after ten new
+closed sources, a twenty-percent source increase, or an hour with new sources.
+`run_shift_sm_postprocessing.py` uses the ordinary histogrammer with native W/p,
+validates every Nano branch and persisted metadata through the shared integrity
+helper, and publishes `nanoAOD_merged/`, `histograms/` and `histograms_merged/`
+with independent SHA-256 readback. The ordinary campaign switch finds these
+outputs; no plotter-side production ledger is required.
+
+The active postprocessing deployment is recorded in
+`../../validation/sm_smart_production_20261023_v1/active_postprocessing_supervisor.json`.
+The main supervisor counts its pending and committed writes within the existing
+SM allocation. Scheduler hosts use the parent's authenticated quota-worker
+receipts; they must not invoke a nonexistent local EOS client. Failure holds
+remain explicit, and one failed source does not prevent unrelated closed
+sources from reaching plots. Physical source/branching qualification flags stay
+as recorded in the original receipts; histogram publication does not close them.
+
 ## Reconstruction default for new production (2026-10-23)
 
 The standard native point fitter now removes exact copies of CSC measurements

@@ -37,8 +37,20 @@ def read(path):
 def save(path, value):
     path = Path(path)
     temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, indent=2, allow_nan=False)+'\n')
-    temporary.replace(path)
+    data = (json.dumps(value, indent=2, allow_nan=False)+'\n').encode()
+    while True:
+        try:
+            with temporary.open('wb') as stream:
+                for start in range(0, len(data), 1048576):
+                    stream.write(data[start:start+1048576])
+            temporary.replace(path)
+            return
+        except OSError as error:
+            if error.errno not in (errno.EIO, errno.ESTALE, errno.ETIMEDOUT):
+                raise
+            # Retry these exact bytes before any further scheduler action.
+            # Quota, permission and semantic failures remain visible.
+            time.sleep(10)
 
 
 def sha(path):
@@ -402,10 +414,22 @@ def admission_order(tasks):
     return result
 
 
+def postprocessing_charge(config):
+    directory = config.get('postprocessing_directory')
+    if not directory:
+        return 0, 0
+    policy = read(config.get('postprocessing_policy', str(Path(directory) / 'config.json')))
+    ledger = read(Path(directory) / 'state.json')
+    spent = sum(t.get('published_bytes', 0) for t in ledger['tasks'].values())
+    reserved = sum(policy['worker_publication_bound_bytes'] for t in ledger['tasks'].values()
+                   if t['phase'] in ('submitted', 'submitting'))
+    return spent, reserved
+
+
 def step(root, config, state):
     # One account query; no full status-tree scan for each completed event.
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
-        'Iwd', 'NumJobStarts', 'HoldReason','ExitCode','RemoteUserCpu','ExitBySignal','HoldReasonCode'], timeout=45)
+        'Iwd', 'DAGManJobId', 'NumJobStarts', 'HoldReason','ExitCode','RemoteUserCpu','ExitBySignal','HoldReasonCode'], timeout=45)
     for task in list(state['tasks'].values()):
         observe(task, ads)
         if task['phase'] == 'done' and task['kind'] == 'source' and not task.get('children_created'):
@@ -498,6 +522,7 @@ def step(root, config, state):
     idle = sum(ad['JobStatus']==1 for ad in workers)
     admitted = 0
     storage_blocks=Counter()
+    extra_spent, extra_reserved = postprocessing_charge(config)
     for name, task in admission_order(state['tasks']):
         if task['phase'] != 'ready' or task['stratum'] in admission_failures:
             continue
@@ -508,8 +533,8 @@ def step(root, config, state):
                 continue
             if task['kind']=='source' and not fresh_detector_families[task['stratum'].split('_')[0]]:
                 continue
-            in_flight = sum(t['bound_bytes'] for t in state['tasks'].values() if t['phase']=='submitted')
-            spent = sum(t.get('published_bytes', 0) for t in state['tasks'].values() if t['phase']=='done')
+            in_flight = sum(t['bound_bytes'] for t in state['tasks'].values() if t['phase']=='submitted') + extra_reserved
+            spent = sum(t.get('published_bytes', 0) for t in state['tasks'].values() if t['phase']=='done') + extra_spent
             if spent+in_flight+task['bound_bytes'] > config['own_reservation_bytes']:
                 storage_blocks['total_reservation']+=1
                 continue
@@ -518,6 +543,8 @@ def step(root, config, state):
                 amount=sum((t.get('published_bytes',0) if t['phase']=='done' else
                     t['bound_bytes'] if t['phase']=='submitted' else 0)
                     for t in state['tasks'].values() if (t['kind']=='raw_source')==(category=='raw_supply'))
+                if category == 'detector_production':
+                    amount += extra_spent + extra_reserved
                 if amount+task['bound_bytes']>config['storage_partitions'][category]:
                     storage_blocks[category]+=1;continue
             required = config['external_future_reservation_bytes']+config['safety_floor_bytes']+in_flight+task['bound_bytes']
