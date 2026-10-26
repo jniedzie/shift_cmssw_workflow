@@ -1,5 +1,5 @@
 # Code style: AI-code. AI-generated neutral pseudoscalar radiative-current model.
-"""Rate-only local VMD model of P -> P' gamma A', not a production adapter.
+"""Rate and correlated decay kernel for the specified local P -> P' gamma A' current.
 
 The real-photon authority is Escribano et al., PhysRevD102,034026 (2020),
 doi:10.1103/PhysRevD.102.034026, Eqs8-11,23 and TablesI-II. We retain both
@@ -25,10 +25,12 @@ source yields, parent flight and detector acceptance are excluded here.
 Four-vectors are (E,px,py,pz), masses/widths GeV, VP couplings GeV^-1.
 """
 import cmath
+import bisect
+import functools
 import math
 
 from dark_photon_dipion_meson import _gauss_legendre
-from dark_photon_meson import boost
+from dark_photon_meson import MUON_MASS_GEV, boost
 from dark_photon_vector_meson import two_body_momentum
 
 
@@ -198,7 +200,7 @@ class LocalVMDCurrent:
         return list(zip(values,values[1:]))
 
     def integrated_width(self, parent_mass, recoil_mass, mass, epsilon_em, *,
-                         photon_reference=False, envelope=False, order=12):
+                         photon_reference=False, envelope=False, order=12, moment=None):
         """Deterministic ds dcos integration; output GeV.
 
         photon_reference=True computes P->P'gamma gamma, including 1/2!.
@@ -236,7 +238,311 @@ class LocalVMDCurrent:
                         cosine = (first+last)/2+(last-first)/2*cosine_node
                         dark = boost((dark_energy,inner*math.sqrt(1-cosine*cosine),0.,inner*cosine),
                                      (0.,0.,-outer/pair_energy))
-                        angular += (last-first)/2*cosine_weight*self.spin_sum(parent,photon,dark,mass,envelope=envelope)
+                        value = self.spin_sum(parent,photon,dark,mass,envelope=envelope)
+                        if moment is not None:
+                            factor = moment(dark)
+                            if not math.isfinite(factor) or factor < 0:
+                                raise ValueError('A rate moment must be finite and nonnegative')
+                            value *= factor
+                        angular += (last-first)/2*cosine_weight*value
                 density = outer*inner/(128*math.pi**3*parent_mass**2*pair_mass)
                 result += (high-low)/2*weight*density*angular
         return result*epsilon_em**2/(2 if photon_reference else 1)
+
+
+def _isotropic(rng):
+    cosine = 2*rng.random()-1
+    azimuth = 2*math.pi*rng.random()
+    sine = math.sqrt(max(0., 1-cosine*cosine))
+    return sine*math.cos(azimuth), sine*math.sin(azimuth), cosine
+
+
+def _rotation(rng):
+    axis = _isotropic(rng)
+    reference = (0., 0., 1.) if abs(axis[2]) < .9 else (1., 0., 0.)
+    first = _cross(axis, reference)
+    norm = math.sqrt(sum(x*x for x in first))
+    first = tuple(x/norm for x in first)
+    second = _cross(axis, first)
+    angle = 2*math.pi*rng.random()
+    rotated = tuple(math.cos(angle)*x+math.sin(angle)*y for x, y in zip(first, second))
+    return rotated, _cross(axis, rotated), axis
+
+
+def _rotate(vector, basis):
+    return (vector[0],)+tuple(sum(vector[j+1]*basis[j][i] for j in range(3)) for i in range(3))
+
+
+class LocalVMDSampler:
+    """Unweighted central-current Dalitz sampler with a proven rejection bound.
+
+    Let t=(p-k)^2 and u=(p-q)^2, where k is the real photon. The density is
+    epsilon_em^2 * spin_sum/(256*pi^3*M^3) on the physical Dalitz domain.
+    A mixture of truncated Lorentzians resolves both crossed vector poles.
+    Cauchy bounds the sum of N diagram/vector amplitudes by N times the sum
+    of their norms. Each norm has the following physical-domain bounds:
+      S_t <= (M^2-t)^2 * lambda(t,m^2,r^2)/8,
+      S_u <= lambda(M^2,m^2,u) * (u-r^2)^2/8.
+    These follow by evaluating the two transverse epsilon vertices in the
+    internal-vector rest frame: S=|a|^2|b|^2+(a.b)^2 times its invariant^2.
+    No pilot maximum, phase-space clipping or favourable interference enters
+    the envelope. Every event is accepted with the full coherent spin sum.
+    """
+    def __init__(self, current, parent_mass, recoil_mass, mass):
+        if (not isinstance(current, LocalVMDCurrent)
+                or not all(math.isfinite(x) for x in (parent_mass,recoil_mass,mass))
+                or parent_mass <= 0 or min(recoil_mass,mass) < 0
+                or mass >= parent_mass-recoil_mass
+                or not current.domain[0] <= mass <= current.domain[1]):
+            raise ValueError('An explicit current and open physical three-body masses are required')
+        self.current, self.parent_mass, self.recoil_mass, self.mass = current, parent_mass, recoil_mass, mass
+        self.t_range = ((recoil_mass+mass)**2, parent_mass**2)
+        self.u_range = (recoil_mass**2, (parent_mass-mass)**2)
+        active = [row for row in current.vectors if abs(row['coupling_product_gev_inverse2']) > 0]
+        if not active:
+            raise ValueError('A zero coherent current cannot generate decays')
+        self.pieces, self.cumulative = [], [0.]
+        count = 2*len(active)
+        for coordinate, limits in enumerate((self.t_range, self.u_range)):
+            other = self.u_range if coordinate == 0 else self.t_range
+            for low, high in current._panels(*limits):
+                if coordinate == 0:
+                    lam = (high-(recoil_mass+mass)**2)*(high-(recoil_mass-mass)**2)
+                    numerator = (parent_mass**2-low)**2*lam/8
+                else:
+                    lam = ((parent_mass-mass)**2-low)*((parent_mass+mass)**2-low)
+                    numerator = lam*(high-recoil_mass**2)**2/8
+                for vector in active:
+                    pole = vector['mass_gev']**2
+                    width = vector['width_gev']
+                    if vector['width_prescription'] == 'rho-pipi-primary-eq10':
+                        threshold = 4*vector['pion_mass_gev']**2
+                        width *= ((low-threshold)/(pole-threshold))**1.5 if low > threshold else 0.
+                    scale = vector['mass_gev']*width
+                    if scale == 0 and low <= pole <= high:
+                        raise ValueError('Pole panels must resolve the positive-width neighbourhood')
+                    # Directed analytic inequalities need only this rounding margin.
+                    strength = count*abs(vector['coupling_product_gev_inverse2'])**2*numerator*(1+1.e-12)
+                    if strength == 0:
+                        continue
+                    if scale:
+                        first, last = math.atan((low-pole)/scale), math.atan((high-pole)/scale)
+                        integral = (last-first)/scale
+                    else:
+                        first, last = 1/(pole-low), 1/(pole-high)
+                        integral = last-first
+                    if not math.isfinite(integral) or integral <= 0:
+                        raise ValueError('Invalid analytic Lorentzian proposal integral')
+                    self.pieces.append(dict(coordinate=coordinate,low=low,high=high,pole=pole,
+                        scale=scale,first=first,last=last,strength=strength))
+                    self.cumulative.append(self.cumulative[-1]+strength*integral*(other[1]-other[0]))
+        self.envelope_integral = self.cumulative[-1]
+        if not math.isfinite(self.envelope_integral) or self.envelope_integral <= 0:
+            raise ValueError('The current has no finite rejection envelope')
+
+    def envelope(self, t, u):
+        return math.fsum(piece['strength']/((piece['pole']-(t,u)[piece['coordinate']])**2+piece['scale']**2)
+            for piece in self.pieces if piece['low'] <= (t,u)[piece['coordinate']] <= piece['high'])
+
+    def rest_event(self, t, u):
+        """Construct the canonical event; return None outside its physical domain."""
+        if not self.t_range[0] < t < self.t_range[1] or not self.u_range[0] < u < self.u_range[1]:
+            return None
+        parent, recoil, mass = self.parent_mass, self.recoil_mass, self.mass
+        pair = math.sqrt(t)
+        outer = (parent*parent-t)/(2*parent)
+        pair_energy = (parent*parent+t)/(2*parent)
+        inner = two_body_momentum(pair,recoil,mass)
+        energy = (t+mass*mass-recoil*recoil)/(2*pair)
+        a = parent*parent+mass*mass-2*parent*pair_energy/pair*energy
+        b = 2*parent*outer/pair*inner
+        if b <= 0:
+            return None
+        cosine = (u-a)/b
+        if abs(cosine) > 1:
+            return None
+        photon = (outer,0.,0.,outer)
+        dark = boost((energy,inner*math.sqrt(max(0.,1-cosine*cosine)),0.,inner*cosine),
+                     (0.,0.,-outer/pair_energy))
+        p = (parent,0.,0.,0.)
+        daughter = tuple(x-y-z for x,y,z in zip(p,photon,dark))
+        return daughter, photon, dark
+
+    def sample_rest(self, rng, *, maximum_trials=1000000):
+        """Generate unit-weight P' gamma A' in a uniformly rotated parent frame."""
+        for trial in range(1,maximum_trials+1):
+            index = bisect.bisect_right(self.cumulative,rng.random()*self.envelope_integral)-1
+            piece = self.pieces[min(index,len(self.pieces)-1)]
+            parameter = piece['first']+rng.random()*(piece['last']-piece['first'])
+            value = piece['pole']+piece['scale']*math.tan(parameter) if piece['scale'] else piece['pole']-1/parameter
+            other = self.u_range if piece['coordinate'] == 0 else self.t_range
+            second = other[0]+rng.random()*(other[1]-other[0])
+            t,u = (value,second) if piece['coordinate'] == 0 else (second,value)
+            event = self.rest_event(t,u)
+            if event is None:
+                continue
+            daughter,photon,dark = event
+            density = self.current.spin_sum((self.parent_mass,0.,0.,0.),photon,dark,self.mass)
+            upper = self.envelope(t,u)
+            if not math.isfinite(density) or density < 0 or density > upper*(1+2.e-12):
+                raise RuntimeError('Coherent double-radiative rejection bound violated')
+            if rng.random()*upper <= density:
+                return dict(recoil_p4=daughter,photon_p4=photon,dark_photon_p4=dark,
+                            t_gev2=t,u_gev2=u,proposal_trials=trial)
+        raise RuntimeError('Double-radiative sampler exhausted its bounded trial budget')
+
+    def spin_density(self, photon, dark):
+        """Hermitian density in the three physical linear A' polarizations."""
+        if self.mass <= 0:
+            raise ValueError('A massive vector is required for its dimuon spin density')
+        matrix = [[0j]*3 for _ in range(3)]
+        basis = polarizations(dark,self.mass)
+        for first in polarizations(photon,0.):
+            amplitudes = [self.current.amplitude((self.parent_mass,0.,0.,0.),photon,dark,first,second)
+                          for second in basis]
+            for i in range(3):
+                for j in range(3):
+                    matrix[i][j] += amplitudes[i]*amplitudes[j].conjugate()
+        return matrix, basis
+
+    def sample(self, parent, proper_ctau_mm, rng):
+        """Full coherent decay and correlated A'->mu-mu+; no acceptance cuts."""
+        if (len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0
+                or not math.isfinite(proper_ctau_mm) or proper_ctau_mm < 0
+                or self.mass <= 2*MUON_MASS_GEV):
+            raise ValueError('Finite timelike parent, nonnegative lifetime and open dimuons required')
+        actual = _dot(parent,parent)
+        if not math.isclose(actual,self.parent_mass**2,rel_tol=2.e-10,abs_tol=1.e-14):
+            raise ValueError('Parent four-vector differs from the frozen sampler mass')
+        event = self.sample_rest(rng)
+        photon, dark = event['photon_p4'], event['dark_photon_p4']
+        matrix,basis = self.spin_density(photon,dark)
+        trace = math.fsum(matrix[i][i].real for i in range(3))
+        if not math.isfinite(trace) or trace <= 0:
+            raise RuntimeError('Accepted decay has no finite physical spin density')
+        inverse = tuple(-x/dark[0] for x in dark[1:])
+        rest_basis = [boost(vector,inverse)[1:] for vector in basis]
+        beta_mu2 = 1-4*MUON_MASS_GEV**2/self.mass**2
+        for _ in range(10000):
+            direction = _isotropic(rng)
+            components = [sum(x*y for x,y in zip(direction,vector)) for vector in rest_basis]
+            projection = math.fsum(matrix[i][j].real*components[i]*components[j] for i in range(3) for j in range(3))
+            probability = 1-beta_mu2*projection/trace
+            if probability < -2.e-12 or probability > 1+2.e-12:
+                raise RuntimeError('Nonpositive or unbounded dimuon spin density')
+            if rng.random() <= probability:
+                break
+        else:
+            raise RuntimeError('Correlated dimuon sampler exhausted its bounded trial budget')
+        momentum = math.sqrt(self.mass*self.mass/4-MUON_MASS_GEV**2)
+        muon = (self.mass/2,)+tuple(momentum*x for x in direction)
+        antimuon = (self.mass/2,)+tuple(-momentum*x for x in direction)
+        dark_beta = tuple(x/dark[0] for x in dark[1:])
+        basis = _rotation(rng)
+        parent_beta = tuple(x/parent[0] for x in parent[1:])
+        lab = lambda vector: boost(_rotate(vector,basis),parent_beta)
+        dark_lab = lab(dark)
+        length = -proper_ctau_mm*math.log1p(-rng.random())
+        return dict(dark_photon_p4=dark_lab,muon_p4=lab(boost(muon,dark_beta)),
+            antimuon_p4=lab(boost(antimuon,dark_beta)),
+            recoil_p4s=[lab(event['recoil_p4']),lab(photon)],
+            dark_photon_mass_gev=self.mass,muon_mass_gev=MUON_MASS_GEV,
+            proper_decay_length_mm=length,decay_displacement_mm=tuple(length*x/self.mass for x in dark_lab[1:]),
+            decay_ct_mm=length*dark_lab[0]/self.mass,unconditional_decay=True,
+            amplitude_model='coherent-local-vp-field-strength-vmd',
+            polarization_model='full-coherent-massive-vector-density-matrix',
+            scalar_chiral_and_additional_timelike_terms_omitted=True,
+            coherent_parent_replacement_required=True,
+            t_gev2=event['t_gev2'],u_gev2=event['u_gev2'],proposal_trials=event['proposal_trials'])
+
+
+def _source_inputs(model):
+    if (model.get('decay_type') != 'pseudoscalar-double-radiative'
+            or model.get('recoil_pdg_id') not in (111,221)):
+        raise ValueError('An explicit neutral pseudoscalar double-radiative source is required')
+    recoil, width = model.get('recoil_mass_gev'), model.get('total_parent_width_gev')
+    if any(type(value) not in (int,float) or not math.isfinite(value) or value <= 0 for value in (recoil,width)):
+        raise ValueError('Explicit positive recoil mass and parent total width are required')
+    current = LocalVMDCurrent(model['double_radiative_model'])
+    key = (current.domain,current.reference,tuple(tuple(sorted(row.items())) for row in current.vectors))
+    return recoil,width,key
+
+
+@functools.lru_cache(maxsize=64)
+def _sampler(parent_mass,recoil_mass,mass,key):
+    domain,reference,vectors = key
+    current = LocalVMDCurrent(dict(kind='local-vp-field-strength-vmd',reference=reference,
+        virtual_vertex_prescription='constant-local-couplings',omitted_scalar_and_chiral_terms=True,
+        valid_mass_range_gev=domain,vectors=[dict(row) for row in vectors]))
+    return LocalVMDSampler(current,parent_mass,recoil_mass,mass)
+
+
+@functools.lru_cache(maxsize=128)
+def _unit_width(parent_mass,recoil_mass,mass,key):
+    current = _sampler(parent_mass,recoil_mass,mass,key).current
+    previous = current.integrated_width(parent_mass,recoil_mass,mass,1.,order=16)
+    for order in (24,40,64,80):
+        value = current.integrated_width(parent_mass,recoil_mass,mass,1.,order=order)
+        if abs(value-previous) <= 2.e-5*max(value,previous):
+            return value
+        previous = value
+    raise ValueError('Double-radiative production width failed its numerical convergence budget')
+
+
+def branching_coefficient(parent_mass,mass,model):
+    """BR(P->P'gamma A')/epsilon_em^2; no A' dimuon BR or source yield."""
+    recoil,width,key = _source_inputs(model)
+    if not math.isfinite(parent_mass) or not math.isfinite(mass) or parent_mass <= 0 or mass < 0:
+        raise ValueError('Finite physical parent and dark masses required')
+    if mass >= parent_mass-recoil:
+        return 0.
+    return _unit_width(parent_mass,recoil,mass,key)/width
+
+
+def sample_decay(parent,mass,proper_ctau_mm,rng,*,model):
+    recoil,_,key = _source_inputs(model)
+    if len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0:
+        raise ValueError('Finite timelike parent required')
+    squared = _dot(parent,parent)
+    if squared <= 0:
+        raise ValueError('Timelike parent required')
+    result = _sampler(math.sqrt(squared),recoil,mass,key).sample(parent,proper_ctau_mm,rng)
+    result.update(recoil_pdg_ids=[model['recoil_pdg_id'],22],recoil_masses_gev=[recoil,0.],
+                  recoil_natural_decay_required=True)
+    return result
+
+
+def _angular_mean_lab_boost(parent,energy,mass):
+    parent_mass = math.sqrt(_dot(parent,parent))
+    gamma = parent[0]/parent_mass
+    beta_gamma = math.sqrt(sum(x*x for x in parent[1:]))/parent_mass
+    momentum = math.sqrt(max(0.,(energy-mass)*(energy+mass)))
+    center,half_range = gamma*energy,beta_gamma*momentum
+    radial = math.sqrt(max(0.,(center-mass)*(center+mass)))
+    if half_range == 0:
+        return radial/mass
+    if half_range < 1.e-3*radial*radial/center:
+        return (radial-mass*mass*half_range*half_range/(6*radial**3))/mass
+    def primitive(value):
+        value = max(value,mass)
+        return .5*(value*math.sqrt((value-mass)*(value+mass))-mass*mass*math.acosh(value/mass))
+    return (primitive(center+half_range)-primitive(center-half_range))/(2*half_range*mass)
+
+
+def mean_lab_beta_gamma(parent,mass,model):
+    """Coherent Dalitz and isotropic-parent angular mean of |p_A'|/m_A'."""
+    recoil,_,key = _source_inputs(model)
+    if (len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0
+            or _dot(parent,parent) <= 0 or not math.isfinite(mass) or mass <= 0):
+        raise ValueError('Finite timelike parent and positive dark mass required')
+    parent_mass = math.sqrt(_dot(parent,parent))
+    sampler = _sampler(parent_mass,recoil,mass,key)
+    denominator = _unit_width(parent_mass,recoil,mass,key)
+    moment = lambda dark: _angular_mean_lab_boost(parent,dark[0],mass)
+    previous = None
+    for order in (24,40,64,80):
+        numerator = sampler.current.integrated_width(parent_mass,recoil,mass,1.,order=order,moment=moment)
+        if previous is not None and abs(numerator-previous) <= 2.e-5*max(numerator,previous):
+            return numerator/denominator
+        previous = numerator
+    raise ValueError('Double-radiative mean boost failed its numerical convergence budget')

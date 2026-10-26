@@ -1,14 +1,18 @@
 # Code style: AI-code. AI-generated controls of neutral pseudoscalar VMD currents.
 import math
 import json
+import random
+import statistics
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_double_radiative import LocalVMDCurrent,empirical_reference_model,polarizations,quark_model_couplings
+from dark_photon_double_radiative import (LocalVMDCurrent,LocalVMDSampler,branching_coefficient,
+    empirical_reference_model,mean_lab_beta_gamma,polarizations,quark_model_couplings,sample_decay)
 from dark_photon_meson import boost
 from dark_photon_vector_meson import two_body_momentum
+from dark_photon_meson import MUON_MASS_GEV
 
 
 MASSES = {221:.547862,331:.95778,111:.1349768}
@@ -148,6 +152,132 @@ class DoubleRadiativeTest(unittest.TestCase):
                        dict(omitted_scalar_and_chiral_terms=False),dict(valid_mass_range_gev=None)]:
             with self.assertRaises(ValueError):
                 LocalVMDCurrent(dict(reference_model(221,111),**change))
+
+
+def source_model(parent,recoil):
+    return dict(decay_type='pseudoscalar-double-radiative',recoil_mass_gev=MASSES[recoil],
+        recoil_pdg_id=recoil,total_parent_width_gev=1.31e-6 if parent==221 else .000196,
+        double_radiative_model=reference_model(parent,recoil))
+
+
+class CorrelatedDoubleRadiativeProduction(unittest.TestCase):
+    def test_individual_diagram_norm_and_analytic_envelope_cover_full_currents(self):
+        rng=random.Random(7281)
+        for parent,recoil,mass in [(221,111,0.),(221,111,.22),(221,111,.4),
+                                  (331,111,.3),(331,111,.7),(331,221,.22)]:
+            current=LocalVMDCurrent(reference_model(parent,recoil))
+            sampler=LocalVMDSampler(current,MASSES[parent],MASSES[recoil],mass)
+            for _ in range(100):
+                p,k,q=rest_event(MASSES[parent],MASSES[recoil],mass,
+                    cosine=rng.uniform(-1.,1.),fraction=rng.uniform(.001,.999))
+                r=tuple(x-y for x,y in zip(p,k));s=tuple(x-y for x,y in zip(p,q))
+                for index,internal in enumerate((r,s)):
+                    first,second=(k,q) if index==0 else (q,k)
+                    expected=(dot(first,internal)*dot(second,internal)-dot(internal,internal)*dot(first,second))**2
+                    expected+=(dot(first,internal)**2-dot(internal,internal)*dot(first,first))*(
+                        dot(second,internal)**2-dot(internal,internal)*dot(second,second))
+                    actual=math.fsum(abs(current._kinematic_terms(p,k,q,a,b)[index])**2
+                        for a in polarizations(k,0.) for b in polarizations(q,mass))
+                    self.assertAlmostEqual(actual/expected,1.,delta=2.e-9)
+                self.assertLessEqual(current.spin_sum(p,k,q,mass),sampler.envelope(dot(r,r),dot(s,s))*(1+2.e-12))
+
+    def test_unweighted_acceptance_has_the_independent_integrated_rate_and_energy_moment(self):
+        current=LocalVMDCurrent(reference_model(331,111))
+        sampler=LocalVMDSampler(current,MASSES[331],MASSES[111],.3)
+        width=current.integrated_width(MASSES[331],MASSES[111],.3,1.,order=24)
+        probability=width*256*math.pi**3*MASSES[331]**3/sampler.envelope_integral
+        expected_energy=current.integrated_width(MASSES[331],MASSES[111],.3,1.,order=24,
+            moment=lambda dark:dark[0])/width
+        rng=random.Random(290133);events=[sampler.sample_rest(rng) for _ in range(1200)]
+        trials=sum(row['proposal_trials'] for row in events)
+        # Geometric waiting times give Var(mean trials)=(1-p)/(N*p^2).
+        sigma=math.sqrt((1-probability)/(len(events)*probability**2))
+        self.assertAlmostEqual(trials/len(events),1/probability,delta=6*sigma)
+        energies=[row['dark_photon_p4'][0] for row in events]
+        self.assertAlmostEqual(statistics.mean(energies),expected_energy,
+            delta=6*statistics.stdev(energies)/math.sqrt(len(energies)))
+
+    def test_full_decay_closes_shells_vertices_lifetimes_and_rotations(self):
+        rng=random.Random(187301)
+        for pdg,recoil,mass in [(221,111,.22),(331,111,.3),(331,221,.22),
+                               (331,111,MASSES[331]-MASSES[111]-1.e-5)]:
+            model=source_model(pdg,recoil)
+            for beta in [(0.,0.,0.),(.2,-.4,.7)]:
+                parent=boost((MASSES[pdg],0.,0.,0.),beta)
+                for _ in range(15):
+                    row=sample_decay(parent,mass,120.,rng,model=model)
+                    final=[row['dark_photon_p4'],*row['recoil_p4s']]
+                    for component in range(4):
+                        self.assertAlmostEqual(sum(v[component] for v in final),parent[component],delta=2.e-13)
+                        self.assertAlmostEqual(row['muon_p4'][component]+row['antimuon_p4'][component],
+                            row['dark_photon_p4'][component],delta=2.e-13)
+                    for vector,expected in zip(final,[mass,MASSES[recoil],0.]):
+                        self.assertAlmostEqual(dot(vector,vector),expected*expected,delta=3.e-13)
+                    for key in ['muon_p4','antimuon_p4']:
+                        self.assertAlmostEqual(dot(row[key],row[key]),MUON_MASS_GEV**2,delta=3.e-13)
+                    length=row['proper_decay_length_mm'];dark=row['dark_photon_p4']
+                    self.assertGreater(length,0.)
+                    self.assertEqual(row['decay_ct_mm'],length*dark[0]/mass)
+                    self.assertEqual(row['decay_displacement_mm'],tuple(length*x/mass for x in dark[1:]))
+                    self.assertEqual(row['recoil_pdg_ids'],[recoil,22])
+                    self.assertTrue(row['coherent_parent_replacement_required'])
+                    self.assertTrue(row['scalar_chiral_and_additional_timelike_terms_omitted'])
+                    self.assertTrue(row['unconditional_decay'])
+
+    def test_actual_muon_helicity_moment_follows_each_coherent_spin_density(self):
+        import numpy as np
+        current=LocalVMDCurrent(reference_model(331,111));sampler=LocalVMDSampler(current,MASSES[331],MASSES[111],.6)
+        rng=random.Random(62098);residuals=[];isotropic_residuals=[]
+        for _ in range(1600):
+            row=sampler.sample((MASSES[331],0.,0.,0.),0.,rng)
+            dark=row['dark_photon_p4'];photon=row['recoil_p4s'][1]
+            matrix,basis=sampler.spin_density(photon,dark)
+            trace=sum(matrix[i][i].real for i in range(3));beta2=1-4*MUON_MASS_GEV**2/.6**2
+            eigenvalues,eigenvectors=np.linalg.eigh(np.asarray(matrix).real)
+            expected=(trace/3-beta2*(trace+2*eigenvalues[-1])/15)/((1-beta2/3)*trace)
+            rest=boost(row['muon_p4'],tuple(-x/dark[0] for x in dark[1:]))
+            rest_basis=[boost(vector,tuple(-x/dark[0] for x in dark[1:]))[1:] for vector in basis]
+            axis=[sum(eigenvectors[j,-1]*rest_basis[j][i] for j in range(3)) for i in range(3)]
+            norm=math.sqrt(sum(x*x for x in rest[1:]))
+            cosine=sum(a*b for a,b in zip(rest[1:],axis))/norm
+            residuals.append(cosine*cosine-expected);isotropic_residuals.append(1/3-expected)
+            self.assertEqual(row['proper_decay_length_mm'],0.)
+        error=statistics.stdev(residuals)/math.sqrt(len(residuals))
+        self.assertAlmostEqual(statistics.mean(residuals),0.,delta=5*error)
+        self.assertGreater(abs(statistics.mean(isotropic_residuals)),2*error)
+
+    def test_production_coefficient_keeps_real_photon_normalization_and_exact_epsilon_power(self):
+        model=source_model(221,111);current=LocalVMDCurrent(model['double_radiative_model'])
+        coefficient=branching_coefficient(MASSES[221],0.,model)
+        independent=current.integrated_width(MASSES[221],MASSES[111],0.,1.,photon_reference=True,order=32)
+        self.assertAlmostEqual(coefficient*model['total_parent_width_gev']/independent,2.,delta=4.e-5)
+        value=branching_coefficient(MASSES[221],.3,model)
+        self.assertGreater(value,0.)
+        self.assertEqual(branching_coefficient(MASSES[221],MASSES[221]-MASSES[111],model),0.)
+        # Source integration owns epsilon_em^2 and BR(A'->mumu), once each.
+        first=value*.001**2*.12;second=value*.002**2*.12
+        self.assertEqual(second/first,4.)
+
+    def test_same_seed_is_reproducible_and_boost_mean_matches_sampled_events(self):
+        model=source_model(221,111);parent=boost((MASSES[221],0.,0.,0.),(.2,-.3,.7))
+        first=sample_decay(parent,.3,80.,random.Random(13883),model=model)
+        second=sample_decay(parent,.3,80.,random.Random(13883),model=model)
+        self.assertEqual(first,second)
+        expected=mean_lab_beta_gamma(parent,.3,model)
+        rng=random.Random(81932);values=[]
+        for _ in range(600):
+            dark=sample_decay(parent,.3,80.,rng,model=model)['dark_photon_p4']
+            values.append(math.sqrt(sum(x*x for x in dark[1:]))/.3)
+        self.assertAlmostEqual(statistics.mean(values),expected,delta=6*statistics.stdev(values)/math.sqrt(len(values)))
+
+    def test_invalid_or_closed_production_inputs_fail_without_redrawing(self):
+        model=source_model(221,111);parent=(MASSES[221],0.,0.,0.)
+        for mass,length in [(2*MUON_MASS_GEV,1.),(.5,1.),(.3,-1.),(.3,float('nan'))]:
+            rng=random.Random(913);before=rng.getstate()
+            with self.assertRaises(ValueError):sample_decay(parent,mass,length,rng,model=model)
+            self.assertEqual(rng.getstate(),before)
+        for key in ['total_parent_width_gev','recoil_mass_gev']:
+            with self.assertRaises(ValueError):branching_coefficient(MASSES[221],.3,dict(model,**{key:0.}))
 
 
 if __name__=='__main__':

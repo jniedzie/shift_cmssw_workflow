@@ -70,6 +70,34 @@ public:
     if(pythia.info.weight()!=1.)throw std::runtime_error("Parent source is not unit weighted");
     return true;
   }
+  std::string radiative_ancestor(int index) const {
+    // A coherent P -> P' gamma A' amplitude owns its P -> gamma V feed-down.
+    // Follow only same-species generator copies, never arbitrary ancestors.
+    std::set<int> seen;
+    int child=index;
+    while(seen.insert(child).second) {
+      auto mothers=pythia.event[child].motherList();
+      if(mothers.size()!=1)return "null";
+      int mother=mothers.front();
+      if(mother<=0||mother>=pythia.event.size())
+        throw std::runtime_error("Invalid radiative-source ancestry");
+      if(pythia.event[mother].id()==pythia.event[child].id()) {child=mother;continue;}
+      if(pythia.event[mother].id()!=221&&pythia.event[mother].id()!=331)return "null";
+      auto daughters=pythia.event[mother].daughterList();
+      if(daughters.size()!=2)return "null";
+      bool contains=false,photon=false;
+      for(int daughter:daughters) {
+        contains=contains||daughter==child;
+        photon=photon||(daughter!=child&&pythia.event[daughter].id()==22);
+      }
+      if(!contains||!photon)return "null";
+      std::ostringstream out;
+      out<<"{\"index\":"<<mother<<",\"pdg_id\":"<<pythia.event[mother].id()
+         <<",\"vector_pdg_id\":"<<pythia.event[child].id()<<",\"sibling_pdg_id\":22}";
+      return out.str();
+    }
+    throw std::runtime_error("Cyclic radiative-source ancestry");
+  }
   std::string snapshot() const {
     std::ostringstream o;o<<std::setprecision(17)<<"{\"native_weight\":"<<pythia.info.weight()
        <<",\"ecm_gev\":"<<pythia.info.eCM()<<",\"parents\":[";
@@ -84,7 +112,8 @@ public:
       if(copy)continue;
       if(!first)o<<',';first=false;
       o<<"{\"index\":"<<i<<",\"pdg_id\":"<<p.id()<<",\"native_mass_gev\":"<<p.m()
-       <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]}";
+       <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]"
+       <<",\"radiative_ancestor\":"<<radiative_ancestor(i)<<'}';
     }
     o<<"]}";return o.str();
   }
@@ -268,7 +297,8 @@ public:
       } else {
         if(daughters.empty())throw std::runtime_error("An eligible non-kaon meson was not naturally decayed");
         o<<"{\"index\":"<<i<<",\"pdg_id\":"<<p.id()<<",\"native_mass_gev\":"<<p.m()
-         <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]}";
+         <<",\"p4\":["<<p.e()<<','<<p.px()<<','<<p.py()<<','<<p.pz()<<"]"
+         <<",\"radiative_ancestor\":"<<radiative_ancestor(i)<<'}';
       }
     }
     o<<"]}";return o.str();

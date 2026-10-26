@@ -23,7 +23,7 @@ from dark_photon_meson_source import (coefficient_bound, choose_collision, sourc
     parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
     dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
     kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,validate_native_precision_policy,
-    deferred_native_precision_measure,full_source_native_precision_summary)
+    deferred_native_precision_measure,full_source_native_precision_summary,radiative_cascade_owner)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import (native_source, inject_decay, cmssw_native_libraries,
     inject_undecayed_kaon_decay)
@@ -78,6 +78,11 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
         return sample_radiative_decay(parent['pdg_id'],parent['p4'],mass,proper_ctau_mm,rng)
     if kind=='weak-kaon-pion':
         return sample_weak_decay(parent['pdg_id'],parent['p4'],model['recoil_mass_gev'],mass,proper_ctau_mm,rng)
+    if kind=='weak-kaon-pion-photon':
+        from dark_photon_weak_radiative import sample_decay as sample_weak_radiative
+        sampled=sample_weak_radiative(parent['p4'],mass,proper_ctau_mm,rng,model=model)
+        sampled.update(parent_pdg_id=parent['pdg_id'],parent_flight_included=False)
+        return sampled
     if kind=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import sample_decay as sample_leptonic
         limit=model['native_kinematic_precision']['relative_mass_limit']
@@ -95,6 +100,9 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
 
 def kaon_mean_beta_gamma(parent,model,mass):
     """The new source's rate-weighted mean; never retune its physical lifetime."""
+    if model['decay_type']=='weak-kaon-pion-photon':
+        from dark_photon_weak_radiative import mean_lab_beta_gamma as weak_mean
+        return weak_mean(parent['p4'],mass,model)
     if model['decay_type']=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import mean_lab_beta_gamma as leptonic_mean
         return leptonic_mean(parent['p4'],mass,model=model['leptonic_form_factor_model'],
@@ -337,6 +345,8 @@ def run(args):
                         accumulate('coefficient_precision_difference_sum', parent['coefficient_difference_from_kinematic_mass'])
                         model = models[parent['pdg_id']]
                         for channel in exclusive_channels(model):
+                            if radiative_cascade_owner(parent,channel,models,snapshot['parents']) is not None:
+                                continue
                             coefficient = parent_branching_coefficient(parent['mass_gev'], args.mass, channel, width['br_mumu'])
                             if coefficient == 0:
                                 continue

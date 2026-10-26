@@ -78,7 +78,8 @@ def exclusive_channels(model):
 
 def kaon_channel(model):
     """Qualified fixed-native-mass kaon electromagnetic current families."""
-    return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion','weak-kaon-leptonic')
+    return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion','weak-kaon-leptonic',
+                                      'weak-kaon-pion-photon')
 
 
 def _kaon_group(model):
@@ -190,6 +191,11 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
         return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
     if signal_mass+recoil_threshold(model) >= parent_mass:
         return 0.
+    if model['decay_type']=='weak-kaon-pion-photon':
+        coefficient=_weak_radiative_coefficient(parent_mass,signal_mass,
+            json.dumps(dict(weak_radiative_model=model['weak_radiative_model'],
+                total_parent_width_gev=model['total_parent_width_gev']),sort_keys=True))
+        return coefficient*model['em_mixing_over_epsilon_abs2']*br_mumu
     if model['decay_type']=='neutral-kaon-photon':
         width = (parent_mass**3/(32*math.pi)*(1-(signal_mass/parent_mass)**2)**3
                  *model['radiative_amplitude_abs2_gev_minus2'])
@@ -200,6 +206,12 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
         width=decay_width(parent_mass,model['recoil_mass_gev'],signal_mass,.001,
             model['alpha_em'],form)/1.e-6
     return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
+
+
+@lru_cache(maxsize=512)
+def _weak_radiative_coefficient(parent_mass,signal_mass,inputs):
+    from dark_photon_weak_radiative import branching_coefficient
+    return branching_coefficient(parent_mass,signal_mass,json.loads(inputs))
 
 
 def _kaon_weak_form_factor(parent_mass,recoil_mass,signal_mass,current):
@@ -294,6 +306,21 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
         model.update(recoil_pdg_id=expected[pdg],recoil_mass_gev=parent['recoil_mass_gev'],
             weak_form_factor=[form.real,form.imag],weak_form_factor_model=dict(weak),alpha_em=alpha)
         model['provenance']['transition']=weak
+    elif parent['decay_type']=='weak-kaon-pion-photon':
+        current=json.loads(json.dumps(parent.get('weak_radiative_model',{}),allow_nan=False))
+        recoil=parent.get('recoil_mass_gev')
+        if (pdg!=130 or parent.get('recoil_pdg_id')!=111
+                or type(recoil) not in (int,float) or not 0<recoil<mass
+                or current.get('parent_pdg_id')!=130
+                or current.get('parent_mass_gev')!=mass
+                or current.get('recoil_pion_mass_gev')!=recoil or not current.get('reference')):
+            raise ValueError('Require the separately sourced KL pi0 photon current and native masses')
+        # Only the independently certified native table masses enlarge the
+        # pole allowance; the subsequent rate-drift gate remains unchanged.
+        current['pole_mass_numerical_tolerance_gev']=max(abs(value-mass) for value in support)
+        opened=signal_mass<max(support)-recoil
+        model.update(recoil_pdg_id=111,recoil_mass_gev=recoil,weak_radiative_model=current)
+        model['provenance']['transition']=current
     else:
         lepton=parent.get('charged_lepton_pdg_id');neutrino=parent.get('neutrino_pdg_id')
         current=parent.get('leptonic_form_factor_model',{})
@@ -369,6 +396,15 @@ def _validate_kaon_model(pdg,model):
                 or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)
                 or current.get('parent_pdg_id')!=pdg or current.get('kind')!='chpt-p6-kaon-em-vector'):
             raise ValueError('Require a matching charged/KS weak current and pion recoil')
+    elif kind=='weak-kaon-pion-photon':
+        current=model.get('weak_radiative_model',{})
+        if (pdg!=130 or model.get('recoil_pdg_id')!=111
+                or current.get('parent_pdg_id')!=130
+                or current.get('parent_mass_gev')!=mass
+                or current.get('recoil_pion_mass_gev')!=model.get('recoil_mass_gev')
+                or current.get('pole_mass_numerical_tolerance_gev')!=max(abs(value-mass) for value in support)
+                or not current.get('reference')):
+            raise ValueError('KL pi0 photon rate differs from its native-current authority')
     elif kind=='weak-kaon-leptonic':
         lepton=model.get('charged_lepton_pdg_id');neutrino=model.get('neutrino_pdg_id')
         current=model.get('leptonic_form_factor_model',{})
@@ -497,7 +533,7 @@ def dipion_kernel(model):
 def recoil_threshold(model):
     if model.get('decay_type')=='weak-kaon-leptonic':
         return model.get('charged_lepton_mass_gev',model['leptonic_form_factor_model']['lepton_mass_gev'])
-    if model.get('decay_type')=='weak-kaon-pion':
+    if model.get('decay_type') in ('weak-kaon-pion','weak-kaon-pion-photon'):
         return model['recoil_mass_gev']
     if model.get('decay_type') == 'charged-vector-dipion':
         return model['charged_pion_mass_gev']+model['neutral_pion_mass_gev']
@@ -508,6 +544,44 @@ def recoil_threshold(model):
 
 def vector_parent(model):
     return model.get('decay_type', 'pseudoscalar-photon') == 'vector-pseudoscalar'
+
+
+def radiative_cascade_owner(parent, channel, models, parents):
+    """Own only an explicitly replaced, matching P -> gamma V -> gamma P'A'.
+
+    Other rare channels of that vector and vectors from other source histories
+    remain independent contributions. Missing ancestry is not evidence that a
+    candidate is disjoint from the coherent parent amplitude.
+    """
+    if not vector_parent(channel):
+        return None
+    candidates=[]
+    for pdg,group in models.items():
+        for owner in exclusive_channels(group):
+            if (owner.get('decay_type')=='pseudoscalar-double-radiative'
+                    and parent['pdg_id'] in owner.get('coherent_replaced_vector_pdgs',[])
+                    and owner.get('recoil_pdg_id')==channel.get('recoil_pdg_id')):
+                candidates.append((pdg,owner))
+    if not candidates:
+        return None
+    if 'radiative_ancestor' not in parent:
+        raise ValueError('Coherent radiative replacement requires native ancestry for every competing vector')
+    ancestor=parent['radiative_ancestor']
+    if ancestor is None:
+        return None
+    if (not isinstance(ancestor,dict) or type(ancestor.get('index')) is not int
+            or ancestor['index']<=0 or ancestor.get('sibling_pdg_id')!=22
+            or ancestor.get('vector_pdg_id')!=parent['pdg_id']):
+        raise ValueError('Invalid coherent radiative-parent ancestry')
+    owners=[owner for pdg,owner in candidates if pdg==ancestor.get('pdg_id')]
+    if len(owners)>1:
+        raise ValueError('Several coherent amplitudes claim one exclusive vector cascade')
+    if not owners:
+        return None
+    if not any(row.get('index')==ancestor['index'] and row.get('pdg_id')==ancestor['pdg_id']
+               for row in parents):
+        raise ValueError('Coherent radiative ancestor is absent from the native source inventory')
+    return owners[0]['channel']
 
 
 def production_mechanism(card):
@@ -1034,6 +1108,7 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
     identifiers = set()
     kaon_counts = {}
     weights = []
+    replaced = []
     for parent in parents:
         identity, pdg = parent['index'], parent['pdg_id']
         if type(identity) is not int or identity <= 0 or identity in identifiers:
@@ -1059,6 +1134,10 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
         # epsilon=1 is not a physical parameter passed to radiative_branching:
         # divide a safely small reference epsilon back out of its exact law.
         for channel in exclusive_channels(model):
+            owner=radiative_cascade_owner(parent,channel,models,parents)
+            if owner is not None:
+                replaced.append(dict(parent_index=identity,channel=channel['channel'],owner=owner))
+                continue
             value = parent_branching_coefficient(parent_mass, mass_gev, channel, br_mumu)
             weights.append((parent, channel, value))
     total = math.fsum(value for _, _, value in weights)
@@ -1067,6 +1146,8 @@ def choose_collision(parents, mass_gev, br_mumu, models, bound, rng, native_weig
     probability = total/bound
     result = dict(parent_count=len(parents), coefficient_sum=total,
                   acceptance_probability=probability, accepted=False, parent_index=None)
+    if replaced:
+        result['coherently_replaced_cascades']=replaced
     if total == 0 or rng.random() >= probability:
         return result
     draw = rng.random()*total

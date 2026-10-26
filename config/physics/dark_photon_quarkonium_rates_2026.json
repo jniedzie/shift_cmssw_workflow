@@ -1,13 +1,13 @@
 {
-  "_code_style": "AI-code. AI-generated attributed rate reference inputs; no production integration.",
+  "_code_style": "AI-code. AI-generated attributed rate and spin-current reference inputs; no production integration.",
   "schema": "shift-heavy-quarkonium-em-rate-reference-v1",
-  "scope": "Conditional leading electromagnetic rate models, excluding source normalization, material transport, spin-correlated generation and detector acceptance.",
+  "scope": "Conditional leading electromagnetic rates and unpolarized-parent spin currents. Source normalization, material transport, native recoil-spin integration and detector acceptance remain separate qualifications.",
   "alpha_em": 0.0072973525692838015,
-  "physical_reference_masses_gev": {"eta_c": 2.9839, "Jpsi": 3.09690, "chi_c0": 3.41471, "chi_c1": 3.51067, "chi_c2": 3.55617},
+  "physical_reference_masses_gev": {"eta_c": 2.9839, "Jpsi": 3.09690, "chi_c0": 3.41471, "chi_c1": 3.51067, "chi_c2": 3.55617, "h_c": 3.52538, "psi_2S": 3.686097},
   "chi_c1_lattice": {
     "kind": "chi-c1-lattice-e1-m2-c1",
     "reference": "https://arxiv.org/pdf/2604.15256v2#page=16",
-    "equations": [50, 55, 56],
+    "equations": [8, 53, 57, 58, 59],
     "table": "IV",
     "valid_mass_range_gev": [0, 0.41377],
     "form_factors": {
@@ -31,8 +31,10 @@
     "independent_measurement": {"br_mumu": 0.000233, "br_stat_error": 0.000018, "br_sys_error": 0.000029}
   },
   "chi_c0_e1_benchmark": {
+    "kind": "chi-c0-leading-heavy-spin-e1",
     "reference": "https://arxiv.org/pdf/0812.0716#page=4",
     "equation": "2.8",
+    "valid_mass_range_gev": [0, 0.9],
     "approximation": "Constant leading heavy-spin electric-dipole coupling, including longitudinal A'; no quantitative recoil/higher-multipole/timelike uncertainty bound.",
     "independent_besiii_mumu_br_upper_90_percent": 0.000020,
     "measurement_reference": "https://arxiv.org/pdf/1901.06627#page=5",
@@ -54,6 +56,31 @@
     "jpsi_width_gev": 0.0000926,
     "valid_mass_range_gev": [0, 0.9],
     "prescription": "Eq14 with complex squared poles mV^2-i mV GammaV, renormalized exactly to F(0)=1. Alternative model, not a universal QCD upper bound."
+  },
+  "h_c_lattice": {
+    "kind": "h-c-lattice-f1-f2",
+    "reference": "https://arxiv.org/html/2604.15256v2#S4.SS2",
+    "equations": [9, 11, 55, 70, 71, 72],
+    "table": "VII",
+    "valid_mass_range_gev": [0, 0.54148],
+    "form_factors": {"C": -0.520, "C_error": 0.010, "DF1_gev_minus2": 0.202, "DF1_error_gev_minus2": 0.022, "DF2_gev_minus2": 0.252, "DF2_error_gev_minus2": 0.058},
+    "fit_correlation_matrix": [[1, -0.13, 0.10], [-0.13, 1, -0.63], [0.10, -0.63, 1]],
+    "independent_integrated_validation_kev": {"electron": 5.45, "electron_error": 0.19, "muon": 0.635, "muon_error": 0.022},
+    "normalization_caveat": "Connected-current lattice prediction. Its electron/photon ratio exceeds the BESIII result by 3.2 measured standard errors (primary SecIV.2); photon-normalized and absolute-lattice choices must remain distinct. Fit errors do not bound disconnected or all higher-order physical contributions."
+  },
+  "psi_2S_m1_benchmark": {
+    "kind": "constant-heavy-quark-m1",
+    "reference": "https://arxiv.org/pdf/0812.0716#page=1",
+    "current_reference": "https://arxiv.org/pdf/1210.3927#page=2",
+    "valid_mass_range_gev": [0, 0.702197],
+    "prescription": "Unique parity-odd vector-to-pseudoscalar magnetic current, calibrated by an explicit psi(2S) to eta_c photon branching fraction. Constant F(q2)/F(0)=1 is an additional leading model assumption; k^3 and transverse A-prime follow the current, not an empirical timelike-form-factor measurement.",
+    "uncertainty": "No universal omitted-timelike-form-factor or hindered-M1/recoil correction bound is claimed. Preserve this assumption in model systematics."
+  },
+  "sampling_contract": {
+    "parent_spin": "Explicitly unpolarized parents only; no inferred polarization from ND generation.",
+    "chi_c2_spin": "The measured effective pole determines the inclusive rate only. Angular sampling separately requires angular_model=leading-heavy-spin-e1; this is an unmeasured higher-multipole/recoil assumption, not an experimental spin measurement.",
+    "recoil_spin": "Samples return rho[row][column]=[real,imaginary] conditional on sampled A-prime muons, with recoil-rest Cartesian polarization four-vectors transported to the lab. A J/psi natural-decay adapter must consume this density; ordinary Pythia natural decays are not automatically spin-correlated.",
+    "lifetimes": "Only the relative A-prime proper flight is sampled. The native parent flight, decay position, natural recoil branching and source exposure remain the caller's responsibility."
   },
   "source_calibration_caveat": "Use exact initialized Pythia branching tables only as generator-conditional calibrations. Measured physical branching fractions and alternative onium production models require separately identified inputs. Natural MPI/string/feed-down onia in ND must not be added again as an unmatched hard source."
 }

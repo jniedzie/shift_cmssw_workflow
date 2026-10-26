@@ -7,11 +7,33 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_meson_source import (coefficient_bound, choose_collision, source_cross_section_pb,
-    resolve_parent_kinematics, parent_branching_coefficient, resolved_parent_models, production_mechanism)
+    resolve_parent_kinematics, parent_branching_coefficient, resolved_parent_models, production_mechanism,
+    radiative_cascade_owner)
 from dark_photon_vector_meson import two_body_momentum
 
 
 class MesonSourceTest(unittest.TestCase):
+    def test_coherent_parent_owns_only_its_matching_radiative_vector_cascade(self):
+        owner=dict(decay_type='pseudoscalar-double-radiative',channel='eta_prime->pi0_gamma_Aprime',
+            recoil_pdg_id=111,coherent_replaced_vector_pdgs=[113,223,333])
+        models={331:owner}
+        vector=dict(index=12,pdg_id=113,radiative_ancestor=dict(index=5,pdg_id=331,
+            vector_pdg_id=113,sibling_pdg_id=22))
+        source=[dict(index=5,pdg_id=331),vector]
+        channel=dict(decay_type='vector-pseudoscalar',channel='rho0->pi0_Aprime',recoil_pdg_id=111)
+        self.assertEqual(radiative_cascade_owner(vector,channel,models,source),owner['channel'])
+        self.assertIsNone(radiative_cascade_owner(vector,dict(channel,recoil_pdg_id=221),models,source))
+        self.assertIsNone(radiative_cascade_owner(dict(vector,radiative_ancestor=None),channel,models,source))
+        self.assertIsNone(radiative_cascade_owner(vector,dict(decay_type='vector-dipion'),models,source))
+        with self.assertRaisesRegex(ValueError,'absent'):
+            radiative_cascade_owner(vector,channel,models,[vector])
+        missing=dict(vector);missing.pop('radiative_ancestor')
+        with self.assertRaisesRegex(ValueError,'requires native ancestry'):
+            radiative_cascade_owner(missing,channel,models,source)
+        malformed=dict(vector,radiative_ancestor=dict(vector['radiative_ancestor'],vector_pdg_id=223))
+        with self.assertRaisesRegex(ValueError,'Invalid coherent'):
+            radiative_cascade_owner(malformed,channel,models,source)
+
     def test_mechanism_cannot_mislabel_new_exclusive_channels(self):
         legacy = dict(parents=[dict(pdg_id=221)])
         self.assertEqual(production_mechanism(legacy), 'eta-etaprime-radiative')
