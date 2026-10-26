@@ -76,3 +76,25 @@ generated mass, raw GEN, identities and weights stay unchanged. The original
 v3 setter path remains unchanged for all other particles. The native converter
 log and preflight receipt record every such reconciliation. The 10 nm
 undefined-hadron flight guard is unchanged.
+
+The separate `reviewed_tiny_flight.patch` is an optional, source-specific
+transport approximation. Copy `interface/ReviewedTinyFlight.h` beside
+`PromptDecaySupport.h` in a private v4 runtime before applying it. It retains
+the ordinary 10 nm budget and only accepts explicitly reviewed charged-D*
+records up to 15 nm. The pinned authority's `reviewed_tiny_flights` rows bind
+the original GEN hash, event number, barcode, PDG, status, binary64 momentum,
+mass, birth/end vertices and daughter barcodes. All other records retain the
+existing guard. Daughter vertices and their subsequent transport remain intact.
+
+This is not an exact D* material model or a numerical-precision repair.
+Deployment requires an explicit physics approval, complete original-GEN
+converter scans, failed-event full chains and paired successful controls.
+Keep the affected event IDs and absolute W/p contributions as an event-response
+uncertainty. The absolute bound applies to event indicators; it is not a small
+relative uncertainty on rare bins or a bound on arbitrary pair multiplicities.
+Do not omit the flagged events from exposure or quietly discard this uncertainty
+when producing limits. The October 26 tests and decision are in `SHIFT_BSM.md`.
+
+The native regression is `testReviewedTinyFlight`. Run its isolated-process
+checks with `python3 test/testReviewedTinyFlight.py /absolute/path/to/testReviewedTinyFlight`.
+Also retain the original prompt-tree, hadron-source and signal-decay controls.

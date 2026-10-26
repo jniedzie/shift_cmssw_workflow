@@ -5,6 +5,14 @@
   <use name="json"/>
   <use name="openssl"/>
 </bin>
+<bin file="testReviewedTinyFlight.cc" name="testReviewedTinyFlight">
+  <use name="SimG4Core/Generators"/>
+  <use name="heppdt"/>
+  <use name="hepmc"/>
+  <use name="hepmc3"/>
+  <use name="json"/>
+  <use name="openssl"/>
+</bin>
 <test name="testRecordedPrimaryInvariantPrecision" command="testRecordedPrimaryPrecision"/>
 <bin file="testRecordedPrimaryAuthority.cc" name="testRecordedPrimaryAuthority">
   <use name="SimG4Core/Generators"/>

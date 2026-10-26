@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import shlex
 import shutil
@@ -39,6 +40,42 @@ def pinned(pin):
 
 def provenance(override):
     return json.loads(json.dumps({key:override[key] for key in ('authority','profile','qualification')},sort_keys=True))
+
+
+def validate_tiny_flight_review(profile, qualification):
+    """Keep a transport approximation distinct from a numerical-only retry."""
+    scope=profile.get('reviewed_tiny_flight_scope')
+    if scope is None:
+        return
+    review=qualification.get('reviewed_tiny_flight')
+    if not isinstance(review,dict):
+        raise ValueError('Reviewed tiny-flight runtime needs its approval and uncertainty')
+    approval=pinned(review['approval']);uncertainty=pinned(review['uncertainty'])
+    authority=pinned(review['source_authority'])
+    if (approval.get('approved') is not True
+            or approval.get('source_authority_sha256')!=review['source_authority']['sha256']
+            or profile.get('recorded_primary_authority',{}).get('sha256')!=review['source_authority']['sha256']
+            or uncertainty.get('schema')!='shift-reviewed-tiny-flight-response-uncertainty-v1'
+            or uncertainty.get('production_approval_pending') is not False
+            or uncertainty.get('exact_Dstar_material_model') is not False
+            or scope.get('ordinary_budget_mm_unchanged')!=1.e-5
+            or scope.get('exception_limit_mm')!=1.5e-5
+            or scope.get('whole_affected_event_uncertainty_required') is not True):
+        raise ValueError('Tiny-flight approval, source scope or retained uncertainty changed')
+    rows=authority.get('reviewed_tiny_flights',[]);budget=uncertainty.get('rows',[])
+    if (not rows or len(rows)!=scope.get('exact_source_particles')
+            or len({(r['source_gen_sha256'],r['hepmc_event_number'],r['barcode']) for r in rows})!=len(rows)):
+        raise ValueError('Tiny-flight review must enumerate unique exact source particles')
+    identities=set()
+    for row in budget:
+        count=row.get('full_GEN_events_in_this_cohort');weight=row.get('affected_selected_sum_abs_W_over_p')
+        if (type(count) is not int or count<=0 or type(weight) not in (int,float)
+                or not math.isfinite(weight) or weight<=0
+                or row.get('absolute_event_indicator_efficiency_bound_in_this_cohort')!=weight/count):
+            raise ValueError('Tiny-flight event-response uncertainty lacks its full exposure or weight')
+        identities.update((row['source_gen_sha256'],tuple(event)) for event in row['affected_original_event_ids'])
+    if identities!={(row['source_gen_sha256'],tuple(row['original_event_id'])) for row in rows}:
+        raise ValueError('Tiny-flight uncertainty does not cover exactly the reviewed source events')
 
 
 def clone_text(original, runtime_sha256, override):
@@ -109,6 +146,7 @@ def validate_override(policy):
             or qualification.get('schema')!=QUALIFICATION_SCHEMA or qualification.get('complete') is not True
             or any(qualification.get(key) is not True for key in required)):
         raise ValueError('Runtime replacement lacks its complete unchanged-physics qualification')
+    validate_tiny_flight_review(profile,qualification)
     old_profile=pinned(authority['old_profile']);original_profile=read(production/'frozen/detector_runtime.json')
     if (old_profile!=original_profile or original_profile!=read(production/'plan.json')['detector_runtime']
             or sha(production/'frozen/detector_runtime.json')!=override.get('original_profile_sha256')
@@ -241,6 +279,7 @@ def future_preparation(preparation,setting,operations):
     from dark_photon_detector_runtime import validate_profile, CORE_SOURCES
     original=read(preparation);old=original['detector_runtime']
     profile=pinned(setting['profile']);qualification=pinned(setting['qualification'])
+    validate_tiny_flight_review(profile,qualification)
     flags=('class_layout_unchanged','source_GEN_unchanged','detector_electronics_unchanged','core_sources_unchanged')
     if (qualification.get('schema')!=QUALIFICATION_SCHEMA or qualification.get('complete') is not True
             or any(qualification.get(key) is not True for key in flags)

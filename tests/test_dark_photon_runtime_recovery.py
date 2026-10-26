@@ -14,6 +14,67 @@ import dark_photon_runtime_recovery as recovery
 import dark_photon_stage_budget as budget
 
 
+class TinyFlightReview(unittest.TestCase):
+    def fixture(self,root):
+        def write(name,value):
+            path=root/name;path.write_text(json.dumps(value));return dict(path=str(path),sha256=recovery.sha(path))
+        authority=write('source.json',dict(reviewed_tiny_flights=[dict(source_gen_sha256='a'*64,
+            hepmc_event_number=37,barcode=44,original_event_id=[1,1,37])]))
+        approval=write('approval.json',dict(approved=True,source_authority_sha256=authority['sha256']))
+        uncertainty=write('uncertainty.json',dict(schema='shift-reviewed-tiny-flight-response-uncertainty-v1',
+            production_approval_pending=False,exact_Dstar_material_model=False,rows=[dict(
+                source_gen_sha256='a'*64,affected_original_event_ids=[[1,1,37]],
+                full_GEN_events_in_this_cohort=20,affected_selected_sum_abs_W_over_p=2.,
+                absolute_event_indicator_efficiency_bound_in_this_cohort=.1)]))
+        profile=dict(recorded_primary_authority=dict(sha256=authority['sha256']),reviewed_tiny_flight_scope=dict(
+            exact_source_particles=1,ordinary_budget_mm_unchanged=1.e-5,exception_limit_mm=1.5e-5,
+            whole_affected_event_uncertainty_required=True))
+        qualification=dict(reviewed_tiny_flight=dict(approval=approval,uncertainty=uncertainty,source_authority=authority))
+        return profile,qualification
+
+    def test_legacy_precision_only_runtime_needs_no_transport_review(self):
+        recovery.validate_tiny_flight_review({}, {})
+
+    def test_exact_approved_scope_and_full_event_uncertainty_pass(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile,qualification=self.fixture(Path(d))
+            recovery.validate_tiny_flight_review(profile,qualification)
+
+    def test_missing_approval_or_changed_pinned_review_rejects(self):
+        with tempfile.TemporaryDirectory() as d:
+            profile,qualification=self.fixture(Path(d))
+            with self.assertRaises(ValueError):recovery.validate_tiny_flight_review(profile,{})
+            pin=qualification['reviewed_tiny_flight']['approval'];Path(pin['path']).write_text('{}')
+            with self.assertRaises(ValueError):recovery.validate_tiny_flight_review(profile,qualification)
+
+    def test_uncertain_or_mismatched_exposure_and_scope_reject(self):
+        for field,value in [('full_GEN_events_in_this_cohort',0),('affected_selected_sum_abs_W_over_p',-1.),
+                            ('absolute_event_indicator_efficiency_bound_in_this_cohort',0.),
+                            ('affected_original_event_ids',[[1,1,38]])]:
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as d:
+                profile,qualification=self.fixture(Path(d));pin=qualification['reviewed_tiny_flight']['uncertainty']
+                data=recovery.read(pin['path']);data['rows'][0][field]=value
+                Path(pin['path']).write_text(json.dumps(data));pin['sha256']=recovery.sha(pin['path'])
+                with self.assertRaises(ValueError):recovery.validate_tiny_flight_review(profile,qualification)
+
+    def test_unapproved_source_or_wider_policy_rejects(self):
+        for field,value in [('ordinary_budget_mm_unchanged',2.e-5),('exception_limit_mm',1.e-3),
+                            ('whole_affected_event_uncertainty_required',False),('exact_source_particles',2)]:
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as d:
+                profile,qualification=self.fixture(Path(d));profile['reviewed_tiny_flight_scope'][field]=value
+                with self.assertRaises(ValueError):recovery.validate_tiny_flight_review(profile,qualification)
+
+    def test_explicitly_unapproved_or_pending_physics_choice_rejects(self):
+        for part,field,value in [('approval','approved',False),
+                                 ('uncertainty','production_approval_pending',True),
+                                 ('uncertainty','exact_Dstar_material_model',True)]:
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as d:
+                profile,qualification=self.fixture(Path(d));pin=qualification['reviewed_tiny_flight'][part]
+                data=recovery.read(pin['path']);data[field]=value
+                Path(pin['path']).write_text(json.dumps(data));pin['sha256']=recovery.sha(pin['path'])
+                with self.assertRaises(ValueError):recovery.validate_tiny_flight_review(profile,qualification)
+
+
 class RuntimeRecovery(unittest.TestCase):
     def fixture(self, root):
         production=root/'original';sources=production/'frozen/sources';sources.mkdir(parents=True)

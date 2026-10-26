@@ -1,0 +1,37 @@
+# Code style: AI-code. AI-generated opt-in source-scoped tiny-flight patch.
+--- a/SimG4Core/Generators/interface/PromptDecaySupport.h
++++ b/SimG4Core/Generators/interface/PromptDecaySupport.h
+@@ -12,6 +12,10 @@
+ #include <string>
+ #include <vector>
+ #include <utility>
++
++namespace sim::reviewedTinyFlight {
++  template <typename Particle> bool accepts(const Particle&, double);
++}
+ 
+ namespace sim::promptDecay {
+   inline int pdg(const HepMC::GenParticle& p) { return p.pdg_id(); }
+@@ -56,7 +60,8 @@
+     const double distance=std::hypot(b.x()-a.x(),b.y()-a.y(),b.z()-a.z());
+     const double ct=b.t()-a.t();
+     return std::isfinite(distance) && std::isfinite(ct) && ct >= 0. &&
+-           distance <= maximumFlightMm && ct <= maximumFlightMm;
++           ((distance <= maximumFlightMm && ct <= maximumFlightMm) ||
++            sim::reviewedTinyFlight::accepts(p,maximumFlightMm));
+   }
+ 
+   template <typename Particle>
+@@ -96,4 +101,5 @@
+     return result;
+   }
+ }
++#include "SimG4Core/Generators/interface/ReviewedTinyFlight.h"
+ #endif
+--- a/SimG4Core/Generators/test/BuildFile.xml
++++ b/SimG4Core/Generators/test/BuildFile.xml
+@@ -1,2 +1,4 @@
+ <!-- Code style: AI-code. AI-generated native decay-tree regression. -->
++<use name="json"/>
++<use name="openssl"/>
+ <bin file="testPredefinedSignalDecay.cc" name="testPredefinedSignalDecay">
