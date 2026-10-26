@@ -102,10 +102,10 @@ def validate_capacity(config):
     if redistribution is not None:
         total = redistribution.get('total_workers')
         ceiling = redistribution.get('future_category_ceiling')
-        if (type(total) is not int or total != workers * waves or total > 600 or
+        if (type(total) is not int or not workers * waves <= total <= 1000 or
                 type(ceiling) is not int or not workers <= ceiling <= total or
                 config.get('dag_max_idle') != 5):
-            raise ValueError('Redistribution must preserve the existing total worker budget and five-job start queue')
+            raise ValueError('Redistribution permits a 1000-worker budget with the five-job start queue')
     breakdown = config.get('fixed_publication_breakdown', {})
     if 'global_2400_inflight_detector_bound_bytes' in breakdown:
         if (breakdown['global_2400_inflight_detector_bound_bytes'] < workers * waves * 9900801
@@ -137,7 +137,7 @@ def jobs(config, constraint):
     arguments = scheduler_arguments(config)
     output = run_condor(['/usr/bin/condor_q', *arguments, '-constraint', constraint,
                          '-json', '-attributes',
-                         'ClusterId,ProcId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask,'
+                         'ClusterId,ProcId,DAGManJobId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask,'
                          'JobUniverse,Cmd,DAGMan_MaxJobs,DAGMan_MaxIdle,DAG_AdUpdateTime,'
                          'ShiftDPPointPreflightManifestSHA256'], timeout=45)
     return parse_ads(output)
@@ -1493,6 +1493,78 @@ def adopt_reviewed_detector_stages(config, state):
         save(Path(config['directory'])/'state.json',state)
 
 
+def adopt_reviewed_runtime_rescues(config,state,*,validate_only=False):
+    """Resume only a sealed failed DAG's unfinished nodes with a qualified runtime."""
+    from dark_photon_runtime_recovery import pinned,validate_override
+    for index,authority in config.get('reviewed_detector_runtime_rescues',{}).items():
+        if config['dependencies'].get(authority['path'])!=authority['sha256']:
+            raise ValueError('Runtime rescue is outside frozen controller dependencies')
+        proof=pinned(authority);entry=state['waves'][index]
+        if entry.get('reviewed_runtime_rescue_sha256')==authority['sha256']:
+            continue
+        original=wave_directory(config,int(index))/'production'
+        previous=Path(proof['previous_directory']);replacement=Path(proof['replacement_directory'])
+        native=proof['previous_terminal_native_ad'];submitted=pinned(proof['previous_submission'])
+        if (proof.get('schema')!='shift-reviewed-detector-runtime-rescue-v1'
+                or proof.get('complete') is not True or proof.get('wave_index')!=int(index)
+                or proof.get('original_directory')!=str(original)
+                or proof.get('original_seal_sha256')!=sha(original/'seal.json')
+                or str(previous)!=entry.get('replacement_detector_directory')
+                or submitted.get('cluster')!=entry.get('cluster')
+                or submitted.get('task')!=str(previous)
+                or proof.get('previous_DAG_sha256')!=sha(previous/'pipeline.dag')
+                or proof.get('previous_detector_submit_sha256')!=sha(previous/'detector.sub')
+                or native.get('ClusterId')!=submitted.get('cluster') or native.get('ProcId')!=0
+                or native.get('Iwd')!=str(previous) or native.get('JobStatus')!=4
+                or native.get('ExitCode') in (None,0) or native.get('ExitBySignal') is not False
+                or not replacement.is_absolute() or replacement.is_relative_to(original)
+                or replacement.name!=f'w{int(index):03d}'):
+            raise ValueError('Runtime rescue differs from its failed native manager and sealed source')
+        view=Path(proof['runtime_view']);policy=read(view/'stage_budget_policy.json')
+        view_seal=pinned(proof['runtime_view_seal'])
+        if (policy.get('production_directory')!=str(original)
+                or view_seal.get('original_production')!=str(original)
+                or view_seal.get('original_seal_sha256')!=proof['original_seal_sha256']
+                or any(sha(path)!=digest for path,digest in view_seal['files'].items())):
+            raise ValueError('Runtime rescue view differs from its original source cohort')
+        for path,digest in proof['files'].items():
+            if sha(path)!=digest:
+                raise ValueError('Reviewed runtime-rescue file changed: '+path)
+        validate_override(policy)
+        slices=policy['allowed_slices']
+        if not isinstance(slices,list) or not slices:
+            raise ValueError('A failed DAG rescue requires exact reviewed unfinished slices')
+        rescue=Path(proof['previous_rescue']['path'])
+        if sha(rescue)!=proof['previous_rescue']['sha256']:
+            raise ValueError('Original rescue DONE-node evidence changed')
+        graph=(previous/'pipeline.dag').read_text()
+        nodes={line.split()[1] for line in graph.splitlines() if line.startswith('JOB ')}
+        done={line.split()[1] for line in rescue.read_text().splitlines() if line.startswith('DONE ')}
+        expected={f'D_{item["point"]}_{item["chunk"]:03d}' for item in slices}
+        expected.update('F_'+item['point'] for item in slices);expected.add('COLLECT')
+        required={str(replacement/name) for name in ['pipeline.dag','pipeline.dag.rescue001','detector.sub']}
+        if (not required.issubset(proof['files']) or not done<=nodes or nodes-done!=expected
+                or (replacement/'pipeline.dag.rescue001').read_bytes()!=rescue.read_bytes()
+                or (replacement/'pipeline.dag').read_text()!=graph.replace(str(previous/'detector.sub'),str(replacement/'detector.sub'))
+                or (replacement/'detector.sub').read_text()!=(previous/'detector.sub').read_text().replace(
+                    'executable = '+str(previous/'detector_worker.sh'),'executable = '+str(view/'detector_worker.sh'))):
+            raise ValueError('Runtime rescue changed completed nodes, worker arguments or downstream collection')
+        cluster=submitted['cluster']
+        if jobs(config,f'ClusterId == {cluster} || DAGManJobId == {cluster}'):
+            raise RuntimeError('Original failed runtime DAG still has live workers')
+        if validate_only:
+            continue
+        receipt=submit_dag(config,replacement,config.get('detector_workers_per_wave',100)+2)
+        state.setdefault('reviewed_detector_runtime_rescues',[]).append(dict(previous=copy.deepcopy(entry),authority=authority))
+        for key in ('terminal','successful','exit_code','queue'):
+            entry.pop(key,None)
+        entry.update(cluster=receipt['cluster'],replacement_detector_cluster=receipt['cluster'],
+            replacement_detector_directory=str(replacement),reviewed_runtime_rescue_sha256=authority['sha256'])
+        for key in ('wave_'+index,'held_wave_'+index):
+            state.setdefault('failures',{}).pop(key,None)
+        save(Path(config['directory'])/'state.json',state)
+
+
 def fresh_storage_admission(config, observation):
     """Protect all future DP exposure and credit only closed published batches."""
     shared = config.get('fresh_shared_remaining_storage')
@@ -1661,6 +1733,7 @@ def step(config, config_path, state):
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
     adopt_reviewed_gen_handoffs(config, config_path, state)
     adopt_reviewed_detector_stages(config, state)
+    adopt_reviewed_runtime_rescues(config,state)
     observation = quota(config)
     state['quota'] = observation
     worklist = read(config['worklist'])

@@ -178,7 +178,10 @@ def operational_recoveries(config):
         destination=Path(operations['directory'])
         if not destination.is_absolute():
             raise ValueError('Operational handoffs require a persistent absolute directory')
-        for batch,authority in operations.get('reviewed_failures',{}).items():
+        failure_reviews=list(operations.get('reviewed_failures',{}).items())
+        failure_reviews.extend((row['batch'],row['authority'])
+            for row in config.get('reviewed_handoff_predecessors',[]))
+        for batch,authority in failure_reviews:
             proof=proof_at(authority)
             original=root/'batches'/batch/'handoff'
             if proof.get('original_handoff_directory') is not None:
@@ -235,7 +238,44 @@ def operational_recoveries(config):
         result[native['ClusterId']] = dict(authority=authority['review'], native=native,
             kind='detector_stage_recovery', original_directory=str(original),
             recovery_submission=str(replacement/'submission.json'))
+    result.update(reviewed_runtime_rescues(config))
     return result
+
+
+def reviewed_runtime_rescues(config):
+    """Validate rescued DONE nodes with the supervisor's frozen read-only path."""
+    authorities=config.get('reviewed_detector_runtime_rescues',{})
+    if not authorities:
+        return {}
+    helper=config['runtime_rescue_validator']
+    path=Path(helper['path'])
+    for member in path.parent.glob('*.py'):
+        if config.get('dependencies',{}).get(str(member))!=sha(member):
+            raise ValueError('Runtime rescue validator helper is outside frozen authority')
+    if not path.is_absolute() or sha(path)!=helper['sha256']:
+        raise ValueError('Runtime rescue validator changed')
+    spec=importlib.util.spec_from_file_location('_watch_runtime_rescue',path)
+    module=importlib.util.module_from_spec(spec)
+    previous_path=list(sys.path)
+    sys.path.insert(0,str(path.parent))
+    try:
+        spec.loader.exec_module(module)
+        result={}
+        for index,authority in authorities.items():
+            if config.get('dependencies',{}).get(authority['path'])!=authority['sha256'] or sha(authority['path'])!=authority['sha256']:
+                raise ValueError('Runtime rescue review is outside frozen authority')
+            proof=read(authority['path'])
+            native=proof['previous_terminal_native_ad']
+            old_entry=dict(cluster=native['ClusterId'],replacement_detector_directory=proof['previous_directory'])
+            validation=dict(config,directory=config['production_directory'],dependencies=config['dependencies'],
+                reviewed_detector_runtime_rescues={index:authority})
+            module.adopt_reviewed_runtime_rescues(validation,dict(waves={index:old_entry}),validate_only=True)
+            result[native['ClusterId']]=dict(authority=authority,native=native,
+                kind='detector_stage_recovery',original_directory=proof['original_directory'],
+                recovery_submission=str(Path(proof['replacement_directory'])/'submission.json'))
+        return result
+    finally:
+        sys.path[:]=previous_path
 
 
 def unsubmitted_runtime_managers(config):
@@ -243,6 +283,20 @@ def unsubmitted_runtime_managers(config):
     authorities = config.get('reviewed_unsubmitted_runtime_recoveries', {})
     if not authorities:
         return {}
+    validators=config.get('unsubmitted_runtime_validators',{})
+    if validators:
+        # Older completed repairs retain the helper revision qualified with
+        # their runtime. A new repair must not reinterpret those old policies.
+        result={}
+        for name,authority in authorities.items():
+            selected=dict(config,reviewed_unsubmitted_runtime_recoveries={name:authority},
+                unsubmitted_runtime_validator=validators.get(name,config.get('unsubmitted_runtime_validator')))
+            selected.pop('unsubmitted_runtime_validators',None)
+            rows=unsubmitted_runtime_managers(selected)
+            if set(result)&set(rows):
+                raise ValueError('Runtime repairs repeat a native manager')
+            result.update(rows)
+        return result
     helper = config.get('unsubmitted_runtime_validator', {})
     helper_path = Path(helper.get('path', ''))
     dependencies = config.get('dependencies', {})
@@ -256,6 +310,8 @@ def unsubmitted_runtime_managers(config):
     spec = importlib.util.spec_from_file_location('_watch_unsubmitted_runtime', helper_path)
     module = importlib.util.module_from_spec(spec)
     previous_path = list(sys.path)
+    helper_names={path.stem for path in helper_path.parent.glob('*.py')}
+    previous_modules={name:sys.modules.pop(name) for name in helper_names if name in sys.modules}
     sys.path.insert(0, str(helper_path.parent))
     try:
         spec.loader.exec_module(module)
@@ -284,6 +340,9 @@ def unsubmitted_runtime_managers(config):
                 submitted=record_epoch(receipt, 'utc', 'submitted_epoch'))
         return result
     finally:
+        for name in helper_names:
+            sys.modules.pop(name,None)
+        sys.modules.update(previous_modules)
         sys.path[:] = previous_path
 
 

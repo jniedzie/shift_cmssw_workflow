@@ -61,6 +61,11 @@ or use Git worktrees unless the user explicitly overrides this policy.
 - Before cleanup, check references and running jobs. Remove only files known
   to be disposable; never use a blanket cleanup on campaign state, data, logs,
   or the repository. A directory named `tmp` is not proof it is unused.
+- A reviewed detector retry must archive the exact old incomplete slice status
+  after checking that no outputs were published; a DAG rescue does not bypass
+  the worker's previous-attempt guard. Keep `DAGManJobId` in scheduler query
+  results and test adoption with actual running children. Revived and pending
+  GEN waves must retain their reservations within the unchanged worker budget.
 
 ## Production retention and obsolete campaigns
 

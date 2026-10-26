@@ -81,6 +81,58 @@ class StatisticsWatchdogTest(unittest.TestCase):
         child['Cmd'] = str(directory / 'worker.sh')
         return production, directory, manager, child
 
+    def test_each_runtime_repair_uses_its_own_pinned_validator_revision(self):
+        dependencies={};authorities={};validators={}
+        for index,name in enumerate(['old','new'],100):
+            tools=self.root/name;tools.mkdir();helper=tools/'validator.py'
+            imported=tools/'same_named_adapter.py';imported.write_text('REVISION='+repr(name)+'\n')
+            dependencies[str(imported)]=WATCH.sha(imported)
+            helper.write_text('import same_named_adapter\n'
+                'def validate_unsubmitted_runtime_recovery(original,batch,authority):\n'
+                ' import json\n from pathlib import Path\n'
+                ' proof=json.loads(Path(authority["path"]).read_text())\n'
+                ' assert proof["expected_validator"]==same_named_adapter.REVISION\n return proof\n')
+            directory=self.root/(name+'_DAG');directory.mkdir()
+            descriptor=directory/'pipeline.dag.condor.sub';descriptor.write_text('sealed manager')
+            (directory/'submission.json').write_text(json.dumps(dict(cluster=index,task=str(directory),
+                submit_sha256=WATCH.sha(descriptor),utc='2026-10-26T09:00:00+00:00')))
+            proof=self.root/(name+'.json');proof.write_text(json.dumps(dict(point='p',
+                expected_validator=name,recovery_directory=str(directory))))
+            authorities[name]=dict(path=str(proof),sha256=WATCH.sha(proof))
+            validators[name]=dict(path=str(helper),sha256=WATCH.sha(helper))
+            dependencies.update({str(proof):WATCH.sha(proof),str(helper):WATCH.sha(helper)})
+        config=dict(production_directory='/science',dependencies=dependencies,
+            reviewed_unsubmitted_runtime_recoveries=authorities,
+            unsubmitted_runtime_validator=validators['new'],unsubmitted_runtime_validators=validators)
+        self.assertEqual(set(WATCH.unsubmitted_runtime_managers(config)),{100,101})
+        config['unsubmitted_runtime_validators']['old']=validators['new']
+        with self.assertRaises(AssertionError):WATCH.unsubmitted_runtime_managers(config)
+
+    def test_runtime_rescue_uses_only_the_frozen_read_only_validator(self):
+        tools=self.root/'rescue_tools';tools.mkdir()
+        helper=tools/'validate.py'
+        marker=self.root/'validated.json'
+        helper.write_text('import json\nfrom pathlib import Path\n'
+            'def adopt_reviewed_runtime_rescues(config,state,*,validate_only=False):\n'
+            ' assert validate_only is True\n'
+            ' Path('+repr(str(marker))+').write_text(json.dumps(state))\n')
+        proof_path=self.root/'rescue.json'
+        native=dict(ClusterId=123,ProcId=0,JobStatus=4,ExitCode=1)
+        proof_path.write_text(json.dumps(dict(previous_terminal_native_ad=native,
+            previous_directory='/old/recovery',original_directory='/science/waves/w003/production',
+            replacement_directory='/new/recovery')))
+        pin=dict(path=str(proof_path),sha256=WATCH.sha(proof_path))
+        config=dict(production_directory='/science',reviewed_detector_runtime_rescues={'3':pin},
+            runtime_rescue_validator=dict(path=str(helper),sha256=WATCH.sha(helper)),
+            dependencies={str(helper):WATCH.sha(helper),str(proof_path):WATCH.sha(proof_path)})
+        result=WATCH.reviewed_runtime_rescues(config)
+        self.assertEqual(result[123]['native'],native)
+        self.assertEqual(result[123]['recovery_submission'],'/new/recovery/submission.json')
+        self.assertEqual(json.loads(marker.read_text())['waves']['3']['cluster'],123)
+        helper.write_text('raise AssertionError("changed helper must never run")')
+        with self.assertRaisesRegex(ValueError,'frozen authority'):
+            WATCH.reviewed_runtime_rescues(config)
+
     def test_native_bound_point_preflight_has_its_declared_child_directory(self):
         production, directory, manager, child = self.point_preflight_fixture()
         self.assertTrue(WATCH.declared_point_preflight_child(production, child, manager))

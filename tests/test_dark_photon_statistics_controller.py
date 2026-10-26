@@ -87,10 +87,14 @@ class WorkerRedistribution(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'preserve healthy'):
             self.rebalance()
 
-    def test_opt_in_budget_must_equal_existing_capacity(self):
+    def test_expanded_budget_keeps_initial_reservations_and_a_1000_worker_bound(self):
         controller.validate_capacity(self.config)
-        self.config['detector_worker_redistribution']['total_workers'] = 601
-        with self.assertRaises(ValueError): controller.validate_capacity(self.config)
+        self.config['detector_worker_redistribution']['total_workers'] = 1000
+        self.config['detector_worker_redistribution']['future_category_ceiling'] = 1000
+        controller.validate_capacity(self.config)
+        for total in [599,1001]:
+            self.config['detector_worker_redistribution']['total_workers'] = total
+            with self.assertRaises(ValueError): controller.validate_capacity(self.config)
 
     def test_future_category_option_does_not_change_default_or_initial_worker_count(self):
         import prepare_dark_photon_production as preparer
@@ -1102,6 +1106,91 @@ class ReviewedDetectorStage(unittest.TestCase):
                     with self.assertRaises((RuntimeError,ValueError)):
                         controller.adopt_reviewed_detector_stages(config,state)
                     submit.assert_not_called()
+
+class NativeOwnershipQuery(unittest.TestCase):
+    def test_queue_projection_keeps_child_DAG_owner(self):
+        row=dict(ClusterId=123,ProcId=0,DAGManJobId=100,Iwd='/science',JobStatus=2)
+        with patch.object(controller,'scheduler_arguments',return_value=[]), \
+             patch.object(controller,'run_condor',return_value=json.dumps([row])) as run:
+            self.assertEqual(controller.jobs({},'DAGManJobId == 100'),[row])
+        self.assertIn('DAGManJobId',run.call_args.args[0][-1].split(','))
+
+
+class ReviewedRuntimeRescue(unittest.TestCase):
+    def fixture(self,root):
+        original=root/'waves/w001/production';original.mkdir(parents=True)
+        previous=root/'old/w001';previous.mkdir(parents=True)
+        replacement=root/'new/w001';replacement.mkdir(parents=True)
+        view=root/'runtime_view';view.mkdir()
+        controller.new(original/'seal.json',dict(original=True))
+        controller.new(previous/'submission.json',dict(cluster=123,task=str(previous)))
+        (previous/'detector.sub').write_text('executable = '+str(previous/'detector_worker.sh')+'\narguments = same seed and slice\n')
+        graph=''.join('JOB '+name+' '+str(previous/'detector.sub')+'\n' for name in ['D_m2_prompt_000','D_m2_prompt_007','F_m2_prompt','COLLECT'])
+        (previous/'pipeline.dag').write_text(graph)
+        rescue=previous/'pipeline.dag.rescue001';rescue.write_text('DONE D_m2_prompt_000\n')
+        (replacement/'pipeline.dag').write_text(graph.replace(str(previous/'detector.sub'),str(replacement/'detector.sub')))
+        (replacement/'pipeline.dag.rescue001').write_bytes(rescue.read_bytes())
+        (replacement/'detector.sub').write_text((previous/'detector.sub').read_text().replace(str(previous/'detector_worker.sh'),str(view/'detector_worker.sh')))
+        controller.new(view/'stage_budget_policy.json',dict(production_directory=str(original),allowed_slices=[dict(point='m2_prompt',chunk=7)]))
+        pin=lambda p:dict(path=str(p),sha256=controller.sha(p))
+        controller.new(view/'seal.json',dict(original_production=str(original),
+            original_seal_sha256=controller.sha(original/'seal.json'),
+            files={str(view/'stage_budget_policy.json'):controller.sha(view/'stage_budget_policy.json')}))
+        proof=dict(schema='shift-reviewed-detector-runtime-rescue-v1',complete=True,wave_index=1,
+            original_directory=str(original),original_seal_sha256=controller.sha(original/'seal.json'),
+            previous_directory=str(previous),replacement_directory=str(replacement),runtime_view=str(view),
+            previous_DAG_sha256=controller.sha(previous/'pipeline.dag'),previous_detector_submit_sha256=controller.sha(previous/'detector.sub'),
+            runtime_view_seal=pin(view/'seal.json'),
+            previous_submission=pin(previous/'submission.json'),previous_rescue=pin(rescue),
+            previous_terminal_native_ad=dict(ClusterId=123,ProcId=0,Iwd=str(previous),JobStatus=4,ExitCode=1,ExitBySignal=False),
+            files={str(p):controller.sha(p) for p in replacement.iterdir()})
+        path=root/'review.json';controller.new(path,proof)
+        config=dict(directory=str(root),dependencies={str(path):controller.sha(path)},reviewed_detector_runtime_rescues={'1':pin(path)})
+        state=dict(waves={'1':dict(gen_cluster=100,cluster=123,replacement_detector_directory=str(previous),terminal=True,successful=False)},failures={'wave_1':{}})
+        return config,state,replacement,view
+
+    def test_watchdog_validation_never_submits_or_changes_state(self):
+        import dark_photon_runtime_recovery as recovery
+        with tempfile.TemporaryDirectory() as directory:
+            config,state,replacement,view=self.fixture(Path(directory))
+            previous=json.dumps(state,sort_keys=True)
+            with patch.object(recovery,'validate_override'),patch.object(controller,'jobs',return_value=[]), \
+                 patch.object(controller,'submit_dag') as submit,patch.object(controller,'save') as save:
+                controller.adopt_reviewed_runtime_rescues(config,state,validate_only=True)
+            self.assertEqual(json.dumps(state,sort_keys=True),previous)
+            submit.assert_not_called();save.assert_not_called()
+
+    def test_preserves_DONE_nodes_and_adopts_one_qualified_rescue_once(self):
+        import dark_photon_runtime_recovery as recovery
+        with tempfile.TemporaryDirectory() as d:
+            config,state,replacement,view=self.fixture(Path(d))
+            with patch.object(recovery,'validate_override') as validate,patch.object(controller,'jobs',return_value=[]), \
+                 patch.object(controller,'submit_dag',return_value=dict(cluster=456)) as submit:
+                controller.adopt_reviewed_runtime_rescues(config,state)
+                controller.adopt_reviewed_runtime_rescues(config,state)
+            submit.assert_called_once();validate.assert_called_once()
+            self.assertEqual(state['waves']['1']['gen_cluster'],100)
+            self.assertEqual(state['waves']['1']['cluster'],456)
+            self.assertNotIn('terminal',state['waves']['1'])
+
+    def test_changed_graph_rescue_slice_or_live_original_blocks_submission(self):
+        import dark_photon_runtime_recovery as recovery
+        for change in ['graph','DONE','slice','live','unqualified']:
+            with self.subTest(change=change),tempfile.TemporaryDirectory() as d:
+                config,state,replacement,view=self.fixture(Path(d))
+                pin=config['reviewed_detector_runtime_rescues']['1'];proof=controller.read(pin['path'])
+                if change=='graph':(replacement/'pipeline.dag').write_text('JOB changed_seed changed.sub\n')
+                if change=='DONE':(replacement/'pipeline.dag.rescue001').write_text('DONE D_m2_prompt_007\n')
+                if change=='slice':controller.save(view/'stage_budget_policy.json',dict(allowed_slices=[dict(point='m2_prompt',chunk=8)]))
+                # Rehashing a changed draft must not defeat semantic checks.
+                proof['files']={str(p):controller.sha(p) for p in replacement.iterdir()}
+                controller.save(pin['path'],proof);pin['sha256']=controller.sha(pin['path']);config['dependencies'][pin['path']]=pin['sha256']
+                with patch.object(recovery,'validate_override',side_effect=ValueError('unqualified') if change=='unqualified' else None), \
+                     patch.object(controller,'jobs',return_value=[dict(JobStatus=2)] if change=='live' else []), \
+                     patch.object(controller,'submit_dag') as submit:
+                    with self.assertRaises((ValueError,RuntimeError)):controller.adopt_reviewed_runtime_rescues(config,state)
+                    submit.assert_not_called()
+
 
 class RemovedFailedAggregate(unittest.TestCase):
     def test_removed_relocated_log_failure_keeps_exact_original_failed_hold(self):

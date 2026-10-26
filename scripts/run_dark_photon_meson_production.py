@@ -1740,7 +1740,10 @@ def validate_unsubmitted_runtime_recovery(production, batch, proof_or_pin):
             or preflight_ad.get('ClusterId') != old_preflight.get('cluster')):
         raise ValueError('Runtime first admission lost its exact failed converter job')
     for native in (handoff_ad, preflight_ad):
-        if (native.get('ProcId') != 0 or native.get('JobStatus') != 5
+        removed_failed_hold=(native.get('JobStatus')==3 and native.get('LastJobStatus')==5
+            and native.get('LastHoldReasonCode')==3 and native.get('NumHolds',0)>=1
+            and 'OnExitHold' in native.get('LastHoldReason',''))
+        if (native.get('ProcId') != 0 or (native.get('JobStatus') != 5 and not removed_failed_hold)
                 or type(native.get('ExitCode')) is not int or native['ExitCode'] == 0
                 or native.get('ExitBySignal') is not False):
             raise ValueError('Runtime first admission requires its pinned native failed holds')
@@ -3183,6 +3186,10 @@ def detector_admission_pending(config, batch, entry):
     if operational is not None:
         directories.append(Path(operational.get('preserved_directories',{}).get(batch['batch'],
             str(Path(operational['directory'])/batch['batch']))))
+    recovery=config.get('reviewed_unsubmitted_runtime_recoveries',{}).get(batch['batch'])
+    if recovery is not None:
+        proof=validate_unsubmitted_runtime_recovery(root/'production',batch,recovery)
+        directories.append(Path(proof['recovery_directory']))
     return any((directory/name).is_file() for directory in directories
                for name in ('submission.json', 'submission_intent.json'))
 

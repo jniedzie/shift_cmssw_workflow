@@ -13,7 +13,7 @@ from prepare_dark_photon_meson_production import source_execution_limits, detect
 from prepare_dark_photon_grid import RUNTIME_HELPER_SOURCES
 
 
-REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'prepare_dark_photon_production.py',
+REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py', 'prepare_dark_photon_production.py',
                      'prepare_dark_photon_grid.py',
                      'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py',
                      'dark_photon_detector_runtime.py') + RUNTIME_HELPER_SOURCES
@@ -163,6 +163,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         seal_files[str(tools/name)] = production.durable.sha(tools/name)
     if operational_handoffs:
         previous_handoffs=copy.deepcopy(config.get('operational_handoffs',{}))
+        replacement_batches={batch for batch,_ in reviewed_handoff_failures}
         config['operational_handoffs']=dict(directory=str(output/'handoffs'),
             reviewed_failures=previous_handoffs.get('reviewed_failures',{}),preserved_directories={})
         for batch,manifest in reviewed_handoff_failures:
@@ -175,7 +176,10 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             old=previous_handoffs.get('preserved_directories',{}).get(batch['batch'])
             if old is None and previous_handoffs.get('directory'):
                 old=str(Path(previous_handoffs['directory'])/batch['batch'])
-            if old is not None and (Path(old)/'submission.json').is_file():
+            # An explicitly reviewed failed launcher needs a new worker. All
+            # other submitted launchers keep their original owner and receipt.
+            if (old is not None and (Path(old)/'submission.json').is_file()
+                    and batch['batch'] not in replacement_batches):
                 config['operational_handoffs']['preserved_directories'][batch['batch']]=old
                 old_seal=Path(old).parents[1]/'seal.json'
                 seal_files[str(old_seal)]=production.durable.sha(old_seal)

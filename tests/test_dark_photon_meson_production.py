@@ -690,6 +690,25 @@ class UnsubmittedRuntimeRecovery(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, 'output-absence'):
                     production.validate_unsubmitted_runtime_recovery(original, batch, proof)
 
+    def test_removed_failed_holds_need_their_exact_native_hold_history(self):
+        for changed in ['valid','not_held','wrong_reason','no_holds','successful']:
+            with self.subTest(changed=changed),tempfile.TemporaryDirectory() as temporary:
+                original,batch,pin=self.fixture(Path(temporary));proof=production.read_pinned(pin)
+                review_path=Path(proof['native_review']['path']);review=production.read(review_path)
+                for key in ['failed_handoff','failed_preflight']:
+                    review[key].update(JobStatus=3,LastJobStatus=5,LastHoldReasonCode=3,NumHolds=1,
+                        LastHoldReason='OnExitHold expression evaluated to TRUE')
+                if changed=='not_held':review['failed_handoff']['LastJobStatus']=2
+                if changed=='wrong_reason':review['failed_handoff']['LastHoldReasonCode']=1
+                if changed=='no_holds':review['failed_preflight']['NumHolds']=0
+                if changed=='successful':review['failed_preflight']['ExitCode']=0
+                review_path.write_text(json.dumps(review));proof['native_review']['sha256']=production.durable.sha(review_path)
+                with patch('dark_photon_runtime_recovery.validate_override'):
+                    if changed=='valid':production.validate_unsubmitted_runtime_recovery(original,batch,proof)
+                    else:
+                        with self.assertRaisesRegex(ValueError,'native failed holds'):
+                            production.validate_unsubmitted_runtime_recovery(original,batch,proof)
+
     def test_first_admission_checks_held_attempts_outputs_and_never_submits_twice(self):
         with tempfile.TemporaryDirectory() as temporary:
             original, batch, pin = self.fixture(Path(temporary))
@@ -1027,6 +1046,22 @@ class Admission(unittest.TestCase):
             entries['a']['detector_native_complete']=True
             self.assertEqual(production.detector_reservations(config,entries), {})
             self.assertIsNone(production.detector_reservations({}, {}))
+
+    def test_reviewed_existing_DAG_keeps_its_original_worker_reservation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);directory=root/'batches/a';directory.mkdir(parents=True)
+            (directory/'source_status.json').write_text(json.dumps(dict(complete=True,events=53)))
+            recovery=root/'recovery';recovery.mkdir();(recovery/'submission.json').write_text('{}')
+            batch=dict(batch='a',events_per_job=10,source_collisions=50000)
+            config=dict(directory=str(root),batches=[batch],maximum_active_detector_workers=2400,
+                detector_workers_per_point=100,reviewed_unsubmitted_runtime_recoveries=dict(a={'review':'pinned'}))
+            with patch.object(production,'validate_unsubmitted_runtime_recovery',
+                    return_value=dict(recovery_directory=str(recovery))) as validate:
+                self.assertEqual(production.detector_reservations(config,{}),{'a':8})
+                validate.assert_called_once_with(directory/'production',batch,{'review':'pinned'})
+            with patch.object(production,'validate_unsubmitted_runtime_recovery',side_effect=ValueError('changed review')):
+                with self.assertRaisesRegex(ValueError,'changed review'):
+                    production.detector_reservations(config,{})
 
     def test_handoff_submit_freezes_credentials_persistent_directory_and_failure_hold(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1780,6 +1815,38 @@ class NativeHealth(unittest.TestCase):
             with patch.object(production,'verify',return_value=original):
                 with self.assertRaisesRegex(ValueError,'already exists'):
                     replacement.prepare(original_root,old_seal,template,template_seal,output)
+
+    def test_reviewed_failed_launcher_is_replaced_and_other_owners_are_preserved(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);science=root/'science';old=root/'old';new=root/'new'
+            science.mkdir();(old/'tools').mkdir(parents=True)
+            batches=[dict(batch=name) for name in ['failed','successful','unreviewed']]
+            original=dict(directory=str(science),tools=str(science/'tools'),batches=batches,
+                simultaneous_sources=2,simultaneous_detector_points=2)
+            previous=dict(original,operational_handoffs=dict(directory=str(old/'handoffs')))
+            for name in ['config.json','seal.json']:(science/name).write_text('{}')
+            (old/'config.json').write_text(json.dumps(previous))
+            descriptor='\n'.join(['+SendCredential = True','+MaxRuntime = 604800',
+                'on_exit_hold = (ExitCode != 0)','periodic_release = False',
+                'arguments = OPERATIONS_SEAL_DIGEST'])
+            (old/'controller.sub.in').write_text(descriptor)
+            (old/'lcg_controller.sh').write_text('#!/bin/bash\n')
+            (old/'seal.json').write_text(json.dumps(dict(files={})))
+            digest=production.durable.sha(old/'seal.json')
+            (old/'controller.sub').write_text(descriptor.replace('OPERATIONS_SEAL_DIGEST',digest))
+            for batch in batches:
+                directory=old/'handoffs'/batch['batch'];directory.mkdir(parents=True)
+                (directory/'submission.json').write_text('{}')
+            review=root/'review.json';review.write_text('{}')
+            with patch.object(production,'verify',return_value=original), \
+                 patch.object(production,'operational_configuration',return_value=previous):
+                replacement.prepare(science,production.durable.sha(science/'seal.json'),old,digest,new,
+                    operational_handoffs=True,reviewed_handoff_failures=[('failed',review)])
+            actual=json.loads((new/'config.json').read_text())['operational_handoffs']
+            self.assertEqual(set(actual['preserved_directories']),{'successful','unreviewed'})
+            self.assertTrue((new/'handoffs/failed/worker.sub').is_file())
+            self.assertFalse((new/'handoffs/successful').exists())
+            self.assertEqual(actual['reviewed_failures']['failed']['sha256'],production.durable.sha(review))
 
     def test_versioned_controller_preserves_original_physics_and_frozen_settings(self):
         with tempfile.TemporaryDirectory() as temporary:
