@@ -17,6 +17,7 @@ from prepare_dark_photon_grid import validate_physical_preflight
 from dark_photon_material_selection import population, validate_plan
 from dark_photon_production_support import (
     PROFILES, validate_complete_groups, validate_publication_canary,
+    validate_histogram_template,
 )
 
 
@@ -579,6 +580,7 @@ def prepare(args):
     for path, expected in template_seal['files'].items():
         if sha256(path) != expected:
             raise ValueError('Qualified template dependency changed: ' + path)
+    histogram_qualification = validate_histogram_template(template)
     plan = copy.deepcopy(read(args.preparation))
     runtime_profile = plan.get('detector_runtime')
     independent_preflights = getattr(args, 'independent_point_preflights', False)
@@ -706,8 +708,11 @@ def prepare(args):
     for name in ('postprocess_canary.json', 'shared_dependency_gate.json'):
         shutil.copy2(template / name, output / name)
     score = (template / 'scoring_components.json').read_text().replace(str(template), str(output))
-    (output / 'scoring_components.json').write_text(score)
+    score = json.loads(score)
+    score['standard_weight_precision'] = histogram_qualification['weight_precision']
+    write(output / 'scoring_components.json', score)
     plan.update(schema='shift-bdt-independent-signal-stage-v1', prepared=True, submitted=False,
+        standard_histogram_qualification=histogram_qualification,
         sample_role='validation_only', new_worker_cap=args.detector_workers,
         finalizer_concurrency=args.finalizers, detector_gate_points=gates,
         detector_gate_chunk=(0 if gates else None), **timeouts,

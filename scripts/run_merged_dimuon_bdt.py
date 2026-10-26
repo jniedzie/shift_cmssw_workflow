@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Code style: AI-code. AI-generated frozen scoring and histogram production.
 """Score an immutable merged-MC inventory and histogram distinct copies.
 
 The driver is used inside a frozen worker. It never submits jobs, filters
@@ -81,8 +82,12 @@ def check_standard_histograms(path, expected_events, expected_sumw):
         raw, weighted = root.Get('rawEventsCutFlow'), root.Get('cutFlow')
         if not raw or not weighted or int(round(raw.GetBinContent(1))) != expected_events:
             raise ValueError('Standard histogram event count differs from scored source')
-        if float(weighted.GetBinContent(1)) != expected_sumw:
+        if not math.isclose(float(weighted.GetBinContent(1)), expected_sumw, rel_tol=1e-12, abs_tol=1e-300):
             raise ValueError('Standard histogram weights differ from source weights')
+        for category in ('', 'Good', 'Near-Both', 'Near-Far', 'Both-Both', 'Both-Far', 'Other'):
+            name = 'dimuon/ShiftDimuonVertex' + category + '_logMass'
+            if not root.Get(name):
+                raise ValueError('Frozen histogrammer is missing required histogram: ' + name)
     finally:
         root.Close()
 
@@ -99,6 +104,24 @@ def legacy_weight_sum(path, branch):
                 if not np.isfinite(total):
                     raise ValueError('Legacy Float cutflow overflows or is nonfinite')
     return float(total)
+
+
+def standard_weight_sum(plan, path, branch):
+    """Use the qualified runtime's precision; preserve old frozen-plan semantics."""
+    precision = plan.get('standard_weight_precision', 'float32')
+    if precision == 'float32':
+        return legacy_weight_sum(path, branch)
+    if precision != 'float64':
+        raise ValueError('Unknown standard histogram weight precision: ' + str(precision))
+    import uproot
+    total = 0.0
+    with uproot.open(path, handler=uproot.source.file.MultithreadedFileSource, num_workers=1) as source:
+        for arrays in source['Events'].iterate([branch], library='np', how=dict, step_size=1000):
+            for value in arrays[branch]:
+                total += float(value)
+                if not math.isfinite(total):
+                    raise ValueError('Standard Double cutflow is nonfinite')
+    return total
 
 
 def validate_plan(path, expected_hash):
@@ -199,10 +222,13 @@ def run_file(plan, row, work, cache, analysis, plan_hash):
             '--input_path', str(scored), '--output_hists_path', str(standard)],
             cwd=analysis / 'bin', env=standard_environment(cache, analysis), check=True,
             stdout=log, stderr=subprocess.STDOUT, timeout=1800)
-        expected_float_sum = legacy_weight_sum(scored, row['weight_branch'])
-        check_standard_histograms(standard, score['events'], expected_float_sum)
-        histogram['standard_cutflow_float32_sumw'] = expected_float_sum
-        histogram['standard_cutflow_policy'] = 'Exact ordered Float32 legacy accumulation; supplemental histogram weights remain Double'
+        expected_sum = standard_weight_sum(plan, scored, row['weight_branch'])
+        check_standard_histograms(standard, score['events'], expected_sum)
+        histogram['standard_cutflow_sumw'] = expected_sum
+        histogram['standard_weight_precision'] = plan.get('standard_weight_precision', 'float32')
+        if histogram['standard_weight_precision'] == 'float32':
+            histogram['standard_cutflow_float32_sumw'] = expected_sum
+        histogram['standard_cutflow_policy'] = 'Ordered accumulation at the qualified standard runtime precision'
         combined = work / 'histograms.root'
         subprocess.run(['hadd', str(combined), str(standard), str(bdt_hist)], check=True,
             stdout=log, stderr=subprocess.STDOUT, timeout=300)

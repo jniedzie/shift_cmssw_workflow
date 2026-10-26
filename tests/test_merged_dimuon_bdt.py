@@ -439,6 +439,15 @@ class LegacyFloatCutflowFileTest(unittest.TestCase):
             self.assertEqual(worker.legacy_weight_sum(path, "shiftSamplingGenWeight"),
                              expected_legacy_cutflow(weights))
 
+    def test_new_standard_runtime_keeps_double_weights_and_old_plans_keep_float(self):
+        with tempfile.TemporaryDirectory() as directory:
+            weights=[16777217.,-16777216.,0.1,-0.1]
+            path=self.fixture(directory,weights)
+            self.assertEqual(worker.standard_weight_sum({'standard_weight_precision':'float64'},path,'shiftSamplingGenWeight'),1.)
+            self.assertEqual(worker.standard_weight_sum({},path,'shiftSamplingGenWeight'),expected_legacy_cutflow(weights))
+            with self.assertRaisesRegex(ValueError,'Unknown standard histogram weight precision'):
+                worker.standard_weight_sum({'standard_weight_precision':'half'},path,'shiftSamplingGenWeight')
+
     def test_real_double_input_is_rounded_before_the_addition(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = self.fixture(temporary, [16777217, -16777216])

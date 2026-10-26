@@ -502,7 +502,7 @@ def execute_histogram_only(plan, row, populations, rate, identities,
     deployment = Path(plan['scoring_deployment']['path'])
     sys.path.insert(0, str(deployment / 'frozen/scoring/workflow/scripts'))
     import run_merged_dimuon_bdt as scorer
-    from dark_photon_production_support import validate_histogram_merge
+    from dark_photon_production_support import validate_histogram_merge, validate_standard_histograms
     scoreplan = read(deployment / 'scoring_components.json')
     sources = [completed_histogram_input(population, scoreplan['model_sha256'])
                for population in populations if not population.get('rate_only')]
@@ -550,6 +550,7 @@ def execute_histogram_only(plan, row, populations, rate, identities,
         subprocess.run(['hadd', str(merged), *map(str, histograms)], check=True,
                        stdout=log, stderr=subprocess.STDOUT, timeout=900)
     audit = validate_histogram_merge(histograms, merged)
+    validate_standard_histograms(merged)
     qualified.validate_histogram_axes(merged, deployment / 'frozen/scoring/sm_axis_authority.root')
     scorer.check_standard_histograms(merged, len(identities), merged_cutflow_sumw(histograms))
     prefix = row['final_output_base']
@@ -656,7 +657,7 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
     deployment = Path(plan['scoring_deployment']['path'])
     sys.path.insert(0, str(deployment / 'frozen/scoring/workflow/scripts'))
     import run_merged_dimuon_bdt as scorer
-    from dark_photon_production_support import validate_histogram_merge
+    from dark_photon_production_support import validate_histogram_merge, validate_standard_histograms
     io = scorer.io
     guard_spec = plan['publication_guard']
     guard_directory = Path(guard_spec['deployment_path'])
@@ -752,16 +753,21 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
         if group['material_selected']:
             validate_nano(work / ('score_' + str(index)) / 'scored.root',
                           group['event_ids'], group['sampling_probabilities'])
-        scorer.check_standard_histograms(histogram, group['events'],
-            scorer.legacy_weight_sum(work / ('score_' + str(index)) / 'scored.root',
-                                     WEIGHT_BRANCH if group['material_selected'] else 'genWeight')
-            if group['material_selected'] else group['native_sumw'])
+        sumw = group['native_sumw']
+        if group['material_selected']:
+            scored_nano = work / ('score_' + str(index)) / 'scored.root'
+            if scoreplan.get('standard_weight_precision') == 'float64':
+                sumw = scorer.standard_weight_sum(scoreplan, scored_nano, WEIGHT_BRANCH)
+            else:
+                sumw = scorer.legacy_weight_sum(scored_nano, WEIGHT_BRANCH)
+        scorer.check_standard_histograms(histogram, group['events'], sumw)
         histograms.append(histogram)
     merged = work / 'histograms.root'
     with (work / 'histogram_merge.log').open('x') as log:
         subprocess.run(['hadd', str(merged), *map(str, histograms)], check=True,
                        stdout=log, stderr=subprocess.STDOUT, timeout=900)
     histogram_audit = validate_histogram_merge(histograms, merged)
+    validate_standard_histograms(merged)
     scorer.check_standard_histograms(merged, len(identities), merged_cutflow_sumw(histograms))
     final_histogram = put(merged, prefix + '/histograms_merged/ntuple_0.root')
     write(work / 'cross_sections.json', rate)

@@ -1,6 +1,29 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Required histogram runtime for new productions
+
+Freeze the current main `shift_histogrammer_config.py` together with its rebuilt
+histogrammer binary. The October 9/12 analysis archives predate `logMass` and
+must not be reused for a new production. All seven dimuon categories, including
+the inclusive one, must exist in worker and merged outputs. Zero selected pairs
+are valid for individual production outputs.
+
+Before `prepare_dark_photon_production.py` accepts a template, its existing
+`postprocess_canary.json` must qualify the actual archive and scoring runner:
+set `standard_analysis_archive_sha256` and `standard_histogram_runner_sha256`
+to their tested hashes, and `standard_weight_precision` to `float64` for the
+current Double-weight histogrammer. Retain the ordinary
+`probes[].result.marker.published.histograms` artifacts with their hashes.
+Preparation reads those real ROOT outputs and requires all seven `logMass`
+histograms plus a filled inclusive histogram from at least one reconstructed
+positive-mass pair. Merely adding these fields without running that canary
+does not qualify a runtime. Requalify whenever the archive or runner changes.
+
+Worker and final publication checks reject missing categories; the SM streaming
+histogrammer enforces the same coverage. Existing frozen campaigns remain
+unchanged and use their separate qualified refresh publisher when needed.
+
 ## Automatic SM weekend production (2026-10-23)
 
 The user authorized QCD, DY and J/psi in all 19 bins under

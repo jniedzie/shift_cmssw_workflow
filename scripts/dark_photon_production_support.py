@@ -6,6 +6,7 @@ This module is copied into a new immutable deployment. Existing deployments
 keep their original workers, finalizers, receipts and publication contracts.
 """
 import copy
+import ast
 import hashlib
 import json
 import math
@@ -14,6 +15,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tarfile
+import tempfile
 
 from dark_photon_material_selection import population, validate_nano, WEIGHT_BRANCH, merged_cutflow_sumw
 
@@ -22,6 +24,11 @@ PROFILES = {
     'all-tiers-v1': ('GEN_SIM', 'DIGI_RAW_HLT', 'AODSIM', 'nanoAOD'),
     'nano-metadata-v1': ('nanoAOD',),
 }
+
+REQUIRED_LOG_MASS_HISTOGRAMS = tuple(
+    'dimuon/ShiftDimuonVertex' + category + '_logMass'
+    for category in ('', 'Good', 'Near-Both', 'Near-Far', 'Both-Both', 'Both-Far', 'Other')
+)
 
 
 def sha256(path):
@@ -203,6 +210,88 @@ def histogram_inventory(path):
     if not result:
         raise ValueError('Histogram output contains no histograms')
     return result
+
+
+def validate_standard_histograms(path, *, require_filled_log_mass=False):
+    """Require the ordinary main-config observables in a real runtime output."""
+    import ROOT
+    source = ROOT.TFile.Open(str(path))
+    if not source or source.IsZombie() or source.TestBit(ROOT.TFile.kRecovered):
+        raise ValueError('Unreadable standard histogram output: ' + str(path))
+    try:
+        missing = [name for name in REQUIRED_LOG_MASS_HISTOGRAMS if not source.Get(name)]
+        if missing:
+            raise ValueError('Frozen histogrammer is missing required logMass histograms: ' + ', '.join(missing))
+        for name in REQUIRED_LOG_MASS_HISTOGRAMS:
+            histogram = source.Get(name)
+            if histogram.GetDimension() != 1 or not math.isfinite(histogram.GetEntries()):
+                raise ValueError('Invalid logMass histogram: ' + name)
+            if not all(math.isfinite(histogram.GetBinContent(i)) and math.isfinite(histogram.GetBinError(i))
+                       for i in range(histogram.GetNcells())):
+                raise ValueError('Nonfinite logMass histogram: ' + name)
+        filled = source.Get(REQUIRED_LOG_MASS_HISTOGRAMS[0]).GetEntries() > 0
+        if require_filled_log_mass and not filled:
+            raise ValueError('Histogrammer qualification needs a reconstructed positive-mass pair; booked empty logMass is insufficient')
+        return dict(complete=True, required_histograms=list(REQUIRED_LOG_MASS_HISTOGRAMS), filled_log_mass=filled)
+    finally:
+        source.Close()
+
+
+def validate_histogram_template(template):
+    """Reject a stale analysis payload before any new detector jobs are prepared."""
+    template = Path(template)
+    components = read(template/'scoring_components.json')
+    archive = components['analysis_archive']
+    if sha256(archive['path']) != archive['sha256']:
+        raise ValueError('Frozen standard analysis archive changed')
+    with tarfile.open(archive['path']) as source:
+        configs = [member for member in source.getmembers()
+                   if member.isfile() and Path(member.name).name == 'shift_histogrammer_config.py']
+        if len(configs) != 1:
+            raise ValueError('Freeze the main shift_histogrammer_config.py exactly once in the analysis payload')
+        config = source.extractfile(configs[0]).read()
+    if not any(isinstance(node, ast.Constant) and node.value == 'logMass'
+               for node in ast.walk(ast.parse(config))):
+        raise ValueError('Outdated histogram payload: rebuild and freeze the main SHIFT histogrammer with logMass before production')
+    qualification = read(template/'postprocess_canary.json')
+    if (qualification.get('complete') is not True or
+            qualification.get('standard_analysis_archive_sha256') != archive['sha256']):
+        raise ValueError('Histogram canary must qualify this exact standard analysis archive')
+    if qualification.get('standard_weight_precision') != 'float64':
+        raise ValueError('Qualify the current main histogrammer with Double event weights before new production')
+    runner = template/'frozen/scoring/workflow/scripts/run_merged_dimuon_bdt.py'
+    current_runner = Path(__file__).with_name('run_merged_dimuon_bdt.py')
+    if (not runner.is_file() or sha256(runner) != sha256(current_runner) or
+            qualification.get('standard_histogram_runner_sha256') != sha256(runner)):
+        raise ValueError('Qualify the current standard histogram worker before freezing new production')
+    outputs = []
+    filled = False
+    for probe in qualification.get('probes', []):
+        marker = probe.get('result', {}).get('marker', {})
+        histogram = marker.get('published', {}).get('histograms')
+        if marker.get('complete') is not True or not histogram:
+            continue
+        # Preparation also runs on batch hosts without a mounted EOS filesystem.
+        with tempfile.TemporaryDirectory(prefix='shift-histogram-canary-') as scratch:
+            path = Path(histogram['path'])
+            if str(path).startswith('/eos/'):
+                from shift_condor_native import native_env
+                path = Path(scratch)/'canary.root'
+                remote = histogram['path'].replace('/eos/home-j/jniedzie/', '/eos/user/j/jniedzie/')
+                subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
+                    'root://eosuser.cern.ch/'+remote, str(path)], env=native_env(), check=True, timeout=300)
+            if sha256(path) != histogram['sha256']:
+                raise ValueError('Qualified histogram canary changed')
+            checked = validate_standard_histograms(path)
+        filled = filled or checked['filled_log_mass']
+        outputs.append(histogram)
+    if not outputs or not filled:
+        raise ValueError('Qualify the frozen histogrammer on a positive-mass reconstructed pair before production')
+    return dict(complete=True, analysis_archive_sha256=archive['sha256'],
+                weight_precision=qualification['standard_weight_precision'],
+                standard_histogram_runner_sha256=sha256(runner),
+                main_configuration_sha256=hashlib.sha256(config).hexdigest(),
+                required_histograms=list(REQUIRED_LOG_MASS_HISTOGRAMS), canary_histograms=outputs)
 
 
 def validate_histogram_merge(inputs, merged):
@@ -392,6 +481,7 @@ def finalize(point, seal_hash, cache):
     def guarded_put(local, remote):
         directory = Path(local).parent
         if directory not in checked_directories:
+            validate_standard_histograms(directory / 'histograms.root')
             qualified.validate_histogram_axes(directory / 'histograms.root',
                                               worker.B / 'frozen/scoring/sm_axis_authority.root')
             checked_directories.add(directory)
@@ -430,6 +520,7 @@ def finalize(point, seal_hash, cache):
         subprocess.run(['hadd', str(merged), *map(str, histogram_paths)], stdout=log, stderr=subprocess.STDOUT,
                        check=True, timeout=1800)
     merge_audit = validate_histogram_merge(histogram_paths, merged)
+    validate_standard_histograms(merged)
     qualified.validate_histogram_axes(merged, worker.B / 'frozen/scoring/sm_axis_authority.root')
     histogram_sumw = math.fsum(1./p for p in probabilities)
     standard_sumw = merged_cutflow_sumw(histogram_paths)

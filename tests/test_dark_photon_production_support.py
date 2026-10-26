@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_production_support import (
     collect, finalize, publication_paths, sha256, validate_complete_groups,
     validate_group_reports, validate_histogram_merge, validate_publication_canary,
+    validate_standard_histograms, validate_histogram_template, REQUIRED_LOG_MASS_HISTOGRAMS,
 )
 from prepare_dark_photon_grid import plan_detector_stage
 from prepare_dark_photon_production import extend_worker
@@ -53,6 +54,75 @@ def write_nano(path, identities, weights=None):
         tree.Fill()
     tree.Write()
     source.Close()
+
+
+class HistogramRuntimeContract(unittest.TestCase):
+    def write_histograms(self, path, *, missing=None, filled=True, nonfinite=False):
+        ROOT=root_module();source=ROOT.TFile(str(path),'RECREATE');source.mkdir('dimuon').cd()
+        for name in REQUIRED_LOG_MASS_HISTOGRAMS:
+            if name==missing:continue
+            histogram=ROOT.TH1D(Path(name).name,'',160,-1.,3.);histogram.Sumw2()
+            if filled and name==REQUIRED_LOG_MASS_HISTOGRAMS[0]:histogram.Fill(1.,1.25)
+            if nonfinite:histogram.SetBinContent(1,float('nan'))
+            histogram.Write()
+        source.Close()
+
+    def template(self, root, *, log_mass=True, filled=True):
+        config=b'histParams = [("logMass", 160, -1., 3.)]\n' if log_mass else b'histParams = [("mass", 100, 0., 100.)]\n'
+        archive=root/'analysis.tar.gz'
+        with tarfile.open(archive,'w:gz') as output:
+            item=tarfile.TarInfo('bin/shift_histogrammer_config.py');item.size=len(config)
+            output.addfile(item,io.BytesIO(config))
+        runner=root/'frozen/scoring/workflow/scripts/run_merged_dimuon_bdt.py'
+        runner.parent.mkdir(parents=True);shutil.copy2(Path(__file__).resolve().parents[1]/'scripts/run_merged_dimuon_bdt.py',runner)
+        canary=root/'canary.root';self.write_histograms(canary,filled=filled)
+        write(root/'scoring_components.json',dict(analysis_archive=dict(path=str(archive),sha256=sha256(archive))))
+        proof=dict(complete=True,standard_analysis_archive_sha256=sha256(archive),
+            standard_weight_precision='float64',standard_histogram_runner_sha256=sha256(runner),
+            probes=[dict(result=dict(marker=dict(complete=True,published=dict(histograms=dict(
+                path=str(canary),sha256=sha256(canary),bytes=canary.stat().st_size)))) )])
+        write(root/'postprocess_canary.json',proof);return proof
+
+    def test_all_categories_and_zero_yield_outputs_are_required_but_valid(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'empty.root';self.write_histograms(path,filled=False)
+            self.assertTrue(validate_standard_histograms(path)['complete'])
+            with self.assertRaisesRegex(ValueError,'booked empty'):
+                validate_standard_histograms(path,require_filled_log_mass=True)
+
+    def test_missing_category_or_nonfinite_bins_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'invalid.root'
+            self.write_histograms(path,missing=REQUIRED_LOG_MASS_HISTOGRAMS[-1])
+            with self.assertRaisesRegex(ValueError,'missing required logMass'):validate_standard_histograms(path)
+            self.write_histograms(path,nonfinite=True)
+            with self.assertRaisesRegex(ValueError,'Nonfinite logMass'):validate_standard_histograms(path)
+
+    def test_current_archive_and_real_filled_canary_qualify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);self.template(root)
+            result=validate_histogram_template(root)
+            self.assertTrue(result['complete']);self.assertEqual(result['weight_precision'],'float64')
+            self.assertEqual(len(result['required_histograms']),7)
+
+    def test_older_payload_is_rejected_before_preparation_creates_outputs(self):
+        import prepare_dark_photon_production as preparation
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);self.template(root,log_mass=False);write(root/'seal.json',dict(files={}))
+            args=SimpleNamespace(template=root,output=root/'new_production',failure_base='/eos/user/test/failures')
+            with self.assertRaisesRegex(ValueError,'Outdated histogram payload'):preparation.prepare(args)
+            self.assertFalse(args.output.exists())
+
+    def test_wrong_archive_runner_or_precision_cannot_reuse_a_canary(self):
+        for key in ['standard_analysis_archive_sha256','standard_histogram_runner_sha256','standard_weight_precision']:
+            with self.subTest(key=key),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);proof=self.template(root);proof[key]='wrong';write(root/'postprocess_canary.json',proof)
+                with self.assertRaises(ValueError):validate_histogram_template(root)
+
+    def test_booked_but_unfilled_canary_does_not_qualify_the_binary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);self.template(root,filled=False)
+            with self.assertRaisesRegex(ValueError,'positive-mass'):validate_histogram_template(root)
 
 
 class CompleteGroups(unittest.TestCase):
@@ -479,6 +549,10 @@ class LocalFinalizer(unittest.TestCase):
                     for _ in range(descriptor['expected_events']):
                         histogram.Fill(.5)
                     histogram.Write()
+                root.mkdir('dimuon').cd()
+                for name in REQUIRED_LOG_MASS_HISTOGRAMS:
+                    histogram = ROOT.TH1D(Path(name).name, '', 160, -1., 3.)
+                    histogram.Sumw2();histogram.Write()
                 root.Close()
                 artifacts = {'nano': scored, 'histograms': histogram_path}
                 for name in ('score_receipt', 'bdt_hist_receipt', 'score_log', 'histogram_log'):

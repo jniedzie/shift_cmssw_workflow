@@ -417,6 +417,9 @@ else:
                     completed_histogram_input(damaged, 'b' * 64)
 
     def run_merge(self, base, *, corrupt_source=False, zero_second=False, all_zero=False):
+        # Load PyROOT before patch.dict restores the worker import inventory.
+        import ROOT
+        ROOT.TFile
         import numpy as np
         import uproot
         if shutil.which('hadd') is None:
@@ -439,6 +442,8 @@ else:
                     root[name] = to_TH1x(None, name, values, float(count), float(values.sum()),
                         float(variances.sum()), 0., 0., variances,
                         to_TAxis('xaxis', '', 3, 0., 8., edges))
+                for category in ('','Good','Near-Both','Near-Far','Both-Both','Both-Far','Other'):
+                    root['dimuon/ShiftDimuonVertex'+category+'_logMass']=(np.zeros(160),np.linspace(-1.,3.,161))
             source = self.source(value, path)
             item = source['report']['score_histograms']['marker']['published']['histograms']
             remote[item['path']] = path
@@ -630,6 +635,10 @@ class SemanticRoot(unittest.TestCase):
                     histogram.SetBinContent(1, row['expected_events'])
                     histogram.SetBinError(1, math.sqrt(row['expected_events']))
                     histogram.Write()
+                root.mkdir('dimuon').cd()
+                for category in ('','Good','Near-Both','Near-Far','Both-Both','Both-Far','Other'):
+                    histogram=ROOT.TH1D('ShiftDimuonVertex'+category+'_logMass','',160,-1.,3.)
+                    histogram.Sumw2();histogram.Write()
                 root.Close()
                 io.put_remote(hist, row['output_histograms'])
                 item = dict(path=row['output_histograms'], sha256=sha(hist), bytes=hist.stat().st_size)
@@ -657,11 +666,13 @@ class SemanticRoot(unittest.TestCase):
                     final_output_base='/eos/user/t/test/darkphoton_point/additive', sources=[dict(index=0), dict(index=1)])])
             (base / 'plan.json').write_text(json.dumps(plan))
             (base / 'seal.json').write_text(json.dumps(dict(files={str(base / 'plan.json'): 'e' * 64})))
+            from dark_photon_production_support import validate_standard_histograms
             with patch('aggregate_dark_photon_samples.load_plan', return_value=plan), patch(
                     'aggregate_dark_photon_samples.checked', side_effect=lambda path, digest: Path(path)), patch(
                     'aggregate_dark_photon_samples.load_source', side_effect=lambda source, *args: populations[source['index']]), patch.dict(
                     sys.modules, run_merged_dimuon_bdt=scorer, chunk_worker=guard, finalize_point=SimpleNamespace(),
-                    dark_photon_production_support=SimpleNamespace(validate_histogram_merge=check_merge)):
+                    dark_photon_production_support=SimpleNamespace(validate_histogram_merge=check_merge,
+                        validate_standard_histograms=validate_standard_histograms)):
                 report = execute(base / 'plan.json', 'e' * 64, 'f' * 64, 'point', base / 'cache', scratch, base / 'results')
             self.assertTrue(report['complete'])
             self.assertEqual(report['events'], 10)
