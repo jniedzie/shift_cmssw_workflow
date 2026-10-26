@@ -10,6 +10,31 @@ or reconstruction.
 Always work directly on `main` in this repository. Do not create task branches
 or use Git worktrees unless the user explicitly overrides this policy.
 
+## Production evidence before scaling
+
+The October 26 SM failure established additional requirements in the workspace
+AGENTS.md under "Production lessons from the October 26 SM failure". Apply
+them before preparing a replacement production:
+
+- Measure the probability of passing the actual reconstructed dimuon and plot
+  selections versus GEN direction, total energy/momentum and material paths.
+  Qualify held-out Both-Both and tail statistics per simulation cost; a score,
+  successful runtime or empty tail histogram does not demonstrate improvement.
+- Count trials, saved GEN, admission, completed Nano and published exposure
+  separately for every process/bin. Compare useful effective statistics with
+  the baseline; generator trials and raw reserves are not reconstructed events.
+- Inspect admission and unknown-fallback fractions on real complete cohorts.
+  Nearly 100% admission must not be presented as useful event rejection. A
+  control floor f bounds event-count savings at 1/f. Preserve unknown-model
+  support and existing frozen probabilities while testing a new SM policy.
+- Keep physical material transport, parent/daughter kinematics and original
+  normalization intact. Pending/failed jobs are not physics failures, and
+  overlapping replays do not add exposure. Test publication through the
+  ordinary plotter inputs before declaring a production usable.
+- Record a failed scientific gate and stop expanding that recipe rather than
+  replacing the missing evidence with a larger job count. The user must be
+  told the measured limitation before an unqualified bulk allocation is used.
+
 ## Temporary scripts and cleanup
 
 - For the next new SM/BSM production, use `scripts/shift_production_selection.py`
