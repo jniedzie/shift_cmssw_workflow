@@ -31,6 +31,10 @@ them before preparing a replacement production:
   normalization intact. Pending/failed jobs are not physics failures, and
   overlapping replays do not add exposure. Test publication through the
   ordinary plotter inputs before declaring a production usable.
+- Never interpret a zero known-prefix material sum as a fully scored zero
+  depth. Navigation timeouts and missing paths remain unknown. Combine pointing,
+  material coverage and energy requirements on the same pair, rather than
+  combining independently optimized values from different pairs.
 - Record a failed scientific gate and stop expanding that recipe rather than
   replacing the missing evidence with a larger job count. The user must be
   told the measured limitation before an unqualified bulk allocation is used.

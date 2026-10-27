@@ -123,6 +123,43 @@ class ResponseFeatureTest(unittest.TestCase):
         self.assertIsNone(miss['max_pair_min_energy_GeV'])
         self.assertIsNone(miss['min_parent_prefix_depth_among_pointing_pairs'])
 
+    def test_unscored_parent_zero_prefix_is_not_a_shallow_opportunity(self):
+        result=feature_values(event([muon(13,parents=[7]),muon(-13,parents=[7])],
+            [parent(7,None,full=False)]))
+        self.assertEqual(result['best_pair_miss_cm'],0.)
+        self.assertEqual(result['min_parent_prefix_depth_among_pointing_pairs'],0.)
+        self.assertIsNone(result['min_parent_depth_among_fully_covered_pointing_pairs'])
+        self.assertEqual(result['n_shallow_fully_covered_pointing_pairs'],0)
+
+    def test_full_and_shallow_must_describe_the_same_pair(self):
+        result=feature_values(event([muon(13,parents=[1]),muon(-13,parents=[2]),
+            muon(-13,parents=[3])],
+            [parent(1,0.),parent(2,12.),parent(3,None,full=False)]))
+        self.assertEqual(result['n_pointing_os_pairs'],2)
+        self.assertEqual(result['n_pointing_pairs_full_parent_coverage'],1)
+        self.assertEqual(result['min_parent_prefix_depth_among_pointing_pairs'],0.)
+        self.assertEqual(result['min_parent_depth_among_fully_covered_pointing_pairs'],12.)
+        self.assertEqual(result['n_shallow_fully_covered_pointing_pairs'],0)
+
+    def test_shallow_union_counts_shared_parent_once_and_keeps_boundary(self):
+        shared=feature_values(event([muon(13,parents=[7]),muon(-13,parents=[7])],
+            [parent(7,.6)]))
+        self.assertEqual(shared['min_parent_depth_among_fully_covered_pointing_pairs'],.6)
+        self.assertEqual(shared['n_shallow_fully_covered_pointing_pairs'],1)
+        boundary=feature_values(event([muon(13,parents=[1]),muon(-13,parents=[2])],
+            [parent(1,.4),parent(2,.6)]))
+        self.assertEqual(boundary['min_parent_depth_among_fully_covered_pointing_pairs'],1.)
+        self.assertEqual(boundary['n_shallow_fully_covered_pointing_pairs'],1)
+        prompt=feature_values(event([muon(13),muon(-13)]))
+        self.assertEqual(prompt['min_parent_depth_among_fully_covered_pointing_pairs'],0.)
+        self.assertEqual(prompt['n_shallow_fully_covered_pointing_pairs'],1)
+
+    def test_missing_depth_stays_unknown_even_with_a_coverage_flag(self):
+        result=feature_values(event([muon(13,parents=[7]),muon(-13,parents=[7])],
+            [parent(7,None,full=True)]))
+        self.assertIsNone(result['min_parent_depth_among_fully_covered_pointing_pairs'])
+        self.assertEqual(result['n_shallow_fully_covered_pointing_pairs'],0)
+
     def test_absent_parent_and_invalid_material_fail(self):
         with self.assertRaisesRegex(ValueError,'absent parent'):
             feature_values(event([muon(13,parents=[7]),muon(-13)]))

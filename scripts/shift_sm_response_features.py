@@ -16,6 +16,7 @@ STATIONS = default_policy('response-features-only', 'no-selection-draw')[
     'two_endcap_pointing']['station_envelopes']
 MASS_STOPPING_POWER_GEV_CM2_G = .001688
 OPPORTUNITY_MISS_MARGIN_CM = 500.
+SHALLOW_PARENT_DEPTH_MAX = 1.
 UNKNOWN_DIRECTION_REASONS = (
     'missing muon production vertex',
     'muon born inside unmodelled central CMS region',
@@ -103,7 +104,9 @@ def feature_values(event):
     tied pairs keep their saved order. The two-station minimum is optimized
     separately over all OS pairs. ``min_parent_prefix_depth`` instead minimizes
     the union of known parent flights over every incoming OS candidate pair.
-    It can be zero for an unknown path; coverage flags preserve that distinction.
+    An entirely unscored parent path contributes zero to that lower bound;
+    this is not a known zero material depth. Coverage flags preserve the
+    distinction, and the lower bound alone must not select shallow parents.
     No eligible pair gives None, and the all-pairs-depth flag is false for an
     empty candidate set. All unknown-ancestor flags, including BSM, remain.
 
@@ -112,6 +115,11 @@ def feature_values(event):
     a descriptive population, not an event veto. Its maximum minimum energy
     and minimum column ratio can come from different pairs; an unknown column
     never substitutes zero. Neither quantity imposes an energy or pT cut.
+    ``min_parent_depth_among_fully_covered_pointing_pairs`` instead requires
+    the same pointing pair to have complete coverage and explicit depths for
+    every parent flight. It is None when no such pair exists. The corresponding
+    shallow-pair count uses the union of those flights and depth <= 1; unknown
+    paths cannot create a counted shallow opportunity.
     """
     muons = event['muons']
     if event.get('GEN_muons', len(muons)) != len(muons):
@@ -153,7 +161,9 @@ def feature_values(event):
             near=max(a['near'], b['near']), far=max(a['far'], b['far']),
             two_station=max(two_station) if None not in two_station else None,
             column_ratio=max(ratios) if None not in ratios else None,
-            parent_depth=depth, parent_full=full))
+            parent_depth=depth, parent_full=full,
+            parent_depth_known=all(parents[number]['material'].get('interaction_depth_proxy')
+                                   is not None for number in numbers)))
 
     incomplete = 0
     for number in incoming_parents:
@@ -169,6 +179,8 @@ def feature_values(event):
                      if row['miss'] <= OPPORTUNITY_MISS_MARGIN_CM]
     known_columns = [row['column_ratio'] for row in opportunities
                      if row['column_ratio'] is not None]
+    full_parent_depths = [row['parent_depth'] for row in opportunities
+                         if row['parent_full'] and row['parent_depth_known']]
     pair = best['pair'] if best else None
     births = [muon['birth_cm'][2] for muon in pair] if pair else None
     return dict(n_gen_muons=len(muons), n_os_pairs=count_os,
@@ -195,6 +207,10 @@ def feature_values(event):
         min_pair_max_column_loss_over_p=min(known_columns) if known_columns else None,
         min_parent_prefix_depth_among_pointing_pairs=min(row['parent_depth']
             for row in opportunities) if opportunities else None,
+        min_parent_depth_among_fully_covered_pointing_pairs=(min(full_parent_depths)
+            if full_parent_depths else None),
+        n_shallow_fully_covered_pointing_pairs=sum(depth <= SHALLOW_PARENT_DEPTH_MAX
+            for depth in full_parent_depths),
         n_incomplete_incoming_parent_paths=incomplete,
         n_unknown_ancestor_barcodes=len(event.get('unknown_transport_ancestor_barcodes', [])),
         unknown_material_reasons='; '.join(sorted(reasons)))
