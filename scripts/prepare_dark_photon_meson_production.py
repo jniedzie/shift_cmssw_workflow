@@ -16,18 +16,19 @@ from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
 from run_dark_photon_statistics import sha, new
 from run_dark_photon_meson_production import (source_mechanism, completion_scope, reference_point,
     additional_reservations, gen_runtime, coverage_request, prior_meson_configuration,
-    fresh_production_authority)
+    fresh_production_authority, pinned_path)
 from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
+from run_dark_photon_senscalc_gen import SOURCES as REFERENCE_SOURCES
 
 
-TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + MATERIAL_SOURCES + RUNTIME_HELPER_SOURCES + (
+TOOLS = tuple(sorted(set(DETECTOR_SOURCES + MESON_SOURCES + REFERENCE_SOURCES + MATERIAL_SOURCES + RUNTIME_HELPER_SOURCES + (
     'prepare_dark_photon_meson_production.py', 'run_dark_photon_meson_production.py',
     'dark_photon_automatic_admission.py',
     'prepare_dark_photon_production.py', 'dark_photon_production_support.py',
     'dark_photon_publication_quota.py', 'run_dark_photon_gen_stage.py',
     'run_dark_photon_statistics.py', 'shift_condor_native.py', 'watch_dark_photon_production.py',
     'aggregate_dark_photon_samples.py', 'watch_dark_photon_statistics.py',
-    'audit_dark_photon_meson_coverage.py'))))
+    'audit_dark_photon_meson_coverage.py','run_shift_sm_postprocessing.py'))))
 
 
 def source_execution_limits(config):
@@ -99,7 +100,9 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
             old_runs.update(item[0] for item in row.get('event_ids', []))
     result, identifiers, seeds, runs = [], set(), set(), set()
     endpoint=.958  # Historical callers without a card retain their original scope.
-    if model_card is not None:
+    if mechanism=='senscalc-meson-fragmentation':
+        endpoint=1.
+    elif model_card is not None:
         from dark_photon_meson_source import recoil_threshold
         parents=model_card.get('parents',[])
         if not parents:
@@ -117,6 +120,13 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
         maximum = limits['maximum_canary_source_collisions'] if row.get('operational_canary', False) else limits['maximum_source_collisions_per_batch']
         if type(count) is not int or not 2 <= count <= maximum:
             raise ValueError('Fixed source exposure exceeds the frozen per-batch limit')
+        if mechanism=='senscalc-meson-fragmentation':
+            if count>100000:
+                raise ValueError('Split reference source exposure into independent banks of at most100000 collisions')
+            source_seed=row.get('source_seed')
+            if (type(source_seed) is not int or not 1<=source_seed<=899999999 or
+                    source_seed in old_seeds or any(source_seed==other['source_seed'] for other in result)):
+                raise ValueError('Reference source banks need explicit independent source seeds')
         if type(row.get('events_per_job',20)) is not int or not 1<=row.get('events_per_job',20)<=20:
             raise ValueError('Detector chunks require1..20 actual signal events')
         target = row.get('target_mean_lab_flight_m')
@@ -150,7 +160,9 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
     if mechanism == 'meson-radiative' and (len(canaries) != 2
             or len({row['point'] for row in canaries}) != 2):
         raise ValueError('Require two distinct declared unified-source full-chain canaries')
-    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative'):
+    if mechanism=='senscalc-meson-fragmentation' and (len(canaries)!=2 or len({row['point'] for row in canaries})!=2):
+        raise ValueError('Require two independent reference-source full-chain canaries')
+    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative','senscalc-meson-fragmentation'):
         raise ValueError('Unsupported meson source mechanism')
     return result
 
@@ -169,7 +181,7 @@ def prepare(configuration, output, scripts=None):
         raise ValueError('Parallel handoffs require an explicit boolean')
     mechanism = source_mechanism(config)
     requirements = ''
-    if mechanism == 'meson-radiative':
+    if mechanism in ('meson-radiative','senscalc-meson-fragmentation'):
         hosts = config.get('excluded_hosts', [])
         if (not isinstance(hosts, list) or any(not isinstance(host, str)
                 or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch', host) for host in hosts)):
@@ -185,7 +197,7 @@ def prepare(configuration, output, scripts=None):
         config.get('detector_job_base',5500000), mechanism, execution_limits,
         model_card=json.loads(Path(config['model_card']).read_text()))
     campaign_pattern = (r'[A-Za-z0-9_-]*20[0-9]{6}[A-Za-z0-9_-]*'
-                        if mechanism == 'meson-radiative' else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
+                        if mechanism in ('meson-radiative','senscalc-meson-fragmentation') else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
     if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
             type(config.get('simultaneous_sources', 2)) is not int or
@@ -225,6 +237,18 @@ def prepare(configuration, output, scripts=None):
             raise ValueError('Unified source requires bounded workers and at most five ready nodes')
         config.setdefault('detector_workers_per_point', 10)
         config.setdefault('dag_max_idle', 5)
+    if mechanism=='senscalc-meson-fragmentation':
+        from run_dark_photon_meson_production import reference_source
+        if fresh_production_authority(config) is None:
+            raise ValueError('The reference benchmark requires a fresh production and storage authority')
+        if config.get('publish_canary_aliases',False) is not False:
+            raise ValueError('Reference-source canaries must preserve global aliases')
+        reference_source(config)
+        if 'main_histogrammer' not in config:
+            raise ValueError('Reference source production requires the qualified main-histogrammer handoff')
+        pinned_path(config['main_histogrammer'])
+        if config.get('minimum_eos_free_bytes',100000000000)<50000000000:
+            raise ValueError('Reference-source preparation must preserve the shared storage floor')
     scripts = Path(scripts or Path(__file__).resolve().parent)
     output.mkdir(parents=True)
     tools = output / 'tools'
@@ -315,6 +339,26 @@ def prepare(configuration, output, scripts=None):
         authorities.append(dict(path=str(target),sha256=sha(target)))
         files[str(target)]=sha(target)
     config['operational_authorities']=authorities
+    if config.get('main_histogrammer') is not None:
+        source=pinned_path(config['main_histogrammer']);target=output/'main_histogrammer.json'
+        shutil.copy2(source,target);config['main_histogrammer']=dict(path=str(target),sha256=sha(target))
+        files[str(target)]=sha(target)
+        settings=json.loads(target.read_text())
+        for key in ('qualification','nano_integrity'):
+            authority=settings[key];files[str(pinned_path(authority))]=authority['sha256']
+    if mechanism=='senscalc-meson-fragmentation':
+        for key in ('runtime_profile','settings'):
+            source=pinned_path(config['reference_source'][key])
+            target=output/('reference_'+key+source.suffix)
+            shutil.copy2(source,target)
+            config['reference_source'][key]=dict(path=str(target),sha256=sha(target))
+            files[str(target)]=sha(target)
+        authority=config['detector_runtime']['manifest']
+        files[str(pinned_path(authority))]=authority['sha256']
+        for bank in config['reference_source'].get('saved_banks',{}).values():
+            pinned_path(bank['manifest'])
+            for source in Path(bank['directory']).iterdir():
+                if source.is_file():files[str(source)]=sha(source)
     for key in ('qualified_template', 'reference_preparation', 'cmssw_base',
                 'darkcast_path', 'darkcast_source_receipt') + (() if config.get('fresh_production_authority') else ('adaptive_directory',)):
         if not Path(config[key]).is_absolute():
@@ -348,7 +392,7 @@ def prepare(configuration, output, scripts=None):
     config.update(schema='shift-dp-meson-production-v1', directory=str(output), tools=str(tools),
                   production_mechanism=mechanism,
                   batches=batches, events_per_job=20, group_events=config.get('group_events',4000),
-                  gen_timeout_seconds=43200, publication_timeout_seconds=1800,
+                  gen_timeout_seconds=config.get('gen_timeout_seconds',43200), publication_timeout_seconds=1800,
                   minimum_afs_free_mb=1024, minimum_eos_free_bytes=config.get('minimum_eos_free_bytes',100000000000),
                   minimum_eos_free_files=20000, simultaneous_sources=config.get('simultaneous_sources', 2),
                   simultaneous_detector_points=config.get('simultaneous_detector_points', 2),
@@ -395,6 +439,9 @@ queue
         (directory / 'logs').mkdir()
         row['campaign'] = config['campaign_prefix'] + '-' + row['batch']
         row['final_output_base'] = config['eos_base'] + '/darkphoton_' + row['point'] + '/' + row['campaign']
+        worker_runtime=config.get('source_worker_runtime_seconds',86400)
+        if type(worker_runtime) is not int or not config['gen_timeout_seconds']+900<=worker_runtime<=86400:
+            raise ValueError('Source worker lifetime must cover GEN and deployment, at most one day')
         text = f'''# Code style: AI-code. AI-generated fixed-M meson GEN worker.
 universe = vanilla
 executable = /usr/bin/python3
@@ -407,7 +454,7 @@ request_cpus = 1
 request_memory = 4000MB
 request_disk = 64000MB
 {requirements}+JobFlavour = "tomorrow"
-+MaxRuntime = 86400
++MaxRuntime = {worker_runtime}
 +SendCredential = True
 +WantIOProxy = True
 +ShiftDPStatisticsTask = "{directory}"

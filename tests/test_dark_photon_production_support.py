@@ -25,10 +25,43 @@ from prepare_dark_photon_grid import plan_detector_stage
 from prepare_dark_photon_production import extend_worker
 from shift_production_selection import default_policy
 from shift_material_preselection import checksum
+from dark_photon_production_support import main_histogram_stage
 
 
 def write(path, value):
     path.write_text(json.dumps(value))
+
+
+class MainHistogramHandoff(unittest.TestCase):
+    def stage(self,root,*,converted=2):
+        (root/'primary_preflight').mkdir();(root/'statuses').mkdir()
+        write(root/'plan.json',dict(points=[dict(point='m0p7_lab_100m',events=1,chunks=[dict(job=5,count=1)])],
+                                   detector_runtime=dict(runtime_sha256='runtime')))
+        write(root/'gen_inventory.json',dict(points={'m0p7_lab_100m':dict(events=2,gen_sha256='gen')}))
+        write(root/'source.json',{})
+        write(root/'seal.json',dict(files={}))
+        write(root/'primary_preflight/receipt.json',dict(complete=True,
+            original_plan_sha256=sha256(root/'plan.json'),original_seal_sha256=sha256(root/'seal.json'),
+            original_inventory_sha256=sha256(root/'gen_inventory.json'),replacement_runtime_sha256='runtime',
+            points={'m0p7_lab_100m':dict(gen_sha256='gen',full_count=2,converted_count=converted)}))
+
+    def test_partial_original_converter_census_cannot_start_a_selected_slice(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root,converted=1)
+            with self.assertRaisesRegex(ValueError,'complete original GEN'):
+                main_histogram_stage(root,'detector',0)
+            self.assertEqual(list((root/'statuses').iterdir()),[])
+
+    def test_a_failed_or_missing_response_cannot_reach_histogramming(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root)
+            with patch('run_shift_sm_postprocessing.run') as histogrammer:
+                with self.assertRaises(FileNotFoundError):main_histogram_stage(root,'finalize')
+                histogrammer.assert_not_called()
+            result=json.loads((root/'statuses/finalizer.json').read_text())
+            self.assertFalse(result['complete'])
+            with self.assertRaisesRegex(ValueError,'Preserve the existing attempt'):
+                main_histogram_stage(root,'finalize')
 
 
 def root_module():

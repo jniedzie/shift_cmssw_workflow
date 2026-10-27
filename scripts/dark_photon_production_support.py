@@ -48,6 +48,113 @@ def valid_digest(value):
             all(character in '0123456789abcdef' for character in value))
 
 
+def validate_main_detector_payload(payload,source_path,chunk):
+    """Bind a real response to its exact original source, selected slice and seed."""
+    source=read(source_path)
+    expected=[source['event_ids'][i] for i in
+              source['selected_indices'][chunk['skip']:chunk['skip']+chunk['count']]]
+    if (payload.get('complete') is not True or payload.get('job')!=chunk['job'] or
+            payload.get('source_skip')!=chunk['skip'] or payload.get('events')!=chunk['count'] or
+            payload.get('source_descriptor_sha256')!=sha256(source_path) or
+            payload.get('source_gen_sha256')!=source['gen_sha256'] or
+            payload.get('nano',{}).get('event_ids')!=expected or
+            payload.get('nano_readback_sha256')!=payload.get('nano_sha256')):
+        raise ValueError('Detector response differs from its frozen source, selected slice or Nano readback')
+
+
+def main_histogram_stage(directory,action,chunk_index=None):
+    """Execute a sealed common detector slice or its main-histogram finalizer."""
+    from run_dark_photon_statistics import save
+    directory=Path(directory).resolve();seal=read(directory/'seal.json')
+    for name,expected in seal['files'].items():
+        if sha256(name)!=expected:raise ValueError('Changed main-histogram stage dependency: '+name)
+    plan=read(directory/'plan.json');row=plan['points'][0]
+    preflight=read(directory/'primary_preflight/receipt.json')
+    inventory=read(directory/'gen_inventory.json');parent=inventory['points'][row['point']]
+    converted=preflight.get('points',{}).get(row['point'],{})
+    if (preflight.get('complete') is not True or
+            preflight['original_plan_sha256']!=sha256(directory/'plan.json') or
+            preflight['original_seal_sha256']!=sha256(directory/'seal.json') or
+            preflight.get('original_inventory_sha256')!=sha256(directory/'gen_inventory.json') or
+            preflight.get('replacement_runtime_sha256')!=plan['detector_runtime']['runtime_sha256'] or
+            converted.get('gen_sha256')!=parent['gen_sha256'] or
+            converted.get('full_count')!=parent['events'] or converted.get('converted_count')!=parent['events']):
+        raise ValueError('The complete original GEN must pass its actual converter before SIM')
+    status=directory/'statuses'/('chunk_'+str(chunk_index)+'.json' if action=='detector' else 'finalizer.json')
+    if status.exists():raise ValueError('Preserve the existing attempt; review its outputs before any retry')
+    report=dict(complete=False,action=action,plan_sha256=sha256(directory/'plan.json'),
+                seal_sha256=sha256(directory/'seal.json'),
+                primary_preflight_receipt_sha256=sha256(directory/'primary_preflight/receipt.json'))
+    save(status,report)
+    previous=Path.cwd()
+    try:
+        with tempfile.TemporaryDirectory(prefix='dp-main-'+action+'-',dir=os.environ.get('_CONDOR_SCRATCH_DIR','/tmp')) as scratch:
+            os.chdir(scratch);scratch=Path(scratch)
+            tools=directory/'frozen/sources'
+            if action=='detector':
+                if type(chunk_index) is not int or not 0<=chunk_index<len(row['chunks']):
+                    raise ValueError('Unknown selected detector slice')
+                chunk=row['chunks'][chunk_index]
+                with (scratch/'worker.log').open('x') as log:
+                    result=subprocess.run([sys.executable,str(tools/'run_shift_gen_to_nano.py'),str(directory/'source.json'),
+                        '--skip',str(chunk['skip']),'--count',str(chunk['count']),'--job',str(chunk['job']),
+                        '--templates',str(directory/'frozen/templates'),'--publish','--remove-consumed-intermediates',
+                        '--absolute-stage-timeouts','--stage-timeouts','7200,3600,5400,7200',
+                        '--first-event-stall-timeout','7200','--event-stall-timeout','3600'],
+                        stdout=log,stderr=subprocess.STDOUT,check=False,timeout=43200)
+                if (scratch/'report.json').is_file():report['payload']=read(scratch/'report.json')
+                if result.returncode:
+                    report['failure_log']=(scratch/'worker.log').read_text(errors='replace')[-20000:]
+                result.check_returncode()
+                payload=report['payload']
+                validate_main_detector_payload(payload,directory/'source.json',chunk)
+                if (payload.get('complete') is not True or payload.get('nano_readback_sha256')!=payload.get('nano_sha256') or
+                        payload['nano']['events']!=chunk['count']):
+                    raise ValueError('Detector slice lacks its exact complete Nano readback')
+                report.update(complete=True,chunk=chunk_index,job=chunk['job'],events=chunk['count'])
+            elif action=='finalize':
+                from run_shift_sm_postprocessing import run
+                from export_dark_photon_cross_sections import rate_record
+                source=read(directory/'source.json');inputs=[]
+                for index,chunk in enumerate(row['chunks']):
+                    receipt=read(directory/'statuses'/('chunk_'+str(index)+'.json'))
+                    if (receipt.get('complete') is not True or receipt.get('chunk')!=index or
+                            receipt.get('job')!=chunk['job'] or receipt.get('events')!=chunk['count'] or
+                            receipt['plan_sha256']!=report['plan_sha256'] or receipt['seal_sha256']!=report['seal_sha256'] or
+                            receipt.get('primary_preflight_receipt_sha256')!=report['primary_preflight_receipt_sha256']):
+                        raise ValueError('A detector response is missing, failed or belongs to another stage')
+                    payload=receipt['payload']
+                    validate_main_detector_payload(payload,directory/'source.json',chunk)
+                    inputs.append(dict(path=payload['nano_path'],sha256=payload['nano_readback_sha256'],
+                                       bytes=payload['nano_bytes'],events=chunk['count']))
+                gen=Path(row['gen_directory']);contract=read(gen/'contract.json');audit=read(gen/'validation.json')
+                rate=rate_record(contract,audit,point=row['point'],campaign=plan['campaign'],source_hashes={},
+                    gen_path=source['gen'],gen_sha256=source['gen_sha256'],source_directory=gen)
+                settings=read(directory/'main_histogrammer.json')
+                normalization=dict(stratum=source['stratum'],source_id=row['point']+':'+str(row['run_number']),
+                    gen_sha256=source['gen_sha256'],denominator_kind='conditional_signal_events',
+                    full_source_events=contract['requested_events'],
+                    physical_dimuon_cross_section_pb=rate['physical_selected_cross_sections_pb'][0]['value_pb'],
+                    signal_rate_record=rate,physics_normalization_ready=False,forced_decay_branching_convention_ready=True)
+                request=dict(schema='shift-production-postprocessing-v1',complete_source_selections_only=True,
+                    selected_sources=[source],normalization_sources=[normalization],nano_inputs=inputs,
+                    histogram_runtime=settings['runtime'],maximum_publication_bytes=settings['maximum_publication_bytes'],
+                    stratum=source['stratum'],campaign=plan['campaign'],sample_directory=row['final_output_base'],
+                    snapshot_name='ntuple_0')
+                save(directory/'postprocessing_request.json',request)
+                run(directory/'postprocessing_request.json')
+                result=read(scratch/'result.json')
+                if result.get('complete') is not True:raise ValueError('Main histogram publication did not finish')
+                report.update(complete=True,point=row['point'],events=row['events'],
+                    final_output_base=row['final_output_base'],main_histograms=result)
+                save(directory/'completed_points'/(row['point']+'.json'),report)
+            else:raise ValueError('Unknown main-histogram stage action')
+    except BaseException as error:
+        report.update(complete=False,error=repr(error));raise
+    finally:
+        os.chdir(previous);save(status,report)
+
+
 def valid_artifact(item, path):
     return (isinstance(item, dict) and item.get('path') == path and
             type(item.get('bytes')) is int and item['bytes'] > 0 and valid_digest(item.get('sha256')))
@@ -592,3 +699,13 @@ def collect(seal_hash):
                 model_sha256=model_hash, seal_sha256=seal_hash, plan_sha256=plan_hash)
     worker.write(worker.B / 'performance_inputs.json', performance)
     worker.write(worker.B / 'bin_histogram_inputs.json', bins)
+
+
+if __name__=='__main__':
+    import argparse
+    parser=argparse.ArgumentParser(description='Execute a sealed main-histogram signal stage')
+    parser.add_argument('--main-stage',type=Path,required=True)
+    parser.add_argument('--action',choices=('detector','finalize'),required=True)
+    parser.add_argument('--chunk',type=int)
+    options=parser.parse_args()
+    main_histogram_stage(options.main_stage,options.action,options.chunk)

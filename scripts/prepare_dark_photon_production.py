@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import shlex
 
 from dark_photon_publication_quota import sha256, external_chunk_reservations
 from audit_dark_photon_gen import validate_event_ids
@@ -29,6 +30,118 @@ def write(path, value):
     with Path(path).open('x') as output:
         json.dump(value, output, indent=2, sort_keys=True, allow_nan=False)
         output.write('\n')
+
+
+def prepare_main_histograms(args):
+    """Use the common detector worker and main histogrammer for flux sources."""
+    from dark_photon_detector_runtime import validate_profile
+    plan=copy.deepcopy(read(args.preparation));output=args.output.resolve()
+    if output.exists():raise FileExistsError('Preserve the existing production: '+str(output))
+    validate_physical_preflight(plan)
+    inventory=read(args.gen_inventory);validate_plan(plan,inventory)
+    check_gen(plan,inventory,read(args.gen_publication),args.prior_inventories)
+    settings=read(args.main_histogrammer)
+    qualification=settings['qualification'];proof=read(qualification['path'])
+    control=proof.get('histogram_positive_control',{})
+    if (sha256(qualification['path'])!=qualification['sha256'] or proof.get('complete') is not True or
+            proof.get('histogram_runtime')!=settings.get('runtime') or
+            control.get('all_seven_logmass_categories_present') is not True or
+            control.get('positive_logmass_filled') is not True):
+        raise ValueError('Require the exact main histogrammer qualified on a reconstructed positive-mass pair')
+    if len(plan['points'])!=1 or plan['events']<=0:
+        raise ValueError('Main histogram handoff requires one nonempty complete source cohort')
+    row=plan['points'][0];parent=inventory['points'][row['point']]
+    source=read(Path(row['gen_directory'])/'material_selected_source.json')
+    if (source['event_ids']!=parent['event_ids'] or source['gen_sha256']!=parent['gen_sha256'] or
+            len(source['selected_indices'])!=row['events']):
+        raise ValueError('Detector handoff differs from the complete frozen admission')
+    if row['events']>plan['group_events']:
+        raise ValueError('Use smaller source banks to respect the grouped-Nano file budget')
+    profile=plan['detector_runtime'];validate_profile(profile)
+    output.mkdir(parents=True);frozen=output/'frozen';(frozen/'sources').mkdir(parents=True)
+    (frozen/'templates').mkdir();files={}
+    for category in ('sources','templates'):
+        for name,record in plan['frozen_dependencies'][category].items():
+            if sha256(record['frozen_copy'])!=record['sha256']:
+                raise ValueError('Changed detector handoff dependency: '+name)
+            target=frozen/category/name
+            if category=='sources':freeze_detector_source(record['frozen_copy'],target,profile)
+            else:shutil.copy2(record['frozen_copy'],target)
+            files[str(target)]=sha256(target)
+    for name in ('dark_photon_production_support.py','run_shift_sm_postprocessing.py'):
+        target=frozen/'sources'/name;shutil.copy2(Path(__file__).with_name(name),target);files[str(target)]=sha256(target)
+    integrity=settings['nano_integrity']
+    if sha256(integrity['path'])!=integrity['sha256']:raise ValueError('Nano branch-integrity helper changed')
+    target=frozen/'sources/shift_nano_integrity.py';shutil.copy2(integrity['path'],target);files[str(target)]=sha256(target)
+    gen=Path(row['gen_directory']);contract=read(gen/'contract.json');audit=read(gen/'validation.json')
+    source=dict(source,schema='shift-bsm-source-v1',gen_transport='xrootd',gen_path_resolved=True,
+        gen=parent['gen_path'],receipt=str(gen/'manifest.json'),receipt_sha256=sha256(gen/'manifest.json'),
+        stratum='darkphoton_'+row['point'],output_base=row['final_output_base']+'/detector',
+        complete_muon_decays=False,missing_filter_lumi=True,
+        signal_contract_sha256=sha256(gen/'contract.json'),
+        source_full_graph_sha256=[event['full_graph_sha256'] for event in audit['event_rows']],
+        maximum_publication_bytes=settings['maximum_detector_publication_bytes_per_job'],
+        predefined_signal_decays=dict(schema='shift-predefined-dark-photon-transport-v1',
+            mass_gev=row['mass_gev'],proper_ctau_mm=row['proper_ctau_mm'],
+            generated_mass_support_gev=contract['generated_mass_support_gev']))
+    write(output/'source.json',source);write(output/'detector_runtime_profile.json',profile)
+    write(output/'main_histogrammer.json',settings)
+    for name,path in [('gen_inventory.json',args.gen_inventory),('gen_publication.json',args.gen_publication)]:
+        write(output/name,read(path))
+    plan.update(schema='shift-dark-photon-main-histograms-v1',runtime=plan.get('runtime',{}),
+        new_worker_cap=args.detector_workers,main_histogrammer=True,
+        original_preparation_sha256=sha256(args.preparation))
+    write(output/'plan.json',plan)
+    files.update({str(output/name):sha256(output/name) for name in
+        ('source.json','detector_runtime_profile.json','main_histogrammer.json','gen_inventory.json','gen_publication.json','plan.json')})
+    files[str(qualification['path'])]=qualification['sha256']
+    files[profile['manifest']['path']]=profile['manifest']['sha256']
+    files.update({str(gen/name):sha256(gen/name) for name in ('contract.json','validation.json','manifest.json')})
+    (output/'statuses').mkdir();(output/'completed_points').mkdir();(output/'logs').mkdir()
+    helper=frozen/'sources/dark_photon_production_support.py'
+    bootstrap=frozen/'sources/dark_photon_detector_runtime.py'
+    # Each entry checks the stage seal from a persistent directory, then runs
+    # the common payload in worker scratch. Detector and finalizer are ordinary
+    # DAG nodes: a failed/missing response cannot trigger histogram publication.
+    for action in ('detector','finalize'):
+        script=output/(action+'_worker.sh')
+        argv=['/usr/bin/python3',str(bootstrap),'--profile',str(output/'detector_runtime_profile.json'),
+              '--entry',str(helper),'--','--main-stage',str(output),'--action',action]
+        entry=shlex.join(argv)+' "$@"'
+        if action=='finalize':
+            entry=('unset PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LD_PRELOAD ROOTSYS\n'
+                'source /cvmfs/sft.cern.ch/lcg/views/LCG_107/x86_64-el9-gcc14-opt/setup.sh\n'
+                'exec python3 '+shlex.join([str(helper),'--main-stage',str(output),'--action',action]))
+        else:entry='exec '+entry
+        script.write_text('#!/bin/bash\n# Code style: AI-code. Frozen main-histogram production entry.\n'
+            'set -eo pipefail\ncd '+shlex.quote(str(output))+'\n'+entry+'\n')
+        script.chmod(0o700);subprocess.run(['bash','-n',str(script)],check=True)
+        files[str(script)]=sha256(script)
+        submit=output/(action+'.sub')
+        submit.write_text('universe = vanilla\nexecutable = '+str(script)+'\narguments = '+
+            ('--chunk $(chunk)' if action=='detector' else '')+'\ninitialdir = '+str(output)+
+            '\ngetenv = False\nshould_transfer_files = NO\nrequest_cpus = 1\nrequest_memory = 4000MB\n'
+            'request_disk = 8000MB\n+MaxRuntime = '+str(settings.get('worker_runtime_seconds',43200))+
+            '\n+SendCredential = True\n+WantIOProxy = True\n'
+            '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n+JobBatchName = "SHIFT_DP_main_histograms"\n'
+            'output = '+str(output/'logs')+'/'+action+'.$(ClusterId).$(ProcId).out\n'
+            'error = '+str(output/'logs')+'/'+action+'.$(ClusterId).$(ProcId).err\nlog = '+str(output/'events.log')+
+            '\non_exit_hold = (ExitBySignal == True) || (ExitCode != 0)\nperiodic_release = False\nqueue\n')
+        files[str(submit)]=sha256(submit)
+    nodes=['JOB P '+str(output/'primary_preflight/worker.sub')];children=[]
+    for index,chunk in enumerate(row['chunks']):
+        name='D'+str(index);children.append(name)
+        nodes.extend(['JOB '+name+' '+str(output/'detector.sub'),
+                      'VARS '+name+' chunk="'+str(index)+'"','CATEGORY '+name+' DETECTOR'])
+    nodes.extend(['JOB F '+str(output/'finalize.sub'),'CATEGORY F FINALIZER',
+        'PARENT P CHILD '+' '.join(children),'PARENT '+' '.join(children)+' CHILD F',
+        'MAXJOBS DETECTOR '+str(args.detector_workers),'MAXJOBS FINALIZER 1'])
+    (output/'pipeline.dag').write_text('\n'.join(nodes)+'\n')
+    files[str(output/'pipeline.dag')]=sha256(output/'pipeline.dag')
+    write(output/'seal.json',dict(schema='shift-dark-photon-main-histograms-seal-v1',files=files))
+    from prepare_dark_photon_kinematics_preflight import prepare,pin
+    prepare(output,pin(output/'detector_runtime_profile.json'),output/'primary_preflight')
+    return dict(directory=str(output),prepared=True,submitted=False,detector_chunks=len(children),main_histogrammer=True)
 
 
 def telemetry_derivation(original, replacement):
@@ -570,6 +683,8 @@ def freeze_absolute_stage_budget(output, stage_timeouts):
 
 
 def prepare(args):
+    if getattr(args,'main_histogrammer',None) is not None:
+        return prepare_main_histograms(args)
     timeouts = detector_timeout_settings(args)
     template, output = args.template.resolve(), args.output.resolve()
     if output.exists():
@@ -810,6 +925,8 @@ def main():
     parser.add_argument('--publication-profile', choices=tuple(PROFILES), default='all-tiers-v1')
     parser.add_argument('--publication-canary', type=Path,
                         help='Pinned measured full-chain Nano/metadata canary required for nano-metadata-v1')
+    parser.add_argument('--main-histogrammer',type=Path,
+                        help='Qualified main histogrammer runtime and Nano integrity helper; bypass legacy BDT scoring')
     print(json.dumps(prepare(parser.parse_args())))
 
 

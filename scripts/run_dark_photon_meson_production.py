@@ -29,7 +29,7 @@ import traceback
 import run_dark_photon_statistics as durable
 
 
-MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative')
+MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative', 'senscalc-meson-fragmentation')
 
 
 class MesonJobFailure(RuntimeError):
@@ -71,6 +71,45 @@ def source_mechanism(config):
     if mechanism not in MECHANISMS:
         raise ValueError('Unsupported meson source mechanism')
     return mechanism
+
+
+def reference_source(config):
+    """Check the reference backend's independent source and GEN authorities."""
+    if source_mechanism(config)!='senscalc-meson-fragmentation':
+        return None
+    if config.get('jaw_source_profile') is None:
+        raise ValueError('Reference detector production requires the pinned jaw-placement profile before GEN')
+    pinned_path(config['jaw_source_profile'])
+    settings=config['reference_source']
+    profile=read_pinned(settings['runtime_profile'])
+    source_settings=pinned_path(settings['settings'])
+    from dark_photon_detector_runtime import validate_profile
+    validate_profile(config['detector_runtime'])
+    if (profile.get('schema')!='shift-senscalc-source-capsule-v1' or
+            settings.get('rate_profile') not in ('pointlike','measured-form-factor') or
+            type(settings.get('proposal_probability')) not in (int,float) or
+            not 1.e-6<=settings['proposal_probability']<=.01):
+        raise ValueError('Require the explicit qualified source capsule, rate profile and proposal')
+    return dict(settings=settings,profile=profile,source_settings=str(source_settings))
+
+
+def reference_bank_arguments(reference,batch):
+    """Reuse a pinned bank without adding exposure, or request independent draws."""
+    settings=reference['settings']
+    bank=settings.get('saved_banks',{}).get(batch['batch'])
+    if bank is not None:
+        directory=Path(bank['directory'])
+        manifest=read_pinned(bank['manifest'])
+        if (not directory.is_absolute() or Path(bank['manifest']['path'])!=directory/'manifest.json' or
+                bank.get('additional_source_collisions')!=0 or
+                manifest.get('seed')!=batch['source_seed'] or manifest.get('mass_gev')!=batch['mass_gev'] or
+                manifest.get('source_trials')!=batch['source_collisions']):
+            raise ValueError('Reused reference bank differs from its original source exposure')
+        return ['--sample',str(directory)]
+    return ['--source-runtime-profile',str(pinned_path(settings['runtime_profile'])),
+        '--source-settings',reference['source_settings'],'--source-collisions',str(batch['source_collisions']),
+        '--source-seed',str(batch['source_seed']),'--mass',str(batch['mass_gev']),
+        '--proposal-probability',str(settings['proposal_probability'])]
 
 
 def fresh_production_authority(config, reader=None):
@@ -1032,6 +1071,16 @@ def adopted_row(batch, gen, config=None):
                 or not math.isclose(contract['physical_width_table']['ctau_mm'],
                                     point['proper_ctau_mm'], rel_tol=1.e-12, abs_tol=0.)):
             raise ValueError('Unified source changed its qualified card or reference lifetime')
+    if mechanism=='senscalc-meson-fragmentation':
+        reference=reference_source(config)
+        source_manifest=read(gen/'source_manifest.json')
+        if (source_manifest.get('seed')!=batch['source_seed'] or
+                source_manifest.get('settings_sha256')!=reference['settings']['settings']['sha256'] or
+                source_manifest.get('runtime_receipt_sha256')!=reference['profile']['runtime_receipt_sha256'] or
+                source_manifest.get('proposal_probability')!=reference['settings']['proposal_probability'] or
+                contract.get('rate_profile')!=reference['settings']['rate_profile'] or
+                contract.get('radiative_model_sha256')!=durable.sha(config['model_card'])):
+            raise ValueError('Reference source differs from its frozen bank prescription')
     return dict(point=batch['point'], mass_gev=batch['mass_gev'], epsilon=batch['epsilon'],
         seed=batch['seed'], run_number=batch['run_number'], events=count,
         production_mechanism=mechanism,
@@ -1057,7 +1106,7 @@ def compact_files(gen):
     result = []
     for path in sorted(Path(gen).rglob('*')):
         if (not path.is_file() or '__pycache__' in path.parts or path.suffix in ('.root', '.hepmc', '.pyc')
-                or path.name in ('meson_source_ledger.jsonl', 'meson_source_ledger.jsonl.gz')):
+                or path.name in ('meson_source_ledger.jsonl', 'meson_source_ledger.jsonl.gz', 'source_ledger.jsonl')):
             continue
         if path.stat().st_size > 10000000:
             raise ValueError('Unexpected large file in compact GEN metadata: ' + str(path))
@@ -1113,10 +1162,11 @@ def source(config, seal_digest, batch):
             scratch = Path(temporary)
             os.environ['TMPDIR'] = str(scratch)
             probe['phase'] = 'runtime_download'
-            release, runtime_archive = unpack_gen_runtime(config, scratch)
+            reference=reference_source(config)
+            release, runtime_archive = ((None,None) if reference else unpack_gen_runtime(config, scratch))
             gen = scratch / 'gen'
             probe.update(gen=gen,phase='GEN')
-            runner = Path(config['tools']) / 'run_dark_photon_meson_gen.py'
+            runner = Path(config['tools']) / ('run_dark_photon_senscalc_gen.py' if reference else 'run_dark_photon_meson_gen.py')
             argv = ['python3', str(runner), '--mass', str(batch['mass_gev']), '--epsilon', str(batch['epsilon']),
                 '--source-collisions', str(batch['source_collisions']), '--seed', str(batch['seed']),
                 '--run-number', str(batch['run_number']), '--model-card', config['model_card'],
@@ -1124,13 +1174,28 @@ def source(config, seal_digest, batch):
                 '--timeout', str(config['gen_timeout_seconds']), '--output', str(gen)]
             if config.get('jaw_source_profile') is not None:
                 argv.extend(['--jaw-profile', str(pinned_path(config['jaw_source_profile']))])
+            if reference:
+                profile_path=scratch/'detector_runtime_profile.json'
+                durable.new(profile_path,config['detector_runtime'])
+                argv=['/usr/bin/python3',str(Path(config['tools'])/'dark_photon_detector_runtime.py'),
+                    '--profile',str(profile_path),'--entry',str(runner),'--',
+                    *reference_bank_arguments(reference,batch),
+                    '--rate-profile',reference['settings']['rate_profile'],
+                    '--epsilon',str(batch['epsilon']),'--seed',str(batch['seed']),'--run-number',str(batch['run_number']),
+                    '--radiative-model',config['model_card'],'--darkcast-path',config['darkcast_path'],
+                    '--darkcast-source-receipt',config['darkcast_source_receipt'],
+                    '--detector-runtime-profile',str(profile_path),'--output',str(gen),
+                    '--timeout',str(config['gen_timeout_seconds'])]
+                if config.get('jaw_source_profile') is not None:
+                    argv.extend(['--jaw-profile',str(pinned_path(config['jaw_source_profile']))])
             rename = ''
             if runtime_archive is not None:
                 runtime = gen_runtime(config)
                 argv.extend(['--runtime-provenance', runtime['provenance']['path'],
                              '--runtime-archive', str(runtime_archive)])
                 rename = ' && scram b ProjectRename'
-            shell = ('export SCRAM_ARCH=el9_amd64_gcc13 && source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
+            shell = (shlex.join(argv) if reference else
+                'export SCRAM_ARCH=el9_amd64_gcc13 && source /cvmfs/cms.cern.ch/cmsset_default.sh && cd ' +
                 shlex.quote(str(release / 'src')) + rename +
                 ' && eval "$(scram runtime -sh)" && cd ' + shlex.quote(str(scratch)) +
                 ' && export PYTHONDONTWRITEBYTECODE=1 && exec ' + shlex.join(argv))
@@ -1138,6 +1203,19 @@ def source(config, seal_digest, batch):
                 result = subprocess.run(['/bin/bash', '-c', shell], cwd=directory,
                     env=stage.native_env(), stdout=log, stderr=subprocess.STDOUT,
                     timeout=config['gen_timeout_seconds'] + 900, check=False)
+            if reference and (gen/'source_bank/source_ledger.jsonl').is_file():
+                # One compressed authoritative ledger suffices for all later
+                # audits. Avoid two uncompressed AFS copies per source cohort.
+                ledger=gen/'source_bank/source_ledger.jsonl'
+                with ledger.open('rb') as incoming, (ledger.with_suffix('.jsonl.gz')).open('xb') as raw:
+                    with gzip.GzipFile(fileobj=raw,mode='wb',mtime=0) as outgoing:
+                        shutil.copyfileobj(incoming,outgoing,1048576)
+                from dark_photon_senscalc import ledger_digest
+                if ledger_digest(ledger.with_suffix('.jsonl.gz'))!=durable.sha(ledger):
+                    raise ValueError('Reference source ledger compression changed original exposure')
+                ledger.unlink()
+                duplicate=gen/'source_ledger.jsonl'
+                if duplicate.is_file():duplicate.unlink()
             # Keep the complete source accounting even if a fixed exposure
             # returns zero signals. A zero source is never rerun automatically.
             ledger = gen / 'meson_source_ledger.jsonl'
@@ -1190,6 +1268,9 @@ def source(config, seal_digest, batch):
             status.update(complete=True, events=row['events'], publication=publication, parent=parent,
                 metadata_sha256={str(path): durable.sha(path) for path in compact_files(final_gen)},
                 finished_utc=datetime.now(timezone.utc).isoformat())
+            if reference:
+                status['new_source_collisions']=(0 if batch['batch'] in reference['settings'].get('saved_banks',{})
+                                                 else batch['source_collisions'])
     except Exception as error:
         status.update(error=repr(error), traceback=traceback.format_exc()[-10000:])
         raise
@@ -1214,6 +1295,8 @@ def prepare_material_admission(config, batch, status):
         geometry=copy.deepcopy(settings['geometry']), frame=copy.deepcopy(settings['frame']),
         cohort_id=batch['campaign']+':'+batch['batch'],
         selection_seed=settings.get('selection_seed','dp-material-'+batch['campaign'])+':'+batch['batch'])
+    if 'material_event_timeout_seconds' in settings:
+        request['material_event_timeout_seconds']=settings['material_event_timeout_seconds']
     request_path=directory/'material_admission_request.json'
     profile_path=directory/'material_runtime_profile.json'
     immutable(request_path,request)
@@ -1305,7 +1388,11 @@ def adopt(config, batch):
     if math.ceil(row['events']/chunk_size) + 1 > batch['detector_job_capacity']:
         raise ValueError('Actual N needs a separately reviewed larger detector namespace; do not truncate it')
     physical = dict(points=[row], production_mechanism=source_mechanism(config),
-        physical_width_preflight_passed=True, meson_width_qualification=grid.meson_width_qualification([row]))
+        physical_width_preflight_passed=True)
+    if source_mechanism(config)=='senscalc-meson-fragmentation':
+        physical['senscalc_width_qualification']=grid.senscalc_width_qualification([row])
+    else:
+        physical['meson_width_qualification']=grid.meson_width_qualification([row])
     plan = grid.plan_detector_stage(physical, batch['campaign'], config['eos_base'],
         events_per_job=chunk_size, group_events=config['group_events'],
         detector_job_base=batch['detector_job_base'])
@@ -1316,6 +1403,9 @@ def adopt(config, batch):
     from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
     from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
     sources=set(grid.SOURCES)|set(MESON_SOURCES)|set(MATERIAL_SOURCES)
+    if source_mechanism(config)=='senscalc-meson-fragmentation':
+        from run_dark_photon_senscalc_gen import SOURCES as REFERENCE_SOURCES
+        sources.update(REFERENCE_SOURCES)
     preparation = directory / 'preparation.json'
     previous = read(preparation) if preparation.exists() else None
     plan['frozen_dependencies'] = dict(sources=adoption_sources(
@@ -1324,7 +1414,8 @@ def adopt(config, batch):
             for path in sorted((Path(config['directory'])/'templates').glob('step*.py')) for name in [path.name]})
     # Generic downstream workers consume the real audited GEN source directly.
     row = plan['points'][0]
-    row['gen_argv'] = ['python3', str(Path(config.get('physics_tools',config['tools']))/'run_dark_photon_meson_gen.py')]
+    entry='run_dark_photon_senscalc_gen.py' if source_mechanism(config)=='senscalc-meson-fragmentation' else 'run_dark_photon_meson_gen.py'
+    row['gen_argv'] = ['python3', str(Path(config.get('physics_tools',config['tools']))/entry)]
     if preparation.exists():
         if read(preparation) != plan:
             raise ValueError('An earlier post-GEN detector adoption differs')
@@ -1439,6 +1530,8 @@ def handoff(config, batch):
             str(config.get('detector_workers_per_point', 100)), '--finalizers', '2',
             '--publication-profile', 'nano-metadata-v1', '--publication-canary', config['publication_canary'],
             '--event-stall-timeout','7200','--first-event-stall-timeout','7200','--detector-timeout','43200',
+            *(['--main-histogrammer',str(pinned_path(config['main_histogrammer']))]
+              if config.get('main_histogrammer') is not None else []),
             *(['--absolute-stage-timeouts', *map(str,config['operational_stage_timeouts_seconds'])]
               if config.get('operational_stage_timeouts_seconds') is not None else [])],
             directory/'prepare_production.log', timeout=1800)
@@ -1485,6 +1578,9 @@ source /cvmfs/sft.cern.ch/lcg/views/LCG_108/x86_64-el9-gcc13-opt/setup.sh
 exec python3 '''+shlex.quote(str(script))+' --directory '+shlex.quote(config['directory'])+
         options+' --action handoff --batch '+shlex.quote(batch['batch'])+'\n')
     wrapper.chmod(0o755)
+    worker_runtime=config.get('handoff_worker_runtime_seconds',86400)
+    if type(worker_runtime) is not int or not 3600<=worker_runtime<=86400:
+        raise ValueError('Detector preparation needs a frozen worker lifetime of one to24hours')
     descriptor=f'''# Code style: AI-code. AI-generated independent meson handoff worker.
 universe = vanilla
 executable = {wrapper}
@@ -1498,7 +1594,7 @@ request_memory = 3000MB
 request_disk = 4000MB
 priority = 1000000
 +JobFlavour = "tomorrow"
-+MaxRuntime = 86400
++MaxRuntime = {worker_runtime}
 +SendCredential = True
 +ShiftDPStatisticsTask = "{directory}"
 +JobBatchName = "SHIFT_DP_meson_detector_preparation"
@@ -2480,7 +2576,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
             return False, dict(reason='waiting_for_reviewed_bulk_storage_and_seven_mass_GEN_gates')
         gate = read(path)
         audit_flag = ('all_requested_mass_GEN_audits_passed'
-                      if source_mechanism(config) == 'meson-radiative' else 'all_seven_mass_GEN_audits_passed')
+                      if source_mechanism(config) in ('meson-radiative','senscalc-meson-fragmentation') else 'all_seven_mass_GEN_audits_passed')
         if (gate.get('complete') is not True or gate.get(audit_flag) is not True
                 or gate.get('model_card_sha256') != durable.sha(config['model_card'])
                 or gate.get('worklist_sha256') != durable.sha(Path(config['directory'])/'config.json')
@@ -2828,7 +2924,7 @@ def publish_batch(config, state, batch):
         result=cumulative_result(config,state,batch,transport,result)
         if result is None:
             return None
-        unified = source_mechanism(config) == 'meson-radiative'
+        unified = source_mechanism(config) in ('meson-radiative','senscalc-meson-fragmentation')
         prior_campaigns = []
         private_canary = (unified and batch['operational_canary']
                           and config.get('publish_canary_aliases', False) is False)
@@ -2979,6 +3075,25 @@ def production_queue_snapshot(config):
     return dict(before_epoch=before,rows=durable.parse_ads(output))
 
 
+def main_histogram_preflight_child(directory,child,cluster):
+    """Recognize only the sealed main-stage converter node's persistent Iwd."""
+    root=Path(directory);preflight=root/'primary_preflight'
+    if child.get('Iwd')!=str(preflight) or child.get('DAGManJobId')!=cluster:
+        return False
+    plan_path=root/'plan.json';seal=read(root/'seal.json')
+    if seal['files'].get(str(plan_path))!=durable.sha(plan_path):
+        raise ValueError('Main-stage plan differs from its science seal')
+    plan=read(plan_path)
+    if plan.get('schema')!='shift-dark-photon-main-histograms-v1' or plan.get('main_histogrammer') is not True:
+        return False
+    preparation=read(preflight/'preparation.json')
+    for name,filename in (('worker','worker.sh'),('submit','worker.sub'),('config','preflight.json')):
+        authority=preparation[name]
+        if Path(authority['path'])!=preflight/filename or durable.sha(authority['path'])!=authority['sha256']:
+            raise ValueError('Declared converter node changed before monitoring')
+    return preparation.get('complete') is True
+
+
 def native_status(config, receipt, queue_snapshot=None):
     payload_directory = receipt['task']
     for name, authority in config.get('reviewed_unsubmitted_runtime_recoveries', {}).items():
@@ -3015,7 +3130,8 @@ def native_status(config, receipt, queue_snapshot=None):
             if managers[0].get('ExitBySignal') or managers[0].get('ExitCode')!=0:
                 raise MesonJobFailure('Meson manager completed unsuccessfully; no automatic retry', rows)
             return 'complete'
-        if any(row.get('Iwd')!=payload_directory for row in children):
+        if any(row.get('Iwd')!=payload_directory and not
+               main_histogram_preflight_child(payload_directory,row,receipt['cluster']) for row in children):
             raise RuntimeError('Meson child has an unexpected persistent working directory')
         directory=Path(receipt['task'])
         health_path=directory/'manager_health.json'

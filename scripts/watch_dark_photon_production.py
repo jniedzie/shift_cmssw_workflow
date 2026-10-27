@@ -310,8 +310,14 @@ def completed_histogram(candidate, transport=None):
             or report.get('seal_sha256') != source['seal_sha256']
             or report.get('final_output_base') != str(output)):
         raise ValueError('Point completion belongs to another frozen production')
-    marker = report.get('score_histograms', {}).get('marker', {})
-    item = marker.get('published', {}).get('histograms')
+    if 'main_histograms' in report:
+        marker=report['main_histograms']
+        item=marker.get('published',{}).get('merged_histogram')
+        if marker.get('events')!=row['events']:
+            raise ValueError('Main histogram receipt has different source exposure')
+    else:
+        marker = report.get('score_histograms', {}).get('marker', {})
+        item = marker.get('published', {}).get('histograms')
     if marker.get('complete') is not True or not isinstance(item, dict):
         raise ValueError('Point has no completed merged histogram publication')
     histogram = Path(item.get('path', ''))

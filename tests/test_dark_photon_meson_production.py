@@ -16,6 +16,54 @@ import audit_dark_photon_meson_coverage as coverage_audit
 
 
 class FixedExposure(unittest.TestCase):
+    def test_native_monitor_accepts_only_the_exact_sealed_converter_child(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);preflight=root/'primary_preflight';preflight.mkdir()
+            (root/'plan.json').write_text(json.dumps(dict(schema='shift-dark-photon-main-histograms-v1',main_histogrammer=True)))
+            (root/'seal.json').write_text(json.dumps(dict(files={str(root/'plan.json'):production.durable.sha(root/'plan.json')})))
+            preparation=dict(complete=True)
+            for key,name in (('worker','worker.sh'),('submit','worker.sub'),('config','preflight.json')):
+                path=preflight/name;path.write_text('synthetic node')
+                preparation[key]=dict(path=str(path),sha256=production.durable.sha(path))
+            (preflight/'preparation.json').write_text(json.dumps(preparation))
+            child=dict(Iwd=str(preflight),DAGManJobId=123)
+            self.assertTrue(production.main_histogram_preflight_child(root,child,123))
+            self.assertFalse(production.main_histogram_preflight_child(root,child,124))
+            self.assertFalse(production.main_histogram_preflight_child(root,dict(child,Iwd=str(root/'other')),123))
+            (preflight/'worker.sub').write_text('changed node')
+            with self.assertRaisesRegex(ValueError,'converter node changed'):
+                production.main_histogram_preflight_child(root,child,123)
+
+    def test_reference_detector_source_requires_jaw_placement_before_any_GEN_work(self):
+        with self.assertRaisesRegex(ValueError,'jaw-placement profile before GEN'):
+            production.reference_source(dict(production_mechanism='senscalc-meson-fragmentation'))
+
+    def test_saved_bank_is_explicit_reuse_and_must_match_its_original_exposure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);manifest=root/'manifest.json'
+            manifest.write_text(json.dumps(dict(seed=711,mass_gev=.7,source_trials=2000)))
+            bank=dict(directory=str(root),manifest=dict(path=str(manifest),sha256=production.durable.sha(manifest)),
+                      additional_source_collisions=0)
+            reference=dict(settings=dict(saved_banks={'one':bank}))
+            batch=dict(batch='one',source_seed=711,mass_gev=.7,source_collisions=2000)
+            self.assertEqual(production.reference_bank_arguments(reference,batch),['--sample',str(root)])
+            bank['additional_source_collisions']=2000
+            with self.assertRaisesRegex(ValueError,'original source exposure'):
+                production.reference_bank_arguments(reference,batch)
+
+    def test_reference_banks_keep_source_seeds_and_bound_each_independent_exposure(self):
+        rows=self.rows()
+        for index,row in enumerate(rows):row['source_seed']=711+index
+        prepared=preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+        self.assertEqual([row['source_seed'] for row in prepared],[711,712])
+        self.assertNotIn('events',prepared[0])
+        rows[1]['source_seed']=711
+        with self.assertRaisesRegex(ValueError,'independent source seeds'):
+            preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+        rows[1]['source_seed']=712;rows[0]['source_collisions']=100001
+        with self.assertRaisesRegex(ValueError,'at most100000'):
+            preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+
     def test_heavy_source_mass_scope_comes_from_the_declared_current(self):
         from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
         parent=CorrelatedCurrentSourceTest().quark()
