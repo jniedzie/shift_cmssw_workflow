@@ -10,6 +10,7 @@ import copy
 import gzip
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -143,7 +144,11 @@ def prepare(request):
             check=True, timeout=900)
         if sha(local) != parent['gen_sha256']:
             raise ValueError('Downloaded GEN differs from the full audited parent')
-        records = list(scan_source(local, 'shiftEventTime', geometry, request['frame']))
+        timeout = request.get('material_event_timeout_seconds', 0.)
+        if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout < 0:
+            raise ValueError('Material event timeout must be finite and nonnegative')
+        records = list(scan_source(local, 'shiftEventTime', geometry, request['frame'],
+                                   event_timeout_seconds=timeout))
         inputs = selection_inputs(records, parent, contract, request['contract_sha256'],
                                   request['cohort_id'], request['selection_seed'])
         inputs['features'].update(geometry_sha256=geometry_info['sha256'],
