@@ -11,8 +11,9 @@ import subprocess
 import tarfile
 import time
 
-from run_shift_sm_postprocessing import (digest, download, publish, transfer_env,
+from run_shift_sm_postprocessing import (digest, download, hadd_command, transfer_env,
                                         validate_dimuon_histograms)
+from run_shift_weighted_gen import publish
 from shift_event_weights import validate_proposal_rows, WEIGHT_POLICY
 from shift_sm_response_labels import read_nano
 
@@ -35,7 +36,7 @@ def histogram_arm(arm,rows,payload):
     annotations=combine_annotation_metadata(rows)
     merged=Path(arm+'_nano.root')
     with Path(arm+'_merge.log').open('w') as log:
-        subprocess.run(['hadd','-f','-n','25',str(merged),*[str(r['local']) for r in rows]],
+        subprocess.run(hadd_command(merged,[r['local'] for r in rows],25),
                        check=True,stdout=log,stderr=log,timeout=900)
     integrity=compare_all_branches([r['local'] for r in rows],merged)
     env=transfer_env();env.update(PYTHONHOME=str(payload/'runtime'),ROOTSYS=str(payload/'runtime'),
