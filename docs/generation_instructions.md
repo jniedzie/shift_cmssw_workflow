@@ -76,6 +76,17 @@ as recorded in the original receipts; histogram publication does not close them.
 
 ## Reconstruction default for new production (2026-10-23)
 
+New runtime builds must include the current
+`SimG4Core/Generators/interface/RecordedPrimaryMomentum.h` and its matching
+`libSimG4CoreGenerators.so`. The source now propagates the event-scale invariant
+roundoff budget into the energy check, retaining the existing conservation cap.
+The original October 23 SM runtime predates this fix, although a private BSM
+runtime already contained it. Qualify shared transport fixes for every intended
+sample family; availability in one family's capsule does not update another.
+Keep running capsules unchanged and use a separately qualified replacement.
+The full-original-GEN and paired reconstruction checks are recorded in
+[`SHIFT_RECONSTRUCTION.md`](../../SHIFT_RECONSTRUCTION.md).
+
 The standard native point fitter now removes exact copies of CSC measurements
 and uses the positional x/y alignment-error block for CSC points. Both
 `removeExactDuplicateMuonFitInputs` and `correctCSC2DAlignmentCovariance` default
