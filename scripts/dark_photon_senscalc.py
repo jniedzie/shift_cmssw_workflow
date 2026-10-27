@@ -221,10 +221,10 @@ def source_summary(rows,sigma_mb,*,mass=None):
 
 def sample_source(runtime,settings,mass,trials,seed,output,*,probability=.01):
     """Run a bounded stable-LLP cohort with a full original-collision ledger."""
-    if (not math.isfinite(mass) or not .211316751<mass<1. or not 2<=trials<=100000 or
+    if (not math.isfinite(mass) or not .211316751<mass<2. or not 2<=trials<=100000 or
             not 1<=seed<=899999999 or not 1.e-6<=probability<=.01 or
             not math.isclose(probability*1.e6,round(probability*1.e6),abs_tol=1.e-8)):
-        raise ValueError('Open sub-GeV dimuon point, bounded trials, seed and representable proposal required')
+        raise ValueError('Open dimuon point below2GeV, bounded trials, seed and representable proposal required')
     runtime,receipt=checked_runtime(runtime)
     output=Path(output).resolve();output.mkdir(parents=True,exist_ok=False)
     shutil.copy2(settings,output/'source_settings.cmnd')

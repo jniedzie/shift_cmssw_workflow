@@ -19,7 +19,7 @@ int main(int argc,char** argv) {
     if(argc!=8)throw std::runtime_error("xml settings mass trials seed output proposalProbability");
     double mass=std::stod(argv[3]),probability=std::stod(argv[7]);
     int trials=std::stoi(argv[4]),seed=std::stoi(argv[5]);
-    if(!(mass>0.211316751 && mass<1.) || trials<1 || trials>100000 ||
+    if(!(mass>0.211316751 && mass<2.) || trials<1 || trials>100000 ||
        seed<1 || seed>899999999 || !(probability>0. && probability<=0.01))
       throw std::runtime_error("Invalid bounded reference point");
     PythiaParallel parallel(argv[1],false);
