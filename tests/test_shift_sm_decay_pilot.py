@@ -16,6 +16,18 @@ from prepare_shift_sm_decay_validation import frozen_draw, original_census
 
 
 class GroupedStatisticsTest(unittest.TestCase):
+    def test_cross_DAG_wait_does_not_turn_missing_or_failed_responses_into_zero(self):
+        with tempfile.TemporaryDirectory() as directory:
+            request=Path(directory)/'request.json'
+            plan=dict(cases=[dict(path=str(request),case_id='paired-original')])
+            with self.assertRaisesRegex(TimeoutError,'Missing paired'):
+                collection.wait_for_case_results(plan,0)
+            request.with_name('result.json').write_text(json.dumps(dict(complete=False,exit_code=1)))
+            with self.assertRaisesRegex(ValueError,'Parent response failed'):
+                collection.wait_for_case_results(plan,60)
+            request.with_name('result.json').write_text(json.dumps(dict(complete=True,exit_code=0)))
+            collection.wait_for_case_results(plan,0)
+
     def test_native_inclusion_and_decay_corrections_are_each_applied_once(self):
         request=dict(event_id=[1,1,2],original_source=dict(source_id='synthetic',gen_sha256='a'*64),
                      native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')

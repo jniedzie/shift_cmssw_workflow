@@ -37,6 +37,9 @@ def validate(request):
     probability=request.get('source_inclusion_probability',1.)
     require(math.isfinite(probability) and 0.<probability<=1.,
             'Invalid frozen original-event inclusion probability')
+    scale=request.get('proposal_scale_multiplier',1.)
+    require(not isinstance(scale,bool) and math.isfinite(scale) and scale>0.,
+            'Lifetime proposal scale must be finite and positive')
     require(len(request['parent_barcodes'])==len(set(request['parent_barcodes']))==2
             and len(request['first_depth_one_distances_cm'])==2
             and all(math.isfinite(x) and x>0 for x in request['first_depth_one_distances_cm']),
@@ -76,7 +79,7 @@ def prepare(request):
                                   'Proposal parent is not an original undecayed charged pion')
         momentum=math.sqrt(sum(x*x for x in p['momentum'][:3]))
         require(momentum>0 and p['generated_mass']>0,'Parent momentum/mass unavailable')
-        scales.append(distance*10.*p['generated_mass']/momentum)
+        scales.append(request.get('proposal_scale_multiplier',1.)*distance*10.*p['generated_mass']/momentum)
     numbers=request['parent_barcodes']
     definition=dict(ordinary_fraction=.1,components=[
         dict(probability=.2,parent_barcodes=numbers[:1],mean_proper_lifetime_mm=scales[:1]),

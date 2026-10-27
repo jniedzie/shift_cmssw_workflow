@@ -7,6 +7,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import tarfile
 import time
@@ -132,6 +133,29 @@ def combine_annotation_metadata(rows):
     return metadata
 
 
+def wait_for_case_results(plan,seconds):
+    """Bound a cross-DAG comparison wait; never resubmit or hide a failure."""
+    if isinstance(seconds,bool) or not math.isfinite(seconds) or seconds<0:
+        raise ValueError('Invalid parent-result wait bound')
+    deadline=time.monotonic()+seconds
+    while True:
+        missing=[]
+        for case in plan['cases']:
+            path=Path(case['path']).with_name('result.json')
+            if not path.is_file():
+                missing.append(case['case_id'])
+            else:
+                result=json.loads(path.read_text())
+                if 'exit_code' in result and (result['exit_code']!=0 or not result['complete']):
+                    raise ValueError('Parent response failed, not a physics rejection: '+case['case_id'])
+        if not missing:
+            return
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            raise TimeoutError('Missing paired parent results: '+','.join(missing))
+        time.sleep(min(30.,remaining))
+
+
 def run(path):
     request=json.loads(Path(path).read_text());plan_path=Path(request['plan_path'])
     if digest(plan_path)!=request['plan_sha256']:raise ValueError('Pilot plan changed')
@@ -140,11 +164,18 @@ def run(path):
         diagnostic_only=True,physics_normalization_ready=False,production_policy_qualified=False)
     Path('report.json').write_text(json.dumps(report)+'\n')
     try:
+        groups=plan.get('comparison_groups',['ordinary','mixture'])
+        if len(groups)!=2 or len(set(groups))!=2 or any(not re.fullmatch('[A-Za-z0-9_-]+',v) for v in groups):
+            raise ValueError('Require exactly two distinct safe comparison groups')
+        wait_for_case_results(plan,request.get('wait_for_case_results_seconds',0))
         grouped=defaultdict(list)
         for case in plan['cases']:
             case_request=Path(case['path'])
             if digest(case_request)!=case['sha256']:raise ValueError('Case authority changed')
             frozen=json.loads(case_request.read_text());result_path=case_request.with_name('result.json')
+            group=case.get('comparison_group',frozen['arm'])
+            if group not in groups or group!=frozen.get('comparison_group',frozen['arm']):
+                raise ValueError('Comparison group differs from its frozen request')
             result=json.loads(result_path.read_text())
             if (not result['complete'] or result['exit_code']!=0
                     or result['request_sha256']!=case['sha256']
@@ -168,13 +199,13 @@ def run(path):
                         not math.isclose(float(getattr(tree,field)),refs[field],rel_tol=2.e-12,abs_tol=0)):
                     raise ValueError('Persisted decay weight changed: '+field)
             file.Close()
-            grouped[frozen['arm']].append(dict(local=local,labels=labels,authority=authority,
+            grouped[group].append(dict(local=local,labels=labels,authority=authority,
                 sim_seconds=result['detector']['stages']['1']['seconds'],
                 payload_seconds=result['detector']['wall_seconds'],case_id=case['case_id'],
                 GEN_pairs=result['GEN_audit']['selected_original_pion_direct_muon_pairs']))
-        if set(grouped)!={'ordinary','mixture'} or any(len(v)!=plan['independent_originals'] for v in grouped.values()):
+        if set(grouped)!=set(groups) or any(len(v)!=plan['independent_originals'] for v in grouped.values()):
             raise ValueError('Paired original population is incomplete')
-        ids=[{tuple(r['labels']['event_id']) for r in grouped[arm]} for arm in ['ordinary','mixture']]
+        ids=[{tuple(r['labels']['event_id']) for r in grouped[arm]} for arm in groups]
         if ids[0]!=ids[1] or len(ids[0])!=plan['independent_originals']:raise ValueError('Arms do not share exact originals')
         capsule=Path('histogram_runtime.tar.gz');pin=request['histogram_runtime']
         download(pin['path'],capsule,pin['sha256'])
