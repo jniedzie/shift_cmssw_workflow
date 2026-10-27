@@ -45,7 +45,7 @@
   "remaining_qualifications": [
     "Resolve the absolute distinguishable K_mu3 e+e- TableII discrepancy; no factor-ten rate repair is authorized. The conversion factor independently matches the explicit pair-spin trace and two-body phase space, and two exact production proposals agree on the lower tree-level rate.",
     "Converged integrated timelike rates and a qualified production proposal. The existing weighted rest-frame sampler preserves polarization, recoil and flight, but is not a unit-weight event generator.",
-    "Charged-kaon O(p4) projection and its distinct contact/loop terms.",
+    "Complete charged-kaon O(p4) loop current. Local L5/L9/L10, electromagnetic pole and WZW terms have separate controls, not a full-order qualification.",
     "Native kaon flight, material transport, recoil ownership and weighted full-source normalization."
   ],
   "real_photon_rate_control": {
@@ -72,6 +72,34 @@
     "rounded_electron_branching_p2": 0.00028,
     "rounded_muon_branching_p2": 0.000019,
     "scope": "Leading-current control only. Includes the amplitude Clebsch 1/sqrt(2), exact initial-kaon and final-lepton radiation and weak contact. The charged O(p4) timelike structure-dependent current is not implemented; the API rejects that order rather than using the neutral expression."
+  },
+  "charged_local_control": {
+    "form_factor_model": {
+      "kind": "chpt-p4-local-charged-kaon-semileptonic-control",
+      "parent_mass_gev": 0.493677,
+      "pion_mass_gev": 0.1349768,
+      "alpha_em": 0.007297352573756914,
+      "fermi_constant_gev_minus2": 1.16637e-05,
+      "v_us": 0.22,
+      "fpi_gev": 0.0932,
+      "l10": -0.0055,
+      "l9": 0.008063771301905175,
+      "l5": 0.002107865640146847,
+      "reference": "https://arxiv.org/pdf/hep-ph/9209261",
+      "lec_scale_gev": 0.77
+    },
+    "production_ready": false,
+    "charged_loop_current_included": false,
+    "input_convention": "Historical Table11 without-loops control: barred L9=L9r-log(Mpi*MK^2*Meta/mu^4)/(256*pi^2), FK/Fpi=0.1136/0.0932 represented by effective L5=(FK/Fpi-1)*Fpi^2/(4*(MK^2-Mpi^2)); these values are not the full one-loop matching inputs.",
+    "contact_authority": "Direct flavour expansion of gauged L2,L9,L10; full timelike contact checked against independent polynomial controls.",
+    "anomaly_authority": "Bijnens/Ecker/Gasser Eq5.17, including the helicity-suppressed kaon pole.",
+    "allowed_orders": [
+      "p2-control",
+      "p2-plus-local-p4-control"
+    ],
+    "rounded_electron_branching_local_p4": 0.00032,
+    "rounded_muon_branching_local_p4": 2.1e-05,
+    "scope": "Explicit local/anomaly control. The full charged one-loop current remains unavailable and is rejected; no neutral loop current is substituted."
   },
   "physics_limits": [
     "Historical chiral input benchmark; not a modern global fit of Kl3 form factors.",

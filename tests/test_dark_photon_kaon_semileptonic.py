@@ -14,12 +14,12 @@ import unittest
 import numpy as np
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_kaon_semileptonic import (CHIRAL_LEFT,CollierLoops,GAMMA,IDENTITY,
+from dark_photon_kaon_semileptonic import (CHIRAL_LEFT,CollierLoops,GAMMA,IDENTITY,EPSILON,
     LOOP_FACTOR,METRIC,NeutralCurrentEvaluator,REFERENCE,build_collier_adapter,
     chiral_parameters,current_operators,dot,leading_current,leading_charged_current,neutral_contact_tensors,
     neutral_em_corrections,phase_space_density,polarization_basis,rest_kinematics,
     slash,spin_density,weak_vertex,uniform_production_point,weighted_production_point,
-    sample_weighted_rest_decay)
+    sample_weighted_rest_decay,charged_local_contact_tensor,CHARGED_LOCAL_KIND)
 from dark_photon_meson import MUON_MASS_GEV,boost
 
 
@@ -29,6 +29,12 @@ CARD=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_kl3_chpt_20
 def model(lepton='electron'):
     card=json.loads(CARD.read_text())
     return dict(card['form_factor_model'],lepton_mass_gev=card['explicit_conventions'][lepton+'_mass_gev'])
+
+
+def charged_local_model(lepton='electron'):
+    card=json.loads(CARD.read_text())
+    return dict(card['charged_local_control']['form_factor_model'],
+        lepton_mass_gev=card['explicit_conventions'][lepton+'_mass_gev'])
 
 
 def point(card,mass,*,first_fraction=.4,weak_fraction=.3):
@@ -126,6 +132,74 @@ class LeadingSemileptonicCurrent(unittest.TestCase):
                 value+=w1*w2*jacobian*8*math.pi*phase_space_density(M,0.,0.,0.,first**2,second**2)
         expected=M**3/(49152*math.pi**5)
         self.assertAlmostEqual(value/expected,1.,delta=3.e-6)
+
+
+class ChargedLocalCurrent(unittest.TestCase):
+    def test_timelike_contact_matches_independent_gauged_flavour_expansion(self):
+        fixture=json.loads((CARD.parents[2]/'tests/fixtures/charged_kl3_local_contacts.json').read_text())
+        for row in fixture['cases']:
+            for name,expected in row['expected_before_charged_clebsch'].items():
+                card=dict(charged_local_model(),fpi_gev=1.,l5=0.,
+                    l9=1. if name=='L9' else 0.,l10=1. if name=='L10' else 0.)
+                actual=charged_local_contact_tensor(row['parent_p4'],row['pion_p4'],row['dark_p4'],card)
+                np.testing.assert_allclose(actual,expected,atol=3.e-15,rtol=3.e-14)
+
+    def test_each_local_current_is_gauge_consistent_and_transports_its_spin_density(self):
+        for lepton,masses in [('electron',[.22,.25,.3]),('muon',[.22,.25])]:
+            card=charged_local_model(lepton)
+            for mass in masses:
+                rest=point(card,mass);basis=polarization_basis(rest[-1])
+                operators=current_operators(*rest,card,order='p2-plus-local-p4-control')
+                for current in operators.values():
+                    residual=np.einsum('r,r,rij->ij',METRIC,rest[-1],current)
+                    self.assertLess(float(np.max(np.abs(residual))),1.e-12)
+                rho=spin_density(*rest,card,order='p2-plus-local-p4-control',epsilon_em=.001)['total']
+                self.assertGreater(float(np.trace(rho).real),0.)
+                self.assertGreaterEqual(float(np.linalg.eigvalsh(rho).min()),
+                    -128*np.finfo(float).eps*float(np.trace(rho).real))
+                beta=(.21,-.13,.45)
+                moved=[boost(v,beta) for v in rest];states=[boost(v,beta) for v in basis]
+                actual=spin_density(*moved,card,order='p2-plus-local-p4-control',epsilon_em=.001,
+                    polarizations=states)['total']
+                np.testing.assert_allclose(actual,rho,rtol=3.e-10,atol=2.e-12*float(np.max(np.abs(rho))))
+
+    def test_anomalous_kaon_pole_is_present_and_helicity_suppressed(self):
+        values=[]
+        for mass_lepton in (0.,.1056583715):
+            card=dict(charged_local_model(),lepton_mass_gev=mass_lepton)
+            p,pi,l,nu,q=rest_kinematics(card['parent_mass_gev'],card['pion_mass_gev'],mass_lepton,
+                .22,.37**2,.115**2,.31,-.27,1.1)
+            w=p-pi-q
+            # Independent pointlike part of primary Eq5.17. Its difference
+            # from the implemented anomaly isolates the physical kaon pole.
+            contact=1j/(8*math.pi**2*card['fpi_gev']**2*math.sqrt(2))*np.einsum(
+                'mnrs,r,s->mn',EPSILON,METRIC*q,METRIC*(4*pi+w))
+            contact=np.einsum('mn,n,nij,jk->mik',contact,METRIC,GAMMA,CHIRAL_LEFT)
+            total=current_operators(p,pi,l,nu,q,card,order='p2-plus-local-p4-control')['anomaly_p4']
+            amplitude=np.einsum('ar,r,rij->aij',polarization_basis(q),METRIC,total-contact)
+            square=math.fsum(np.trace(slash(nu)@a@(slash(l)-mass_lepton*IDENTITY)@
+                GAMMA[0]@a.conjugate().T@GAMMA[0]).real for a in amplitude)
+            values.append(square)
+        self.assertGreater(values[1],1.e-12)
+        self.assertLess(abs(values[0]),1.e-10*values[1])
+
+    def test_missing_loops_are_rejected_and_local_probe_keeps_its_weight(self):
+        card=charged_local_model()
+        self.assertEqual(card['kind'],CHARGED_LOCAL_KIND)
+        for order in ('p2-plus-p4','p4-one-loop'):
+            with self.assertRaisesRegex(ValueError,'loop current is not implemented'):
+                current_operators(*point(card,.22),card,order=order)
+        first=weighted_production_point(card,.22,(.3,.4,.2,.7,.45),
+            order='p2-plus-local-p4-control',epsilon_em=.001)
+        second=weighted_production_point(card,.22,(.3,.4,.2,.7,.45),
+            order='p2-plus-local-p4-control',epsilon_em=.002)
+        self.assertEqual(second['width_weight_gev']/first['width_weight_gev'],4.)
+        row=sample_weighted_rest_decay(card,.22,100.,random.Random(7731),
+            order='p2-plus-local-p4-control',epsilon_em=.001)
+        self.assertFalse(row['production_qualified'])
+        self.assertFalse(row['dimuon_branching_included'])
+        self.assertFalse(row['parent_flight_included'])
+        self.assertEqual(row['current_model_kind'],CHARGED_LOCAL_KIND)
 
 
 class WeightedSemileptonicDecay(unittest.TestCase):

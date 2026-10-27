@@ -31,6 +31,8 @@ from dark_photon_vector_meson import two_body_momentum
 
 
 REFERENCE='https://arxiv.org/pdf/0708.1576v2'
+CHARGED_REFERENCE='https://arxiv.org/pdf/hep-ph/9209261'
+CHARGED_LOCAL_KIND='chpt-p4-local-charged-kaon-semileptonic-control'
 CHIRAL_LEFT=IDENTITY-GAMMA5
 LOOP_FACTOR=16*math.pi**2
 
@@ -248,6 +250,81 @@ def leading_charged_current(parent,pion,lepton,neutrino,dark):
         for mu in range(4)])/math.sqrt(2)
 
 
+def _charged_local_parameters(model):
+    if model.get('kind')!=CHARGED_LOCAL_KIND or model.get('reference')!=CHARGED_REFERENCE:
+        raise ValueError('Explicit charged local-current control authority required')
+    names=('parent_mass_gev','pion_mass_gev','fpi_gev','lec_scale_gev','l5','l9','l10')
+    values={name:float(model[name]) for name in names}
+    if (not all(math.isfinite(value) for value in values.values())
+            or min(values[name] for name in names[:4])<=0):
+        raise ValueError('Finite physical charged local-current parameters required')
+    return values
+
+
+def charged_local_contact_tensor(parent,pion,dark,model):
+    """Charged L5/L9/L10 contact, including1/Fpi² but before1/sqrt(2).
+
+    Expand the published gauged chiral Lagrangian through K pi photon W.
+    Its flavour traces independently reproduce the neutral contact and fix
+    every charged term, including those vanishing for real transverse photons.
+    This is the local tensor only, not the missing charged loop current.
+    LEC values and their convention must be supplied; no rate is rescaled.
+    """
+    p,pi,q=[np.asarray(v,dtype=float) for v in (parent,pion,dark)]
+    if any(v.shape!=(4,) or not np.all(np.isfinite(v)) for v in (p,pi,q)):
+        raise ValueError('Finite four-momenta required')
+    par=_charged_local_parameters(model);w=p-pi-q
+    delta=par['parent_mass_gev']**2-par['pion_mass_gev']**2
+    q2,qw,qpi,wpi=[float(dot(a,b)) for a,b in ((q,q),(q,w),(q,pi),(w,pi))]
+    g=np.diag(METRIC);outer=np.outer;f=par['fpi_gev']
+    tensor=4*par['l9']*((-q2-qw-qpi+wpi)*g+outer(q,q)-outer(q,pi)+outer(w,q)
+        -2*outer(w,pi)+2*outer(pi,q)+outer(pi,w))
+    tensor+=4*par['l10']*(-qw*g+outer(w,q))-4*delta*par['l5']*g
+    return tensor/f**2
+
+
+def charged_local_current_operators(parent,pion,lepton,neutrino,dark,model):
+    """Charged leading+local O(p4)+WZW control, with no loop contribution.
+
+    Keep the virtual initial-kaon EM vertex transverse before adding it.
+    The weak pole and contact satisfy their Ward identity together. The
+    anomaly includes both the contact and helicity-suppressed kaon pole of
+    Bijnens/Ecker/Gasser Eq5.17. These terms follow from the Lagrangian;
+    continuing only a measured real-photon rate would not determine them.
+    This API cannot provide the full charged O(p4) order or qualify production.
+    """
+    par=_charged_local_parameters(model)
+    p,pi,l,nu,q=_external_point(parent,pion,lepton,neutrino,dark)
+    leading=leading_charged_current(p,pi,l,nu,q)
+    w=p-pi-q;h=p+pi;t=p-pi
+    f=par['fpi_gev'];l5,l9=par['l5'],par['l9']
+    delta=par['parent_mass_gev']**2-par['pion_mass_gev']**2
+    q2=float(dot(q,q));kaon_denominator=2*dot(p,q)-q2
+    lepton_denominator=2*dot(l,q)+q2
+    def weak(r,s):
+        return (2*l9*dot(s,s)*r+(4*delta*l5-2*l9*dot(r,s))*s)/f**2
+    on,shifted=weak(h,t),weak(h-q,w)
+    tensor=charged_local_contact_tensor(p,pi,q,model)
+    weak_part=np.array([slash(on)@CHIRAL_LEFT@(2*l[mu]*IDENTITY+slash(q)@GAMMA[mu])/
+        lepton_denominator-(2*p[mu]-q[mu])/kaon_denominator*slash(shifted)@CHIRAL_LEFT
+        for mu in range(4)])
+    weak_part+=np.einsum('mn,n,nij,jk->mik',tensor,METRIC,GAMMA,CHIRAL_LEFT)
+    electromagnetic=np.array([-2*l9/f**2*slash(h-q)@CHIRAL_LEFT*
+        (q2*(2*p[mu]-q[mu])/kaon_denominator-q[mu]) for mu in range(4)])
+    denominator=dot(w,w)-par['parent_mass_gev']**2
+    if denominator>=0:
+        raise ValueError('Charged anomaly requires a physical subthreshold weak invariant')
+    axial=1j/(8*math.pi**2*f**2)*np.einsum('mnrs,r,s->mn',
+        EPSILON,METRIC*q,METRIC*(4*pi+w))
+    axial+=4j/(8*math.pi**2*f**2*denominator)*np.outer(
+        np.einsum('mlrs,l,r,s->m',EPSILON,METRIC*pi,METRIC*q,METRIC*w),w)
+    anomaly=np.einsum('mn,n,nij,jk->mik',axial,METRIC,GAMMA,CHIRAL_LEFT)
+    weak_part=weak_part/math.sqrt(2)
+    electromagnetic=electromagnetic/math.sqrt(2);anomaly=anomaly/math.sqrt(2)
+    return dict(leading=leading,weak_p4=weak_part,electromagnetic_p4=electromagnetic,
+        anomaly_p4=anomaly,total=leading+weak_part+electromagnetic+anomaly)
+
+
 def chiral_parameters(model,loops):
     """Strong one-loop input in a consistent LO-GMO mass/subtraction scheme."""
     if (model.get('kind')!='chpt-p4-neutral-kaon-semileptonic-vector'
@@ -359,7 +436,7 @@ def neutral_contact_tensors(parent,pion,dark,model,loops):
 
 
 def current_operators(parent,pion,lepton,neutrino,dark,model,loops=None,*,order):
-    """Neutral current components; the full O(p4) model is under qualification.
+    """Neutral full current or explicitly limited charged controls.
 
     The printed Eq30 and its distinct, analytically derived reversed-kaon-leg
     convention remain separate. Never use a total-current projection to hide
@@ -367,6 +444,14 @@ def current_operators(parent,pion,lepton,neutrino,dark,model,loops=None,*,order)
     """
     parent,pion,lepton,neutrino,dark=[np.asarray(v,dtype=float) for v in (parent,pion,lepton,neutrino,dark)]
     kind=model.get('kind')
+    if kind==CHARGED_LOCAL_KIND:
+        if order=='p2-plus-local-p4-control':
+            return charged_local_current_operators(parent,pion,lepton,neutrino,dark,model)
+        if order!='p2-control':
+            raise ValueError('Full charged semileptonic O(p4) loop current is not implemented')
+        _charged_local_parameters(model)
+        leading=leading_charged_current(parent,pion,lepton,neutrino,dark)
+        return dict(leading=leading,total=leading)
     if kind=='chpt-p4-neutral-kaon-semileptonic-vector':
         leading=leading_current(parent,pion,lepton,neutrino,dark)
     elif kind=='chpt-p2-charged-kaon-semileptonic-control':
@@ -645,8 +730,8 @@ def sample_weighted_rest_decay(model,mass,proper_ctau_mm,rng,loops=None,*,order,
     weight. No rejection/unweighting of the four-body production is implied.
     This development API must not enter the unit-weight meson source runner.
 
-    The model kind distinguishes the neutral full current from the charged
-    leading control. Parent flavour/charge labels, the KL/KS charge mixture,
+    The model kind distinguishes the neutral full current from the explicit
+    charged controls. Parent flavour/charge labels, the KL/KS charge mixture,
     native parent flight and material
     transport are deliberately not attached here. Their qualification must
     precede any production integration. The output kaon is at rest, so no
