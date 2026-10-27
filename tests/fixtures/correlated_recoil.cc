@@ -38,3 +38,20 @@ std::vector<double> shiftTestRecoilMuon(ShiftMesonNative::Source& source) {
 std::string shiftTestRecoilSpectator(ShiftMesonNative::Source& source) {
   return ShiftMesonNative::particle_signature(source.current->barcode_to_particle(8));
 }
+
+std::vector<int> shiftTestStoppedRecoilKaons(ShiftMesonNative::Source& source) {
+  std::vector<int> result;
+  auto* parent=source.current->barcode_to_particle(7);
+  for(auto it=parent->end_vertex()->particles_out_const_begin();
+      it!=parent->end_vertex()->particles_out_const_end();++it) {
+    if((*it)->pdg_id()!=443||!(*it)->end_vertex())continue;
+    auto* vertex=(*it)->end_vertex();
+    for(auto child=vertex->particles_out_const_begin();child!=vertex->particles_out_const_end();++child) {
+      if(std::abs((*child)->pdg_id())!=321)continue;
+      if((*child)->status()!=1||(*child)->end_vertex())
+        throw std::runtime_error("Native-disabled recoil kaon was decayed by EvtGen");
+      result.push_back((*child)->pdg_id());
+    }
+  }
+  std::sort(result.begin(),result.end());return result;
+}

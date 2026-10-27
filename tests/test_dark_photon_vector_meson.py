@@ -1,5 +1,6 @@
 # Code style: AI-code. AI-generated independent vector-meson physics checks.
 import math
+import cmath
 import json
 from pathlib import Path
 import random
@@ -9,12 +10,149 @@ import unittest
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_vector_meson import (MUON_MASS_GEV, two_body_momentum,
     radiative_branching,transition_form_factor_abs2,transition_form_factor_variations,
+    transition_form_factor_phase_envelope,transition_form_factor_amplitude,
     sample_decay,mean_lab_beta_gamma)
 
 SUPPLEMENT = Path(__file__).resolve().parents[1]/'config/campaigns/dark_photon_vector_radiative_supplement.json'
+JPSI = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_jpsi_transition_inputs.json'
 
 
 class VectorMesonTest(unittest.TestCase):
+    def test_jpsi_empirical_inputs_keep_corrected_tables_and_normalization_scenarios(self):
+        pi, eta, _ = json.loads(JPSI.read_text())['parents']
+        self.assertEqual(eta['transition_form_factor']['reference'],
+                         'https://arxiv.org/html/1810.03091v5')
+        self.assertEqual(len(eta['transition_form_factor']['bins']),20)
+        self.assertEqual(transition_form_factor_abs2(.25,eta['transition_form_factor']),1.10)
+        self.assertEqual(transition_form_factor_abs2(2.,eta['transition_form_factor']),9.15)
+        self.assertEqual(eta['br_p_gamma'],.001104)
+        self.assertEqual(len(pi['transition_form_factor']['bins']),30)
+        self.assertEqual(transition_form_factor_abs2(.7,pi['transition_form_factor']),19.2)
+        self.assertEqual(transition_form_factor_abs2(.78,pi['transition_form_factor']),42.6)
+        self.assertEqual(transition_form_factor_abs2(2.,pi['transition_form_factor']),2.71)
+        raw, shape = pi['normalization_scenarios']
+        self.assertEqual(raw['br_p_gamma'],.0000356)
+        self.assertEqual(shape['br_p_gamma'],.0000339)
+        self.assertAlmostEqual(transition_form_factor_abs2(.7,shape['transition_form_factor']),19.2/1.21)
+        for row in (pi,eta):
+            model=row['transition_form_factor']
+            self.assertEqual(transition_form_factor_abs2(0.,model),1.)
+            with self.assertRaisesRegex(ValueError,'domain'):
+                transition_form_factor_abs2(model['valid_mass_range_gev'][1]+1.e-6,model)
+            self.assertIn('unpolarized',row['polarization_note'].lower())
+            self.assertFalse(row['production_rate_validated'])
+
+    def test_jpsi_resonance_residues_match_independent_partial_width_conventions(self):
+        model=json.loads(JPSI.read_text())['parents'][2]['transition_form_factor']
+        parent,recoil=model['parent_mass_gev'],model['recoil_mass_gev']
+        photon_k=(parent**2-recoil**2)/(2*parent)
+        photon_g2=12*math.pi*model['photon_branching_fraction']/photon_k**3
+        for row in model['resonances']:
+            vector=row['mass_gev']
+            k=math.sqrt((parent**2-(recoil+vector)**2)*(parent**2-(recoil-vector)**2))/(2*parent)
+            strong_g2=12*math.pi*row['parent_branching_fraction']/k**3
+            r=(model['electron_mass_gev']/vector)**2
+            electromagnetic_x2=3*row['electron_width_gev']/(model['alpha_em']*vector*math.sqrt(1-4*r)*(1+2*r))
+            residue2=strong_g2/photon_g2*electromagnetic_x2
+            expected=(row['parent_branching_fraction']/model['photon_branching_fraction']
+                      *(photon_k/k)**3*electromagnetic_x2)
+            self.assertAlmostEqual(residue2/expected,1.,places=14)
+            reconstructed_br=photon_g2*residue2/electromagnetic_x2*k**3/(12*math.pi)
+            self.assertAlmostEqual(reconstructed_br/row['parent_branching_fraction'],1.,places=14)
+
+    def test_jpsi_narrow_vector_poles_reproduce_observed_cascade_branching(self):
+        # Integrate the pole alone in s=mV^2+mV*Gamma*tan(theta). The
+        # Breit-Wigner denominator cancels the Jacobian, independently
+        # checking that no factor of alpha, mV or3 was lost in the residue.
+        model=json.loads(JPSI.read_text())['parents'][2]['transition_form_factor']
+        M,P=model['parent_mass_gev'],model['recoil_mass_gev']
+        kg=(M*M-P*P)/(2*M)
+        for row in model['resonances'][1:]:
+            # Take a controlled narrow-width limit without changing the
+            # measured residue. Finite physical-width line-shape corrections
+            # need not vanish, and must not be hidden in a relaxed tolerance.
+            m,w=row['mass_gev'],row['width_gev']/100
+            k=math.sqrt((M*M-(P+m)**2)*(M*M-(P-m)**2))/(2*M)
+            electron=model['electron_mass_gev'];alpha=model['alpha_em']
+            r=electron**2/m**2
+            residue2=row['parent_branching_fraction']/model['photon_branching_fraction']*(kg/k)**3*3*row['electron_width_gev']/(alpha*m*math.sqrt(1-4*r)*(1+2*r))
+            # Symmetric30width window is finite and physically open forboth
+            # narrow poles. Its exactCauchy fraction is retained below.
+            angle=math.atan(30.)
+            count=2000
+            step=2*angle/count
+            total=0.
+            for index in range(count):
+                theta=-angle+(index+.5)*step
+                s=m*m+m*w*math.tan(theta)
+                phase=math.sqrt((M*M-(P+math.sqrt(s))**2)*(M*M-(P-math.sqrt(s))**2))/(M*M-P*P)
+                lepton=math.sqrt(1-4*electron*electron/s)*(1+2*electron*electron/s)
+                total+=model['photon_branching_fraction']*alpha/(3*math.pi*s)*lepton*phase**3*residue2*m**3/w*step
+            expected=row['parent_branching_fraction']*row['electron_width_gev']/w*(2*angle/math.pi)
+            self.assertAlmostEqual(total/expected,1.,delta=1.e-6)
+
+    def test_jpsi_photon_matching_phase_average_and_tight_phase_bounds(self):
+        model=json.loads(JPSI.read_text())['parents'][2]['transition_form_factor']
+        parent,recoil=model['parent_mass_gev'],model['recoil_mass_gev']
+        photon_k=(parent**2-recoil**2)/(2*parent)
+        for mass in (0.,.22,.7,.77526,.78266,1.01946,1.5,2.):
+            f=1/(1-mass**2/model['continuum_pole_mass_gev']**2)
+            terms=[]
+            for row in model['resonances']:
+                m,w=row['mass_gev'],row['width_gev']
+                k=math.sqrt((parent**2-(recoil+m)**2)*(parent**2-(recoil-m)**2))/(2*parent)
+                r=(model['electron_mass_gev']/m)**2
+                a=math.sqrt(row['parent_branching_fraction']/model['photon_branching_fraction']
+                    *(photon_k/k)**3*3*row['electron_width_gev']
+                    /(model['alpha_em']*m*math.sqrt(1-4*r)*(1+2*r)))
+                terms.append(a*(m*m/complex(m*m-mass*mass,-m*w)-f*m*m/complex(m*m,-m*w)))
+            # The fullCartesian4phase grid cancels every cross term exactly.
+            phases=(1.,1.j,-1.,-1.j)
+            average=sum(abs(f+a*terms[0]+b*terms[1]+c*terms[2])**2
+                        for a in phases for b in phases for c in phases)/64
+            central=transition_form_factor_abs2(mass,model)
+            self.assertAlmostEqual(central/average,1.,places=13)
+            fixed_phases=(.7,-1.8,2.1)
+            independent=f+sum(term*cmath.exp(1.j*phase) for term,phase in zip(terms,fixed_phases))
+            self.assertAlmostEqual(abs(transition_form_factor_amplitude(mass,model,fixed_phases)-independent),0.,places=12)
+            low,high=transition_form_factor_phase_envelope(mass,model)
+            self.assertLessEqual(low,central)
+            self.assertGreaterEqual(high,central)
+            lengths=[f,*(abs(term) for term in terms)]
+            self.assertAlmostEqual(high/sum(lengths)**2,1.,places=14)
+            largest=lengths.index(max(lengths))
+            if 2*max(lengths)>=sum(lengths):
+                phases=[(-1. if largest==0 or index!=largest-1 else 1.)
+                        *cmath.exp(-1.j*cmath.phase(term)) for index,term in enumerate(terms)]
+                # If a resonance dominates, point it opposite the continuum;
+                # if the continuum dominates, point all resonances opposite it.
+                if largest:
+                    phases=[-value for value in phases]
+                attained=abs(f+sum(phase*term for phase,term in zip(phases,terms)))**2
+                self.assertAlmostEqual(attained,low,delta=1.e-11*max(1.,high))
+            if mass==0:
+                self.assertEqual((central,low,high),(1.,1.,1.))
+        self.assertEqual(len(model['resonances']),3)
+        with self.assertRaisesRegex(ValueError,'phase'):
+            transition_form_factor_amplitude(.25,model,[])
+        with self.assertRaisesRegex(ValueError,'domain'):
+            transition_form_factor_abs2(2.001,model)
+
+    def test_jpsi_current_rejects_unqualified_poles_rates_and_phase_defaults(self):
+        model=json.loads(JPSI.read_text())['parents'][2]['transition_form_factor']
+        for update in ({'phase_prescription':None},{'continuum_pole_mass_gev':1.5},
+                       {'propagator_width':'zero-width'},{'alpha_em':0.}):
+            with self.assertRaises(ValueError):
+                transition_form_factor_abs2(.25,dict(model,**update))
+        for field,value in [('width_gev',0.),('electron_width_gev',1.),
+                            ('parent_branching_fraction',-1.),('reference',None)]:
+            changed=json.loads(json.dumps(model));changed['resonances'][0][field]=value
+            with self.assertRaises(ValueError):
+                transition_form_factor_abs2(.25,changed)
+        changed=json.loads(json.dumps(model));changed['resonances'].append(changed['resonances'][0])
+        with self.assertRaisesRegex(ValueError,'unique'):
+            transition_form_factor_abs2(.25,changed)
+
     def test_running_width_pole_matches_published_complex_propagator(self):
         model = json.loads(SUPPLEMENT.read_text())['parents'][0]['transition_form_factor']
         self.assertEqual(model['kind'], 'running-width-vector-pole')
@@ -137,7 +275,8 @@ class VectorMesonTest(unittest.TestCase):
     def test_independent_lab_conservation_shells_and_spacetime(self):
         rng=random.Random(761016160)
         for parent_mass,recoil_mass,mass in ((.78266,.1349768,.22),(.78266,.1349768,.6),
-                 (1.01946,.547862,.4),(.89555,.497611,.3)):
+                 (1.01946,.547862,.4),(.89555,.497611,.3),
+                 (3.0969,.1349768,.22),(3.0969,.547862,.7),(3.0969,.95778,2.)):
             for p in ((0.,0.,0.),(1.,-2.,-30.)):
                 parent=(math.sqrt(parent_mass**2+sum(x*x for x in p)),)+p
                 for _ in range(15):

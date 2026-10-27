@@ -186,7 +186,33 @@ def model_owned_channels(model):
 
 
 def model_recoil(owner):
-    if owner.get('decay_type') == 'weak-kaon-leptonic':
+    kind = owner.get('decay_type')
+    if kind in ('pseudoscalar-double-radiative', 'weak-kaon-pion-photon',
+                'neutral-kaon-dipion', 'quarkonium-radiative'):
+        parent = owner.get('pdg_id')
+        daughter = owner.get('recoil_pdg_id')
+        if kind == 'pseudoscalar-double-radiative':
+            if (parent, daughter) not in ((221, 111), (331, 111), (331, 221)):
+                raise ValueError('Double-radiative ownership requires its physical pseudoscalar recoil')
+            expected = [daughter, 22]
+        elif kind == 'weak-kaon-pion-photon':
+            if parent != 130 or daughter != 111:
+                raise ValueError('Weak radiative-kaon ownership requires KL and pi0 plus photon')
+            expected = [111, 22]
+        elif kind == 'neutral-kaon-dipion':
+            if parent not in (130, 310):
+                raise ValueError('Neutral-kaon dipion ownership requires KL or KS')
+            expected = [111, 111]
+        else:
+            expected_daughter = {441:22, 10441:443, 20443:443, 445:443,
+                                 10443:441, 100443:441}.get(parent)
+            if expected_daughter is None or daughter != expected_daughter:
+                raise ValueError('Quarkonium ownership requires its physical radiative recoil')
+            expected = [daughter]
+        recoil = owner.get('recoil_pdg_ids', expected)
+        if not isinstance(recoil, list) or sorted(recoil) != sorted(expected):
+            raise ValueError('Declared recoil disagrees with the exclusive current ownership')
+    elif kind == 'weak-kaon-leptonic':
         parent = owner.get('pdg_id')
         lepton, neutrino = owner.get('charged_lepton_pdg_id'), owner.get('neutrino_pdg_id')
         sign = 1 if parent == 321 else -1

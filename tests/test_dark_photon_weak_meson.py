@@ -289,6 +289,117 @@ def only_dipion_component(name, coefficient=1.):
 
 
 class NeutralKaonDipionTest(unittest.TestCase):
+    def test_known_kaon_mixing_acts_on_amplitudes_without_lifetime_rescaling(self):
+        reference=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_neutral_dipion_1993.json'
+        card=json.loads(reference.read_text());eps=complex(*card['mixing_input']['epsilon_k_complex'])
+        N=math.sqrt(1+abs(eps)**2)
+        for name,base,other in [('KS',card['model_template'],card['cp_odd_electric_reference_model']),
+                                ('KL',card['cp_odd_electric_reference_model'],card['model_template'])]:
+            mixed=card['mixed_model_templates'][name]
+            for key in mixed['coefficients']:
+                expected=(complex(*base['coefficients'][key])+eps*complex(*other['coefficients'][key]))/N
+                self.assertEqual(complex(*mixed['coefficients'][key]),expected)
+            induced=json.loads(json.dumps(mixed))
+            induced['coefficients']={key:[(eps*complex(*other['coefficients'][key])/N).real,
+                                          (eps*complex(*other['coefficients'][key])/N).imag]
+                                     for key in mixed['coefficients']}
+            inherited=neutral_dipion_decay_width(induced,.22,epsilon=.001,quadrature_order=32)
+            opposite=neutral_dipion_decay_width(other,.22,epsilon=.001,quadrature_order=32)
+            self.assertLess(abs(inherited/opposite/(abs(eps)**2/N**2)-1.),1.e-11)
+            self.assertEqual(mixed['total_width_gev'],base['total_width_gev'])
+
+    def test_mixed_electric_magnetic_rate_is_incoherent_but_spin_density_is_not(self):
+        reference=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_neutral_dipion_1993.json'
+        card=json.loads(reference.read_text());eps=complex(*card['mixing_input']['epsilon_k_complex'])
+        N2=1+abs(eps)**2
+        for name,base,other in [('KS',card['model_template'],card['cp_odd_electric_reference_model']),
+                                ('KL',card['cp_odd_electric_reference_model'],card['model_template'])]:
+            mixed=card['mixed_model_templates'][name]
+            own_rho=neutral_dipion_polarization_density(.075,.43,.22,base)
+            other_rho=neutral_dipion_polarization_density(.075,.43,.22,other)
+            full=neutral_dipion_polarization_density(.075,.43,.22,mixed)
+            incoherent=[[ (own_rho[i][j]+abs(eps)**2*other_rho[i][j])/N2
+                           for j in range(3)] for i in range(3)]
+            trace=sum(full[i][i].real for i in range(3))
+            expected=sum(incoherent[i][i].real for i in range(3))
+            self.assertLess(abs(trace/expected-1.),1.e-12)
+            self.assertGreater(max(abs(full[i][j]-incoherent[i][j]) for i in range(3) for j in range(3) if i!=j),0.)
+            # An unmeasured M2 strong phase changes correlated off-diagonal
+            # density, even though it cannot change the summed E/M width.
+            shifted=json.loads(json.dumps(mixed))
+            magnetic=complex(*shifted['coefficients']['magnetic_quadrupole'])*1.j
+            shifted['coefficients']['magnetic_quadrupole']=[magnetic.real,magnetic.imag]
+            changed=neutral_dipion_polarization_density(.075,.43,.22,shifted)
+            self.assertLess(abs(sum(changed[i][i].real for i in range(3))/trace-1.),1.e-12)
+            self.assertGreater(max(abs(full[i][j]-changed[i][j]) for i in range(3) for j in range(3) if i!=j),0.)
+
+    def test_original_heiliger_sehgal_m2_photon_spectrum_matches_absolute_tensor(self):
+        reference=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_neutral_dipion_1993.json'
+        card=json.loads(reference.read_text())
+        model=card['model_template']
+        M,pion=model['reference_parent_mass_gev'],model['pion_mass_gev']
+        coefficient=model['coefficients']['magnetic_quadrupole'][0]
+        g_over_scale_squared=math.sqrt(4*math.pi*model['alpha_em'])*coefficient/M
+        # Primary1993 Eq3, including its absolute3840*pi^3 and full
+        # neutral phase space. No normalization is fitted to the kernel.
+        for photon_energy in (.01,.04,.09,.14,.17):
+            invariant=M*M-2*M*photon_energy
+            beta=math.sqrt(1-4*pion*pion/invariant)
+            published=(g_over_scale_squared**2/(3840*math.pi**3*M**3)
+                       *(1-2*photon_energy/M)*beta**5*photon_energy**5)
+            numerical=2*M*sum(weight*neutral_dipion_differential_width(
+                invariant,cosine,0.,model) for cosine,weight in _gauss_legendre(16))
+            self.assertLess(abs(numerical/published-1.),5.e-12)
+
+    def test_primary_m1_reference_cut_and_physical_pion_masses_fix_m2_benchmark(self):
+        reference=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_neutral_dipion_1993.json'
+        card=json.loads(reference.read_text());inputs=card['normalization_inputs']
+        M,pion=inputs['reference_parent_mass_gev'],inputs['charged_pion_mass_gev']
+        maximum=(M*M-4*pion*pion)/(2*M)
+        minimum=inputs['charged_reference_photon_energy_min_gev']
+        # Independently integrate the primary Eq4 M1 spin sum. Charged
+        # pions are distinguishable; the neutral M2 rate has one1/2!.
+        def density(energy):
+            invariant=M*M-2*M*energy
+            return energy**3*invariant*(1-4*pion*pion/invariant)**1.5/(384*math.pi**3*M**7)
+        unit=_dipion_integral(density,minimum,maximum,64)
+        expected_g=math.sqrt(inputs['charged_kl_m1_branching_fraction']
+            *inputs['hbar_c_gev_mm']/inputs['native_kl_ctau_mm']/unit)
+        self.assertLess(abs(expected_g/card['independent_normalization']['gM1_gev']-1.),1.e-8)
+        coefficient=expected_g*M/(math.sqrt(4*math.pi*inputs['alpha_em'])*inputs['interaction_scale_gev']**2)
+        self.assertLess(abs(coefficient/card['model_template']['coefficients']['magnetic_quadrupole'][0]-1.),1.e-8)
+        self.assertEqual(inputs['neutral_photon_energy_min_gev'],0.)
+        self.assertAlmostEqual(card['independent_normalization']['neutral_fraction_below_20MeV'],3.6130257974905064e-5)
+        self.assertTrue(card['model_template']['primary_amplitude_verified'])
+        self.assertFalse(card['model_template']['physical_omission_bound_available'])
+
+    def test_m2_massive_spectrum_and_quoted_photon_scenario_are_independent_checks(self):
+        reference=Path(__file__).resolve().parents[1]/'config/physics/dark_photon_ks_neutral_dipion_1993.json'
+        card=json.loads(reference.read_text());model=card['model_template']
+        M,pion=model['reference_parent_mass_gev'],model['pion_mass_gev']
+        coefficient=model['coefficients']['magnetic_quadrupole'][0]
+        # The conserved M2 tensor stays transverse for a massive vector.
+        # Its exact angular integral is e²*c²*k^5*s*beta_pi^5/(7680*pi³*M^8).
+        for mass in (0.,.212,.22,.225,.227):
+            low,high=4*pion*pion,(M-mass)**2
+            def reference_density(angle):
+                invariant=low+(high-low)*math.sin(math.pi*angle/2)**2
+                momentum=math.sqrt((M*M-(math.sqrt(invariant)+mass)**2)
+                    *(M*M-(math.sqrt(invariant)-mass)**2))/(2*M)
+                beta=math.sqrt(1-4*pion*pion/invariant)
+                jacobian=(high-low)*math.pi/2*math.sin(math.pi*angle)
+                return (4*math.pi*model['alpha_em']*coefficient**2*momentum**5
+                    *invariant*beta**5/(7680*math.pi**3*M**8)*jacobian)
+            independent=_dipion_integral(reference_density,0.,1.,64)
+            actual=neutral_dipion_decay_width(model,mass,epsilon=.001,quadrature_order=64)/1.e-6
+            self.assertLess(abs(actual/independent-1.),2.e-10)
+        photon=neutral_dipion_decay_width(model,0.,epsilon=.001,quadrature_order=64)/1.e-6
+        self.assertLess(abs(photon/model['total_width_gev']/card['independent_normalization']['predicted_neutral_photon_branching_fraction']-1.),2.e-12)
+        model=json.loads(json.dumps(model))
+        model['coefficients']['magnetic_quadrupole'][0]=card['quoted_rate_normalization_scenario']['cM2']
+        photon=neutral_dipion_decay_width(model,0.,epsilon=.001,quadrature_order=64)/1.e-6
+        self.assertLess(abs(photon/model['total_width_gev']/1.7e-11-1.),2.e-12)
+
     def test_all_four_currents_are_ward_transverse_and_bose_even_in_moving_frames(self):
         card, mass = neutral_dipion_model(), .22
         parent, q, first, second = neutral_dipion_rest_kinematics(.497611, .1349768, mass, .075, .43)
@@ -418,6 +529,57 @@ class NeutralKaonDipionTest(unittest.TestCase):
         self.assertAlmostEqual(sum(v[0] for v in [row['dark_photon_p4'], *row['recoil_p4s']]), .497614)
         self.assertEqual(row['event_parent_mass_gev'], .497614)
         self.assertEqual(row['reference_parent_mass_gev'], .497611)
+
+    def test_checked_source_frame_precision_repairs_failed_native_row_without_p4_changes(self):
+        directory=Path(__file__).resolve().parent
+        fixture=json.loads((directory/'fixtures/kaon_native_source_frame_20261027.json').read_text())
+        card=json.loads((directory.parent/'config/physics/dark_photon_ks_neutral_dipion_1993.json').read_text())
+        model=card['mixed_model_templates']['KL']
+        model['pole_mass_numerical_tolerance_gev']=fixture['weak_radiative_model']['pole_mass_numerical_tolerance_gev']
+        seen_failure=False
+        for example in fixture['examples']:
+            context=example['context'];record=context['native_source_record']
+            parent=tuple(record['p4'])
+            original=json.dumps(context,sort_keys=True)
+            squared=math.fsum((parent[0]**2,*(-x*x for x in parent[1:])))
+            actual_mass=math.sqrt(squared)
+            if not example['old_local_energy_guard_passed']:
+                seen_failure=True
+                with self.assertRaisesRegex(ValueError,'mass mismatch'):
+                    neutral_dipion_branching_coefficient(actual_mass,.22,model,native_energy_gev=parent[0])
+            coefficient=neutral_dipion_branching_coefficient(actual_mass,.22,model,
+                native_energy_gev=parent[0],native_context=context)
+            nominal=neutral_dipion_branching_coefficient(record['native_mass_gev'],.22,model,
+                native_energy_gev=parent[0],native_context=context)
+            self.assertLess(abs(coefficient/nominal-1.),1.e-7)
+            self.assertGreater(mean_neutral_dipion_lab_beta_gamma(parent,.22,model,native_context=context),0.)
+            row=sample_neutral_dipion_decay(parent,.22,7.,random.Random(38174+record['index']),
+                                           model=model,native_context=context)
+            total=tuple(math.fsum(components) for components in zip(row['dark_photon_p4'],*row['recoil_p4s']))
+            for component,expected in zip(total,parent):
+                self.assertLess(abs(component-expected),3.e-8)
+            self.assertEqual(json.dumps(context,sort_keys=True),original)
+        self.assertTrue(seen_failure)
+
+    def test_source_context_cannot_widen_reference_table_support_or_borrow_momentum(self):
+        directory=Path(__file__).resolve().parent
+        fixture=json.loads((directory/'fixtures/kaon_native_source_frame_20261027.json').read_text())
+        context=next(row['context'] for row in fixture['examples'] if not row['old_local_energy_guard_passed'])
+        parent=context['native_source_record']['p4']
+        mass=math.sqrt(math.fsum((parent[0]**2,*(-x*x for x in parent[1:]))))
+        card=json.loads((directory.parent/'config/physics/dark_photon_ks_neutral_dipion_1993.json').read_text())
+        model=card['mixed_model_templates']['KL']
+        # The exact native table mass is1keV above this reference. A source
+        # boost allowance must never supply a missing physical-table allowance.
+        with self.assertRaisesRegex(ValueError,'reference support'):
+            neutral_dipion_branching_coefficient(mass,.22,model,
+                native_energy_gev=parent[0],native_context=context)
+        model['pole_mass_numerical_tolerance_gev']=fixture['weak_radiative_model']['pole_mass_numerical_tolerance_gev']
+        changed=list(parent);changed[1]=math.nextafter(changed[1],math.inf)
+        with self.assertRaisesRegex(ValueError,'momentum'):
+            sample_neutral_dipion_decay(changed,.22,1.,random.Random(1),model=model,native_context=context)
+        with self.assertRaisesRegex(ValueError,'final-kaon'):
+            neutral_dipion_branching_coefficient(mass,.22,dict(model,parent_pdg_id=310),native_context=context)
 
     def test_unattributed_models_missing_coefficients_and_closed_points_fail(self):
         for changes in (dict(reference=''), dict(coefficient_reference=''), dict(parent_pdg_id=321),

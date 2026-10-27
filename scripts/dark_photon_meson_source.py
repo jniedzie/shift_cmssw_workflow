@@ -20,7 +20,7 @@ from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_for
 import dark_photon_vector_meson as vector_meson
 
 PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
-           130, 310, 321, -321, 441, 10441, 20443, 445, 10443, 100443)
+           130, 310, 321, -321, 441, 443, 10441, 20443, 445, 10443, 100443)
 PSEUDOSCALAR_DIPION_CORRECTION_LIMIT = 1.e-3
 FULL_SOURCE_NATIVE_PRECISION_POLICY = dict(
     kind='full-fixed-source-conservative-parent-measure-v1',required_relative_bound=1.e-3)
@@ -74,6 +74,17 @@ def full_source_native_precision_summary(policy,coefficient_sum,measure_sum,exce
 def exclusive_channels(model):
     """Channels share one physical parent inventory, not separate collisions."""
     return model.get('exclusive_channels', [model])
+
+
+def kaon_native_context(parent, model):
+    """Carry the checked source frame into native-kaon roundoff guards."""
+    authority=parent.get('kaon_source_count_authority')
+    if authority is None:
+        return None
+    channel=next(row for row in exclusive_channels(model) if kaon_channel(row))
+    return dict(native_source_record=parent,authority=authority,
+        native_record_mass_support_gev=list(channel['native_record_mass_support_gev']),
+        source_ecm_gev=channel['source_ecm_gev'])
 
 
 def kaon_channel(model):
@@ -194,13 +205,15 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
     if model['decay_type']=='neutral-kaon-dipion':
         from dark_photon_weak_meson import neutral_dipion_branching_coefficient
         return (neutral_dipion_branching_coefficient(parent_mass,signal_mass,model,
-                    native_energy_gev=(native_precision or {}).get('native_energy_gev'))
+                    native_energy_gev=(native_precision or {}).get('native_energy_gev'),
+                    native_context=(native_precision or {}).get('native_context'))
                 *model['em_mixing_over_epsilon_abs2']*br_mumu)
     if model['decay_type']=='weak-kaon-pion-photon':
         coefficient=_weak_radiative_coefficient(parent_mass,signal_mass,
             json.dumps(dict(weak_radiative_model=model['weak_radiative_model'],
                 total_parent_width_gev=model['total_parent_width_gev']),sort_keys=True),
-            (native_precision or {}).get('native_energy_gev'))
+            (native_precision or {}).get('native_energy_gev'),
+            json.dumps((native_precision or {}).get('native_context'),sort_keys=True,allow_nan=False))
         return coefficient*model['em_mixing_over_epsilon_abs2']*br_mumu
     if model['decay_type']=='neutral-kaon-photon':
         width = (parent_mass**3/(32*math.pi)*(1-(signal_mass/parent_mass)**2)**3
@@ -215,9 +228,10 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
 
 
 @lru_cache(maxsize=512)
-def _weak_radiative_coefficient(parent_mass,signal_mass,inputs,native_energy_gev=None):
+def _weak_radiative_coefficient(parent_mass,signal_mass,inputs,native_energy_gev=None,native_context_json='null'):
     from dark_photon_weak_radiative import branching_coefficient
-    return branching_coefficient(parent_mass,signal_mass,json.loads(inputs),native_energy_gev=native_energy_gev)
+    return branching_coefficient(parent_mass,signal_mass,json.loads(inputs),native_energy_gev=native_energy_gev,
+        native_context=json.loads(native_context_json))
 
 
 def _kaon_weak_form_factor(parent_mass,recoil_mass,signal_mass,current):
@@ -739,19 +753,24 @@ def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, na
             raise ValueError('Resolved correlated current belongs to another signal mass')
         return (current_kernel(model).branching_coefficient(parent_mass,signal_mass,model)
                 *model['em_mixing_over_epsilon_abs2']*br_mumu)
+    if 'physical_epsilon' in model and signal_mass!=model.get('signal_mass_gev'):
+        raise ValueError('Resolved electromagnetic current belongs to another signal mass')
     if dipion_channel(model):
         context = dict(native_precision or {}) if vector_dipion_channel(model) else {}
         if model.get('decay_type') not in ('neutral-vector-dipion','charged-vector-dipion'):
             context.pop('defer_to_full_source',None)
+        # The neutral-vector kernel already binds this factor internally.
+        conversion = (1. if model.get('decay_type')=='neutral-vector-dipion'
+                      else model.get('em_mixing_over_epsilon_abs2',1.))
         return dipion_kernel(model).branching_coefficient(parent_mass, signal_mass, model,
-                                                          **(context or {})) * br_mumu
+                                                          **(context or {})) * conversion * br_mumu
     if vector_parent(model):
         value = vector_meson.radiative_branching(parent_mass, model['recoil_mass_gev'],
             signal_mass, .001, model['br_p_gamma'], model['form_factor_abs2'])
     else:
         value = radiative_branching(parent_mass, signal_mass, .001,
             model['br_gamma_gamma'], math.sqrt(model['form_factor_abs2']))
-    return value / 1.e-6 * br_mumu
+    return value / 1.e-6 * model.get('em_mixing_over_epsilon_abs2',1.) * br_mumu
 
 
 def parent_form_factor_abs2(signal_mass, parent):
@@ -819,6 +838,12 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                     parent.get('rho_radiative_model', parent.get('charged_rho_radiative_model',
                     parent.get('neutral_dipion_model',{})))))['reference']))
         model['channel'] = parent.get('channel', str(pdg) + '->gamma_Aprime')
+        if epsilon is not None and parent.get('decay_type')!='neutral-vector-dipion':
+            from dark_photon_model import mixing_parameters
+            if type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01:
+                raise ValueError('Electromagnetic source currents require a physical small epsilon')
+            model.update(physical_epsilon=epsilon,signal_mass_gev=mass,
+                em_mixing_over_epsilon_abs2=(mixing_parameters(mass,epsilon).em_coefficient/epsilon)**2)
         if vector_parent(parent):
             for key in ('decay_type', 'recoil_pdg_id', 'recoil_mass_gev', 'br_p_gamma',
                         'parent_polarization', 'parent_mass_model'):
@@ -1036,6 +1061,8 @@ def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_m
                 raise ValueError('Native kaon mass differs from its exact stable support')
         native_precision = dict(native_mass_gev=native, native_energy_gev=p4[0],
                                 native_mass_tolerance=mass_tolerance)
+        if _kaon_group(model):
+            native_precision['native_context']=kaon_native_context(parent,model)
         if deferred_policy and _kaon_group(model):
             native_precision['defer_to_full_source']=True
         if deferred_policy and any(c.get('decay_type')=='neutral-vector-dipion' for c in exclusive_channels(model)):
@@ -1146,6 +1173,14 @@ def validate_models(models):
         if current_channel(model):
             _validate_current_model(pdg,model)
             continue
+        if pdg==443 or 'em_mixing_over_epsilon_abs2' in model:
+            from dark_photon_model import mixing_parameters
+            epsilon,mass=model.get('physical_epsilon'),model.get('signal_mass_gev')
+            if (type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01
+                    or type(mass) not in (int,float) or not math.isfinite(mass) or mass<=2*MUON_MASS_GEV
+                    or model.get('em_mixing_over_epsilon_abs2')!=
+                        (mixing_parameters(mass,epsilon).em_coefficient/epsilon)**2):
+                raise ValueError('Electromagnetic current and physical source epsilon differ')
         if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion','neutral-vector-dipion'):
             raise ValueError('Unsupported exclusive radiative decay type')
         if model.get('decay_type')=='neutral-vector-dipion':
@@ -1171,10 +1206,10 @@ def validate_models(models):
         if vector_parent(model):
             recoils = {113: (111,221), 213: (211,), -213: (-211,),
                        223: (111,221), 333: (111,221), 313: (311,), -313: (-311,),
-                       323: (321,), -323: (-321,)}
-            if (abs(pdg) not in (113, 213, 223, 333, 313, 323) or model.get('parent_polarization') != 'unpolarized' or
+                       323: (321,), -323: (-321,), 443:(111,221,331)}
+            if (abs(pdg) not in (113, 213, 223, 333, 313, 323, 443) or model.get('parent_polarization') != 'unpolarized' or
                     model.get('parent_mass_model') != 'zero-width-pole' or
-                    type(model.get('recoil_pdg_id')) is not int or abs(model['recoil_pdg_id']) not in (111, 211, 221, 311, 321) or
+                    type(model.get('recoil_pdg_id')) is not int or abs(model['recoil_pdg_id']) not in (111, 211, 221, 331, 311, 321) or
                     not math.isfinite(model.get('recoil_mass_gev', float('nan'))) or model['recoil_mass_gev'] <= 0):
                 raise ValueError('Require an explicit narrow-width unpolarized vector and physical pseudoscalar recoil')
             if model['recoil_pdg_id'] not in recoils[pdg]:
@@ -1253,7 +1288,8 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
             continue
         if vector_parent(model):
             if mass_gev is None:
-                phase = model['br_p_gamma'] * model['form_factor_abs2'] * br_mumu
+                phase = (model['br_p_gamma'] * model['form_factor_abs2'] * br_mumu
+                         * model.get('em_mixing_over_epsilon_abs2',1.))
             else:
                 phase = parent_branching_coefficient(model['mass_max_gev'], mass_gev, model, br_mumu)
             terms.append(math.floor(ecm_gev/model['mass_min_gev']) * phase)
@@ -1262,7 +1298,8 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
         if mass_gev is not None and 'mass_max_gev' in model:
             phase = max(0., 1-(mass_gev/model['mass_max_gev'])**2)**3
         terms.append(math.floor(ecm_gev/model['mass_min_gev']) *
-                     2*model['br_gamma_gamma']*model['form_factor_abs2']*br_mumu*phase)
+                     2*model['br_gamma_gamma']*model['form_factor_abs2']*br_mumu*phase
+                     *model.get('em_mixing_over_epsilon_abs2',1.))
     return math.fsum(terms)
 
 

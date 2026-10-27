@@ -1,0 +1,231 @@
+{
+  "code_style": "AI-code. AI-generated attributed primary-paper KS quadrupole benchmark.",
+  "schema": "shift-ks-neutral-dipion-heiliger-sehgal-1993-v1",
+  "physics_complete": false,
+  "publication": {
+    "authors": [
+      "P. Heiliger",
+      "L. M. Sehgal"
+    ],
+    "title": "Decays K_L,S -> pi0 pi0 gamma and K_L,S -> pi0 pi0 e+ e- as probes of chiral dynamics",
+    "journal": "Physics Letters B",
+    "volume": 307,
+    "pages": "182-186",
+    "year": 1993,
+    "doi": "10.1016/0370-2693(93)90209-Z",
+    "primary_pdf_sha256": "b2770c3142de3e392d03027fe116a8c79592a639d6a8f2846138f2590da8a88e",
+    "verified_local_pdf_name": "1-s2.0-037026939390209Z-main.pdf",
+    "incorrect_previous_attribution": "hep-ph/9307285 is a different paper and must not be used as this source."
+  },
+  "primary_equations": {
+    "m2_amplitude": "A(KS->pi0pi0gamma)=gM2/(MK^4*Lambda^2)*[(p1-p2).q]*epsilon(epsilon_gamma,q,p1,p2)",
+    "photon_spectrum": "dGamma/domega=(gM2/Lambda^2)^2/(3840*pi^3*MK^3)*(1-2*omega/MK)*beta_pi^5*omega^5",
+    "beta_pi": "sqrt(1-4*m_pi^2/(MK^2-2*MK*omega))",
+    "m1_reference_amplitude": "A(KL->pi+pi-gamma)_DE=gM1/MK^4*epsilon(epsilon_gamma,q,p_plus,p_minus)",
+    "kernel_convention": "A=epsilon_EM*e*cM2/MK^5*[(p1-p2).q]*epsilon(epsilon_A,q,p1,p2); cM2=gM2*MK/(e*Lambda^2)."
+  },
+  "normalization_inputs": {
+    "charged_kl_m1_branching_fraction": 2.9e-05,
+    "charged_reference_photon_energy_min_gev": 0.02,
+    "neutral_photon_energy_min_gev": 0.0,
+    "neutral_photon_energy_max_gev": 0.17558003853121923,
+    "cut_scope": "The20MeV cut is attached only to the charged reference BR preceding Eq6. Eq3 and the quoted neutral BR have no neutral cut. The neutral low-energy fraction is separately integrated.",
+    "coupling_ratio_gM2_over_gM1": 1.0,
+    "coupling_ratio_authority": "Explicit equal-coupling assumption preceding Eq6, not a measured relation.",
+    "interaction_scale_gev": 0.77526,
+    "interaction_scale_authority": "Lambda of order vector-meson mass in the primary paper; Lambda=m_rho=0.77526GeV is the declared benchmark.",
+    "reference_parent_mass_gev": 0.49761,
+    "neutral_pion_mass_gev": 0.1349768,
+    "charged_pion_mass_gev": 0.13957039,
+    "native_kl_ctau_mm": 15330.0,
+    "native_ks_ctau_mm": 26.842,
+    "lifetime_authority": "Initialized Pythia8.317 source values; same frozen native kaon authority as the candidate. No detector or transport changes.",
+    "hbar_c_gev_mm": 1.973269804e-13,
+    "alpha_em": 0.0072973525692838015
+  },
+  "independent_normalization": {
+    "m1_unit_width_per_gM1_squared_gev_minus1": 4.8861033404902776e-08,
+    "m2_unit_width_per_gM2_over_Lambda_squared_gev3": 7.248200230645887e-12,
+    "gM1_gev": 8.74057155617017e-08,
+    "cM2": 2.3897175962831083e-07,
+    "predicted_neutral_photon_branching_fraction": 2.0852049238323612e-11,
+    "neutral_fraction_below_20MeV": 3.6130257974905043e-05,
+    "physical_mass_width_ratio": 0.0004106558620477698,
+    "paper_rounded_width_ratio": 0.00035,
+    "paper_rounded_branching_fraction": 1.7e-11,
+    "paper_rounding_note": "The approximate4e-3 phase-space factor in Eq5 agrees with a common-pion-mass calculation. Keeping distinct physical charged/neutral masses gives a larger exact ratio; this benchmark does not fit that difference away."
+  },
+  "quoted_rate_normalization_scenario": {
+    "photon_branching_fraction": 1.7e-11,
+    "cM2": 2.157727870678202e-07,
+    "scope": "Alternative normalization to the paper rounded Eq6 estimate, using the independently integrated Eq3 spectrum and full neutral phase space. Retained as a model scenario, not an experimental error."
+  },
+  "model_template": {
+    "kind": "neutral-kaon-dipion-finite-current",
+    "parent_pdg_id": 310,
+    "reference_parent_mass_gev": 0.49761,
+    "pion_mass_gev": 0.1349768,
+    "alpha_em": 0.0072973525692838015,
+    "total_width_gev": 7.351426138141719e-15,
+    "valid_mass_range_gev": [
+      0.0,
+      0.22765639999999998
+    ],
+    "reference": "https://doi.org/10.1016/0370-2693(93)90209-Z",
+    "coefficient_reference": "Heiliger-Sehgal1993 Eqs2-6; coefficient from independent charged-reference M1 integral with physical charged/neutral pion masses, equal gM2/gM1=1 and Lambda=m_rho benchmark.",
+    "coefficients": {
+      "electric_quadrupole": [
+        0.0,
+        0.0
+      ],
+      "charge_radius_pole": [
+        0.0,
+        0.0
+      ],
+      "electric_contact": [
+        0.0,
+        0.0
+      ],
+      "magnetic_quadrupole": [
+        2.3897175962831083e-07,
+        0.0
+      ]
+    },
+    "primary_amplitude_verified": true,
+    "finite_benchmark_qualified": true,
+    "physical_omission_bound_available": false,
+    "uncertainty_scope": "The photon rate is an equal-coupling/vector-size estimate, not a measurement or an upper bound. Constant lowest-M2 timelike continuation is an explicit finite benchmark; additional timelike operators, form-factor curvature and CP-violating currents are not bounded by this paper."
+  },
+  "mixing_input": {
+    "reference_card": "dark_photon_kl_pi0_cpv_reference.json",
+    "reference_card_sha256": "1e49ffa1385ed231382bedc6527ecf77c49291a10ae57f2f2a4e227e80c3ed7b",
+    "parameters": {
+      "reference": "https://scoap3-prod-backend.s3.cern.ch/media/files/43451/10.1103/PhysRevD.98.094505.pdf#page=1",
+      "absolute_epsilon_k": 0.002228,
+      "absolute_epsilon_k_uncertainty": 1.1e-05,
+      "phase_degrees": 43.52,
+      "phase_uncertainty_degrees": 0.05,
+      "meaning": "Evaluate the complex epsilonK once in the declared CP convention, multiply the attributed KS current, and add it coherently to the direct term. A separate probability for the indirect term would lose interference."
+    },
+    "epsilon_k_complex": [
+      0.0016155986539298712,
+      0.0015342180384221758
+    ],
+    "normalization": 1.00000248198892,
+    "state_convention": "KS=(K1+epsilonK*K2)/sqrt(1+abs(epsilonK)^2); KL=(K2+epsilonK*K1)/sqrt(1+abs(epsilonK)^2), K1=(K0+Kbar0)/sqrt2, K2=(K0-Kbar0)/sqrt2",
+    "amplitude_rule": "Apply the same complex epsilonK to the opposite CP-eigenstate current before squaring. No parent lifetime, branching-ratio or total-width factor enters an amplitude.",
+    "scope": "Known indirect CP violation only, in the existing reference-current strong-phase convention. Direct CPV, unknown timelike operators and missing strong-phase/form-factor dependence remain model uncertainties, not a closed omission budget.",
+    "relative_magnetic_electric_strong_phase_rad": 0.0,
+    "strong_phase_note": "The realpositive M2 versus electric-current relative sign/strong phase is a central equal-coupling benchmark choice, not a measured interference phase. Total polarization-summed E/M width interference vanishes for any phase, while correlated muon azimuthal density can change. Keep the common phase when comparing the two physical kaons; no invented phase covariance or statistical error."
+  },
+  "cp_odd_electric_reference_model": {
+    "kind": "neutral-kaon-dipion-finite-current",
+    "parent_pdg_id": 130,
+    "reference_parent_mass_gev": 0.49761,
+    "pion_mass_gev": 0.1349768,
+    "alpha_em": 0.0072973525692838015,
+    "total_width_gev": 1.2871949145466406e-17,
+    "valid_mass_range_gev": [
+      0.0,
+      0.22765639999999998
+    ],
+    "reference": "https://arxiv.org/html/2602.15117v1#A1",
+    "coefficient_reference": "https://arxiv.org/html/2602.15117v1#A3",
+    "coefficients": {
+      "electric_quadrupole": [
+        2.4968079360000004e-07,
+        0.0
+      ],
+      "charge_radius_pole": [
+        8.921841926435371e-08,
+        0.0
+      ],
+      "electric_contact": [
+        1.709540136956455e-08,
+        0.0
+      ],
+      "magnetic_quadrupole": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "mixed_model_templates": {
+    "KS": {
+      "kind": "neutral-kaon-dipion-finite-current",
+      "parent_pdg_id": 310,
+      "reference_parent_mass_gev": 0.49761,
+      "pion_mass_gev": 0.1349768,
+      "alpha_em": 0.0072973525692838015,
+      "total_width_gev": 7.351426138141719e-15,
+      "valid_mass_range_gev": [
+        0.0,
+        0.22765639999999998
+      ],
+      "reference": "https://doi.org/10.1016/0370-2693(93)90209-Z",
+      "coefficient_reference": "Coherent CP-eigenstate currents from Heiliger-Sehgal1993 Eqs1-3 and corrected neutral-dipion reference2602.15117 AppA3, mixed with the common epsilonK and exactstate normalization from dark_photon_kl_pi0_cpv_reference.json.",
+      "coefficients": {
+        "electric_quadrupole": [
+          4.033829528602826e-10,
+          3.8306382662851085e-10
+        ],
+        "charge_radius_pole": [
+          1.4414080031337146e-10,
+          1.3688016845982253e-10
+        ],
+        "electric_contact": [
+          2.7619238890414457e-11,
+          2.6228008057627705e-11
+        ],
+        "magnetic_quadrupole": [
+          2.389711665045234e-07,
+          0.0
+        ]
+      },
+      "primary_amplitude_verified": true,
+      "finite_benchmark_qualified": true,
+      "physical_omission_bound_available": false,
+      "uncertainty_scope": "Known indirect CP violation only, in the existing reference-current strong-phase convention. Direct CPV, unknown timelike operators and missing strong-phase/form-factor dependence remain model uncertainties, not a closed omission budget.",
+      "relative_magnetic_electric_strong_phase_rad": 0.0,
+      "strong_phase_note": "The realpositive M2 versus electric-current relative sign/strong phase is a central equal-coupling benchmark choice, not a measured interference phase. Total polarization-summed E/M width interference vanishes for any phase, while correlated muon azimuthal density can change. Keep the common phase when comparing the two physical kaons; no invented phase covariance or statistical error."
+    },
+    "KL": {
+      "kind": "neutral-kaon-dipion-finite-current",
+      "parent_pdg_id": 130,
+      "reference_parent_mass_gev": 0.49761,
+      "pion_mass_gev": 0.1349768,
+      "alpha_em": 0.0072973525692838015,
+      "total_width_gev": 1.2871949145466406e-17,
+      "valid_mass_range_gev": [
+        0.0,
+        0.22765639999999998
+      ],
+      "reference": "https://arxiv.org/html/2602.15117v1#A1",
+      "coefficient_reference": "Coherent CP-eigenstate currents from Heiliger-Sehgal1993 Eqs1-3 and corrected neutral-dipion reference2602.15117 AppA3, mixed with the common epsilonK and exactstate normalization from dark_photon_kl_pi0_cpv_reference.json.",
+      "coefficients": {
+        "electric_quadrupole": [
+          2.496801738965749e-07,
+          0.0
+        ],
+        "charge_radius_pole": [
+          8.921819782577525e-08,
+          0.0
+        ],
+        "electric_contact": [
+          1.709535893907308e-08,
+          0.0
+        ],
+        "magnetic_quadrupole": [
+          3.8608149493275907e-10,
+          3.6663387431402904e-10
+        ]
+      },
+      "primary_amplitude_verified": true,
+      "finite_benchmark_qualified": true,
+      "physical_omission_bound_available": false,
+      "uncertainty_scope": "Known indirect CP violation only, in the existing reference-current strong-phase convention. Direct CPV, unknown timelike operators and missing strong-phase/form-factor dependence remain model uncertainties, not a closed omission budget.",
+      "relative_magnetic_electric_strong_phase_rad": 0.0,
+      "strong_phase_note": "The realpositive M2 versus electric-current relative sign/strong phase is a central equal-coupling benchmark choice, not a measured interference phase. Total polarization-summed E/M width interference vanishes for any phase, while correlated muon azimuthal density can change. Keep the common phase when comparing the two physical kaons; no invented phase covariance or statistical error."
+    }
+  }
+}

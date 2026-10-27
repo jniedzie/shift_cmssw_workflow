@@ -1,0 +1,1275 @@
+{
+  "code_style": "AI-code. AI-generated attributed Jpsi transition inputs.",
+  "schema": "shift-dark-photon-jpsi-transition-inputs-v1",
+  "physics_complete": false,
+  "physics_scope": "Three exclusive Jpsi->P electromagnetic VP-current benchmarks. Bin-average empiricalpi0/eta and a conditional photon-matchedrho/omega/phi eta-prime family. Native unpolarized pole source and absolute pp production remain unvalidated. No universal all-meson or all-order completeness claim.",
+  "electromagnetic_mixing_note": "Kernel epsilon is physical electromagnetic mixing. Source binding must apply the resolved hypercharge-to-EM conversion exactly once and BR(Aprime->mumu) exactly once. No such factors are present in TFF inputs.",
+  "parents": [
+    {
+      "pdg_id": 443,
+      "name": "Jpsi",
+      "mass_gev": 3.0969,
+      "mass_uncertainty_gev": 6e-06,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 111,
+      "recoil_mass_gev": 0.1349768,
+      "br_p_gamma": 3.56e-05,
+      "br_p_gamma_uncertainty": 1.7e-06,
+      "pdg_reference": "https://pdg.lbl.gov/2023/listings/rpp2023-list-J-psi-1S.pdf",
+      "channel": "Jpsi->pi0_Aprime",
+      "production_rate_validated": false,
+      "polarization_note": "Unpolarized native pp-production benchmark. The transverse e+e- collider parent spin state is not imported as a pp-production measurement.",
+      "ownership_note": "One direct Jpsi->P timelike electromagnetic current, inclusive of its virtual vector resonances. Natural Jpsi->PV followed by a separate V->P2 Aprime has an extra recoil and remains a different exclusive final state. Do not add an independent V->Aprime conversion source to this same current.",
+      "transition_form_factor": {
+        "kind": "measured-bin-abs2",
+        "reference": "https://journals.aps.org/prd/supplemental/10.1103/yglh-sfbg/paper_supplemental.pdf",
+        "data_table": "II (30printed rows; caption says44)",
+        "valid_mass_range_gev": [
+          0.0010219979,
+          2.8
+        ],
+        "interpolation": "piecewise-constant-bin-average",
+        "bins": [
+          {
+            "mass_range_gev": [
+              0.0010219979,
+              0.04
+            ],
+            "abs2": 1.21,
+            "uncertainty": 0.1,
+            "statistical_uncertainty": 0.06,
+            "systematic_uncertainty": 0.08,
+            "published_center_gev": 0.02,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 2.35e-07,
+            "measured_dalitz_branching_stat": 1.1000000000000001e-08,
+            "measured_dalitz_branching_syst": 1.5000000000000002e-08,
+            "pointlike_bin_branching_fraction": 1.94e-07
+          },
+          {
+            "mass_range_gev": [
+              0.04,
+              0.08
+            ],
+            "abs2": 0.94,
+            "uncertainty": 0.18384776310850237,
+            "statistical_uncertainty": 0.17,
+            "systematic_uncertainty": 0.07,
+            "published_center_gev": 0.06,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 3.58e-08,
+            "measured_dalitz_branching_stat": 6.6e-09,
+            "measured_dalitz_branching_syst": 2.8000000000000003e-09,
+            "pointlike_bin_branching_fraction": 3.82e-08
+          },
+          {
+            "mass_range_gev": [
+              0.08,
+              0.12
+            ],
+            "abs2": 1.32,
+            "uncertainty": 0.2340939982143925,
+            "statistical_uncertainty": 0.22,
+            "systematic_uncertainty": 0.08,
+            "published_center_gev": 0.1,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 2.94e-08,
+            "measured_dalitz_branching_stat": 4.8e-09,
+            "measured_dalitz_branching_syst": 1.9e-09,
+            "pointlike_bin_branching_fraction": 2.23e-08
+          },
+          {
+            "mass_range_gev": [
+              0.12,
+              0.16
+            ],
+            "abs2": 1.26,
+            "uncertainty": 0.19697715603592209,
+            "statistical_uncertainty": 0.18,
+            "systematic_uncertainty": 0.08,
+            "published_center_gev": 0.14,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.98e-08,
+            "measured_dalitz_branching_stat": 2.9e-09,
+            "measured_dalitz_branching_syst": 1.3e-09,
+            "pointlike_bin_branching_fraction": 1.5800000000000003e-08
+          },
+          {
+            "mass_range_gev": [
+              0.16,
+              0.2
+            ],
+            "abs2": 1.16,
+            "uncertainty": 0.19313207915827965,
+            "statistical_uncertainty": 0.18,
+            "systematic_uncertainty": 0.07,
+            "published_center_gev": 0.18,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.4099999999999999e-08,
+            "measured_dalitz_branching_stat": 2.2000000000000003e-09,
+            "measured_dalitz_branching_syst": 9e-10,
+            "pointlike_bin_branching_fraction": 1.22e-08
+          },
+          {
+            "mass_range_gev": [
+              0.2,
+              0.24
+            ],
+            "abs2": 1.12,
+            "uncertainty": 0.22472205054244232,
+            "statistical_uncertainty": 0.21,
+            "systematic_uncertainty": 0.08,
+            "published_center_gev": 0.22,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.1100000000000002e-08,
+            "measured_dalitz_branching_stat": 2.0999999999999998e-09,
+            "measured_dalitz_branching_syst": 7.000000000000001e-10,
+            "pointlike_bin_branching_fraction": 9.9e-09
+          },
+          {
+            "mass_range_gev": [
+              0.24,
+              0.28
+            ],
+            "abs2": 1.39,
+            "uncertainty": 0.26570660511172844,
+            "statistical_uncertainty": 0.25,
+            "systematic_uncertainty": 0.09,
+            "published_center_gev": 0.26,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.16e-08,
+            "measured_dalitz_branching_stat": 2.0999999999999998e-09,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 8.3e-09
+          },
+          {
+            "mass_range_gev": [
+              0.28,
+              0.32
+            ],
+            "abs2": 1.48,
+            "uncertainty": 0.31622776601683794,
+            "statistical_uncertainty": 0.3,
+            "systematic_uncertainty": 0.1,
+            "published_center_gev": 0.3,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.06e-08,
+            "measured_dalitz_branching_stat": 2.0999999999999998e-09,
+            "measured_dalitz_branching_syst": 7.000000000000001e-10,
+            "pointlike_bin_branching_fraction": 7.2e-09
+          },
+          {
+            "mass_range_gev": [
+              0.32,
+              0.36
+            ],
+            "abs2": 2.17,
+            "uncertainty": 0.3956008088970496,
+            "statistical_uncertainty": 0.37,
+            "systematic_uncertainty": 0.14,
+            "published_center_gev": 0.34,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.3600000000000001e-08,
+            "measured_dalitz_branching_stat": 2.3000000000000003e-09,
+            "measured_dalitz_branching_syst": 9e-10,
+            "pointlike_bin_branching_fraction": 6.3e-09
+          },
+          {
+            "mass_range_gev": [
+              0.36,
+              0.4
+            ],
+            "abs2": 2.13,
+            "uncertainty": 0.34928498393145957,
+            "statistical_uncertainty": 0.32,
+            "systematic_uncertainty": 0.14,
+            "published_center_gev": 0.38,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.18e-08,
+            "measured_dalitz_branching_stat": 2.2000000000000003e-09,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 5.6000000000000005e-09
+          },
+          {
+            "mass_range_gev": [
+              0.4,
+              0.44
+            ],
+            "abs2": 2.41,
+            "uncertainty": 0.5028916384272063,
+            "statistical_uncertainty": 0.48,
+            "systematic_uncertainty": 0.15,
+            "published_center_gev": 0.42,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.2e-08,
+            "measured_dalitz_branching_stat": 2.4e-09,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 5e-09
+          },
+          {
+            "mass_range_gev": [
+              0.44,
+              0.48
+            ],
+            "abs2": 1.93,
+            "uncertainty": 0.5412023651093923,
+            "statistical_uncertainty": 0.52,
+            "systematic_uncertainty": 0.15,
+            "published_center_gev": 0.46,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 8.7e-09,
+            "measured_dalitz_branching_stat": 2.3000000000000003e-09,
+            "measured_dalitz_branching_syst": 7.000000000000001e-10,
+            "pointlike_bin_branching_fraction": 4.500000000000001e-09
+          },
+          {
+            "mass_range_gev": [
+              0.48,
+              0.52
+            ],
+            "abs2": 3.03,
+            "uncertainty": 0.6008327554319921,
+            "statistical_uncertainty": 0.57,
+            "systematic_uncertainty": 0.19,
+            "published_center_gev": 0.5,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.24e-08,
+            "measured_dalitz_branching_stat": 2.3000000000000003e-09,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 4.0999999999999995e-09
+          },
+          {
+            "mass_range_gev": [
+              0.52,
+              0.56
+            ],
+            "abs2": 4.05,
+            "uncertainty": 0.7244998274671982,
+            "statistical_uncertainty": 0.68,
+            "systematic_uncertainty": 0.25,
+            "published_center_gev": 0.54,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.51e-08,
+            "measured_dalitz_branching_stat": 2.5e-09,
+            "measured_dalitz_branching_syst": 9e-10,
+            "pointlike_bin_branching_fraction": 3.7e-09
+          },
+          {
+            "mass_range_gev": [
+              0.56,
+              0.6
+            ],
+            "abs2": 4.39,
+            "uncertainty": 0.815965685553014,
+            "statistical_uncertainty": 0.77,
+            "systematic_uncertainty": 0.27,
+            "published_center_gev": 0.58,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.5000000000000002e-08,
+            "measured_dalitz_branching_stat": 2.6e-09,
+            "measured_dalitz_branching_syst": 9e-10,
+            "pointlike_bin_branching_fraction": 3.4000000000000003e-09
+          },
+          {
+            "mass_range_gev": [
+              0.6,
+              0.64
+            ],
+            "abs2": 7.17,
+            "uncertainty": 1.2870120434556938,
+            "statistical_uncertainty": 1.08,
+            "systematic_uncertainty": 0.7,
+            "published_center_gev": 0.62,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 2.2599999999999997e-08,
+            "measured_dalitz_branching_stat": 3.4000000000000003e-09,
+            "measured_dalitz_branching_syst": 2.2000000000000003e-09,
+            "pointlike_bin_branching_fraction": 3.1e-09
+          },
+          {
+            "mass_range_gev": [
+              0.64,
+              0.68
+            ],
+            "abs2": 9.75,
+            "uncertainty": 1.426954799564443,
+            "statistical_uncertainty": 1.29,
+            "systematic_uncertainty": 0.61,
+            "published_center_gev": 0.66,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 2.8300000000000002e-08,
+            "measured_dalitz_branching_stat": 3.7e-09,
+            "measured_dalitz_branching_syst": 1.8e-09,
+            "pointlike_bin_branching_fraction": 2.9e-09
+          },
+          {
+            "mass_range_gev": [
+              0.68,
+              0.72
+            ],
+            "abs2": 19.2,
+            "uncertainty": 2.171658352503911,
+            "statistical_uncertainty": 1.81,
+            "systematic_uncertainty": 1.2,
+            "published_center_gev": 0.7,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 5.17e-08,
+            "measured_dalitz_branching_stat": 4.9e-09,
+            "measured_dalitz_branching_syst": 3.2e-09,
+            "pointlike_bin_branching_fraction": 2.7e-09
+          },
+          {
+            "mass_range_gev": [
+              0.72,
+              0.76
+            ],
+            "abs2": 33.5,
+            "uncertainty": 3.1532998588779977,
+            "statistical_uncertainty": 2.37,
+            "systematic_uncertainty": 2.08,
+            "published_center_gev": 0.74,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 8.36e-08,
+            "measured_dalitz_branching_stat": 5.9e-09,
+            "measured_dalitz_branching_syst": 5.2e-09,
+            "pointlike_bin_branching_fraction": 2.5e-09
+          },
+          {
+            "mass_range_gev": [
+              0.76,
+              0.8
+            ],
+            "abs2": 42.6,
+            "uncertainty": 3.833797073398643,
+            "statistical_uncertainty": 2.78,
+            "systematic_uncertainty": 2.64,
+            "published_center_gev": 0.78,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 9.880000000000001e-08,
+            "measured_dalitz_branching_stat": 6.5e-09,
+            "measured_dalitz_branching_syst": 6.1e-09,
+            "pointlike_bin_branching_fraction": 2.3000000000000003e-09
+          },
+          {
+            "mass_range_gev": [
+              0.8,
+              0.84
+            ],
+            "abs2": 11.8,
+            "uncertainty": 1.7039366185395513,
+            "statistical_uncertainty": 1.53,
+            "systematic_uncertainty": 0.75,
+            "published_center_gev": 0.82,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 2.55e-08,
+            "measured_dalitz_branching_stat": 3.3e-09,
+            "measured_dalitz_branching_syst": 1.6e-09,
+            "pointlike_bin_branching_fraction": 2.2000000000000003e-09
+          },
+          {
+            "mass_range_gev": [
+              0.84,
+              0.88
+            ],
+            "abs2": 8.36,
+            "uncertainty": 1.6453874923555243,
+            "statistical_uncertainty": 1.52,
+            "systematic_uncertainty": 0.63,
+            "published_center_gev": 0.86,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 1.6799999999999998e-08,
+            "measured_dalitz_branching_stat": 3.1e-09,
+            "measured_dalitz_branching_syst": 1.3e-09,
+            "pointlike_bin_branching_fraction": 2e-09
+          },
+          {
+            "mass_range_gev": [
+              0.88,
+              0.92
+            ],
+            "abs2": 4.49,
+            "uncertainty": 1.2857682528356345,
+            "statistical_uncertainty": 1.24,
+            "systematic_uncertainty": 0.34,
+            "published_center_gev": 0.9,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 8.399999999999999e-09,
+            "measured_dalitz_branching_stat": 2.3000000000000003e-09,
+            "measured_dalitz_branching_syst": 6e-10,
+            "pointlike_bin_branching_fraction": 1.9e-09
+          },
+          {
+            "mass_range_gev": [
+              0.92,
+              0.96
+            ],
+            "abs2": 3.1,
+            "uncertainty": 1.246515142306743,
+            "statistical_uncertainty": 1.17,
+            "systematic_uncertainty": 0.43,
+            "published_center_gev": 0.94,
+            "published_half_width_gev": 0.02,
+            "measured_dalitz_branching_fraction": 5.4e-09,
+            "measured_dalitz_branching_stat": 2.0999999999999998e-09,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 1.8e-09
+          },
+          {
+            "mass_range_gev": [
+              0.96,
+              1.02
+            ],
+            "abs2": 2.7,
+            "uncertainty": 0.9266067126888301,
+            "statistical_uncertainty": 0.81,
+            "systematic_uncertainty": 0.45,
+            "published_center_gev": 0.99,
+            "published_half_width_gev": 0.03,
+            "measured_dalitz_branching_fraction": 6.5e-09,
+            "measured_dalitz_branching_stat": 2e-09,
+            "measured_dalitz_branching_syst": 1.1000000000000001e-09,
+            "pointlike_bin_branching_fraction": 2.4e-09
+          },
+          {
+            "mass_range_gev": [
+              1.02,
+              1.09
+            ],
+            "abs2": 0.43,
+            "uncertainty": 0.42011903075200013,
+            "statistical_uncertainty": 0.26,
+            "systematic_uncertainty": 0.33,
+            "published_center_gev": 1.05,
+            "published_half_width_gev": 0.035,
+            "measured_dalitz_branching_fraction": 1.1000000000000001e-09,
+            "measured_dalitz_branching_stat": 7.000000000000001e-10,
+            "measured_dalitz_branching_syst": 8e-10,
+            "pointlike_bin_branching_fraction": 2.5e-09
+          },
+          {
+            "mass_range_gev": [
+              1.09,
+              1.16
+            ],
+            "abs2": 1.82,
+            "uncertainty": 0.7746612162745725,
+            "statistical_uncertainty": 0.76,
+            "systematic_uncertainty": 0.15,
+            "published_center_gev": 1.12,
+            "published_half_width_gev": 0.035,
+            "measured_dalitz_branching_fraction": 4.0999999999999995e-09,
+            "measured_dalitz_branching_stat": 1.7000000000000001e-09,
+            "measured_dalitz_branching_syst": 3e-10,
+            "pointlike_bin_branching_fraction": 2.2000000000000003e-09
+          },
+          {
+            "mass_range_gev": [
+              1.16,
+              1.24
+            ],
+            "abs2": 1.67,
+            "uncertainty": 1.0022474744293446,
+            "statistical_uncertainty": 0.98,
+            "systematic_uncertainty": 0.21,
+            "published_center_gev": 1.2,
+            "published_half_width_gev": 0.04,
+            "measured_dalitz_branching_fraction": 3.8e-09,
+            "measured_dalitz_branching_stat": 2.2000000000000003e-09,
+            "measured_dalitz_branching_syst": 5e-10,
+            "pointlike_bin_branching_fraction": 2.3000000000000003e-09
+          },
+          {
+            "mass_range_gev": [
+              1.24,
+              1.32
+            ],
+            "abs2": 2.2,
+            "uncertainty": 1.310267148332736,
+            "statistical_uncertainty": 1.28,
+            "systematic_uncertainty": 0.28,
+            "published_center_gev": 1.28,
+            "published_half_width_gev": 0.04,
+            "measured_dalitz_branching_fraction": 4.3e-09,
+            "measured_dalitz_branching_stat": 2.5e-09,
+            "measured_dalitz_branching_syst": 5e-10,
+            "pointlike_bin_branching_fraction": 2e-09
+          },
+          {
+            "mass_range_gev": [
+              1.32,
+              2.8
+            ],
+            "abs2": 2.71,
+            "uncertainty": 1.6100931650062986,
+            "statistical_uncertainty": 1.6,
+            "systematic_uncertainty": 0.18,
+            "published_center_gev": 2.06,
+            "published_half_width_gev": 0.74,
+            "measured_dalitz_branching_fraction": 2.63e-08,
+            "measured_dalitz_branching_stat": 1.5000000000000002e-08,
+            "measured_dalitz_branching_syst": 1.7000000000000001e-09,
+            "pointlike_bin_branching_fraction": 9.7e-09
+          }
+        ],
+        "photon_normalization_used_by_measurement": 3.56e-05,
+        "bin_edge_note": "Bins are contiguous. For printed rounded1.050+/-.035 and1.120+/-.035 use[1.02,1.09] and[1.09,1.16]; retain original centers/halfwidths above. No pointwise precision is claimed in these two bins.",
+        "background_note": "The paper does not subtract its small two-photon background from TFF bins. Their summed branching fraction8.43e-7 exceeds the separately background-subtracted total8.06e-7. This remains a measured-shape benchmark with an explicit residual background limitation.",
+        "covariance_available": false,
+        "model_discrepancy_quantified": false
+      },
+      "normalization_scenarios": [
+        {
+          "name": "absolute-published-bin-current",
+          "br_p_gamma": 3.56e-05,
+          "br_p_gamma_uncertainty": 1.7e-06,
+          "transition_form_factor_key": "transition_form_factor",
+          "note": "Keep the measurement photon authority and its raw absolute TFF together."
+        },
+        {
+          "name": "published-normalized-shape-with-2025-photon-rate",
+          "br_p_gamma": 3.39e-05,
+          "br_p_gamma_uncertainty": 8e-07,
+          "transition_form_factor": {
+            "kind": "measured-bin-abs2",
+            "reference": "https://journals.aps.org/prd/supplemental/10.1103/yglh-sfbg/paper_supplemental.pdf",
+            "data_table": "II (30printed rows; caption says44)",
+            "valid_mass_range_gev": [
+              0.0010219979,
+              2.8
+            ],
+            "interpolation": "piecewise-constant-bin-average",
+            "bins": [
+              {
+                "mass_range_gev": [
+                  0.0010219979,
+                  0.04
+                ],
+                "abs2": 1.0,
+                "uncertainty": 0.08264462809917356,
+                "statistical_uncertainty": 0.049586776859504134,
+                "systematic_uncertainty": 0.06611570247933884
+              },
+              {
+                "mass_range_gev": [
+                  0.04,
+                  0.08
+                ],
+                "abs2": 0.7768595041322314,
+                "uncertainty": 0.15194030008967138,
+                "statistical_uncertainty": 0.14049586776859505,
+                "systematic_uncertainty": 0.057851239669421496
+              },
+              {
+                "mass_range_gev": [
+                  0.08,
+                  0.12
+                ],
+                "abs2": 1.090909090909091,
+                "uncertainty": 0.19346611422677068,
+                "statistical_uncertainty": 0.18181818181818182,
+                "systematic_uncertainty": 0.06611570247933884
+              },
+              {
+                "mass_range_gev": [
+                  0.12,
+                  0.16
+                ],
+                "abs2": 1.0413223140495869,
+                "uncertainty": 0.1627910380462166,
+                "statistical_uncertainty": 0.1487603305785124,
+                "systematic_uncertainty": 0.06611570247933884
+              },
+              {
+                "mass_range_gev": [
+                  0.16,
+                  0.2
+                ],
+                "abs2": 0.9586776859504131,
+                "uncertainty": 0.1596132885605617,
+                "statistical_uncertainty": 0.1487603305785124,
+                "systematic_uncertainty": 0.057851239669421496
+              },
+              {
+                "mass_range_gev": [
+                  0.2,
+                  0.24
+                ],
+                "abs2": 0.9256198347107439,
+                "uncertainty": 0.1857207029276383,
+                "statistical_uncertainty": 0.17355371900826447,
+                "systematic_uncertainty": 0.06611570247933884
+              },
+              {
+                "mass_range_gev": [
+                  0.24,
+                  0.28
+                ],
+                "abs2": 1.1487603305785123,
+                "uncertainty": 0.21959223562952765,
+                "statistical_uncertainty": 0.2066115702479339,
+                "systematic_uncertainty": 0.0743801652892562
+              },
+              {
+                "mass_range_gev": [
+                  0.28,
+                  0.32
+                ],
+                "abs2": 1.2231404958677685,
+                "uncertainty": 0.2613452611709405,
+                "statistical_uncertainty": 0.24793388429752067,
+                "systematic_uncertainty": 0.08264462809917356
+              },
+              {
+                "mass_range_gev": [
+                  0.32,
+                  0.36
+                ],
+                "abs2": 1.7933884297520661,
+                "uncertainty": 0.32694281727028895,
+                "statistical_uncertainty": 0.30578512396694213,
+                "systematic_uncertainty": 0.11570247933884299
+              },
+              {
+                "mass_range_gev": [
+                  0.36,
+                  0.4
+                ],
+                "abs2": 1.7603305785123966,
+                "uncertainty": 0.2886652759764129,
+                "statistical_uncertainty": 0.2644628099173554,
+                "systematic_uncertainty": 0.11570247933884299
+              },
+              {
+                "mass_range_gev": [
+                  0.4,
+                  0.44
+                ],
+                "abs2": 1.991735537190083,
+                "uncertainty": 0.41561292432000524,
+                "statistical_uncertainty": 0.39669421487603307,
+                "systematic_uncertainty": 0.12396694214876033
+              },
+              {
+                "mass_range_gev": [
+                  0.44,
+                  0.48
+                ],
+                "abs2": 1.5950413223140496,
+                "uncertainty": 0.4472746819085887,
+                "statistical_uncertainty": 0.4297520661157025,
+                "systematic_uncertainty": 0.12396694214876033
+              },
+              {
+                "mass_range_gev": [
+                  0.48,
+                  0.52
+                ],
+                "abs2": 2.5041322314049586,
+                "uncertainty": 0.49655599622478686,
+                "statistical_uncertainty": 0.47107438016528924,
+                "systematic_uncertainty": 0.15702479338842976
+              },
+              {
+                "mass_range_gev": [
+                  0.52,
+                  0.56
+                ],
+                "abs2": 3.3471074380165287,
+                "uncertainty": 0.59876018798942,
+                "statistical_uncertainty": 0.5619834710743802,
+                "systematic_uncertainty": 0.2066115702479339
+              },
+              {
+                "mass_range_gev": [
+                  0.56,
+                  0.6
+                ],
+                "abs2": 3.6280991735537187,
+                "uncertainty": 0.6743518062421603,
+                "statistical_uncertainty": 0.6363636363636364,
+                "systematic_uncertainty": 0.22314049586776863
+              },
+              {
+                "mass_range_gev": [
+                  0.6,
+                  0.64
+                ],
+                "abs2": 5.925619834710744,
+                "uncertainty": 1.0636463169055321,
+                "statistical_uncertainty": 0.8925619834710745,
+                "systematic_uncertainty": 0.5785123966942148
+              },
+              {
+                "mass_range_gev": [
+                  0.64,
+                  0.68
+                ],
+                "abs2": 8.057851239669422,
+                "uncertainty": 1.1793014872433414,
+                "statistical_uncertainty": 1.0661157024793388,
+                "systematic_uncertainty": 0.5041322314049587
+              },
+              {
+                "mass_range_gev": [
+                  0.68,
+                  0.72
+                ],
+                "abs2": 15.867768595041323,
+                "uncertainty": 1.7947589690114967,
+                "statistical_uncertainty": 1.4958677685950414,
+                "systematic_uncertainty": 0.9917355371900827
+              },
+              {
+                "mass_range_gev": [
+                  0.72,
+                  0.76
+                ],
+                "abs2": 27.685950413223143,
+                "uncertainty": 2.606032941221486,
+                "statistical_uncertainty": 1.9586776859504134,
+                "systematic_uncertainty": 1.71900826446281
+              },
+              {
+                "mass_range_gev": [
+                  0.76,
+                  0.8
+                ],
+                "abs2": 35.20661157024794,
+                "uncertainty": 3.1684273333873083,
+                "statistical_uncertainty": 2.2975206611570247,
+                "systematic_uncertainty": 2.181818181818182
+              },
+              {
+                "mass_range_gev": [
+                  0.8,
+                  0.84
+                ],
+                "abs2": 9.75206611570248,
+                "uncertainty": 1.4082120814376458,
+                "statistical_uncertainty": 1.2644628099173554,
+                "systematic_uncertainty": 0.6198347107438017
+              },
+              {
+                "mass_range_gev": [
+                  0.84,
+                  0.88
+                ],
+                "abs2": 6.909090909090909,
+                "uncertainty": 1.3598243738475408,
+                "statistical_uncertainty": 1.256198347107438,
+                "systematic_uncertainty": 0.5206611570247934
+              },
+              {
+                "mass_range_gev": [
+                  0.88,
+                  0.92
+                ],
+                "abs2": 3.710743801652893,
+                "uncertainty": 1.0626183907732516,
+                "statistical_uncertainty": 1.024793388429752,
+                "systematic_uncertainty": 0.2809917355371901
+              },
+              {
+                "mass_range_gev": [
+                  0.92,
+                  0.96
+                ],
+                "abs2": 2.5619834710743805,
+                "uncertainty": 1.030177803559292,
+                "statistical_uncertainty": 0.9669421487603306,
+                "systematic_uncertainty": 0.35537190082644626
+              },
+              {
+                "mass_range_gev": [
+                  0.96,
+                  1.02
+                ],
+                "abs2": 2.231404958677686,
+                "uncertainty": 0.7657906716436612,
+                "statistical_uncertainty": 0.6694214876033059,
+                "systematic_uncertainty": 0.37190082644628103
+              },
+              {
+                "mass_range_gev": [
+                  1.02,
+                  1.09
+                ],
+                "abs2": 0.35537190082644626,
+                "uncertainty": 0.3472058105388431,
+                "statistical_uncertainty": 0.21487603305785125,
+                "systematic_uncertainty": 0.27272727272727276
+              },
+              {
+                "mass_range_gev": [
+                  1.09,
+                  1.16
+                ],
+                "abs2": 1.5041322314049588,
+                "uncertainty": 0.640215881218655,
+                "statistical_uncertainty": 0.628099173553719,
+                "systematic_uncertainty": 0.12396694214876033
+              },
+              {
+                "mass_range_gev": [
+                  1.16,
+                  1.24
+                ],
+                "abs2": 1.3801652892561984,
+                "uncertainty": 0.8283036978754914,
+                "statistical_uncertainty": 0.8099173553719008,
+                "systematic_uncertainty": 0.17355371900826447
+              },
+              {
+                "mass_range_gev": [
+                  1.24,
+                  1.32
+                ],
+                "abs2": 1.8181818181818183,
+                "uncertainty": 1.0828654118452363,
+                "statistical_uncertainty": 1.0578512396694215,
+                "systematic_uncertainty": 0.23140495867768598
+              },
+              {
+                "mass_range_gev": [
+                  1.32,
+                  2.8
+                ],
+                "abs2": 2.239669421487603,
+                "uncertainty": 1.3306555082696683,
+                "statistical_uncertainty": 1.322314049586777,
+                "systematic_uncertainty": 0.1487603305785124
+              }
+            ],
+            "photon_normalization_used_by_measurement": 3.56e-05,
+            "bin_edge_note": "Bins are contiguous. For printed rounded1.050+/-.035 and1.120+/-.035 use[1.02,1.09] and[1.09,1.16]; retain original centers/halfwidths above. No pointwise precision is claimed in these two bins.",
+            "background_note": "The paper does not subtract its small two-photon background from TFF bins. Their summed branching fraction8.43e-7 exceeds the separately background-subtracted total8.06e-7. This remains a measured-shape benchmark with an explicit residual background limitation.",
+            "covariance_available": false,
+            "model_discrepancy_quantified": false,
+            "normalization_note": "The main article explicitly divides all TFF bins by the first bin central1.21 to impose its F(0)=1 shape convention. The common first-bin statistical/systematic error and unavailable covariance are not invented as independent errors. Raw inputs remain in the parent transition_form_factor.",
+            "first_bin_shape_divisor": 1.21
+          },
+          "note": "Separate scenario using the published first-bin shape normalization and updated photon rate. Do not silently replace the absolute published-bin current with this17percent smaller shape normalization."
+        }
+      ],
+      "normalization_error_note": "The historical photon branching error is already in the TFF systematic (4.78percent in supplementalTableI). It must not be counted as another independent error. The first-bin normalized scenario has a common normalization uncertainty and unavailable bin covariance, not independent normalized-bin errors.",
+      "qualification_scope": "Raw published empirical bin-average VP current and its original photon normalization through2.8GeV, inclusive rho-omega interference. The published first-bin-normalized shape plus current photon rate is a separate recorded scenario. Residual two-photon background and sub-bin resonance shape remain explicit limitations. Not a precision pointwise current near narrow poles."
+    },
+    {
+      "pdg_id": 443,
+      "name": "Jpsi",
+      "mass_gev": 3.0969,
+      "mass_uncertainty_gev": 6e-06,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 221,
+      "recoil_mass_gev": 0.547862,
+      "br_p_gamma": 0.001104,
+      "br_p_gamma_uncertainty": 3.4e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2018/listings/rpp2018-list-J-psi-1S.pdf",
+      "channel": "Jpsi->eta_Aprime",
+      "production_rate_validated": false,
+      "polarization_note": "Unpolarized native pp-production benchmark. The transverse e+e- collider parent spin state is not imported as a pp-production measurement.",
+      "ownership_note": "One direct Jpsi->P timelike electromagnetic current, inclusive of its virtual vector resonances. Natural Jpsi->PV followed by a separate V->P2 Aprime has an extra recoil and remains a different exclusive final state. Do not add an independent V->Aprime conversion source to this same current.",
+      "transition_form_factor": {
+        "kind": "measured-bin-abs2",
+        "reference": "https://arxiv.org/html/1810.03091v5",
+        "data_table": 1,
+        "valid_mass_range_gev": [
+          0.0010219979,
+          2.4
+        ],
+        "interpolation": "piecewise-constant-bin-average",
+        "bins": [
+          {
+            "mass_range_gev": [
+              0.0010219979,
+              0.1
+            ],
+            "abs2": 1.11,
+            "uncertainty": 0.09899494936611666,
+            "statistical_uncertainty": 0.07,
+            "systematic_uncertainty": 0.07,
+            "measured_dalitz_branching_fraction": 8.459999999999999e-06,
+            "pointlike_bin_branching_fraction": 7.593e-06
+          },
+          {
+            "mass_range_gev": [
+              0.1,
+              0.2
+            ],
+            "abs2": 1.13,
+            "uncertainty": 0.16552945357246848,
+            "statistical_uncertainty": 0.15,
+            "systematic_uncertainty": 0.07,
+            "measured_dalitz_branching_fraction": 1.33e-06,
+            "pointlike_bin_branching_fraction": 1.1759999999999998e-06
+          },
+          {
+            "mass_range_gev": [
+              0.2,
+              0.3
+            ],
+            "abs2": 1.1,
+            "uncertainty": 0.19313207915827965,
+            "statistical_uncertainty": 0.18,
+            "systematic_uncertainty": 0.07,
+            "measured_dalitz_branching_fraction": 7.4e-07,
+            "pointlike_bin_branching_fraction": 6.79e-07
+          },
+          {
+            "mass_range_gev": [
+              0.3,
+              0.4
+            ],
+            "abs2": 1.23,
+            "uncertainty": 0.2340939982143925,
+            "statistical_uncertainty": 0.22,
+            "systematic_uncertainty": 0.08,
+            "measured_dalitz_branching_fraction": 5.8e-07,
+            "pointlike_bin_branching_fraction": 4.7199999999999994e-07
+          },
+          {
+            "mass_range_gev": [
+              0.4,
+              0.5
+            ],
+            "abs2": 1.03,
+            "uncertainty": 0.23769728648009425,
+            "statistical_uncertainty": 0.23,
+            "systematic_uncertainty": 0.06,
+            "measured_dalitz_branching_fraction": 3.7e-07,
+            "pointlike_bin_branching_fraction": 3.56e-07
+          },
+          {
+            "mass_range_gev": [
+              0.5,
+              0.6
+            ],
+            "abs2": 1.99,
+            "uncertainty": 0.37947331922020555,
+            "statistical_uncertainty": 0.36,
+            "systematic_uncertainty": 0.12,
+            "measured_dalitz_branching_fraction": 5.599999999999999e-07,
+            "pointlike_bin_branching_fraction": 2.7999999999999997e-07
+          },
+          {
+            "mass_range_gev": [
+              0.6,
+              0.7
+            ],
+            "abs2": 1.4,
+            "uncertainty": 0.3640054944640259,
+            "statistical_uncertainty": 0.35,
+            "systematic_uncertainty": 0.1,
+            "measured_dalitz_branching_fraction": 3.2e-07,
+            "pointlike_bin_branching_fraction": 2.2699999999999998e-07
+          },
+          {
+            "mass_range_gev": [
+              0.7,
+              0.8
+            ],
+            "abs2": 2.79,
+            "uncertainty": 0.5597320787662612,
+            "statistical_uncertainty": 0.53,
+            "systematic_uncertainty": 0.18,
+            "measured_dalitz_branching_fraction": 5.2e-07,
+            "pointlike_bin_branching_fraction": 1.87e-07
+          },
+          {
+            "mass_range_gev": [
+              0.8,
+              0.9
+            ],
+            "abs2": 2.08,
+            "uncertainty": 0.5069516742254631,
+            "statistical_uncertainty": 0.49,
+            "systematic_uncertainty": 0.13,
+            "measured_dalitz_branching_fraction": 3.2e-07,
+            "pointlike_bin_branching_fraction": 1.55e-07
+          },
+          {
+            "mass_range_gev": [
+              0.9,
+              1
+            ],
+            "abs2": 1.92,
+            "uncertainty": 0.5336665625650534,
+            "statistical_uncertainty": 0.52,
+            "systematic_uncertainty": 0.12,
+            "measured_dalitz_branching_fraction": 2.5e-07,
+            "pointlike_bin_branching_fraction": 1.3e-07
+          },
+          {
+            "mass_range_gev": [
+              1,
+              1.1
+            ],
+            "abs2": 3.14,
+            "uncertainty": 0.7569015788066504,
+            "statistical_uncertainty": 0.73,
+            "systematic_uncertainty": 0.2,
+            "measured_dalitz_branching_fraction": 3.4e-07,
+            "pointlike_bin_branching_fraction": 1.08e-07
+          },
+          {
+            "mass_range_gev": [
+              1.1,
+              1.22
+            ],
+            "abs2": 2.3,
+            "uncertainty": 0.6768308503607087,
+            "statistical_uncertainty": 0.66,
+            "systematic_uncertainty": 0.15,
+            "measured_dalitz_branching_fraction": 2.5e-07,
+            "pointlike_bin_branching_fraction": 1.07e-07
+          },
+          {
+            "mass_range_gev": [
+              1.22,
+              1.34
+            ],
+            "abs2": 3.39,
+            "uncertainty": 0.8658521813797087,
+            "statistical_uncertainty": 0.84,
+            "systematic_uncertainty": 0.21,
+            "measured_dalitz_branching_fraction": 2.9e-07,
+            "pointlike_bin_branching_fraction": 8.5e-08
+          },
+          {
+            "mass_range_gev": [
+              1.34,
+              1.48
+            ],
+            "abs2": 2.1,
+            "uncertainty": 0.7021395872616782,
+            "statistical_uncertainty": 0.69,
+            "systematic_uncertainty": 0.13,
+            "measured_dalitz_branching_fraction": 1.6e-07,
+            "pointlike_bin_branching_fraction": 7.7e-08
+          },
+          {
+            "mass_range_gev": [
+              1.48,
+              1.62
+            ],
+            "abs2": 3.65,
+            "uncertainty": 1.094440496326776,
+            "statistical_uncertainty": 1.07,
+            "systematic_uncertainty": 0.23,
+            "measured_dalitz_branching_fraction": 2.1e-07,
+            "pointlike_bin_branching_fraction": 5.6999999999999994e-08
+          },
+          {
+            "mass_range_gev": [
+              1.62,
+              1.76
+            ],
+            "abs2": 2.63,
+            "uncertainty": 1.1552056094046632,
+            "statistical_uncertainty": 1.13,
+            "systematic_uncertainty": 0.24,
+            "measured_dalitz_branching_fraction": 1.1e-07,
+            "pointlike_bin_branching_fraction": 4.2e-08
+          },
+          {
+            "mass_range_gev": [
+              1.76,
+              1.9
+            ],
+            "abs2": 5.22,
+            "uncertainty": 1.8416568627190026,
+            "statistical_uncertainty": 1.81,
+            "systematic_uncertainty": 0.34,
+            "measured_dalitz_branching_fraction": 1.5e-07,
+            "pointlike_bin_branching_fraction": 2.8999999999999998e-08
+          },
+          {
+            "mass_range_gev": [
+              1.9,
+              2.06
+            ],
+            "abs2": 9.15,
+            "uncertainty": 3.329159052974189,
+            "statistical_uncertainty": 3.28,
+            "systematic_uncertainty": 0.57,
+            "measured_dalitz_branching_fraction": 1.8999999999999998e-07,
+            "pointlike_bin_branching_fraction": 2.1e-08
+          },
+          {
+            "mass_range_gev": [
+              2.06,
+              2.23
+            ],
+            "abs2": 13.54,
+            "uncertainty": 5.124392646938756,
+            "statistical_uncertainty": 5.05,
+            "systematic_uncertainty": 0.87,
+            "measured_dalitz_branching_fraction": 1.6e-07,
+            "pointlike_bin_branching_fraction": 1.1999999999999998e-08
+          },
+          {
+            "mass_range_gev": [
+              2.23,
+              2.4
+            ],
+            "abs2": 26.74,
+            "uncertainty": 12.621545071820645,
+            "statistical_uncertainty": 12.47,
+            "systematic_uncertainty": 1.95,
+            "measured_dalitz_branching_fraction": 1.2e-07,
+            "pointlike_bin_branching_fraction": 4e-09
+          }
+        ],
+        "photon_normalization_used_by_measurement": 0.001104,
+        "normalization_note": "Corrected2021 Table1, not the erroneous2019 TFF table. Raw measured bin averages and their original PDG2018 photon rate are retained together. The historical input authority is deliberate; multiplying updated2025 photon BR by this old absolute TFF is a different normalization scenario.",
+        "resonance_note": "Original2019 SecIIIB explicitly treats rho/omega/phi->ee as signal in the TFF measurement, including the omega/phi vicinities. Coarse bins do not determine narrow-pole pointwise rates.",
+        "covariance_available": false,
+        "model_discrepancy_quantified": false
+      },
+      "qualification_scope": "Finite empirical bin-average VP-current benchmark through2.4GeV. No sub-bin or endpoint extrapolation, no measured pp spin alignment, and no claim that old photon normalization and current photon BR form a combined fit.",
+      "normalization_error_note": "The photon branching uncertainty is already a common component of the measured TFF systematic. It must not be multiplied as an independent error to form a joint confidence interval; the generic parameter-box envelope is conservative bookkeeping only, with no inferred covariance."
+    },
+    {
+      "pdg_id": 443,
+      "name": "Jpsi",
+      "mass_gev": 3.0969,
+      "mass_uncertainty_gev": 6e-06,
+      "decay_type": "vector-pseudoscalar",
+      "parent_mass_model": "zero-width-pole",
+      "parent_polarization": "unpolarized",
+      "recoil_pdg_id": 331,
+      "recoil_mass_gev": 0.95778,
+      "br_p_gamma": 0.00528,
+      "br_p_gamma_uncertainty": 6e-05,
+      "pdg_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-J-psi-1S.pdf",
+      "channel": "Jpsi->eta_prime_Aprime",
+      "production_rate_validated": false,
+      "polarization_note": "Unpolarized native pp-production benchmark. The transverse e+e- collider parent spin state is not imported as a pp-production measurement.",
+      "ownership_note": "One direct Jpsi->P timelike electromagnetic current, inclusive of its virtual vector resonances. Natural Jpsi->PV followed by a separate V->P2 Aprime has an extra recoil and remains a different exclusive final state. Do not add an independent V->Aprime conversion source to this same current.",
+      "transition_form_factor": {
+        "kind": "photon-matched-resonance-continuum",
+        "reference": "https://arxiv.org/abs/1403.7042",
+        "valid_mass_range_gev": [
+          0.0010219979,
+          2.0
+        ],
+        "parent_mass_gev": 3.0969,
+        "recoil_mass_gev": 0.95778,
+        "photon_branching_fraction": 0.00528,
+        "alpha_em": 0.0072973525692838015,
+        "electron_mass_gev": 0.00051099895,
+        "continuum_pole_mass_gev": 3.1,
+        "continuum_pole_mass_uncertainty_gev": 1.0,
+        "continuum_reference_note": "BESIII2014 background-subtracted eta-prime TFF fitLambda=3.1+/-1.0GeV. Its subtractedrho/omega/phi->ee backgrounds are restored only as the explicit poles below. The2024 shared-eta rho benchmark is not added.",
+        "phase_prescription": "independent-uniform-phase-average",
+        "propagator_width": "constant-finite-width",
+        "phase_envelope_note": "Exact pointwise polygon-inequality range over all relative phases at central measured inputs. It is a conditional model range, not a confidence interval or a simultaneous mass-shape error. Central independent-phase average is an explicit unmeasured phase assumption.",
+        "current_formula": "F(s)=f(s)+sum aV*exp(i*phiV)*(BV(s)-BV(0)*f(s)); f(s)=1/(1-s/Lambda^2); BV(s)=mV^2/(mV^2-s-i*mV*GammaV)",
+        "residue_formula": "abs(aV)^2=BR(Jpsi->PV)/BR(Jpsi->Pgamma)*(k_gamma/k_V)^3*3*Gamma(V->ee)/(alpha*mV*beta_e*(1+2*me^2/mV^2))",
+        "model_discrepancy_quantified": false,
+        "covariance_available": false,
+        "missing_uncertainties": [
+          "unknown energy dependence of relative phases",
+          "constant-width versus dispersive line shape",
+          "unmeasured residual heavy-current and excited-vector contributions",
+          "joint covariance of continuum and on-shell residues"
+        ],
+        "resonances": [
+          {
+            "pdg_id": 113,
+            "mass_gev": 0.77526,
+            "width_gev": 0.1474,
+            "electron_width_gev": 7.04e-06,
+            "electron_width_uncertainty_gev": 6e-08,
+            "parent_branching_fraction": 8.1e-05,
+            "parent_branching_uncertainty": 8e-06,
+            "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-J-psi-1S.pdf",
+            "vector_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-rho-770.pdf"
+          },
+          {
+            "pdg_id": 223,
+            "mass_gev": 0.78266,
+            "width_gev": 0.00868,
+            "electron_width_gev": 6e-07,
+            "electron_width_uncertainty_gev": 2e-08,
+            "parent_branching_fraction": 0.000189,
+            "parent_branching_uncertainty": 1.8e-05,
+            "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-J-psi-1S.pdf",
+            "vector_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-omega-782.pdf"
+          },
+          {
+            "pdg_id": 333,
+            "mass_gev": 1.01946,
+            "width_gev": 0.004249,
+            "electron_width_gev": 1.251e-06,
+            "electron_width_uncertainty_gev": 2.1e-08,
+            "parent_branching_fraction": 0.00046,
+            "parent_branching_uncertainty": 5e-05,
+            "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-J-psi-1S.pdf",
+            "vector_reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-phi-1020.pdf"
+          }
+        ]
+      },
+      "qualification_scope": "Derived finite three-pole VP-current family with measured on-shell residues and measured continuum pole. Photon matching exact for every unknown phase; benchmark phase average and pointwise phase envelope are explicit. Only2me..2GeV is admitted, safely belowLambda minus its reported1GeV error. This is not a fitted coherent eta-prime amplitude or a global physical uncertainty bound.",
+      "absolute_dalitz_rate_check": {
+        "passed": false,
+        "predicted_inclusive_branching_below_2GeV": 5.734402483354039e-05,
+        "phase_only_integrated_pointwise_bounds": [
+          5.614320713936647e-05,
+          5.859717190630154e-05
+        ],
+        "measured_2019_nonresonant_branching": 6.59e-05,
+        "measured_2019_statistical_uncertainty": 7e-07,
+        "measured_2019_systematic_uncertainty": 1.7e-06,
+        "continuum_pole_minus_reported_error_branching_below_2GeV": 6.30346707703218e-05,
+        "note": "Central-input current underpredicts the newer nonresonant measurement. Known pole phases cannot fix the deficit. The large older continuum-pole uncertainty partly covers it within the restricted domain, but its lower pole2.1GeV lies inside the complete physical endpoint2.13912GeV. No unrestricted zero-width extrapolation, rate rescaling or claimed absolute-rate qualification is made."
+      }
+    }
+  ],
+  "measured_dalitz_checks": {
+    "pi0_total": {
+      "value": 8.06e-07,
+      "stat": 3.1e-08,
+      "syst": 3.8e-08,
+      "reference": "https://doi.org/10.1103/yglh-sfbg"
+    },
+    "pi0_below_0p3": {
+      "value": 4.41e-07,
+      "stat": 1.8e-08,
+      "syst": 2.1e-08,
+      "reference": "https://journals.aps.org/prd/supplemental/10.1103/yglh-sfbg/paper_supplemental.pdf"
+    },
+    "eta_nonresonant_total": {
+      "value": 1.42e-05,
+      "stat": 4e-07,
+      "syst": 7e-07,
+      "excluded_mass_ranges_gev": [
+        [
+          0.65,
+          0.9
+        ],
+        [
+          0.96,
+          1.08
+        ]
+      ],
+      "reference": "https://arxiv.org/html/1810.03091v5"
+    },
+    "eta_prime_nonresonant_total": {
+      "value": 6.59e-05,
+      "stat": 7e-07,
+      "syst": 1.7e-06,
+      "reference": "https://arxiv.org/abs/1809.00635"
+    }
+  },
+  "transcribed_source_sha256": {
+    "pi0-supplement.pdf": "5cd749b7973e214fac3bd277714b353b1bb22dcead321ff3569e4ba0811b6449",
+    "eta-erratum.html": "c7620f4ed3036992e92c72d2d8c8c46515715cafaab6f0a238460eb92eb4b24e",
+    "etaprime-old.pdf": "5ab26e92da280e1ed5ad1efc516eb4cf2a38867f90ad3bc9cf464661c8772139",
+    "pdg-jpsi.pdf": "a0591e205610f433e90dd5a2d3e5909939e778263d393beccdee5fade1ce5277"
+  }
+}

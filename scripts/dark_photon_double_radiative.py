@@ -33,6 +33,8 @@ import bisect
 import functools
 import json
 import math
+from array import array
+import numpy as np
 
 from dark_photon_dipion_meson import _gauss_legendre
 from dark_photon_meson import MUON_MASS_GEV, boost
@@ -237,11 +239,20 @@ class LocalVMDCurrent:
         s = tuple(x-y for x,y in zip(parent,dark))
         ct,et = self._coefficients(_dot(r,r))
         cu,eu = self._coefficients(_dot(s,s))
+        product=_dot(photon,dark)
+        scalar_coefficient=0j
+        if self.scalar is not None:
+            if product<=0:
+                raise ValueError('An open future-directed real-photon current is required')
+            virtuality=max(0.,_dot(dark,dark))
+            scalar_coefficient=-self.scalar['alpha_em']/(2*math.pi)*self.scalar_reduced(
+                virtuality+2*product,virtuality)
         result = 0.
         for first in polarizations(photon,0.):
             for second in polarizations(dark,mass):
                 a,b = self._kinematic_terms(parent,photon,dark,first,second)
-                scalar=self.scalar_amplitude(photon,dark,first,second)
+                scalar=(scalar_coefficient*(_dot(first,second)-_dot(first,dark)*_dot(second,photon)/product)
+                        if self.scalar is not None else 0j)
                 result += (et*abs(a)+eu*abs(b)+abs(scalar))**2 if envelope else abs(ct*a+cu*b+scalar)**2
         return result
 
@@ -275,9 +286,32 @@ class LocalVMDCurrent:
             return 0.
         if not self.domain[0] <= mass <= self.domain[1]:
             raise ValueError('Virtual-current mass lies outside the explicit local-VMD domain')
+        terms=[]
+        for dark,value in self.quadrature(parent_mass,recoil_mass,mass,order,envelope=envelope):
+            factor=1. if moment is None else moment(dark)
+            if not math.isfinite(factor) or factor < 0:
+                raise ValueError('A rate moment must be finite and nonnegative')
+            terms.append(value*factor)
+        return math.fsum(terms)*epsilon_em**2/(2 if photon_reference else 1)
+
+    def quadrature(self,parent_mass,recoil_mass,mass,order,*,envelope=False):
+        """Positive rest-frame Dalitz nodes, independent of the parent boost."""
         parent = (parent_mass,0.,0.,0.)
-        result = 0.
-        for low,high in self._panels((recoil_mass+mass)**2,parent_mass**2):
+        scalar_cuts=[];outer_cuts=[]
+        if self.scalar is not None:
+            from dark_photon_scalar_meson import scalar_thresholds
+            scalar_cuts=scalar_thresholds(self.scalar)
+            # A fixed gamma/A' loop threshold enters/leaves the physical
+            # Dalitz boundary at these two t values. Splitting only the
+            # inner cosine integral leaves a cusp in the outer integral.
+            for cut in scalar_cuts:
+                if mass*mass<cut<(parent_mass-recoil_mass)**2:
+                    pair=math.sqrt(cut)
+                    energy=(parent_mass**2+cut-recoil_mass**2)/(2*parent_mass)
+                    momentum=two_body_momentum(parent_mass,recoil_mass,pair)
+                    outer_cuts.extend(parent_mass**2-(cut-mass*mass)/pair*(energy+sign*momentum)
+                                      for sign in (-1.,1.))
+        for low,high in self._panels((recoil_mass+mass)**2,parent_mass**2,additional=outer_cuts):
             for node,weight in _gauss_legendre(order):
                 invariant = (low+high)/2+(high-low)/2*node
                 pair_mass = math.sqrt(invariant)
@@ -289,27 +323,16 @@ class LocalVMDCurrent:
                 a = parent_mass**2+mass**2-2*parent_mass*gamma*dark_energy
                 b = 2*parent_mass*outer/pair_mass*inner
                 photon = (outer,0.,0.,outer)
-                angular = 0.
-                scalar_cuts=[]
-                if self.scalar is not None:
-                    from dark_photon_scalar_meson import scalar_thresholds
-                    scalar_cuts=[(parent_mass**2+recoil_mass**2+mass**2-invariant-cut-a)/b
-                                 for cut in scalar_thresholds(self.scalar)]
-                for first,last in self._panels(-1.,1.,lambda value:(value-a)/b,additional=scalar_cuts):
+                density = outer*inner/(128*math.pi**3*parent_mass**2*pair_mass)
+                cosine_cuts=[(parent_mass**2+recoil_mass**2+mass**2-invariant-cut-a)/b
+                             for cut in scalar_cuts]
+                for first,last in self._panels(-1.,1.,lambda value:(value-a)/b,additional=cosine_cuts):
                     for cosine_node,cosine_weight in _gauss_legendre(order):
                         cosine = (first+last)/2+(last-first)/2*cosine_node
                         dark = boost((dark_energy,inner*math.sqrt(1-cosine*cosine),0.,inner*cosine),
                                      (0.,0.,-outer/pair_energy))
                         value = self.spin_sum(parent,photon,dark,mass,envelope=envelope)
-                        if moment is not None:
-                            factor = moment(dark)
-                            if not math.isfinite(factor) or factor < 0:
-                                raise ValueError('A rate moment must be finite and nonnegative')
-                            value *= factor
-                        angular += (last-first)/2*cosine_weight*value
-                density = outer*inner/(128*math.pi**3*parent_mass**2*pair_mass)
-                result += (high-low)/2*weight*density*angular
-        return result*epsilon_em**2/(2 if photon_reference else 1)
+                        yield dark,value*(last-first)/2*cosine_weight*(high-low)/2*weight*density
 
 
 def _isotropic(rng):
@@ -660,22 +683,37 @@ def _source_inputs(model):
 
 
 @functools.lru_cache(maxsize=64)
-def _sampler(parent_mass,recoil_mass,mass,key):
+def _current(key):
     domain,reference,vectors,scalar,kind = key
     scalar=json.loads(scalar)
-    current = LocalVMDCurrent(dict(kind=kind,reference=reference,
+    return LocalVMDCurrent(dict(kind=kind,reference=reference,
         virtual_vertex_prescription='constant-local-couplings',omitted_scalar_and_chiral_terms=scalar is None,
         scalar_current=scalar,valid_mass_range_gev=domain,vectors=[dict(row) for row in vectors]))
-    sampler=CoherentScalarSampler if scalar is not None else LocalVMDSampler
+
+
+@functools.lru_cache(maxsize=64)
+def _sampler(parent_mass,recoil_mass,mass,key):
+    current=_current(key)
+    sampler=CoherentScalarSampler if current.scalar is not None else LocalVMDSampler
     return sampler(current,parent_mass,recoil_mass,mass)
+
+
+@functools.lru_cache(maxsize=64)
+def _rate_nodes(parent_mass,recoil_mass,mass,key,order):
+    # Keep only the rest energy needed by the analytic isotropic angular
+    # mean. Re-evaluating the coherent amplitude for every laboratory boost
+    # wastes almost all source-generation time.
+    energies,weights=array('d'),array('d')
+    for dark,weight in _current(key).quadrature(parent_mass,recoil_mass,mass,order):
+        energies.append(dark[0]);weights.append(weight)
+    return energies,weights
 
 
 @functools.lru_cache(maxsize=128)
 def _unit_width(parent_mass,recoil_mass,mass,key):
-    current = _sampler(parent_mass,recoil_mass,mass,key).current
-    previous = current.integrated_width(parent_mass,recoil_mass,mass,1.,order=16)
+    previous=math.fsum(_rate_nodes(parent_mass,recoil_mass,mass,key,16)[1])
     for order in (24,40,64,80):
-        value = current.integrated_width(parent_mass,recoil_mass,mass,1.,order=order)
+        value=math.fsum(_rate_nodes(parent_mass,recoil_mass,mass,key,order)[1])
         if abs(value-previous) <= 2.e-5*max(value,previous):
             return value
         previous = value
@@ -689,7 +727,9 @@ def branching_coefficient(parent_mass,mass,model):
         raise ValueError('Finite physical parent and dark masses required')
     if mass >= parent_mass-recoil:
         return 0.
-    return _unit_width(parent_mass,recoil,mass,key)/width
+    table=_mass_table_for(parent_mass,recoil,mass,key,model)
+    value=table.width(parent_mass) if table is not None else _unit_width(parent_mass,recoil,mass,key)
+    return value/width
 
 
 def sample_decay(parent,mass,proper_ctau_mm,rng,*,model):
@@ -709,6 +749,10 @@ def _angular_mean_lab_boost(parent,energy,mass):
     parent_mass = math.sqrt(_dot(parent,parent))
     gamma = parent[0]/parent_mass
     beta_gamma = math.sqrt(sum(x*x for x in parent[1:]))/parent_mass
+    return _angular_mean_boost(gamma,beta_gamma,energy,mass)
+
+
+def _angular_mean_boost(gamma,beta_gamma,energy,mass):
     momentum = math.sqrt(max(0.,(energy-mass)*(energy+mass)))
     center,half_range = gamma*energy,beta_gamma*momentum
     radial = math.sqrt(max(0.,(center-mass)*(center+mass)))
@@ -722,20 +766,141 @@ def _angular_mean_lab_boost(parent,energy,mass):
     return (primitive(center+half_range)-primitive(center-half_range))/(2*half_range*mass)
 
 
+def _mean_at_mass(parent_mass,recoil,mass,key,gamma,beta_gamma):
+    denominator = _unit_width(parent_mass,recoil,mass,key)
+    previous = None
+    for order in (24,40,64,80):
+        energies,weights=_rate_nodes(parent_mass,recoil,mass,key,order)
+        # The arrays expose the same binary64 nodes without copying. This
+        # evaluates only the analytic angular integral, never the amplitude
+        # or decay proposal, for the changing laboratory boost.
+        energies=np.frombuffer(energies,dtype=np.float64)
+        weights=np.frombuffer(weights,dtype=np.float64)
+        momentum=np.sqrt(np.maximum(0.,(energies-mass)*(energies+mass)))
+        center,half_range=gamma*energies,beta_gamma*momentum
+        radial=np.sqrt(np.maximum(0.,(center-mass)*(center+mass)))
+        if beta_gamma==0:
+            means=radial/mass
+        else:
+            small=half_range<1.e-3*radial*radial/center
+            means=np.empty_like(energies)
+            means[small]=(radial[small]-mass*mass*half_range[small]**2/(6*radial[small]**3))/mass
+            def primitive(values):
+                values=np.maximum(values,mass)
+                return .5*(values*np.sqrt((values-mass)*(values+mass))-mass*mass*np.arccosh(values/mass))
+            means[~small]=(primitive(center[~small]+half_range[~small])-
+                primitive(center[~small]-half_range[~small]))/(2*half_range[~small]*mass)
+        numerator=float(np.dot(weights,means))
+        if previous is not None and abs(numerator-previous) <= 2.e-5*max(numerator,previous):
+            return numerator/denominator
+        previous = numerator
+    raise ValueError('Double-radiative mean boost failed its numerical convergence budget')
+
+
+class PoleMassTable:
+    """Accuracy-checked local quadratic evaluation, never altered kinematics.
+
+    Native zero-width parents have a fixed mass, but evaluating E²-p² after
+    boosting introduces a small continuum of binary64 invariant masses. A
+    fresh two-dimensional amplitude integral for every such value makes the
+    inclusive source unusable. Use a very small mass interval and compare a
+    quadratic interpolant with four independent interior integrals. The
+    numerical interpolation budget (5e-8) is separate from and smaller than
+    the existing 2e-5 quadrature and 1e-3 native-mass budgets.
+
+    The mean check spans parent beta*gamma from zero to1e5. No extrapolation
+    is allowed. Exact evaluation remains the fallback outside the interval,
+    beyond that boost range, or when the interpolation checks do not pass.
+    Actual decays always retain their actual invariant mass and sampler.
+    This is a numerical convergence check, not a physical uncertainty bound.
+    """
+    tolerance=5.e-8
+    maximum_beta_gamma=1.e5
+
+    def __init__(self,parent_mass,recoil,mass,key):
+        self.center=parent_mass
+        self.radius=min(1.e-7*parent_mass,1.e-4*(parent_mass-recoil-mass))
+        self.masses=tuple(parent_mass+offset*self.radius for offset in (-1.,0.,1.))
+        self.recoil,self.mass,self.key=recoil,mass,key
+        self.widths=tuple(_unit_width(value,recoil,mass,key) for value in self.masses)
+        self.width_error=0.;self.mean_error=0.
+        controls=(-.75,-.5,.5,.75)
+        boosts=(0.,.001,.1,1.,10.,100.,1000.,self.maximum_beta_gamma)
+        for offset in controls:
+            value=parent_mass+offset*self.radius
+            exact=_unit_width(value,recoil,mass,key)
+            self.width_error=max(self.width_error,abs(self.width(value)/exact-1))
+        for beta_gamma in boosts:
+            gamma=math.hypot(1.,beta_gamma)
+            means=self.means(gamma,beta_gamma)
+            for offset in controls:
+                value=parent_mass+offset*self.radius
+                exact=_mean_at_mass(value,recoil,mass,key,gamma,beta_gamma)
+                self.mean_error=max(self.mean_error,abs(self.interpolate(value,means)/exact-1))
+        self.valid=max(self.width_error,self.mean_error)<=self.tolerance
+
+    def interpolate(self,parent_mass,values):
+        x=(parent_mass-self.center)/self.radius
+        return values[1]+x*(values[2]-values[0])/2+x*x*(values[2]+values[0]-2*values[1])/2
+
+    def width(self,parent_mass):
+        return self.interpolate(parent_mass,self.widths)
+
+    def means(self,gamma,beta_gamma):
+        return tuple(_mean_at_mass(value,self.recoil,self.mass,self.key,gamma,beta_gamma)
+                     for value in self.masses)
+
+
+@functools.lru_cache(maxsize=12)
+def _pole_mass_table(parent_mass,recoil,mass,key):
+    try:
+        return PoleMassTable(parent_mass,recoil,mass,key)
+    except ValueError as error:
+        # A neighbouring control can be harder to integrate than the exact
+        # requested point. Do not make optional acceleration a new source
+        # validity requirement. All other model/physics errors still raise.
+        if str(error) not in ('Double-radiative production width failed its numerical convergence budget',
+                              'Double-radiative mean boost failed its numerical convergence budget'):
+            raise
+        return None
+
+
+def _mass_table_for(parent_mass,recoil,mass,key,model):
+    if mass<=0:
+        return None
+    scalar=model.get('double_radiative_model',{}).get('scalar_current') or {}
+    pole=model.get('mass_gev',scalar.get('parent_mass_gev'))
+    if type(pole) not in (int,float) or not math.isfinite(pole) or pole<=recoil+mass:
+        return None
+    # Model resolution asks for the exact pole repeatedly. It needs only
+    # that one integral; defer the interpolation setup until native p4
+    # roundoff actually requests a neighbouring invariant mass.
+    if parent_mass==pole:
+        return None
+    radius=min(1.e-7*pole,1.e-4*(pole-recoil-mass))
+    if radius<=32*math.ulp(pole) or abs(parent_mass-pole)>radius:
+        return None
+    table=_pole_mass_table(pole,recoil,mass,key)
+    return table if table is not None and table.valid else None
+
+
 def mean_lab_beta_gamma(parent,mass,model):
     """Coherent Dalitz and isotropic-parent angular mean of |p_A'|/m_A'."""
     recoil,_,key = _source_inputs(model)
     if (len(parent) != 4 or not all(math.isfinite(x) for x in parent) or parent[0] <= 0
             or _dot(parent,parent) <= 0 or not math.isfinite(mass) or mass <= 0):
         raise ValueError('Finite timelike parent and positive dark mass required')
-    parent_mass = math.sqrt(_dot(parent,parent))
-    sampler = _sampler(parent_mass,recoil,mass,key)
-    denominator = _unit_width(parent_mass,recoil,mass,key)
-    moment = lambda dark: _angular_mean_lab_boost(parent,dark[0],mass)
-    previous = None
-    for order in (24,40,64,80):
-        numerator = sampler.current.integrated_width(parent_mass,recoil,mass,1.,order=order,moment=moment)
-        if previous is not None and abs(numerator-previous) <= 2.e-5*max(numerator,previous):
-            return numerator/denominator
-        previous = numerator
-    raise ValueError('Double-radiative mean boost failed its numerical convergence budget')
+    parent_mass=math.sqrt(_dot(parent,parent))
+    if mass>=parent_mass-recoil or not _current(key).domain[0]<=mass<=_current(key).domain[1]:
+        raise ValueError('An open decay inside the declared current mass domain is required')
+    gamma=parent[0]/parent_mass
+    beta_gamma=math.sqrt(sum(x*x for x in parent[1:]))/parent_mass
+    table=_mass_table_for(parent_mass,recoil,mass,key,model)
+    if table is not None and beta_gamma<=table.maximum_beta_gamma:
+        means=table.means(gamma,beta_gamma)
+        value=table.interpolate(parent_mass,means)
+        x=(parent_mass-table.center)/table.radius
+        linear=means[1]+x*(means[2]-means[0])/2
+        if value>0 and abs(value-linear)<=table.tolerance*value:
+            return value
+    return _mean_at_mass(parent_mass,recoil,mass,key,gamma,beta_gamma)

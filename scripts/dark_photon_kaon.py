@@ -139,6 +139,119 @@ def _real(value, name, *, positive=False):
     return value
 
 
+def native_source_mass_precision(parent_mass, native_context, *, expected_p4=None,
+                                 expected_pdg_id=None):
+    """Propagate the checked source-frame boost arithmetic into a mass bound.
+
+    A low laboratory energy can be the difference of two large boosted
+    components. Its rounding scale is therefore not E_lab alone. The raw
+    source beam vector and independently certified COM intervals bound each
+    intermediate component by gamma_source*(1+beta_source)*E_COM. Use the
+    existing64-operation binary64 budget for Lorentz-coefficient construction
+    and the four-term matrix products (Pythia8.317 Basics.cc, Vec4::rotbst),
+    then propagate component errors through the invariant mass explicitly.
+
+    This validates an immutable native record, not arbitrary off-shell
+    inputs. The original finite source-table support, COM/count authority,
+    p4 and physical current/precision gates remain required. The bound says
+    nothing about physical parent-width or hadronic-model uncertainties.
+    """
+    _real(parent_mass,'requested native mass',positive=True)
+    if not isinstance(native_context,dict):
+        raise ValueError('Require a complete checked native source context')
+    record=native_context.get('native_source_record');authority=native_context.get('authority')
+    if not isinstance(record,dict) or not isinstance(authority,dict):
+        raise ValueError('Require the native source record and independent COM authority')
+    pdg=record.get('pdg_id');index=record.get('index')
+    if (type(pdg) is not int or pdg not in (130,310,321,-321)
+            or expected_pdg_id is not None and pdg!=expected_pdg_id
+            or type(index) is not int or index<=0 or record.get('native_final') is not True
+            or record.get('native_end_vertex_present') is not False
+            or type(record.get('native_status')) is not int or record['native_status']<=0
+            or record.get('daughter_indices')!=[]):
+        raise ValueError('Require the original physical final-kaon record')
+    def vector(name):
+        value=record.get(name)
+        if (not isinstance(value,(list,tuple)) or len(value)!=4
+                or any(type(x) not in (int,float) or not math.isfinite(x) for x in value)):
+            raise ValueError('Require the complete finite native '+name)
+        return list(value)
+    p=vector('p4');q=vector('source_total_p4')
+    vector('production_position_mm');vector('stored_decay_position_mm')
+    _real(record.get('selected_proper_lifetime_mm'),'stored native proper flight')
+    _real(record.get('mean_proper_lifetime_mm'),'native mean lifetime',positive=True)
+    if record['selected_proper_lifetime_mm']<0 or p[0]<=0 or q[0]<=0:
+        raise ValueError('Require physical native flight and future-directed source momenta')
+    mothers=record.get('mother_indices')
+    if (not isinstance(mothers,list) or any(type(x) is not int or x<=0 for x in mothers)
+            or index in mothers):
+        raise ValueError('Invalid immutable native kaon ancestry')
+    if expected_p4 is not None and tuple(expected_p4)!=tuple(p):
+        raise ValueError('Requested momentum differs from the immutable native source record')
+    native=_real(record.get('native_mass_gev'),'native table mass',positive=True)
+    support=native_context.get('native_record_mass_support_gev')
+    if (not isinstance(support,list) or not support
+            or any(type(x) not in (int,float) or not math.isfinite(x) or x<=0 for x in support)
+            or support!=sorted(set(support)) or native not in support):
+        raise ValueError('Native mass is outside its exact finite source-table support')
+    source_ecm=_real(native_context.get('source_ecm_gev'),'declared source ECM',positive=True)
+    if authority.get('source_total_p4')!=q or authority.get('stable_native_mass_floor_gev')!=native:
+        raise ValueError('Native record differs from its independent source authority')
+    unit=2.**-53
+    gamma32=32*unit/(1-32*unit)
+    qterms=[x*x for x in q];q2=math.fsum([qterms[0]]+[-x for x in qterms[1:]])
+    dq=gamma32*math.fsum(qterms)
+    products=[a*b for a,b in zip(p,q)]
+    numerator=math.fsum([products[0]]+[-x for x in products[1:]])
+    dn=gamma32*math.fsum(abs(x) for x in products)
+    if q2<=dq or numerator<=dn:
+        raise ValueError('Native source frame has no certified timelike COM interval')
+    ecm_low,ecm_high=math.sqrt(q2-dq),math.sqrt(q2+dq)
+    low,high=(numerator-dn)/ecm_high,(numerator+dn)/ecm_low
+    com_energy=_real(record.get('source_com_energy_gev'),'native COM energy',positive=True)
+    arithmetic=max(com_energy-low,high-com_energy)
+    if (not low<=com_energy<=high or not ecm_low<=source_ecm<=ecm_high
+            or authority.get('source_com_energy_gev')!=com_energy
+            or authority.get('independent_com_energy_interval_gev')!=[low,high]
+            or authority.get('independent_source_ecm_interval_gev')!=[ecm_low,ecm_high]
+            or authority.get('com_energy_arithmetic_allowance_gev')!=arithmetic):
+        raise ValueError('Native source COM certificate disagrees with its raw momentum inputs')
+    variants=[]
+    for terms in ([p[0]**2]+[-x*x for x in p[1:]],
+                  [p[0]**2]+[-x**2 for x in p[1:]],
+                  [p[0]*p[0]]+[-x*x for x in p[1:]]):
+        squared=math.fsum(terms)
+        if squared<=0:raise ValueError('Native kaon invariant has no resolved timelike mass')
+        variants.append(math.sqrt(squared))
+    if parent_mass not in [native,*variants]:
+        raise ValueError('Requested mass differs from the immutable native source record')
+    native_delta=abs(variants[0]-native)
+    floor=min(min(support),low)-2*arithmetic
+    count=authority.get('native_parent_count_bound')
+    if (authority.get('native_invariant_mass_difference_gev')!=native_delta
+            or authority.get('finite_support_minimum_mass_gev')!=min(support)
+            or authority.get('roundoff_mass_floor_gev')!=floor or floor<=0
+            or type(count) is not int or count<=0
+            or count!=math.floor(ecm_high/floor) or count!=math.floor(source_ecm/min(support))):
+        raise ValueError('Native mass/COM arithmetic changes its original source-count certificate')
+    source_gamma=q[0]/ecm_low
+    source_beta=min(1.,math.sqrt(math.fsum(qterms[1:]))/q[0]*(1+gamma32))
+    scale=max(source_gamma*(1+source_beta)*high,*map(abs,p))
+    gamma64=64*unit/(1-64*unit)
+    component_error=gamma64*scale
+    gamma8=8*unit/(1-8*unit)
+    invariant_error=(2*component_error*math.fsum(abs(x) for x in p)+4*component_error**2+
+        gamma8*math.fsum(x*x for x in p)+2*unit*native*native)*(1+gamma64)
+    allowance=invariant_error/(native+min(variants))+8*max(math.ulp(x) for x in [native,*variants])
+    if max(abs(value-native) for value in variants)>allowance:
+        raise ValueError('Native invariant mass exceeds its propagated source-frame roundoff bound')
+    return dict(native_mass_gev=native,kinematic_mass_gev=variants[0],
+        mass_allowance_gev=allowance,source_boost_scale_gev=scale,
+        component_arithmetic_allowance_gev=component_error,
+        source_gamma_upper=source_gamma,source_beta_upper=source_beta,
+        operation_budget=64,requested_mass_gev=parent_mass)
+
+
 def _four_vector(vector):
     if len(vector) != 4 or not all(cmath.isfinite(value) for value in vector):
         raise ValueError('Finite four-vectors are required')

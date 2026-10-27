@@ -1,5 +1,6 @@
 # Code style: AI-code. AI-generated source-card and fixed-exposure guard tests.
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
@@ -16,6 +17,21 @@ from dark_photon_meson_source import coefficient_bound
 
 
 class MesonRunnerTest(unittest.TestCase):
+    def test_frozen_runner_imports_without_the_original_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output=Path(temporary)
+            scripts=Path(__file__).resolve().parents[1]/'scripts'
+            for name in SOURCES:
+                shutil.copy2(scripts/name,output/name)
+            program=('import sys; from pathlib import Path; '
+                'sys.path.insert(0,sys.argv[1]); '
+                'import run_dark_photon_meson_gen,run_dark_photon_spectral_gen,dark_photon_source_placement; '
+                'assert all(Path(module.__file__).parent==Path(sys.argv[1]) for module in '
+                '(run_dark_photon_meson_gen,run_dark_photon_spectral_gen,dark_photon_source_placement))')
+            result=subprocess.run([sys.executable,'-I','-B','-c',program,str(output)],
+                cwd=output,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,timeout=30)
+            self.assertEqual(result.returncode,0,result.stdout)
+
     def test_heavy_current_reaches_runtime_checks_above_old_eta_prime_cutoff(self):
         arguments=SimpleNamespace(mass=1.5,epsilon=1.e-6,source_collisions=2,
             seed=761016999,run_number=1761016999,timeout=60)

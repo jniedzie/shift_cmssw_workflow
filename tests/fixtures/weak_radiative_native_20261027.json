@@ -1,0 +1,88 @@
+{
+  "code_style": "AI-code. AI-generated compact exact native-event regression fixture.",
+  "source": "First3unfiltered source ledger rows, seed741027031; these2KLparents occur in trials1and3. No detector/private geometry payload.",
+  "mass_gev": 0.25,
+  "physical_epsilon": 1e-06,
+  "model": {
+    "weak_radiative_model": {
+      "kind": "chpt-p6-unitarity-offshell-vmd-kl-pi0-photon-vector",
+      "parent_pdg_id": 130,
+      "parent_mass_gev": 0.49761,
+      "recoil_pion_mass_gev": 0.1349768,
+      "charged_loop_pion_mass_gev": 0.13957039,
+      "charged_loop_kaon_mass_gev": 0.493677,
+      "g8_gev_minus2": 9.1e-06,
+      "alpha_em": 0.0072973525692838015,
+      "valid_vector_mass_range_gev": [
+        0.0,
+        0.3626332
+      ],
+      "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+      "full_p6_loop_model": true,
+      "vmd_reference": "https://arxiv.org/pdf/hep-ph/9702278#page=10",
+      "vmd_exchange": [
+        {
+          "mass_gev": 0.77526,
+          "coupling_gev_minus2": 2.7461798008584136e-08
+        },
+        {
+          "mass_gev": 0.78265,
+          "coupling_gev_minus2": -1.1307799180005234e-07
+        }
+      ],
+      "unitarity_model": {
+        "kind": "kl-three-pion-polynomial-msbar",
+        "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+        "a1_gev_minus4": 5.055938764228492e-05,
+        "a2_gev_minus4": -2.0549944654606128e-05,
+        "renormalization_scale_gev": 0.77526,
+        "quadrature_order": 48,
+        "unqualified_higher_operators": true,
+        "normalization": "All compact loop invariants and momenta in mK units; verified against unreduced dimensional tensors24-27; a_i dimensionful inputs include mK^-4 exactly once.",
+        "a1_a2_relative_parameter_rectangle": 0.2,
+        "uncertainty_scope": "Independent parameter rectangle following the primary10-20percent theoretical input estimate; not a statistical confidence region or a universal higher-operator bound."
+      },
+      "pole_mass_numerical_tolerance_gev": 1.0000000000287557e-06
+    },
+    "total_parent_width_gev": 1.2871949145466406e-17
+  },
+  "examples": [
+    {
+      "trial": 1,
+      "index": 73,
+      "p4": [
+        40.74522366717399,
+        0.019663746480491233,
+        -0.3732376549075041,
+        -40.740470566388254
+      ],
+      "native_mass_gev": 0.497611,
+      "kinematic_mass_gev": 0.49761100000023406,
+      "branching_coefficients": {
+        "native_mass_gev": 2.1052140900152213e-07,
+        "kinematic_mass_gev": 2.1052140900307212e-07
+      },
+      "mean_lab_beta_gamma": 88.0325028506423
+    },
+    {
+      "trial": 3,
+      "index": 81,
+      "p4": [
+        7.707487281314984,
+        -0.25742718857703534,
+        -0.35529173762329097,
+        -7.6788828945406635
+      ],
+      "native_mass_gev": 0.497611,
+      "kinematic_mass_gev": 0.4976109999999983,
+      "branching_coefficients": {
+        "native_mass_gev": 2.1052140900152213e-07,
+        "kinematic_mass_gev": 2.105214090015106e-07
+      },
+      "mean_lab_beta_gamma": 16.62208575001387
+    }
+  ],
+  "legacy_source_sha256": "5533ad58d250db2a07e3564c6d1561b2323d9a51631dd5c6f49751962e4c148a",
+  "legacy_rate_order": 64,
+  "legacy_mean_order": 32
+}

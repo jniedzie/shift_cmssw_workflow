@@ -21,9 +21,11 @@ Four-vectors are (E,px,py,pz), GeV, with metric (+---).
 """
 import bisect
 import cmath
+from array import array
 from functools import lru_cache
 import json
 import math
+import numpy as np
 
 from dark_photon_dipion_meson import _gauss_legendre
 from dark_photon_meson import MUON_MASS_GEV, boost, dot
@@ -348,7 +350,7 @@ def _inputs(model):
     return model.get('weak_radiative_model', model)
 
 
-def _resolved_model(parent_mass, model, *, energy=None):
+def _resolved_model(parent_mass, model, *, energy=None, native_context=None, expected_p4=None):
     """Allow propagated native shell roundoff, never a physical mass scan."""
     _number(parent_mass, 'parent mass', positive=True)
     inputs = dict(_inputs(model))
@@ -361,21 +363,35 @@ def _resolved_model(parent_mass, model, *, energy=None):
     if energy is not None:
         _number(energy, 'native parent energy', positive=True)
         allowance += 64*math.ulp(max(energy**2, reference**2))/reference
+    if native_context is not None:
+        from dark_photon_kaon import native_source_mass_precision
+        report=native_source_mass_precision(parent_mass,native_context,
+            expected_p4=expected_p4,expected_pdg_id=inputs['parent_pdg_id'])
+        if any(abs(value-reference)>numerical+64*math.ulp(reference)
+               for value in native_context['native_record_mass_support_gev']):
+            raise ValueError('Native table support exceeds the declared weak-current pole interval')
+        allowance=max(allowance,numerical+report['mass_allowance_gev'])
     if abs(parent_mass-reference) > allowance:
         raise ValueError('Native kaon mass differs from the declared weak-current pole')
-    inputs['parent_mass_gev'] = parent_mass
-    domain = inputs['valid_vector_mass_range_gev']
-    inputs['valid_vector_mass_range_gev'] = [domain[0], min(domain[1], parent_mass-inputs['recoil_pion_mass_gev'])]
-    return inputs
+    return _integration_model(parent_mass,inputs)
 
 
-def _parent(parent, model):
+def _integration_model(parent_mass, inputs):
+    """Same current at a quadrature/control mass; not a source-admission gate."""
+    result=dict(inputs,parent_mass_gev=parent_mass)
+    domain=inputs['valid_vector_mass_range_gev']
+    result['valid_vector_mass_range_gev']=[domain[0],min(domain[1],parent_mass-inputs['recoil_pion_mass_gev'])]
+    return result
+
+
+def _parent(parent, model, native_context=None):
     if len(parent) != 4 or not all(math.isfinite(value) for value in parent) or parent[0] <= 0:
         raise ValueError('Finite future-directed kaon four-vector required')
     squared = math.fsum((parent[0]**2, *(-value**2 for value in parent[1:])))
     if squared <= 0:
         raise ValueError('Timelike kaon required')
-    return _resolved_model(math.sqrt(squared), model, energy=parent[0])
+    return _resolved_model(math.sqrt(squared), model, energy=parent[0],
+        native_context=native_context,expected_p4=parent)
 
 
 def _pair_frame(invariant, cosine, mass, model):
@@ -406,8 +422,34 @@ def polarization_density(invariant, cosine, mass, model):
     kaon, dark, photon, _ = _pair_frame(invariant, cosine, mass, model)
     transverse = [(0., 1., 0., 0.), (0., 0., 1., 0.)]
     polarizations = transverse+([(dark[3]/mass, 0., 0., dark[0]/mass)] if mass else [])
-    currents = [[amplitude(dark, photon, first, second, mass, .001, model, parent=kaon)*1000
-                 for second in transverse] for first in polarizations]
+    # These coefficients depend on momenta, not on polarization. Evaluating
+    # six copies of the same pion-loop tensors dominated the source rate.
+    # Keep amplitude() as an independent, unreduced polarization control.
+    product=_dot(dark,photon)
+    current_invariant=mass**2+2*product
+    scalar=reduced_loop_current(current_invariant,mass,model)
+    if model['kind']==P6_KIND:
+        polynomial=((model['parent_mass_gev']**2+model['recoil_pion_mass_gev']**2-current_invariant)*
+                    (current_invariant-2*model['charged_loop_pion_mass_gev']**2))
+        scalar+=(model['unitarity_model']['a1_gev_minus4']/model['g8_gev_minus2']*
+            polynomial*scalar_loop(current_invariant,mass**2,model['charged_loop_pion_mass_gev']))
+    leading=-1j*2*(4*math.pi*model['alpha_em'])*model['g8_gev_minus2']/(16*math.pi**2)*scalar
+    a=b=d=0j
+    if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector',P6_KIND):
+        a,b,d=vmd_form_factors(kaon,dark,photon,model)
+        if model['kind']==P6_KIND:
+            correction=unitarity_form_factors(kaon,dark,photon,model)
+            a,b,d=(value+loop/(4*math.pi)**2 for value,loop in zip((a,b,d),correction))
+    pq,pk=_dot(kaon,dark),_dot(kaon,photon)
+    def polarized(first,second):
+        eq,ek=_dot(first,dark),_dot(first,photon)
+        fq,fp=_dot(second,dark),_dot(second,kaon)
+        ep,ef=_dot(first,kaon),_dot(first,second)
+        result=leading*(ef-ek*fq/product)
+        return result+1j*(a*(ek*fq-product*ef)+
+            b*(pq*pk/product*ef+ep*fp-pq/product*ek*fp-pk/product*fq*ep)+
+            d*(mass**2*pk/product*ef-pk/product*eq*fq+eq*fp-mass**2/product*ek*fp))
+    currents=[[polarized(first,second) for second in transverse] for first in polarizations]
     if mass == 0:
         currents.append([0j, 0j])
     return tuple(tuple(sum(a*b.conjugate() for a, b in zip(first, second))
@@ -418,12 +460,13 @@ def _density(invariant, cosine, mass, model):
     parent, pion = model['parent_mass_gev'], model['recoil_pion_mass_gev']
     if invariant <= mass**2 or invariant >= (parent-pion)**2:
         return 0.
-    scalar = reduced_loop_current(invariant, mass, model)
-    coefficient = 2*(4*math.pi*model['alpha_em'])*model['g8_gev_minus2']/(16*math.pi**2)
-    trace = 2*abs(coefficient*scalar)**2
     if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         density = polarization_density(invariant, cosine, mass, model)
         trace = sum(density[i][i].real for i in range(3))
+    else:
+        scalar = reduced_loop_current(invariant, mass, model)
+        coefficient = 2*(4*math.pi*model['alpha_em'])*model['g8_gev_minus2']/(16*math.pi**2)
+        trace = 2*abs(coefficient*scalar)**2
     phase = 2*parent*two_body_momentum(parent, pion, math.sqrt(invariant))*(invariant-mass**2)/invariant
     return phase*trace
 
@@ -455,13 +498,15 @@ def _source_width(mass, model_key):
     return decay_width(json.loads(model_key), mass, epsilon=.001)/1.e-6
 
 
-def branching_coefficient(parent_mass, mass, model, *, native_energy_gev=None):
+def branching_coefficient(parent_mass, mass, model, *, native_energy_gev=None, native_context=None):
     """BR(KL -> pi0 gamma A') / epsilon_em^2; dimuon BR is separate."""
-    inputs = _resolved_model(parent_mass, model, energy=native_energy_gev)
+    inputs = _resolved_model(parent_mass, model, energy=native_energy_gev,native_context=native_context)
     width = model.get('total_parent_width_gev')
     _number(width, 'total kaon width', positive=True)
+    _model(inputs,mass)
     key = json.dumps(inputs, sort_keys=True, separators=(',', ':'), allow_nan=False)
-    value = _source_width(mass, key)/width
+    table=_native_mass_table(parent_mass,mass,model)
+    value=(table.width(parent_mass) if table is not None else _source_width(mass,key))/width
     if not math.isfinite(value) or value < 0:
         raise ValueError('Invalid weak radiative branching coefficient')
     return value
@@ -531,9 +576,9 @@ def _cross(first, second):
             first[0]*second[1]-first[1]*second[0])
 
 
-def sample_decay(parent, mass, proper_ctau_mm, rng, *, model):
+def sample_decay(parent, mass, proper_ctau_mm, rng, *, model, native_context=None):
     """Unconditional correlated KL -> pi0 gamma A' -> pi0 gamma mu+mu-."""
-    inputs = _parent(parent, model)
+    inputs = _parent(parent, model,native_context=native_context)
     _model(inputs, mass);_number(proper_ctau_mm, 'proper lifetime', positive=True)
     if mass <= 2*MUON_MASS_GEV or mass >= inputs['parent_mass_gev']-inputs['recoil_pion_mass_gev']:
         raise ValueError('Open radiative and dimuon channels required')
@@ -575,22 +620,164 @@ def sample_decay(parent, mass, proper_ctau_mm, rng, *, model):
         photon_pair_invariant_gev2=invariant, kaon_helicity_cosine=cosine, dimuon_helicity_cosine=direction[2])
 
 
-def mean_lab_beta_gamma(parent, mass, model, *, quadrature_order=32):
-    """Rate-weighted mean A' |p|/m; no parent or A' flight is conditioned."""
-    inputs = _parent(parent, model);_model(inputs, mass)
-    if mass <= 2*MUON_MASS_GEV:
-        raise ValueError('Open dimuon channel required')
-    numerator = denominator = 0.;parent_mass = inputs['parent_mass_gev']
+@lru_cache(maxsize=128)
+def _rest_spectrum(mass,key,order):
+    """Positive rest-frame quadrature reused for changing laboratory boosts.
+
+    Retain the exact old quadrature order, weights and recoil masses. Only
+    the analytic overall-rotation integral depends on the laboratory boost.
+    """
+    inputs=json.loads(key);parent_mass=inputs['parent_mass_gev']
+    recoils,weights=array('d'),array('d')
     for low, high in zip(_s_edges(mass, inputs), _s_edges(mass, inputs)[1:]):
-        for node, weight in _gauss_legendre(quadrature_order):
+        for node, weight in _gauss_legendre(order):
             invariant = (high+low)/2+(high-low)*node/2
-            for cosine, angular_weight in _gauss_legendre(quadrature_order):
+            for cosine, angular_weight in _gauss_legendre(order):
                 weight_here = weight*(high-low)/2*angular_weight*_density(invariant, cosine, mass, inputs)
                 kaon, dark, _, _ = _pair_frame(invariant, cosine, mass, inputs)
                 dark = boost(dark, tuple(-x/kaon[0] for x in kaon[1:]))
                 recoil_mass = math.sqrt(max(0., parent_mass**2+mass**2-2*parent_mass*dark[0]))
-                mean = two_body_mean_boost(parent, recoil_mass, mass, polarization='unpolarized')
-                numerator += weight_here*mean;denominator += weight_here
-    if denominator <= 0:
+                if not math.isfinite(weight_here) or weight_here<0:
+                    raise ValueError('Invalid positive weak-radiative quadrature weight')
+                recoils.append(recoil_mass);weights.append(weight_here)
+    if math.fsum(weights)<=0:
         raise ValueError('Closed weak radiative phase space')
-    return numerator/denominator
+    return recoils,weights
+
+
+def _angular_means(parent_mass,gamma,beta_gamma,mass,recoils):
+    """Vectorized form of the unchanged isotropic two-body angular integral."""
+    recoils=np.frombuffer(recoils,dtype=np.float64)
+    factors=(parent_mass-recoils-mass,parent_mass+recoils+mass,
+             parent_mass-recoils+mass,parent_mass+recoils-mass)
+    if np.any(factors[0]<=0):
+        raise ValueError('Closed vector-to-pseudoscalar radiative channel')
+    momentum=np.sqrt(factors[0]*factors[1]*factors[2]*factors[3])/(2*parent_mass)
+    center=gamma*np.hypot(momentum,mass);half_range=beta_gamma*momentum
+    radial=np.sqrt(np.maximum(0.,(center-mass)*(center+mass)))
+    if beta_gamma==0:return radial/mass
+    small=half_range<1.e-3*radial*radial/center
+    means=np.empty_like(recoils)
+    means[small]=(radial[small]-mass**2*half_range[small]**2/(6*radial[small]**3))/mass
+    def primitive(energy):
+        if np.any(mass-energy>8*np.spacing(np.maximum(center[~small],mass))):
+            raise ValueError('The angular endpoint is below its mass shell')
+        energy=np.maximum(energy,mass)
+        momentum=np.sqrt((energy-mass)*(energy+mass));u=np.arcsinh(momentum/mass)
+        result=.5*(energy*momentum-mass**2*u)
+        tiny=u<1.e-3;z=u[tiny]
+        result[tiny]=mass**2*z**3*(1/3+z*z*(1/15+z*z*(2/315+z*z/2835)))
+        return result
+    means[~small]=(primitive(center[~small]+half_range[~small])-
+        primitive(center[~small]-half_range[~small]))/(2*half_range[~small]*mass)
+    if np.any(~np.isfinite(means)) or np.any(means<0):
+        raise ValueError('Invalid vector-meson angular mean boost')
+    return means
+
+
+def _mean_at_mass(integration_mass,angular_mass,gamma,beta_gamma,mass,key,order):
+    inputs=_integration_model(integration_mass,json.loads(key))
+    spectrum_key=json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False)
+    recoils,weights=_rest_spectrum(mass,spectrum_key,order)
+    angular=_angular_means(angular_mass,gamma,beta_gamma,mass,recoils)
+    weights=np.frombuffer(weights,dtype=np.float64)
+    return float(np.dot(weights,angular))/math.fsum(weights)
+
+
+class NativeMassTable:
+    """Checked local numerical interpolation, without changing any momentum.
+
+    The original admission guard still decides whether a mass is allowed.
+    A narrow auxiliary interval covers its declared native-table allowance
+    and ordinary binary64 jitter. Three mass nodes define the quadratic;
+    four independent interior widths and eight boosts check it to5e-8.
+    Source rates retain64-point quadrature and default means32-point
+    quadrature. This interpolation budget is much smaller than the existing
+    1e-3 native-precision completion gate. It is not a physics uncertainty.
+    """
+    tolerance=5.e-8
+    maximum_beta_gamma=1.e5
+
+    def __init__(self,mass,key):
+        inputs=json.loads(key);self.center=inputs['parent_mass_gev']
+        self.radius=min(max(2*inputs.get('pole_mass_numerical_tolerance_gev',0.),
+            1.e-7*self.center),1.e-4*(self.center-inputs['recoil_pion_mass_gev']-mass))
+        self.mass,self.key=mass,key
+        self.masses=tuple(self.center+offset*self.radius for offset in (-1.,0.,1.))
+        def width(value):
+            current=_integration_model(value,inputs)
+            return _source_width(mass,json.dumps(current,sort_keys=True,separators=(',',':'),allow_nan=False))
+        self.widths=tuple(width(value) for value in self.masses)
+        controls=(-.75,-.5,.5,.75);self.width_error=self.mean_error=0.
+        for offset in controls:
+            value=self.center+offset*self.radius;exact=width(value)
+            self.width_error=max(self.width_error,abs(self.width(value)/exact-1))
+            for beta_gamma in (0.,.001,.1,1.,10.,100.,1000.,self.maximum_beta_gamma):
+                gamma=math.hypot(1.,beta_gamma)
+                means=self.means(value,value,gamma,beta_gamma)
+                exact=_mean_at_mass(value,value,gamma,beta_gamma,mass,key,32)
+                self.mean_error=max(self.mean_error,abs(self.interpolate(value,means)/exact-1))
+        self.valid=max(self.width_error,self.mean_error)<=self.tolerance
+
+    def interpolate(self,value,values):
+        x=(value-self.center)/self.radius
+        return values[1]+x*(values[2]-values[0])/2+x*x*(values[2]+values[0]-2*values[1])/2
+
+    def width(self,value):return self.interpolate(value,self.widths)
+
+    def means(self,integration_mass,angular_mass,gamma,beta_gamma):
+        # The two legacy invariant evaluations can differ by binary64
+        # roundoff. Carry that same difference through every auxiliary node;
+        # do not boost a neighbouring mass's recoil as a different particle.
+        difference=angular_mass-integration_mass
+        return tuple(_mean_at_mass(value,value+difference,gamma,beta_gamma,self.mass,self.key,32)
+                     for value in self.masses)
+
+
+@lru_cache(maxsize=12)
+def _native_table(mass,key):
+    try:
+        table=NativeMassTable(mass,key)
+    except ValueError as error:
+        # Auxiliary nodes must not introduce a new validity requirement.
+        # Unknown model errors still raise; these known numerical/endpoint
+        # failures use the exact requested mass and its unchanged checks.
+        if str(error) not in ('Closed weak radiative phase space',
+                'Closed vector-to-pseudoscalar radiative channel',
+                'The angular endpoint is below its mass shell',
+                'Invalid vector-meson angular mean boost',
+                'Invalid positive weak-radiative quadrature weight'):
+            raise
+        return None
+    return table if table.valid else None
+
+
+def _native_mass_table(parent_mass,mass,model):
+    inputs=_inputs(model);pole=inputs['parent_mass_gev']
+    gap=pole-inputs['recoil_pion_mass_gev']-mass
+    if mass<=2*MUON_MASS_GEV or gap<=0 or parent_mass==pole:return None
+    radius=min(max(2*inputs.get('pole_mass_numerical_tolerance_gev',0.),1.e-7*pole),1.e-4*gap)
+    if radius<=64*math.ulp(pole) or abs(parent_mass-pole)>radius:return None
+    key=json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False)
+    return _native_table(mass,key)
+
+
+def mean_lab_beta_gamma(parent, mass, model, *, quadrature_order=32, native_context=None):
+    """Rate-weighted mean A' |p|/m; no parent or A' flight is conditioned."""
+    inputs=_parent(parent,model,native_context=native_context);_model(inputs,mass)
+    if mass<=2*MUON_MASS_GEV:raise ValueError('Open dimuon channel required')
+    if type(quadrature_order) is not int or quadrature_order<8:
+        raise ValueError('Require an explicit quadrature order >=8')
+    # Preserve the product-based invariant used by two_body_mean_boost,
+    # independently of the pow-based invariant in the original parent gate.
+    squared=math.fsum([parent[0]*parent[0]]+[-x*x for x in parent[1:]])
+    angular_mass=math.sqrt(squared)
+    gamma=parent[0]/angular_mass
+    beta_gamma=math.sqrt(math.fsum(x*x for x in parent[1:]))/angular_mass
+    table=(_native_mass_table(inputs['parent_mass_gev'],mass,model)
+           if quadrature_order==32 and beta_gamma<=NativeMassTable.maximum_beta_gamma else None)
+    if table is not None:
+        return table.interpolate(inputs['parent_mass_gev'],table.means(
+            inputs['parent_mass_gev'],angular_mass,gamma,beta_gamma))
+    key=json.dumps(inputs,sort_keys=True,separators=(',',':'),allow_nan=False)
+    return _mean_at_mass(inputs['parent_mass_gev'],angular_mass,gamma,beta_gamma,mass,key,quadrature_order)

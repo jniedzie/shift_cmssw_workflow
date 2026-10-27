@@ -6,6 +6,7 @@ import statistics
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_double_radiative import (LocalVMDCurrent,LocalVMDSampler,CoherentScalarSampler,ScalarPairCDF,branching_coefficient,
@@ -388,6 +389,79 @@ class ScalarDoubleRadiativeProduction(unittest.TestCase):
                 total=sum(p[component] for p in [row['dark_photon_p4'],*row['recoil_p4s']])
                 self.assertAlmostEqual(total,(MASSES[parent],0.,0.,0.)[component],delta=2.e-13)
             self.assertTrue(row['unconditional_decay'])
+
+
+class CachedDoubleRadiativeEvaluation(unittest.TestCase):
+    def test_scalar_threshold_grazing_resolves_without_relaxing_the_rate_budget(self):
+        # At mA=.25 the pion cut crosses both outer Dalitz boundaries.
+        # The old inner-angle-only split did not converge through order80.
+        # The target is the independent order80 integration recorded while
+        # diagnosing that failure; no parameter or rate has been rescaled.
+        current=LocalVMDCurrent(scalar_model(331,111))
+        target=3.975135411101855e-7
+        first=current.integrated_width(MASSES[331],MASSES[111],.25,1.,order=16)
+        second=current.integrated_width(MASSES[331],MASSES[111],.25,1.,order=24)
+        self.assertAlmostEqual(second/first,1.,delta=2.e-5)
+        self.assertAlmostEqual(second/target,1.,delta=2.e-6)
+
+    def test_near_pole_rate_interpolation_matches_independent_mass_integrals(self):
+        from dark_photon_double_radiative import _source_inputs,_pole_mass_table,_unit_width
+        for parent,recoil,mass in [(221,111,.3),(331,111,.3),(331,221,.3)]:
+            with self.subTest(parent=parent,recoil=recoil):
+                model=source_model(parent,recoil)
+                model['double_radiative_model']=scalar_model(parent,recoil)
+                recoil_mass,width,key=_source_inputs(model)
+                table=_pole_mass_table(MASSES[parent],recoil_mass,mass,key)
+                self.assertTrue(table.valid,dict(width=table.width_error,mean=table.mean_error))
+                for fraction in (-.91,-.31,.27,.88):
+                    actual=MASSES[parent]+fraction*table.radius
+                    exact=_unit_width(actual,recoil_mass,mass,key)/width
+                    self.assertAlmostEqual(branching_coefficient(actual,mass,model)/exact,1.,delta=5.e-8)
+                # Values outside the checked interval keep their own exact
+                # integration. They are never clamped onto the pole or edge.
+                actual=MASSES[parent]+1.3*table.radius
+                self.assertEqual(branching_coefficient(actual,mass,model),
+                    _unit_width(actual,recoil_mass,mass,key)/width)
+
+    def test_changed_boost_and_binary64_mass_do_not_repeat_the_amplitude_integral(self):
+        from dark_photon_double_radiative import _source_inputs,_pole_mass_table,_mean_at_mass
+        model=source_model(331,221);model['double_radiative_model']=scalar_model(331,221)
+        recoil,_,key=_source_inputs(model);mass=.3
+        table=_pole_mass_table(MASSES[331],recoil,mass,key)
+        self.assertTrue(table.valid)
+        # Warm only the necessary three rest-frame mass nodes. A later
+        # boost and invariant-mass jitter must reuse their coherent current.
+        table.means(math.sqrt(2.),1.)
+        parent=boost((math.nextafter(MASSES[331],math.inf),0.,0.,0.),(.21,-.32,.71))
+        actual=math.sqrt(dot(parent,parent));gamma=parent[0]/actual
+        beta_gamma=math.sqrt(sum(x*x for x in parent[1:]))/actual
+        exact=_mean_at_mass(actual,recoil,mass,key,gamma,beta_gamma)
+        with patch.object(LocalVMDCurrent,'spin_sum',side_effect=AssertionError('Repeated amplitude quadrature')):
+            measured=mean_lab_beta_gamma(parent,mass,model)
+            self.assertAlmostEqual(measured/exact,1.,delta=5.e-8)
+            self.assertGreater(branching_coefficient(math.nextafter(actual,math.inf),mass,model),0.)
+
+    def test_near_endpoint_and_loop_threshold_keep_checked_rates_and_means(self):
+        from dark_photon_double_radiative import _source_inputs,_pole_mass_table,_unit_width,_mean_at_mass
+        model=source_model(331,221);model['double_radiative_model']=scalar_model(331,221)
+        recoil,width,key=_source_inputs(model)
+        for mass in (2*.13957039,MASSES[331]-recoil-1.e-5):
+            table=_pole_mass_table(MASSES[331],recoil,mass,key)
+            radius=min(1.e-7*MASSES[331],1.e-4*(MASSES[331]-recoil-mass))
+            actual=MASSES[331]+.43*radius
+            self.assertAlmostEqual(branching_coefficient(actual,mass,model)/
+                (_unit_width(actual,recoil,mass,key)/width),1.,delta=5.e-8)
+            parent=boost((actual,0.,0.,0.),(.17,-.23,.81))
+            invariant=math.sqrt(dot(parent,parent));gamma=parent[0]/invariant
+            beta_gamma=math.sqrt(sum(x*x for x in parent[1:]))/invariant
+            exact=_mean_at_mass(invariant,recoil,mass,key,gamma,beta_gamma)
+            measured=mean_lab_beta_gamma(parent,mass,model)
+            self.assertAlmostEqual(measured/exact,1.,delta=5.e-8)
+            if table is None or not table.valid:
+                # Near a closing endpoint, cancellation in the analytic
+                # angular primitive can exceed the tighter interpolation
+                # budget. The exact original evaluator remains authoritative.
+                self.assertEqual(measured,exact)
 
 
 if __name__=='__main__':

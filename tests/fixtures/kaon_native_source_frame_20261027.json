@@ -1,0 +1,308 @@
+{
+  "code_style": "AI-code. AI-generated exact failed-native-source/frame regression.",
+  "source_trial": 174,
+  "source_seed": 741027032,
+  "run_number": 1761633032,
+  "source_failure_sha256": "886debfdaad4e7604105ce141d50abcb6b4989657069d00e5e829042d0268f60",
+  "scope": "All3KLparents from failedtrial174; rawp4,positions,storedlifetime,sourceq and COMcertificate retained without repair. Physics models and1e-3fullsourcegate unchanged.",
+  "weak_radiative_model": {
+    "kind": "chpt-p6-unitarity-offshell-vmd-kl-pi0-photon-vector",
+    "parent_pdg_id": 130,
+    "parent_mass_gev": 0.49761,
+    "recoil_pion_mass_gev": 0.1349768,
+    "charged_loop_pion_mass_gev": 0.13957039,
+    "charged_loop_kaon_mass_gev": 0.493677,
+    "g8_gev_minus2": 9.1e-06,
+    "alpha_em": 0.0072973525692838015,
+    "valid_vector_mass_range_gev": [
+      0.0,
+      0.3626332
+    ],
+    "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+    "full_p6_loop_model": true,
+    "vmd_reference": "https://arxiv.org/pdf/hep-ph/9702278#page=10",
+    "vmd_exchange": [
+      {
+        "mass_gev": 0.77526,
+        "coupling_gev_minus2": 2.7461798008584136e-08
+      },
+      {
+        "mass_gev": 0.78265,
+        "coupling_gev_minus2": -1.1307799180005234e-07
+      }
+    ],
+    "unitarity_model": {
+      "kind": "kl-three-pion-polynomial-msbar",
+      "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+      "a1_gev_minus4": 5.055938764228492e-05,
+      "a2_gev_minus4": -2.0549944654606128e-05,
+      "renormalization_scale_gev": 0.77526,
+      "quadrature_order": 48,
+      "unqualified_higher_operators": true,
+      "normalization": "All compact loop invariants and momenta in mK units; verified against unreduced dimensional tensors24-27; a_i dimensionful inputs include mK^-4 exactly once.",
+      "a1_a2_relative_parameter_rectangle": 0.2,
+      "uncertainty_scope": "Independent parameter rectangle following the primary10-20percent theoretical input estimate; not a statistical confidence region or a universal higher-operator bound."
+    },
+    "pole_mass_numerical_tolerance_gev": 1.0000000000287557e-06
+  },
+  "examples": [
+    {
+      "context": {
+        "native_source_record": {
+          "index": 49,
+          "pdg_id": 130,
+          "native_mass_gev": 0.497611,
+          "p4": [
+            109.71515147680087,
+            0.7873994952447912,
+            -1.4918785704123687,
+            -109.70105353749375
+          ],
+          "production_position_mm": [
+            9.48905877663204e-07,
+            -1.7978832254444977e-06,
+            -0.00013220223675049688,
+            0.0001322192263695559
+          ],
+          "stored_decay_position_mm": [
+            3501.940616295206,
+            -6635.09462713497,
+            -487892.83883639314,
+            487955.5390877444
+          ],
+          "selected_proper_lifetime_mm": 2213.113142778098,
+          "mean_proper_lifetime_mm": 15330,
+          "native_end_vertex_present": false,
+          "native_final": true,
+          "native_status": 91,
+          "mother_indices": [
+            31
+          ],
+          "daughter_indices": [],
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 1.7598958278661185,
+          "source_com_energy_mantissa_bits": 64
+        },
+        "authority": {
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 1.7598958278661185,
+          "independent_com_energy_interval_gev": [
+            1.7598958277972487,
+            1.7598958279364125
+          ],
+          "independent_source_ecm_interval_gev": [
+            112.97005222985653,
+            112.97005223276527
+          ],
+          "com_energy_arithmetic_allowance_gev": 7.029399284874671e-11,
+          "native_invariant_mass_difference_gev": 1.7226775561596241e-12,
+          "stable_native_mass_floor_gev": 0.497611,
+          "finite_support_minimum_mass_gev": 0.49761,
+          "roundoff_mass_floor_gev": 0.497609999859412,
+          "native_parent_count_bound": 227,
+          "authority": "Final native parent with no daughters; independent physical COM and unchanged integer-count checks"
+        },
+        "native_record_mass_support_gev": [
+          0.49761,
+          0.497611
+        ],
+        "source_ecm_gev": 112.97005223140982
+      },
+      "kinematic_mass_gev": 0.4976110000017227,
+      "old_local_energy_guard_passed": true,
+      "source_frame_precision_report": {
+        "native_mass_gev": 0.497611,
+        "kinematic_mass_gev": 0.4976110000017227,
+        "mass_allowance_gev": 6.922185275588253e-10,
+        "source_boost_scale_gev": 211.8812369385336,
+        "component_arithmetic_allowance_gev": 1.5055067375054072e-12,
+        "source_gamma_upper": 60.201249231631294,
+        "source_beta_upper": 0.9998620286356996,
+        "operation_budget": 64,
+        "requested_mass_gev": 0.4976110000017227
+      }
+    },
+    {
+      "context": {
+        "native_source_record": {
+          "index": 50,
+          "pdg_id": 130,
+          "native_mass_gev": 0.497611,
+          "p4": [
+            1.644796545810943,
+            0.06563414202447529,
+            0.8936618560562026,
+            -1.2863901493020111
+          ],
+          "production_position_mm": [
+            1.2691139783147962e-07,
+            1.7280011872246899e-06,
+            -2.4873879198982213e-06,
+            3.1804091946446816e-06
+          ],
+          "stored_decay_position_mm": [
+            877.5700053342352,
+            11948.82443186038,
+            -17199.850190224202,
+            21991.97047388509
+          ],
+          "selected_proper_lifetime_mm": 6653.373905586797,
+          "mean_proper_lifetime_mm": 15330,
+          "native_end_vertex_present": false,
+          "native_final": true,
+          "native_status": 91,
+          "mother_indices": [
+            38
+          ],
+          "daughter_indices": [],
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 21.587197621115305,
+          "source_com_energy_mantissa_bits": 64
+        },
+        "authority": {
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 21.587197621115305,
+          "independent_com_energy_interval_gev": [
+            21.58719762084488,
+            21.58719762140196
+          ],
+          "independent_source_ecm_interval_gev": [
+            112.97005222985653,
+            112.97005223276527
+          ],
+          "com_energy_arithmetic_allowance_gev": 2.866542558876972e-10,
+          "native_invariant_mass_difference_gev": 2.5462965069777965e-13,
+          "stable_native_mass_floor_gev": 0.497611,
+          "finite_support_minimum_mass_gev": 0.49761,
+          "roundoff_mass_floor_gev": 0.4976099994266915,
+          "native_parent_count_bound": 227,
+          "authority": "Final native parent with no daughters; independent physical COM and unchanged integer-count checks"
+        },
+        "native_record_mass_support_gev": [
+          0.49761,
+          0.497611
+        ],
+        "source_ecm_gev": 112.97005223140982
+      },
+      "kinematic_mass_gev": 0.49761100000025466,
+      "old_local_energy_guard_passed": false,
+      "source_frame_precision_report": {
+        "native_mass_gev": 0.497611,
+        "kinematic_mass_gev": 0.49761100000025466,
+        "mass_allowance_gev": 1.4438460413912647e-10,
+        "source_boost_scale_gev": 2598.9732241268084,
+        "component_arithmetic_allowance_gev": 1.8466815448383237e-11,
+        "source_gamma_upper": 60.201249231631294,
+        "source_beta_upper": 0.9998620286356996,
+        "operation_budget": 64,
+        "requested_mass_gev": 0.49761100000025466
+      }
+    },
+    {
+      "context": {
+        "native_source_record": {
+          "index": 51,
+          "pdg_id": 130,
+          "native_mass_gev": 0.497611,
+          "p4": [
+            0.6184122947346871,
+            0.038088534309668805,
+            0.0741488074755483,
+            -0.3575867403331874
+          ],
+          "production_position_mm": [
+            4.364136700729798e-10,
+            8.495877772257658e-10,
+            -4.097184219520494e-09,
+            7.085690853032061e-09
+          ],
+          "stored_decay_position_mm": [
+            1737.776929302821,
+            3383.0151068221776,
+            -16314.778156687093,
+            28214.858829953762
+          ],
+          "selected_proper_lifetime_mm": 22703.339239482753,
+          "mean_proper_lifetime_mm": 15330,
+          "native_end_vertex_present": false,
+          "native_final": true,
+          "native_status": 91,
+          "mother_indices": [
+            39
+          ],
+          "daughter_indices": [],
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 15.704994339099338,
+          "source_com_energy_mantissa_bits": 64
+        },
+        "authority": {
+          "source_total_p4": [
+            6800.938269999998,
+            0,
+            0,
+            -6799.999935268339
+          ],
+          "source_com_energy_gev": 15.704994339099338,
+          "independent_com_energy_interval_gev": [
+            15.704994338902846,
+            15.704994339307634
+          ],
+          "independent_source_ecm_interval_gev": [
+            112.97005222985653,
+            112.97005223276527
+          ],
+          "com_energy_arithmetic_allowance_gev": 2.0829560298807337e-10,
+          "native_invariant_mass_difference_gev": 2.3314683517128287e-15,
+          "stable_native_mass_floor_gev": 0.497611,
+          "finite_support_minimum_mass_gev": 0.49761,
+          "roundoff_mass_floor_gev": 0.4976099995834088,
+          "native_parent_count_bound": 227,
+          "authority": "Final native parent with no daughters; independent physical COM and unchanged integer-count checks"
+        },
+        "native_record_mass_support_gev": [
+          0.49761,
+          0.497611
+        ],
+        "source_ecm_gev": 112.97005223140982
+      },
+      "kinematic_mass_gev": 0.49761100000000236,
+      "old_local_energy_guard_passed": true,
+      "source_frame_precision_report": {
+        "native_mass_gev": 0.497611,
+        "kinematic_mass_gev": 0.49761100000000236,
+        "mass_allowance_gev": 2.938197581504062e-11,
+        "source_boost_scale_gev": 1890.790110359532,
+        "component_arithmetic_allowance_gev": 1.3434871777630132e-11,
+        "source_gamma_upper": 60.201249231631294,
+        "source_beta_upper": 0.9998620286356996,
+        "operation_budget": 64,
+        "requested_mass_gev": 0.49761100000000236
+      }
+    }
+  ]
+}

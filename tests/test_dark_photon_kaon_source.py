@@ -62,7 +62,10 @@ def parent_row(pdg,model,index=1):
     channel=exclusive_channels(model)[0];mass=channel['mass_min_gev']
     momentum=(.2,.1,.3);energy=math.sqrt(mass*mass+sum(x*x for x in momentum))
     return dict(index=index,pdg_id=pdg,native_mass_gev=mass,p4=[energy,*momentum],
-        native_final=True,native_status=91,mother_indices=[999],daughter_indices=[],
+        native_final=True,native_status=91,native_end_vertex_present=False,
+        mother_indices=[999],daughter_indices=[],
+        production_position_mm=[0.,0.,0.,0.],selected_proper_lifetime_mm=2.,
+        stored_decay_position_mm=[2*x/mass for x in (*momentum,energy)],
         source_total_p4=[ECM,0.,0.,0.],source_com_energy_gev=energy,
         mean_proper_lifetime_mm=channel['mean_proper_ctau_mm'])
 

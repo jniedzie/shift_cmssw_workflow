@@ -24,7 +24,7 @@ from dark_photon_meson_source import (coefficient_bound, choose_collision, sourc
     dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
     kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,validate_native_precision_policy,
     deferred_native_precision_measure,full_source_native_precision_summary,radiative_cascade_owner,
-    current_channel,current_kernel)
+    current_channel,current_kernel,kaon_native_context)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import (native_source, inject_decay, cmssw_native_libraries,
     inject_undecayed_kaon_decay)
@@ -40,7 +40,8 @@ SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'dark_photon_detector_runtime.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
            'pythia_generation_ledger.py', 'export_dark_photon_cross_sections.py',
-           'shift_source_placement.py', 'shift_jaw_source.py', 'shift_material_preselection.py')
+           'dark_photon_source_placement.py', 'shift_source_placement.py',
+           'shift_jaw_source.py', 'shift_material_preselection.py')
 
 
 def freeze_meson_model(source, target):
@@ -82,12 +83,14 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
         return sample_weak_decay(parent['pdg_id'],parent['p4'],model['recoil_mass_gev'],mass,proper_ctau_mm,rng)
     if kind=='weak-kaon-pion-photon':
         from dark_photon_weak_radiative import sample_decay as sample_weak_radiative
-        sampled=sample_weak_radiative(parent['p4'],mass,proper_ctau_mm,rng,model=model)
+        sampled=sample_weak_radiative(parent['p4'],mass,proper_ctau_mm,rng,model=model,
+            native_context=kaon_native_context(parent,model))
         sampled.update(parent_pdg_id=parent['pdg_id'],parent_flight_included=False)
         return sampled
     if kind=='neutral-kaon-dipion':
         from dark_photon_weak_meson import sample_neutral_dipion_decay
-        sampled=sample_neutral_dipion_decay(parent['p4'],mass,proper_ctau_mm,rng,model=model)
+        sampled=sample_neutral_dipion_decay(parent['p4'],mass,proper_ctau_mm,rng,model=model,
+            native_context=kaon_native_context(parent,model))
         sampled.update(parent_pdg_id=parent['pdg_id'],parent_flight_included=False)
         return sampled
     if kind=='weak-kaon-leptonic':
@@ -109,10 +112,11 @@ def kaon_mean_beta_gamma(parent,model,mass):
     """The new source's rate-weighted mean; never retune its physical lifetime."""
     if model['decay_type']=='weak-kaon-pion-photon':
         from dark_photon_weak_radiative import mean_lab_beta_gamma as weak_mean
-        return weak_mean(parent['p4'],mass,model)
+        return weak_mean(parent['p4'],mass,model,native_context=kaon_native_context(parent,model))
     if model['decay_type']=='neutral-kaon-dipion':
         from dark_photon_weak_meson import mean_neutral_dipion_lab_beta_gamma
-        return mean_neutral_dipion_lab_beta_gamma(parent['p4'],mass,model)
+        return mean_neutral_dipion_lab_beta_gamma(parent['p4'],mass,model,
+            native_context=kaon_native_context(parent,model))
     if model['decay_type']=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import mean_lab_beta_gamma as leptonic_mean
         return leptonic_mean(parent['p4'],mass,model=model['leptonic_form_factor_model'],

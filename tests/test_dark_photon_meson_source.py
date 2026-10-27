@@ -185,6 +185,41 @@ class CorrelatedCurrentSourceTest(unittest.TestCase):
 
 
 class MesonSourceTest(unittest.TestCase):
+    def test_jpsi_channels_share_source_and_apply_exact_em_mixing_once(self):
+        from dark_photon_model import mixing_parameters
+        from dark_photon_vector_meson import radiative_branching
+        parents=[dict(pdg_id=443,mass_gev=3.0969,pdg_reference='synthetic fixture',
+            channel='Jpsi_to_'+str(recoil),br_p_gamma=.001,br_p_gamma_uncertainty=.0001,
+            decay_type='vector-pseudoscalar',parent_mass_model='zero-width-pole',
+            parent_polarization='unpolarized',recoil_pdg_id=recoil,recoil_mass_gev=recoil_mass,
+            transition_form_factor=dict(kind='single-pole-slope',slope_gev_minus2=.1,
+                slope_stat_gev_minus2=.01,slope_syst_gev_minus2=.01,
+                valid_mass_range_gev=[.211316751,2.9],reference='synthetic fixture'))
+            for recoil,recoil_mass in ((111,.1349768),(221,.547862),(331,.95778))]
+        card=dict(mechanism='meson-radiative',parents=parents,channels=[p['channel'] for p in parents])
+        configuration=dict(parents=[dict(pdg_id=443,mass_min_gev=3.0969,mass_max_gev=3.0969,mass_width_gev=0.)])
+        mass,epsilon,br=.3,.01,.4
+        models=resolved_parent_models(card,configuration,mass,epsilon=epsilon)
+        channels=models[443]['exclusive_channels']
+        expected=[]
+        for row in channels:
+            value=radiative_branching(3.0969,row['recoil_mass_gev'],mass,
+                mixing_parameters(mass,epsilon).em_coefficient,row['br_p_gamma'],row['form_factor_abs2'])
+            expected.append(value/epsilon**2*br)
+            self.assertAlmostEqual(parent_branching_coefficient(3.0969,mass,row,br),expected[-1],places=15)
+            with self.assertRaisesRegex(ValueError,'another signal mass'):
+                parent_branching_coefficient(3.0969,.4,row,br)
+        bound=coefficient_bound(113.,br,models,mass)
+        self.assertAlmostEqual(bound,math.floor(113./3.0969)*sum(expected),places=14)
+        selected=choose_collision([dict(index=7,pdg_id=443,mass_gev=3.0969)],mass,br,models,bound,random.Random(1))
+        self.assertEqual(selected['parent_count'],1)
+        self.assertAlmostEqual(selected['coefficient_sum'],sum(expected),places=15)
+        with self.assertRaisesRegex(ValueError,'physical source epsilon'):
+            resolved_parent_models(card,configuration,mass)
+        malformed=copy.deepcopy(models);malformed[443]['exclusive_channels'][0]['em_mixing_over_epsilon_abs2']=1.
+        with self.assertRaisesRegex(ValueError,'physical source epsilon'):
+            coefficient_bound(113.,br,malformed,mass)
+
     def test_coherent_parent_owns_only_its_matching_radiative_vector_cascade(self):
         owner=dict(decay_type='pseudoscalar-double-radiative',channel='eta_prime->pi0_gamma_Aprime',
             recoil_pdg_id=111,coherent_replaced_vector_pdgs=[113,223,333])

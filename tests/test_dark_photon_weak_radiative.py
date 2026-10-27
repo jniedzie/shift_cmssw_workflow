@@ -5,6 +5,7 @@ from pathlib import Path
 import random
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_dipion_meson import _gauss_legendre
@@ -40,6 +41,130 @@ def p6_model():
             a1_gev_minus4=3.1e-6/mass**4, a2_gev_minus4=-1.26e-6/mass**4,
             renormalization_scale_gev=.77526, quadrature_order=48,
             unqualified_higher_operators=True))
+
+
+class WeakRadiativeCacheTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import dark_photon_weak_radiative as weak
+        cls.weak=weak
+        cls.fixture=json.loads((CARD.parents[2]/'tests/fixtures/weak_radiative_native_20261027.json').read_text())
+        cls.current=cls.fixture['model'];cls.mass=cls.fixture['mass_gev']
+        cls.table=weak._native_mass_table(.497611,cls.mass,cls.current)
+
+    def test_shared_current_matches_independent_polarization_amplitudes(self):
+        weak=self.weak
+        for inputs in (model(),vmd_model(),p6_model()):
+            threshold=2*inputs['charged_loop_pion_mass_gev']
+            for mass in (0.,.22,threshold-1.e-9,threshold,threshold+1.e-9,.3):
+                for fraction in (.03,.4,.95):
+                    invariant=mass**2+fraction*((inputs['parent_mass_gev']-inputs['recoil_pion_mass_gev'])**2-mass**2)
+                    for cosine in (-1.,-.3,.4,1.):
+                        kaon,dark,photon,_=weak._pair_frame(invariant,cosine,mass,inputs)
+                        transverse=[(0.,1.,0.,0.),(0.,0.,1.,0.)]
+                        polarizations=transverse+([(dark[3]/mass,0.,0.,dark[0]/mass)] if mass else [(0.,0.,0.,0.)])
+                        currents=[[amplitude(dark,photon,first,second,mass,.001,inputs,parent=kaon)*1000
+                            for second in transverse] for first in polarizations]
+                        expected=[[sum(a*b.conjugate() for a,b in zip(first,second))
+                            for second in currents] for first in currents]
+                        actual=polarization_density(invariant,cosine,mass,inputs)
+                        scale=max(abs(x) for row in expected for x in row)
+                        self.assertLess(max(abs(actual[i][j]-expected[i][j]) for i in range(3) for j in range(3)),
+                            128*math.ulp(1.)*scale)
+
+    def test_actual_native_events_keep_the_before_cache_rates_and_means(self):
+        before=json.dumps(self.current,sort_keys=True)
+        for event in self.fixture['examples']:
+            original=list(event['p4'])
+            for name,expected in event['branching_coefficients'].items():
+                actual=branching_coefficient(event[name],self.mass,self.current,native_energy_gev=event['p4'][0])
+                self.assertLess(abs(actual/expected-1),self.table.tolerance)
+            actual=mean_lab_beta_gamma(event['p4'],self.mass,self.current)
+            self.assertLess(abs(actual/event['mean_lab_beta_gamma']-1),self.table.tolerance)
+            self.assertEqual(event['p4'],original)
+        self.assertEqual(json.dumps(self.current,sort_keys=True),before)
+
+    def test_local_controls_cover_both_certified_native_masses_and_jitter(self):
+        weak=self.weak
+        self.assertIsNotNone(self.table)
+        self.assertTrue(self.table.valid)
+        self.assertLessEqual(self.table.width_error,self.table.tolerance)
+        self.assertLessEqual(self.table.mean_error,self.table.tolerance)
+        width=self.current['total_parent_width_gev']
+        for center in (.49761,.497611):
+            for shift in (-2.e-9,0.,2.e-9):
+                value=center+shift
+                inputs=weak._resolved_model(value,self.current,energy=6800.)
+                exact=decay_width(inputs,self.mass,epsilon=.001,quadrature_order=64)/1.e-6/width
+                actual=branching_coefficient(value,self.mass,self.current,native_energy_gev=6800.)
+                self.assertLess(abs(actual/exact-1),self.table.tolerance)
+
+    def test_other_parent_boosts_reuse_the_same_positive_quadrature(self):
+        with patch('dark_photon_weak_radiative._density',side_effect=AssertionError('Repeated amplitude integral')):
+            for momentum in (1.,10.,6800.):
+                parent=(math.hypot(.497611,momentum),0.,0.,momentum)
+                self.assertGreater(mean_lab_beta_gamma(parent,self.mass,self.current),0.)
+
+    def test_failed_acceleration_checks_keep_the_exact_requested_mass(self):
+        event=self.fixture['examples'][0]
+        with patch('dark_photon_weak_radiative._native_table',return_value=None):
+            rate=branching_coefficient(event['kinematic_mass_gev'],self.mass,self.current,native_energy_gev=event['p4'][0])
+            mean=mean_lab_beta_gamma(event['p4'],self.mass,self.current)
+        self.assertLess(abs(rate/event['branching_coefficients']['kinematic_mass_gev']-1),1.e-12)
+        self.assertLess(abs(mean/event['mean_lab_beta_gamma']-1),1.e-12)
+
+    def test_domain_and_near_endpoint_keep_the_original_exact_fallback(self):
+        weak=self.weak;inputs=self.current['weak_radiative_model']
+        endpoint=inputs['valid_vector_mass_range_gev'][1]
+        mass=endpoint-1.e-8
+        self.assertIsNone(weak._native_mass_table(.497611,mass,self.current))
+        exact_inputs=weak._resolved_model(.497611,self.current)
+        exact=decay_width(exact_inputs,mass,epsilon=.001,quadrature_order=64)/1.e-6/self.current['total_parent_width_gev']
+        self.assertAlmostEqual(branching_coefficient(.497611,mass,self.current)/exact,1.,places=12)
+        with self.assertRaises(ValueError):branching_coefficient(.497611,endpoint+1.e-9,self.current)
+        with self.assertRaises(ValueError):mean_lab_beta_gamma((.497611,0.,0.,0.),2*.1056583755,self.current)
+
+
+class WeakRadiativeSourceFrameTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture=json.loads((Path(__file__).parent/'fixtures/kaon_native_source_frame_20261027.json').read_text())
+        cls.current=dict(weak_radiative_model=cls.fixture['weak_radiative_model'],total_parent_width_gev=1.e-17)
+
+    def test_failed_parent_and_same_collision_controls_keep_the_original_rates(self):
+        import dark_photon_weak_radiative as weak
+        for example in self.fixture['examples']:
+            context=example['context'];record=context['native_source_record'];mass=example['kinematic_mass_gev']
+            if not example['old_local_energy_guard_passed']:
+                with self.assertRaisesRegex(ValueError,'pole'):
+                    weak._resolved_model(mass,self.current,energy=record['p4'][0])
+            else:weak._resolved_model(mass,self.current,energy=record['p4'][0])
+            before=json.dumps(context,sort_keys=True)
+            coefficient=branching_coefficient(mass,.25,self.current,native_energy_gev=record['p4'][0],native_context=context)
+            nominal=branching_coefficient(record['native_mass_gev'],.25,self.current)
+            self.assertLess(abs(coefficient/nominal-1),5.e-8)
+            self.assertGreater(mean_lab_beta_gamma(record['p4'],.25,self.current,native_context=context),0.)
+            self.assertEqual(json.dumps(context,sort_keys=True),before)
+
+    def test_actual_unchanged_momenta_and_flights_survive_a_correlated_decay(self):
+        example=self.fixture['examples'][1];context=example['context'];parent=context['native_source_record']['p4']
+        before=json.dumps(context,sort_keys=True)
+        result=sample_decay(parent,.25,7.,random.Random(17450),model=self.current,native_context=context)
+        for i in range(4):
+            self.assertLess(abs(result['dark_photon_p4'][i]+sum(p[i] for p in result['recoil_p4s'])-parent[i]),1.e-10)
+        self.assertTrue(result['unconditional_decay'])
+        self.assertEqual(json.dumps(context,sort_keys=True),before)
+
+    def test_context_cannot_turn_roundoff_into_a_broad_mass_model(self):
+        import copy
+        example=self.fixture['examples'][1];context=example['context'];mass=example['kinematic_mass_gev']
+        changed=copy.deepcopy(context);changed['native_record_mass_support_gev'].append(.6)
+        with self.assertRaisesRegex(ValueError,'support'):
+            branching_coefficient(mass,.25,self.current,native_context=changed)
+        with self.assertRaisesRegex(ValueError,'immutable'):
+            branching_coefficient(mass+.001,.25,self.current,native_context=context)
+        altered=list(context['native_source_record']['p4']);altered[0]+=1.e-10
+        with self.assertRaises(ValueError):mean_lab_beta_gamma(altered,.25,self.current,native_context=context)
 
 
 class HigherOrderUnitarityTest(unittest.TestCase):

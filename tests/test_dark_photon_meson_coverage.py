@@ -298,6 +298,35 @@ class CoverageTest(unittest.TestCase):
         self.assertEqual(report['coverage_counts']['unclassified_model_channels'], 1)
         self.assertFalse(report['physics_complete'])
 
+    def test_double_radiative_and_kaon_photon_recoils_keep_the_photon_in_ownership(self):
+        parents = [dict(pdg_id=331, channel='eta_prime_to_eta', recoil_pdg_id=221),
+            dict(pdg_id=331, channel='eta_prime_to_eta_gamma', recoil_pdg_id=221,
+                 decay_type='pseudoscalar-double-radiative'),
+            dict(pdg_id=130, channel='KL_to_pi0', recoil_pdg_id=111),
+            dict(pdg_id=130, channel='KL_to_pi0_gamma', recoil_pdg_id=111,
+                 decay_type='weak-kaon-pion-photon')]
+        model = dict(parents=parents, channels=[row['channel'] for row in parents])
+        expected = {(331, (221,)), (331, (22, 221)), (130, (111,)), (130, (22, 111))}
+        self.assertEqual(set(model_owned_channels(model)), expected)
+        grouped = dict(parents=[dict(pdg_id=pdg, exclusive_channels=[row for row in parents
+            if row['pdg_id'] == pdg]) for pdg in (331, 130)])
+        self.assertEqual(set(model_owned_channels(grouped)), expected)
+        for row in (parents[1], parents[3]):
+            with self.subTest(channel=row['channel']), self.assertRaisesRegex(ValueError, 'ownership'):
+                model_owned_channels(dict(parents=[dict(row, recoil_pdg_ids=[row['recoil_pdg_id']])]))
+
+    def test_neutral_dipion_and_quarkonium_have_distinct_physical_recoil_ownership(self):
+        parents = [dict(pdg_id=pdg, channel=str(pdg), decay_type='neutral-kaon-dipion',
+                        recoil_pdg_ids=[111, 111]) for pdg in (130, 310)]
+        parents += [dict(pdg_id=pdg, channel=str(pdg), decay_type='quarkonium-radiative',
+                         recoil_pdg_id=recoil) for pdg, recoil in
+                    ((441,22), (10441,443), (20443,443), (445,443), (10443,441), (100443,441))]
+        self.assertEqual(len(model_owned_channels(dict(parents=parents))), 8)
+        for row in parents:
+            malformed = dict(row, recoil_pdg_ids=[13, -13])
+            with self.subTest(channel=row['channel']), self.assertRaises(ValueError):
+                model_owned_channels(dict(parents=[malformed]))
+
     def test_all_explicit_exclusive_channels_leave_validation_and_source_gaps_open(self):
         parents = []
         for item in CATALOGUE:

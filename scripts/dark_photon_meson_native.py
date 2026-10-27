@@ -387,7 +387,7 @@ public:
       bool lepton=id==11||id==12||id==13||id==14;
       leptonic=leptonic||lepton;
       bool massless=id==22||id==12||id==14;
-      if((!lepton&&id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321&&id!=441&&id!=443)||
+      if((!lepton&&id!=22&&id!=111&&id!=211&&id!=221&&id!=331&&id!=311&&id!=321&&id!=441&&id!=443)||
          !std::isfinite(recoil_masses[i])||
          (massless?recoil_masses[i]!=0.:recoil_masses[i]<=0.))
         throw std::runtime_error("Invalid exclusive recoil identity or mass");
@@ -588,10 +588,9 @@ public:
               std::string const& pdl,std::string const& xml)
       :source(value),random(value),external(false,xml,"gamma",true),
        models(external.getListOfModels()),
-       generator(decay.c_str(),pdl.c_str(),&random,external.getPhotosModel(),&models) {
-    if(source.pythia.settings.flag("ParticleDecays:limitRadius")||
-       source.pythia.settings.flag("ParticleDecays:limitCylinder"))
-      throw std::runtime_error("Correlated recoil adapter needs a qualified native spatial decay policy");
+       generator(decay.c_str(),pdl.c_str(),&random,external.getPhotosModel(),&models) {}
+  void read_validation_decay(std::string const& path) {
+    generator.readUDecay(path.c_str());
   }
   bool decay(HepMC::GenParticle* recoil,HepMC::FourVector const& position) {
     if(recoil->pdg_id()!=441&&recoil->pdg_id()!=443)return false;
@@ -645,10 +644,28 @@ struct Callback {
     return engine->decay(particle,position);
   }
 };
+// EvtPDL and decay tables are process-global. A second EvtGen constructor
+// reloads their aliases and aborts, even if the first Source was destroyed.
+// Each production source already runs in its own private interpreter.
+bool initialization_started=false;
 void enable(ShiftMesonNative::Source& source,std::string const& decay,
              std::string const& pdl,std::string const& xml) {
+  if(source.correlated_recoil_decay.target<Callback>())return;
+  if(initialization_started||EvtPDL::entries()!=0)
+    throw std::runtime_error("EvtGen already belongs to another source in this process; use a fresh interpreter");
+  if(source.pythia.settings.flag("ParticleDecays:limitRadius")||
+     source.pythia.settings.flag("ParticleDecays:limitCylinder"))
+    throw std::runtime_error("Correlated recoil adapter needs a qualified native spatial decay policy");
+  // Keep this set after a partial initialization failure too: its global
+  // particle tables cannot safely be reset by constructing a new instance.
+  initialization_started=true;
   auto engine=std::make_shared<RecoilDecay>(source,decay,pdl,xml);
   source.correlated_recoil_decay=Callback{engine};
+}
+void read_validation_decay(ShiftMesonNative::Source& source,std::string const& path) {
+  auto* callback=source.correlated_recoil_decay.target<Callback>();
+  if(!callback)throw std::runtime_error("Missing initialized EvtGen source adapter");
+  callback->engine->read_validation_decay(path);
 }
 }
 '''
@@ -686,7 +703,7 @@ def native_source(settings, seed, parent_ids=(221, 331)):
     if (not parent_ids or len(set(parent_ids)) != len(parent_ids) or
             any(type(pdg) is not int or pdg not in
                 (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
-                 130, 310, 321, -321, 441, 10441, 20443, 445, 10443, 100443) for pdg in parent_ids)):
+                 130, 310, 321, -321, 441, 443, 10441, 20443, 445, 10443, 100443) for pdg in parent_ids)):
         raise ValueError('Require distinct explicitly supported meson source parents')
     import ROOT
     libraries = cmssw_native_libraries()
@@ -715,7 +732,23 @@ def enable_correlated_recoils(source, *, decay_file=None):
 
     The explicit decay-file override is for bounded native validation only.
     Actual source runs use and fingerprint the release's default tables.
+    EvtGen owns process-global particle tables: different sources require
+    fresh interpreters. Re-enabling the same source preserves its tables.
     """
+    previous=getattr(source,'_shift_evtgen_provenance',None)
+    if previous is not None and decay_file is None:
+        return previous
+    override=Path(decay_file).resolve() if decay_file is not None else None
+    override_record=None
+    if override is not None:
+        # Check the input before EvtGen can abort on a missing file. A second
+        # override could leave earlier channels changed but absent from the
+        # receipt, so use a fresh interpreter for a different validation card.
+        override_record=dict(path=str(override),sha256=hashlib.sha256(override.read_bytes()).hexdigest())
+        if previous is not None and previous.get('validation_decay_override'):
+            if previous['files'][-1]==override_record:
+                return previous
+            raise RuntimeError('A different EvtGen validation override requires a fresh interpreter')
     import ROOT
     base=Path(os.environ['CMSSW_BASE'])
     configuration=subprocess.check_output(['scram','tool','info','evtgen'],cwd=base/'src',text=True)
@@ -734,13 +767,20 @@ def enable_correlated_recoils(source, *, decay_file=None):
     if not hasattr(ROOT,'ShiftMesonEvtGen') and not ROOT.gInterpreter.Declare(EVTGEN_CPP):
         raise RuntimeError('Cannot declare the correlated heavy-recoil adapter')
     data=Path(os.environ['EVTGENDATA'])
-    decay=Path(decay_file) if decay_file is not None else data/'DECAY.DEC'
+    decay=data/'DECAY.DEC'
     pdl=data/'evt.pdl'
+    files=[dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+           for path in [*libraries,decay,pdl]]
     ROOT.ShiftMesonEvtGen.enable(source,str(decay),str(pdl),os.environ['PYTHIA8DATA'])
-    return dict(adapter='EvtGen-forward-density-v1',native_source_rng_unchanged=True,
+    if override is not None:
+        ROOT.ShiftMesonEvtGen.read_validation_decay(source,str(override))
+        files.append(override_record)
+    provenance=dict(adapter='EvtGen-forward-density-v1',native_source_rng_unchanged=True,
         native_decay_limits_unchanged=True,
-        files=[dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
-               for path in [*libraries,decay,pdl]])
+        validation_decay_override=decay_file is not None,
+        files=files)
+    source._shift_evtgen_provenance=provenance
+    return provenance
 
 
 def resolved_meson_production_parameters(source):

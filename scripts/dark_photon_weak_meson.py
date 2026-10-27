@@ -495,7 +495,8 @@ def neutral_dipion_decay_width(model, mass, *, epsilon, quadrature_order=32):
                                      0., 1., quadrature_order)
 
 
-def _dipion_native_inputs(parent_mass, mass, model, *, energy=None):
+def _dipion_native_inputs(parent_mass, mass, model, *, energy=None,
+                          native_context=None, parent_p4=None):
     inputs = _dipion_model(model, mass)
     _real(parent_mass, 'native parent mass', positive=True)
     reference = inputs['reference_parent_mass_gev']
@@ -504,6 +505,19 @@ def _dipion_native_inputs(parent_mass, mass, model, *, energy=None):
     if tolerance > 1.e-5:
         raise ValueError('Neutral-kaon pole tolerance exceeds the numerical-table allowance')
     binary_error = 32*math.ulp((energy or parent_mass)**2)/(parent_mass+reference)
+    if native_context is not None:
+        # A small lab energy can result from cancellation of large source-
+        # frame boost terms. Admit only the independently checked immutable
+        # native record and its propagated arithmetic allowance, preserving
+        # the finite table support and the existing no-context guard.
+        from dark_photon_kaon import native_source_mass_precision
+        precision = native_source_mass_precision(parent_mass, native_context,
+            expected_p4=parent_p4, expected_pdg_id=inputs['parent_pdg_id'])
+        table_mass = precision['native_mass_gev']
+        table_roundoff = 8*max(math.ulp(table_mass), math.ulp(reference))
+        if abs(table_mass-reference) > tolerance+table_roundoff:
+            raise ValueError('Native table mass differs from the declared neutral-kaon reference support')
+        binary_error = max(binary_error, precision['mass_allowance_gev'])
     if abs(parent_mass-reference) > tolerance+binary_error:
         raise ValueError('Native/reference neutral-kaon mass mismatch exceeds documented tolerance')
     if parent_mass == reference:
@@ -515,13 +529,16 @@ def _dipion_native_inputs(parent_mass, mass, model, *, energy=None):
         valid_mass_range_gev=[domain[0], min(domain[1], parent_mass-2*inputs['pion_mass_gev'])])
 
 
-def neutral_dipion_branching_coefficient(parent_mass, mass, model, *, native_energy_gev=None):
-    inputs = _dipion_native_inputs(parent_mass, mass, model, energy=native_energy_gev)
+def neutral_dipion_branching_coefficient(parent_mass, mass, model, *, native_energy_gev=None,
+                                        native_context=None):
+    inputs = _dipion_native_inputs(parent_mass, mass, model, energy=native_energy_gev,
+                                  native_context=native_context)
     key = json.dumps(inputs, sort_keys=True, separators=(',', ':'), allow_nan=False)
     return _dipion_segments(mass, key)[-1]/inputs['total_width_gev']
 
 
-def sample_neutral_dipion_decay(parent, mass, proper_ctau_mm, rng, *, model):
+def sample_neutral_dipion_decay(parent, mass, proper_ctau_mm, rng, *, model,
+                               native_context=None):
     """Correlated spin-zero -> pi0 pi0 A' -> pi0 pi0 mu+mu- chain.
 
     The native parent must fly and undergo material transport before this
@@ -537,7 +554,8 @@ def sample_neutral_dipion_decay(parent, mass, proper_ctau_mm, rng, *, model):
     squared = math.fsum((parent[0]**2, *(-x*x for x in parent[1:])))
     if parent[0] <= 0 or squared <= 0 or mass <= 2*MUON_MASS_GEV:
         raise ValueError('Native on-shell neutral kaon and open dimuon channel required')
-    inputs = _dipion_native_inputs(math.sqrt(squared), mass, inputs, energy=parent[0])
+    inputs = _dipion_native_inputs(math.sqrt(squared), mass, inputs, energy=parent[0],
+                                  native_context=native_context, parent_p4=parent)
     scale = inputs['reference_parent_mass_gev']
     key = json.dumps(inputs, sort_keys=True, separators=(',', ':'), allow_nan=False)
     cumulative = _dipion_segments(mass, key)
@@ -597,14 +615,15 @@ def sample_neutral_dipion_decay(parent, mass, proper_ctau_mm, rng, *, model):
         event_parent_mass_gev=scale)
 
 
-def mean_neutral_dipion_lab_beta_gamma(parent, mass, model):
+def mean_neutral_dipion_lab_beta_gamma(parent, mass, model, *, native_context=None):
     """Rate-weighted mean A' boost for the unconditioned spin-zero decay."""
     from dark_photon_vector_meson import mean_lab_beta_gamma as two_body_mean
     _vector(parent)
     squared = math.fsum((parent[0]**2, *(-x*x for x in parent[1:])))
     if parent[0] <= 0 or squared <= 0:
         raise ValueError('Future timelike native parent required')
-    inputs = _dipion_native_inputs(math.sqrt(squared), mass, model, energy=parent[0])
+    inputs = _dipion_native_inputs(math.sqrt(squared), mass, model, energy=parent[0],
+                                  native_context=native_context, parent_p4=parent)
     scale = inputs['reference_parent_mass_gev']
     low = 4*inputs['pion_mass_gev']**2
     span = (scale-mass)**2-low

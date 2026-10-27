@@ -1,16 +1,74 @@
 # Code style: AI-code. AI-generated neutral-kaon amplitude and rate controls.
 import math
+import copy
+import json
 from pathlib import Path
 import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_kaon import amplitude, normalized_dalitz_density, radiative_branching, transition_form_factor
+from dark_photon_kaon import (amplitude, normalized_dalitz_density, radiative_branching,
+    transition_form_factor,native_source_mass_precision)
 from dark_photon_meson import boost
 
 
 PARENT_MASS = .497611
 MUON_MASS = .1056583755
+
+
+class NativeSourceFramePrecisionTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture=json.loads((Path(__file__).parent/'fixtures/kaon_native_source_frame_20261027.json').read_text())
+
+    def test_failed_and_successful_native_records_use_the_actual_source_frame(self):
+        for example in self.fixture['examples']:
+            context=example['context'];record=context['native_source_record'];before=copy.deepcopy(context)
+            result=native_source_mass_precision(example['kinematic_mass_gev'],context,
+                expected_p4=record['p4'],expected_pdg_id=130)
+            self.assertLessEqual(abs(result['kinematic_mass_gev']-record['native_mass_gev']),result['mass_allowance_gev'])
+            self.assertLess(result['mass_allowance_gev'],1.e-8)
+            self.assertEqual(result['native_mass_gev'],record['native_mass_gev'])
+            self.assertEqual(context,before)
+            if record['index']==50:
+                self.assertFalse(example['old_local_energy_guard_passed'])
+                self.assertLess(record['p4'][0],2.)
+                self.assertGreater(record['source_com_energy_gev'],20.)
+                self.assertGreater(result['source_boost_scale_gev'],2500.)
+
+    def test_only_masses_from_the_immutable_record_are_accepted(self):
+        for example in self.fixture['examples']:
+            context=example['context'];p=context['native_source_record']['p4']
+            values=[context['native_source_record']['native_mass_gev'],
+                math.sqrt(math.fsum([p[0]**2]+[-x*x for x in p[1:]])),
+                math.sqrt(math.fsum([p[0]**2]+[-x**2 for x in p[1:]])),
+                math.sqrt(math.fsum([p[0]*p[0]]+[-x*x for x in p[1:]]))]
+            for mass in values:native_source_mass_precision(mass,context)
+            with self.assertRaisesRegex(ValueError,'immutable'):
+                native_source_mass_precision(example['kinematic_mass_gev']+1.e-11,context)
+
+    def test_changed_momentum_or_source_certificate_is_rejected(self):
+        example=self.fixture['examples'][1];original=example['context'];mass=example['kinematic_mass_gev']
+        for field in ('p4','source_total_p4'):
+            changed=copy.deepcopy(original);changed['native_source_record'][field][0]+=.01
+            with self.assertRaises(ValueError):native_source_mass_precision(mass,changed)
+        changed=copy.deepcopy(original);changed['authority']['independent_com_energy_interval_gev'][1]+=.01
+        with self.assertRaises(ValueError):native_source_mass_precision(mass,changed)
+        changed=copy.deepcopy(original);changed['source_ecm_gev']*=1.001
+        with self.assertRaises(ValueError):native_source_mass_precision(mass,changed)
+        with self.assertRaises(ValueError):native_source_mass_precision(mass,original,expected_pdg_id=310)
+        p=list(original['native_source_record']['p4']);p[0]+=1.e-10
+        with self.assertRaisesRegex(ValueError,'momentum'):
+            native_source_mass_precision(mass,original,expected_p4=p)
+
+    def test_missing_context_and_continuous_native_mass_support_are_rejected(self):
+        example=self.fixture['examples'][1];context=example['context'];mass=example['kinematic_mass_gev']
+        for key in ('native_source_record','authority','source_ecm_gev','native_record_mass_support_gev'):
+            changed=copy.deepcopy(context);changed.pop(key)
+            with self.assertRaises(ValueError):native_source_mass_precision(mass,changed)
+        changed=copy.deepcopy(context);changed['native_source_record']['native_mass_gev']+=.001
+        with self.assertRaisesRegex(ValueError,'support'):
+            native_source_mass_precision(mass,changed)
 
 
 def dip_model():

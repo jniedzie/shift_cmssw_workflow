@@ -82,6 +82,12 @@ def transition_form_factor_abs2(mass, model):
     if mass != 0 and not domain[0] <= mass <= domain[1]:
         raise ValueError('Requested mass lies outside the declared transition-model domain')
     kind = model.get('kind')
+    if kind == 'photon-matched-resonance-continuum':
+        continuum, terms = _resonance_continuum_terms(mass, model)
+        # An independent uniform average over unknown relative phases is a
+        # declared benchmark, not a measurement of those phases. The exact
+        # allowed phase range is kept separately below.
+        return abs(continuum)**2 + math.fsum(abs(term)**2 for term in terms)
     if kind == 'single-pole-slope':
         slope = model.get('slope_gev_minus2')
         if type(slope) not in (int,float) or not math.isfinite(slope) or slope <= 0:
@@ -152,6 +158,99 @@ def transition_form_factor_abs2(mass, model):
     raise ValueError('Unsupported vector transition-form-factor model')
 
 
+def _resonance_continuum_terms(mass, model):
+    """Photon-matched VP current with measured on-shell vector residues.
+
+    With B_V(s)=m_V^2/(m_V^2-s-i*m_V*Gamma_V), and f(s)=1/(1-s/Lambda^2),
+      F(s) = f(s) + sum a_V exp(i*phi_V) [B_V(s)-B_V(0)*f(s)].
+    Therefore F(0)=1 for every set of phases. The continuum coefficient is
+    fixed by the measured real-photon rate, rather than adding an independent
+    photon rate once more. A constant finite width is an explicit pole-model
+    assumption, not a dispersive description of the cut or an off-shell BR.
+
+    The VP tensor gives Gamma(J->PV)=g_JPV^2*k_V^3/(12*pi). Combined with
+    Gamma(V->ee)=alpha*m_V*x_V^2*beta_e*(1+2*m_e^2/m_V^2)/3 this fixes
+      |a_V|^2 = BR(J->PV)/BR(J->Pgamma) * (k_gamma/k_V)^3 * x_V^2.
+    No electromagnetic mixing or signal dimuon branching is applied here.
+    """
+    keys = ('parent_mass_gev', 'recoil_mass_gev', 'photon_branching_fraction',
+            'alpha_em', 'electron_mass_gev', 'continuum_pole_mass_gev')
+    if any(type(model.get(key)) not in (int, float) or not math.isfinite(model[key])
+           or model[key] <= 0 for key in keys):
+        raise ValueError('Explicit positive current masses, photon rate and QED inputs are required')
+    parent, recoil, photon_br, alpha, electron, pole = (model[key] for key in keys)
+    if photon_br > 1 or alpha >= 1 or pole <= model['valid_mass_range_gev'][1]:
+        raise ValueError('Invalid photon rate, QED coupling or continuum pole inside the model domain')
+    if model.get('phase_prescription') != 'independent-uniform-phase-average':
+        raise ValueError('Unknown phases require an explicit independent-phase benchmark')
+    if model.get('propagator_width') != 'constant-finite-width':
+        raise ValueError('This benchmark requires an explicit constant finite propagator width')
+    photon_k = two_body_momentum(parent, recoil, 0.)
+    if photon_k <= 0:
+        raise ValueError('The reference photon transition must be open')
+    continuum = 1/(1-(mass/pole)**2)
+    resonances = model.get('resonances')
+    if not isinstance(resonances, list) or not resonances:
+        raise ValueError('Measured vector residues must be supplied explicitly')
+    terms, seen = [], set()
+    for row in resonances:
+        pdg = row.get('pdg_id')
+        if type(pdg) is not int or pdg in seen or not row.get('reference'):
+            raise ValueError('Vector residues require unique PDG identifiers and references')
+        seen.add(pdg)
+        fields = ('mass_gev', 'width_gev', 'electron_width_gev', 'parent_branching_fraction')
+        if any(type(row.get(key)) not in (int, float) or not math.isfinite(row[key])
+               or row[key] <= 0 for key in fields):
+            raise ValueError('Explicit positive measured vector masses, widths and rates are required')
+        vector, width, electron_width, branching = (row[key] for key in fields)
+        vector_k = two_body_momentum(parent, recoil, vector)
+        if vector_k <= 0 or electron_width > width or branching > 1 or vector <= 2*electron:
+            raise ValueError('The measured vector residue has an invalid reference decay')
+        ratio = (electron/vector)**2
+        lepton_phase = math.sqrt(1-4*ratio)*(1+2*ratio)
+        residue = math.sqrt(branching/photon_br*(photon_k/vector_k)**3
+                            * 3*electron_width/(alpha*vector*lepton_phase))
+        propagator = vector**2/complex(vector**2-mass**2, -vector*width)
+        photon_propagator = vector**2/complex(vector**2, -vector*width)
+        terms.append(residue*(propagator-photon_propagator*continuum))
+    return continuum, terms
+
+
+def transition_form_factor_phase_envelope(mass, model):
+    """Exact pointwise range over all unknown phases, conditional on inputs.
+
+    The polygon inequality gives the tight minimum and maximum magnitude of
+    one fixed continuum vector plus independently rotatable resonance terms.
+    These are not confidence intervals or a simultaneous mass-dependent fit.
+    """
+    if model.get('kind') != 'photon-matched-resonance-continuum':
+        raise ValueError('A photon-matched finite-resonance current is required')
+    transition_form_factor_abs2(mass, model)  # Enforce the declared mass domain.
+    continuum, terms = _resonance_continuum_terms(mass, model)
+    lengths = [abs(continuum), *(abs(term) for term in terms)]
+    total = math.fsum(lengths)
+    return max(0., 2*max(lengths)-total)**2, total**2
+
+
+def transition_form_factor_amplitude(mass, model, phases_rad):
+    """One coherent member of the declared finite-current phase family.
+
+    Reuse the same phase vector when comparing different masses. The
+    pointwise envelope alone does not preserve those cross-mass correlations.
+    No phase values are chosen implicitly or interpreted as fitted data.
+    """
+    if model.get('kind') != 'photon-matched-resonance-continuum':
+        raise ValueError('A photon-matched finite-resonance current is required')
+    transition_form_factor_abs2(mass, model)
+    continuum, terms = _resonance_continuum_terms(mass, model)
+    if (not isinstance(phases_rad, (list, tuple)) or len(phases_rad) != len(terms)
+            or any(type(value) not in (int, float) or not math.isfinite(value)
+                   for value in phases_rad)):
+        raise ValueError('One explicit finite phase per ordered vector resonance is required')
+    return continuum + sum(term*complex(math.cos(phase), math.sin(phase))
+                           for term, phase in zip(terms, phases_rad))
+
+
 def transition_form_factor_variations(mass, model):
     """Parameter-box values; never call a model discrepancy a measured error.
 
@@ -161,6 +260,10 @@ def transition_form_factor_variations(mass, model):
     total KLOE errors; their unavailable covariance is not reconstructed.
     """
     central = transition_form_factor_abs2(mass, model)
+    if model['kind'] == 'photon-matched-resonance-continuum':
+        # Keep the unmeasured phase envelope distinct from measured input
+        # errors. No covariance or probabilistic shape error is invented.
+        return [central, *transition_form_factor_phase_envelope(mass, model)]
     if model['kind'] == 'single-pole-slope':
         errors = {'slope_gev_minus2': math.hypot(model['slope_stat_gev_minus2'],
                                                model['slope_syst_gev_minus2'])}

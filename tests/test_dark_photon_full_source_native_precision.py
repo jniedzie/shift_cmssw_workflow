@@ -68,6 +68,8 @@ class FullSourcePrecisionTest(unittest.TestCase):
 
     def test_export_recomputes_every_parent_and_full_exposure_before_admission(self):
         card,config,models,bad,good=fixture()
+        # The native export resolves the physical coupling frozen in the contract.
+        models=resolved_parent_models(card,config,MASS,epsilon=.001)
         bad,=resolve_parent_kinematics([bad],.001,MASS,models,BR,native_precision_policy=POLICY)
         good,=resolve_parent_kinematics([good],.001,MASS,models,BR,native_precision_policy=POLICY)
         coefficient=parent_branching_coefficient(.77511,MASS,models[213],BR)
