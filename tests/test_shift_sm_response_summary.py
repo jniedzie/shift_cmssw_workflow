@@ -41,6 +41,24 @@ class ResponseSummaryTest(unittest.TestCase):
         self.assertEqual(result['weighted_pair_sum'], 20.)
         self.assertEqual(result['event_level_pair_second_moment'], 400.)
 
+    def test_signed_weight_ratio_is_not_reported_as_a_probability(self):
+        result = response_statistics([event(1, [pair()]), event(2, native=-.75)], 'both_both')
+        self.assertEqual(result['weighted_conditional_event_ratio'], 4.)
+        self.assertIsNone(result['weighted_conditional_event_probability'])
+        self.assertFalse(result['weighted_event_probability_defined'])
+        self.assertTrue(result['has_negative_native_weights'])
+        self.assertEqual(result['raw_event_probability'], .5)
+
+    def test_nonnegative_weight_ratio_remains_a_probability(self):
+        result = response_statistics([event(1, [pair()], native=2.), event(2)], 'both_both')
+        self.assertAlmostEqual(result['weighted_conditional_event_ratio'], 2/3)
+        self.assertAlmostEqual(result['weighted_conditional_event_probability'], 2/3)
+        self.assertTrue(result['weighted_event_probability_defined'])
+        zero = response_statistics([event(1, native=0.)], 'both_both')
+        self.assertIsNone(zero['weighted_conditional_event_ratio'])
+        self.assertIsNone(zero['weighted_conditional_event_probability'])
+        self.assertFalse(zero['weighted_event_probability_defined'])
+
     def test_overlapping_snapshots_are_rejected(self):
         row = event(1)
         with self.assertRaisesRegex(ValueError, 'Overlapping'):
@@ -75,11 +93,28 @@ class ResponseSummaryTest(unittest.TestCase):
         good = sampling_forecast([positive, negative], 'both_both', 'poor_both_endcap_pointing_5m', .1)
         self.assertAlmostEqual(good['conditional_information_per_SIM_wall_gain'], 100/19)
         self.assertEqual(good['demoted_positive_originals'], 0)
+        self.assertEqual(good['reference_admission_probability'], 1.)
+        self.assertEqual(good['reference_policy'], 'full_reconstruction_of_original_GEN_cohort')
+        self.assertEqual(good['target_scope'], 'all_pairs_in_category')
+        self.assertIsNone(good['target_tail'])
         positive['features']['best_pair_miss_cm'] = 10000.
         bad = sampling_forecast([positive, negative], 'both_both', 'poor_both_endcap_pointing_5m', .1)
         self.assertAlmostEqual(bad['pair_second_moment_ratio'], 10.)
         self.assertAlmostEqual(bad['conditional_information_per_SIM_wall_gain'], 1.)
         self.assertFalse(bad['production_policy_qualified'])
+
+    def test_reference_is_full_admission_even_for_thinned_response_data(self):
+        positive = event(1, [pair()], probability=.1)
+        negative = event(2, probability=.1)
+        for row in (positive, negative):
+            row['cost'] = dict(sim_wall_seconds_per_event=10., cost_kind='single_event_actual')
+        negative['features']['best_pair_miss_cm'] = 10000.
+        forecast = sampling_forecast([positive, negative], 'both_both', 'poor_both_endcap_pointing_5m', .1)
+        self.assertEqual(forecast['reference_admission_probability'], 1.)
+        self.assertAlmostEqual(forecast['expected_event_count_ratio'], .55)
+        self.assertTrue(forecast['response_sampling_probability_used_for_estimation'])
+        summary = summarize([positive, negative])
+        self.assertFalse(summary['counterfactual_sampling_includes_tails'])
 
 
 if __name__ == '__main__':

@@ -65,12 +65,19 @@ def response_statistics(rows, category, tail=None):
     total = math.fsum(contributions)
     second = math.fsum(value*value for value in contributions)
     positives = math.fsum(weight for weight, value in zip(weights, values) if value > 0)
+    has_negative_weights = any(weight < 0 for weight in weights)
+    ratio = positives/sumw if sumw else None
+    probability_defined = sumw > 0 and not has_negative_weights
     return dict(events=len(rows), positive_originals=passed, pairs=sum(values),
         raw_event_probability=passed/len(rows) if rows else None,
         raw_event_probability_interval95=wilson_interval(passed, len(rows)),
+        raw_event_probability_interval_scope='completed_response_sample',
         zero_observation_upper95_raw=(1.-.05**(1./len(rows))) if rows and not passed else None,
         sum_native_over_probability=sumw, sum_squared_native_over_probability=sumw2,
-        weighted_conditional_event_probability=positives/sumw if sumw else None,
+        weighted_conditional_event_ratio=ratio,
+        weighted_conditional_event_probability=ratio if probability_defined else None,
+        weighted_event_probability_defined=probability_defined,
+        has_negative_native_weights=has_negative_weights,
         weighted_pair_sum=total, event_level_pair_second_moment=second,
         effective_pair_contributions=total*total/second if second else 0.,
         weighted_denominator_effective_events=sumw*sumw/sumw2 if sumw2 else 0.,
@@ -105,6 +112,9 @@ def candidate_regions(features):
 def sampling_forecast(rows, category, region, floor, tail=None):
     """Counterfactual planning comparison conditional on observed outcomes.
 
+    The reference reconstructs every original event with probability one. The
+    old response-sample probability supplies an inverse-probability estimate
+    of that reference; it is not the policy used as the comparison baseline.
     A demoted positive event increases the weight second moment by 1/p_new.
     Counting only saved event slots would miss that statistical penalty. Stage
     costs are wall time and may be equal-share proxies for multi-event jobs.
@@ -137,6 +147,11 @@ def sampling_forecast(rows, category, region, floor, tail=None):
     reference = math.fsum(base_cost)*math.fsum(base_second)
     proposed = math.fsum(new_cost)*math.fsum(new_second)
     return dict(control_floor=floor, low_probability_region=region,
+        reference_admission_probability=1.,
+        reference_policy='full_reconstruction_of_original_GEN_cohort',
+        response_sampling_probability_used_for_estimation=True,
+        target_category=category, target_tail=tail,
+        target_scope='all_pairs_in_category' if tail is None else 'tail_pairs_in_category',
         raw_positive_originals=positive, demoted_positive_originals=demoted_positive,
         expected_event_count_ratio=math.fsum(new_events)/math.fsum(base_events) if rows else None,
         estimated_SIM_wall_ratio=math.fsum(new_cost)/math.fsum(base_cost) if math.fsum(base_cost) else None,
@@ -187,6 +202,7 @@ def summarize(rows):
                               counterfactual_sampling=forecasts))
     return dict(schema='shift-sm-measured-response-summary-v1', events=len(rows), groups=summaries,
         original_event_is_error_unit=True, sampling_correction_applied_once=True,
+        counterfactual_sampling_includes_tails=False,
         raw_intervals_are_not_weighted_rate_intervals=True,
         complete_cohort_conditioning_may_be_informative=True,
         physics_normalization_ready=False, production_policy_qualified=False)
