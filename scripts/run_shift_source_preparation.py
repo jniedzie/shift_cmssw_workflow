@@ -368,12 +368,25 @@ def feature_census(directory,unit,plan,output):
              '--gen',str(output),'--hepmc-label','shiftEventTime',
              '--geometry',plan['geometry_path'],'--frame',str(directory/'frame.json'),
              '--original-source-map',str(directory/'original_sources.json'),'--output',str(features)]
+    event_timeout=plan.get('feature_event_timeout_seconds',0.)
+    require(isinstance(event_timeout,(int,float)) and not isinstance(event_timeout,bool)
+            and math.isfinite(event_timeout) and event_timeout>=0,
+            'Feature event timeout must be finite and nonnegative')
+    if event_timeout:
+        command=command[:-2]+['--event-timeout-seconds',str(event_timeout)]+command[-2:]
     started=time.monotonic()
     fallback=None
     with (directory/'features.log').open('w') as log:
+        def run_reader(arguments,timeout):
+            if event_timeout:
+                # Stop forked navigator children too if the whole census times out.
+                from run_shift_gen_to_nano import command as bounded_command
+                bounded_command(arguments,stdout=log,stderr=subprocess.STDOUT,timeout=timeout)
+            else:
+                subprocess.run(arguments,stdout=log,stderr=subprocess.STDOUT,
+                               check=True,timeout=timeout)
         try:
-            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,
-                           timeout=plan.get('feature_timeout_seconds',600))
+            run_reader(command,plan.get('feature_timeout_seconds',600))
         except subprocess.TimeoutExpired:
             # Ranking is optional; native material transport is not. Preserve
             # every original and its graph/W. Missing paths get the existing
@@ -387,7 +400,7 @@ def feature_census(directory,unit,plan,output):
                 features.unlink()
             command=command[:-2]+['--skip-material-navigation']+command[-2:]
             log.write('\nNavigator timeout: retain full GEN census with unknown material paths.\n');log.flush()
-            subprocess.run(command,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=600)
+            run_reader(command,600)
     import gzip
     with gzip.open(features,'rt') as stream:data=json.load(stream)
     expected={tuple(identity):weight for identity,weight in zip(unit['event_ids'],unit['native_weights'])}

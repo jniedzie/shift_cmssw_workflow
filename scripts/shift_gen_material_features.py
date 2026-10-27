@@ -14,7 +14,10 @@ import gzip
 import hashlib
 import json
 import math
+import multiprocessing
 from pathlib import Path
+import resource
+import tempfile
 import time
 
 from audit_shift_material_scout import digest, identity, items, metadata, product
@@ -261,8 +264,57 @@ def read_hepmc(event, label):
     return rows, float(weight.weight()), list(map(float, hep.weights())), (momentum_unit, length_unit)
 
 
+def _score_event_to_file(arguments, output):
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    result = event_features(*arguments)
+    Path(output).write_text(json.dumps(result, separators=(',', ':'), allow_nan=False))
+
+
+def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, frame, seconds):
+    """Isolate one slow navigator; other originals retain their scored paths.
+
+    Timeout is unknown material, never a rejected original or zero depth.
+    Python/data failures remain fatal rather than silently becoming timeouts.
+    The qualified diagnostic used the same fork/file method; no GEN changes.
+    """
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError('Per-event scoring timeout must be finite and positive')
+    arguments = (rows, event_id, weight, hepmc_weights, geometry, frame)
+    if geometry is None:
+        return event_features(*arguments)
+    context = multiprocessing.get_context('fork')
+    with tempfile.TemporaryDirectory(prefix='shift-material-event-') as directory:
+        output = Path(directory)/'event.json'
+        child = context.Process(target=_score_event_to_file, args=(arguments, str(output)))
+        child.start()
+        child.join(seconds)
+        timed_out = child.is_alive()
+        if timed_out:
+            child.terminate()
+            child.join(2)
+            if child.is_alive():
+                child.kill()
+                child.join(2)
+        code = child.exitcode
+        if child.is_alive():
+            raise RuntimeError('Material navigator child could not be stopped')
+        child.close()
+        if not timed_out:
+            if code != 0 or not output.is_file():
+                raise RuntimeError('Material feature child failed for '+str(event_id)+': '+str(code))
+            return json.loads(output.read_text())
+    result = event_features(rows, event_id, weight, hepmc_weights, None, frame)
+    result['material_navigation_timeout'] = True
+    for parent in result['parent_flights']:
+        parent['material']['unknown_reason'] = 'per-event material navigation timeout'
+    for muon in result['muons']:
+        if muon['material_to_CMS_entry'].get('unknown_reason') == 'geometry scoring not requested':
+            muon['material_to_CMS_entry']['unknown_reason'] = 'per-event material navigation timeout'
+    return result
+
+
 def scan_source(path, hepmc_label, geometry=None, frame=None, maximum_events=None,
-                original_sources=None):
+                original_sources=None, event_timeout_seconds=0.):
     from DataFormats.FWLite import Events
     seen = set()
     for event in Events(str(path)):
@@ -274,7 +326,9 @@ def scan_source(path, hepmc_label, geometry=None, frame=None, maximum_events=Non
         seen.add(event_id)
         rows, weight, hepmc_weights, units = read_hepmc(event, hepmc_label)
         print('Material features: event '+str(list(event_id)),flush=True)
-        record = event_features(rows, event_id, weight, hepmc_weights, geometry, frame)
+        arguments = (rows, event_id, weight, hepmc_weights, geometry, frame)
+        record = (bounded_event_features(*arguments, event_timeout_seconds)
+                  if event_timeout_seconds else event_features(*arguments))
         record['original_hepmc_units'] = dict(momentum=units[0], length=units[1])
         original = (original_sources or {}).get(str(event_id[0]), {})
         record.update(source_id=original.get('source_id'),
@@ -294,12 +348,16 @@ def main():
     parser.add_argument('--original-source-map', type=Path,
                         help='JSON object mapping original run number to source_id and original_source_sha256')
     parser.add_argument('--maximum-events-per-source', type=int)
+    parser.add_argument('--event-timeout-seconds', type=float, default=0.,
+                        help='Optional per-event navigator isolation; zero preserves the existing scanner')
     parser.add_argument('--output', type=Path, required=True, help='JSON or .json.gz; must not exist')
     args = parser.parse_args()
     if bool(args.geometry) != bool(args.frame):
         parser.error('--geometry and --frame must be supplied together')
     if args.maximum_events_per_source is not None and args.maximum_events_per_source < 1:
         parser.error('--maximum-events-per-source must be positive')
+    if not math.isfinite(args.event_timeout_seconds) or args.event_timeout_seconds < 0:
+        parser.error('--event-timeout-seconds must be finite and nonnegative')
     started = time.monotonic()
     hepmc_unit_names()
     geometry, frame = None, None
@@ -336,6 +394,7 @@ def main():
                   full_source_exposure_is_not_selected_event_count=True,
                   geometry_path=str(args.geometry.resolve()) if args.geometry else None,
                   material_navigation_skipped=args.skip_material_navigation,
+                  event_timeout_seconds=args.event_timeout_seconds,
                   geometry_sha256=digest(args.geometry) if args.geometry else None,
                   frame_definition_sha256=digest(args.frame) if args.frame else None,
                   material_score_schema='shift-gen-material-path-score-v1',
@@ -349,7 +408,8 @@ def main():
     args.output.parent.mkdir(parents=True, exist_ok=True)
     opener = gzip.open if args.output.suffix == '.gz' else open
     counts = dict(events=0, zero_GEN_muon_events=0, GEN_muons=0,
-                  muons_with_complete_parent_flights=0, muons_with_known_external_column=0)
+                  muons_with_complete_parent_flights=0, muons_with_known_external_column=0,
+                  material_navigation_timeouts=0)
     with opener(args.output, 'xt') as target:
         body = json.dumps(header, allow_nan=False)
         target.write(body[:-1]+',"events":[')
@@ -357,12 +417,14 @@ def main():
         for path, source in zip(args.gen, sources):
             read_count = 0
             for row in scan_source(path, args.hepmc_label, geometry, frame,
-                                   args.maximum_events_per_source, original_sources):
+                                   args.maximum_events_per_source, original_sources,
+                                   args.event_timeout_seconds):
                 row['source_file_sha256'] = source['sha256']
                 if counts['events']:
                     target.write(',\n')
                 json.dump(row, target, allow_nan=False, separators=(',', ':'))
                 counts['events'] += 1
+                counts['material_navigation_timeouts'] += row.get('material_navigation_timeout') is True
                 read_count += 1
                 counts['zero_GEN_muon_events'] += row['zero_GEN_muon_control']
                 counts['GEN_muons'] += row['GEN_muons']

@@ -1,7 +1,9 @@
 # Code style: AI-code. AI-generated full-HepMC feature and control-support tests.
 from pathlib import Path
 import sys
+import time
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import shift_gen_material_features as features
@@ -15,6 +17,44 @@ def particle(barcode, pdg, parents=(), status=2, birth=(0., 0., 100.), end=(0., 
 
 
 class GenMaterialFeatureTests(unittest.TestCase):
+    def test_isolated_scoring_is_identical_to_direct_scoring(self):
+        rows=[particle(1,211),particle(2,13,[1],status=1,end=None)]
+        scored=dict(complete=True,full_saved_chord_coverage=True,
+                    interaction_depth_proxy=.4,column_density_g_cm2=20.)
+        frame=dict(minimum_abs_z_cm=10.)
+        with patch.object(features,'score_paths',side_effect=lambda *a:dict(paths=[dict(scored)])):
+            direct=features.event_features(rows,[1,1,1],2.,[2.],object(),frame)
+            isolated=features.bounded_event_features(rows,[1,1,1],2.,[2.],object(),frame,2.)
+        self.assertEqual(direct,isolated)
+
+    def test_one_timeout_preserves_graph_and_does_not_poison_next_event(self):
+        rows=[particle(1,211),particle(2,13,[1],status=1,end=None)]
+        frame=dict(minimum_abs_z_cm=10.)
+        def slow(*unused):time.sleep(1.)
+        with patch.object(features,'_score_event_to_file',side_effect=slow):
+            result=features.bounded_event_features(rows,[1,1,1],2.,[2.],object(),frame,.02)
+        baseline=features.event_features(rows,[1,1,1],2.,[2.],None,frame)
+        for key in ('event_id','graph_sha256','native_weight','hepmc_weights'):
+            self.assertEqual(result[key],baseline[key])
+        self.assertTrue(result['material_navigation_timeout'])
+        self.assertIsNone(result['parent_flights'][0]['material']['interaction_depth_proxy'])
+        self.assertIn('timeout',result['parent_flights'][0]['material']['unknown_reason'])
+        # A later event still exercises its own geometry, not a cohort fallback.
+        scored=dict(complete=True,full_saved_chord_coverage=True,
+                    interaction_depth_proxy=.4,column_density_g_cm2=20.)
+        with patch.object(features,'score_paths',side_effect=lambda *a:dict(paths=[dict(scored)])):
+            following=features.bounded_event_features(rows,[1,1,2],2.,[2.],object(),frame,2.)
+        self.assertNotIn('material_navigation_timeout',following)
+        self.assertEqual(following['parent_flights'][0]['material']['interaction_depth_proxy'],.4)
+
+    def test_missing_child_result_is_a_failure_not_an_unknown_path(self):
+        with patch.object(features,'_score_event_to_file',return_value=None):
+            with self.assertRaisesRegex(RuntimeError,'child failed'):
+                features.bounded_event_features([], [1,1,1],1.,[1.],object(),{},2.)
+        for invalid in (0.,-1.,float('nan'),float('inf')):
+            with self.assertRaises(ValueError):
+                features.bounded_event_features([], [1,1,1],1.,[1.],None,{},invalid)
+
     def test_zero_muon_event_and_unfinished_hadrons_are_retained(self):
         row=features.event_features([particle(1,211,status=1,end=None)], [1,2,3], -2., [-2.])
         self.assertTrue(row['zero_GEN_muon_control'])

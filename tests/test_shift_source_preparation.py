@@ -73,12 +73,14 @@ class SourceCensusTests(unittest.TestCase):
         self.assertNotIn('MinPt',source)
 
     def test_feature_reader_retains_zero_muon_controls_and_native_weight_identity(self):
-        value=plan();unit=value['units'][0]
+        value=plan();value['feature_event_timeout_seconds']=10.;unit=value['units'][0]
         for mutation in (None,'weight','prefix','rawsha','missing'):
             with self.subTest(mutation=mutation),tempfile.TemporaryDirectory() as directory:
                 path=Path(directory);output=path/'complete.root';output.write_bytes(b'synthetic')
                 def scanner(command,**kwargs):
                     self.assertNotIn('--maximum-events-per-source',command)
+                    self.assertIn('--event-timeout-seconds',command)
+                    self.assertEqual(command[command.index('--event-timeout-seconds')+1],'10.0')
                     data=dict(events=[dict(event_id=x,native_weight=w,original_source_sha256='a'*64,
                         zero_GEN_muon_control=True) for x,w in zip(unit['event_ids'],unit['native_weights'])],
                         sources=[dict(sha256=prep.sha(output))],maximum_events_per_source=None,
@@ -88,7 +90,8 @@ class SourceCensusTests(unittest.TestCase):
                     if mutation=='rawsha':data['events'][0]['original_source_sha256']='b'*64
                     if mutation=='missing':data['events'].pop()
                     with gzip.open(command[-1],'wt') as stream:json.dump(data,stream)
-                with patch.object(prep.subprocess,'run',side_effect=scanner):
+                with patch.object(prep.subprocess,'run',side_effect=scanner), patch(
+                        'run_shift_gen_to_nano.command',side_effect=scanner):
                     if mutation is None:
                         features,audit=prep.feature_census(path,unit,value,output)
                         self.assertTrue(audit['zero_muon_controls_retained'])
