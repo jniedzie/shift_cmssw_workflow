@@ -134,6 +134,8 @@ def observe(config, state, now=None, query_jobs=query, history=native_manager_hi
             problems.append('DAG manager is held')
         elif manager.get('JobStatus') == 3:
             problems.append('DAG manager was removed')
+        if manager.get('DAG_Status', 0) != 0 or manager.get('DAG_NodesFailed', 0) > 0:
+            problems.append('Live DAG manager reports failed nodes or unsuccessful DAG status')
         if children:
             state.pop('no_children_since', None)
         else:

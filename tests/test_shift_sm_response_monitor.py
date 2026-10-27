@@ -49,6 +49,18 @@ class ResponseMonitorTest(unittest.TestCase):
         self.assertTrue(record['problems'])
         self.assertEqual(record['held_children'][0]['ClusterId'], 124)
 
+    def test_live_failed_DAG_stays_visible_after_held_children_are_removed(self):
+        healthy = child()
+        for status, failed_nodes in ((2, 7), (0, 7), (2, 0)):
+            record, _ = self.observation([
+                dict(manager(), DAG_Status=status, DAG_NodesFailed=failed_nodes), healthy])
+            self.assertEqual(record['phase'], 'attention_required')
+            self.assertTrue(any('failed nodes' in problem for problem in record['problems']))
+            self.assertEqual(record['children'], 1)
+            self.assertEqual(record['held_children'], [])
+            self.assertEqual(healthy['JobStatus'], 2)
+            self.assertFalse(record['terminal'])
+
     def test_no_children_timer_survives_poll_and_resets(self):
         record, state = self.observation([manager()], now=1000)
         self.assertFalse(record['problems'])
