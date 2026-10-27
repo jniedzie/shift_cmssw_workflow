@@ -11,6 +11,7 @@ The existing detailed meson model remains a separate alternative.
 import argparse
 from collections import defaultdict
 import hashlib
+import gzip
 import json
 import math
 import os
@@ -118,6 +119,52 @@ def checked_runtime(directory):
     return directory,receipt
 
 
+def unpack_runtime(profile, destination):
+    """Download the qualified source capsule into one worker's scratch space."""
+    if (profile.get('schema')!='shift-senscalc-source-capsule-v1' or
+            not str(profile.get('url','')).startswith('root://eosuser.cern.ch//eos/user/j/jniedzie/shift_cmssw_support/') or
+            type(profile.get('bytes')) is not int or not 0<profile['bytes']<=100*1024**2 or
+            any(len(profile.get(key,''))!=64 or any(c not in '0123456789abcdef' for c in profile[key])
+                for key in ('sha256','runtime_receipt_sha256'))):
+        raise ValueError('Require a pinned qualified SensCalc source capsule')
+    destination=Path(destination).resolve();destination.mkdir(parents=True,exist_ok=False)
+    archive=destination/'source_runtime.tar.gz'
+    subprocess.run(['/usr/bin/xrdcp','--silent','--cksum','adler32',profile['url'],str(archive)],
+                   timeout=600,check=True)
+    if archive.stat().st_size!=profile['bytes'] or digest(archive)!=profile['sha256']:
+        raise ValueError('Downloaded source capsule differs from its pinned bytes')
+    runtime=destination/'runtime';runtime.mkdir()
+    with tarfile.open(archive) as payload:
+        members=payload.getmembers()
+        if (sum(item.size for item in members)>300*1024**2 or
+                any(item.name.startswith('/') or '..' in Path(item.name).parts or
+                    not (item.isfile() or item.isdir()) for item in members)):
+            raise ValueError('Unsafe or unexpectedly large source capsule')
+        payload.extractall(runtime)
+    archive.unlink()
+    if digest(runtime/'runtime.json')!=profile['runtime_receipt_sha256']:
+        raise ValueError('Source runtime receipt differs from the qualified capsule')
+    checked_runtime(runtime)
+    return runtime
+
+
+def ledger_digest(path):
+    """Hash original ledger bytes even when retained losslessly compressed."""
+    value=hashlib.sha256()
+    opener=gzip.open if Path(path).suffix=='.gz' else open
+    with opener(path,'rb') as stream:
+        for block in iter(lambda:stream.read(1024*1024),b''):value.update(block)
+    return value.hexdigest()
+
+
+def source_ledger(directory):
+    directory=Path(directory)
+    plain=directory/'source_ledger.jsonl'
+    path=plain if plain.is_file() else directory/'source_ledger.jsonl.gz'
+    opener=gzip.open if path.suffix=='.gz' else open
+    return path,opener
+
+
 def source_summary(rows,sigma_mb,*,mass=None):
     """Count independent source collisions, including zero-candidate trials.
 
@@ -190,6 +237,17 @@ def sample_source(runtime,settings,mass,trials,seed,output,*,probability=.01):
         environment=dict(os.environ)
         environment.pop('PYTHIA8DATA',None)
         environment['LD_LIBRARY_PATH']=str(runtime/receipt['upstream_directory']/'lib')+':'+environment.get('LD_LIBRARY_PATH','')
+        coefficients=subprocess.run([str(runtime/'source'),'--rates',str(mass)],cwd=runtime,
+            env=environment,text=True,capture_output=True,timeout=60,check=True).stdout
+        weights={}
+        for line in coefficients.splitlines():
+            fields=line.split()
+            if len(fields)==2 and fields[0].lstrip('-').isdigit() and int(fields[0]) in CHANNELS:
+                weights[fields[0]]=float(fields[1])/probability
+        if (set(weights)!=set(map(str,CHANNELS)) or
+                any(not math.isfinite(value) or value<0 for value in weights.values()) or max(weights.values())<=0):
+            raise ValueError('Missing complete physical coefficient envelope from the pinned source')
+        manifest['coefficient_weights_over_epsilon_squared']=weights
         with (output/'source.log').open('w') as log:
             subprocess.run([str(runtime/'source'),str(runtime/receipt['upstream_directory']/'share/Pythia8/xmldoc'),
                 str(output/'source_settings.cmnd'),str(mass),str(trials),str(seed),

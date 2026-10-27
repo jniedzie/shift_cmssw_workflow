@@ -1,6 +1,8 @@
 # Code style: AI-code. Exposure, frozen-input and interpolation controls.
 import json
 import math
+import io
+import tarfile
 from pathlib import Path
 import sys
 import tempfile
@@ -12,6 +14,24 @@ import dark_photon_senscalc as model
 
 
 class SensCalcBenchmark(unittest.TestCase):
+    def test_source_capsule_checks_downloaded_bytes_and_rejects_archive_escape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);archive=root/'payload.tar.gz'
+            with tarfile.open(archive,'w:gz') as payload:
+                item=tarfile.TarInfo('../escape');item.size=1
+                payload.addfile(item,io.BytesIO(b'x'))
+            profile=dict(schema='shift-senscalc-source-capsule-v1',
+                url='root://eosuser.cern.ch//eos/user/j/jniedzie/shift_cmssw_support/synthetic.tar.gz',
+                bytes=archive.stat().st_size,sha256='0'*64,runtime_receipt_sha256='1'*64)
+            def transfer(argv,**kwargs):Path(argv[-1]).write_bytes(archive.read_bytes())
+            with patch.object(model.subprocess,'run',side_effect=transfer):
+                with self.assertRaisesRegex(ValueError,'pinned bytes'):
+                    model.unpack_runtime(profile,root/'corrupt')
+                profile['sha256']=model.digest(archive)
+                with self.assertRaisesRegex(ValueError,'Unsafe'):
+                    model.unpack_runtime(profile,root/'escape_attempt')
+            self.assertFalse((root/'escape').exists())
+
     @staticmethod
     def collision(trial,weights):
         return dict(trial=trial,generator_success=True,native_weight=1.,
