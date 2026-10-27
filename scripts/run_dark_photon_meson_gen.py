@@ -23,7 +23,8 @@ from dark_photon_meson_source import (coefficient_bound, choose_collision, sourc
     parent_branching_coefficient, vector_parent, dipion_channel, vector_dipion_channel,
     dipion_kernel, exclusive_channels, production_mechanism, charged_rho_parent_rate_model,
     kaon_channel, PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,validate_native_precision_policy,
-    deferred_native_precision_measure,full_source_native_precision_summary,radiative_cascade_owner)
+    deferred_native_precision_measure,full_source_native_precision_summary,radiative_cascade_owner,
+    current_channel,current_kernel)
 import dark_photon_vector_meson as vector_meson
 from dark_photon_meson_native import (native_source, inject_decay, cmssw_native_libraries,
     inject_undecayed_kaon_decay)
@@ -33,7 +34,8 @@ from run_dark_photon_spectral_gen import digest, freeze_spectral_inputs, physica
 SOURCES = ('run_dark_photon_meson_gen.py', 'dark_photon_meson.py', 'dark_photon_meson_source.py',
            'dark_photon_vector_meson.py', 'dark_photon_dipion_meson.py', 'dark_photon_rho_radiative.py',
            'dark_photon_charged_rho_radiative.py','dark_photon_neutral_vector_dipion.py',
-           'dark_photon_double_radiative.py',
+           'dark_photon_double_radiative.py', 'dark_photon_scalar_meson.py',
+           'dark_photon_quarkonium.py', 'dark_photon_weak_radiative.py',
            'dark_photon_kaon.py', 'dark_photon_weak_meson.py', 'dark_photon_kaon_leptonic.py',
            'dark_photon_meson_native.py', 'dark_photon_meson_gen_cfg.py', 'dark_photon_detector_runtime.py', 'fixed_target_generation.py',
            'run_dark_photon_spectral_gen.py', 'dark_photon_model.py', 'audit_dark_photon_gen.py',
@@ -83,6 +85,11 @@ def sample_kaon_decay(parent,model,mass,proper_ctau_mm,rng):
         sampled=sample_weak_radiative(parent['p4'],mass,proper_ctau_mm,rng,model=model)
         sampled.update(parent_pdg_id=parent['pdg_id'],parent_flight_included=False)
         return sampled
+    if kind=='neutral-kaon-dipion':
+        from dark_photon_weak_meson import sample_neutral_dipion_decay
+        sampled=sample_neutral_dipion_decay(parent['p4'],mass,proper_ctau_mm,rng,model=model)
+        sampled.update(parent_pdg_id=parent['pdg_id'],parent_flight_included=False)
+        return sampled
     if kind=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import sample_decay as sample_leptonic
         limit=model['native_kinematic_precision']['relative_mass_limit']
@@ -103,6 +110,9 @@ def kaon_mean_beta_gamma(parent,model,mass):
     if model['decay_type']=='weak-kaon-pion-photon':
         from dark_photon_weak_radiative import mean_lab_beta_gamma as weak_mean
         return weak_mean(parent['p4'],mass,model)
+    if model['decay_type']=='neutral-kaon-dipion':
+        from dark_photon_weak_meson import mean_neutral_dipion_lab_beta_gamma
+        return mean_neutral_dipion_lab_beta_gamma(parent['p4'],mass,model)
     if model['decay_type']=='weak-kaon-leptonic':
         from dark_photon_kaon_leptonic import mean_lab_beta_gamma as leptonic_mean
         return leptonic_mean(parent['p4'],mass,model=model['leptonic_form_factor_model'],
@@ -147,9 +157,9 @@ def source_settings(card):
     settings.extend(f'{pdg}:m0={mass:.17g}' for pdg,mass in masses.items())
     settings.extend(card['source'].get('additional_pythia_settings', []))
     for parent in card['parents']:
-        if vector_parent(parent):
+        if vector_parent(parent) or current_channel(parent):
             if parent.get('parent_mass_model') != 'zero-width-pole':
-                raise ValueError('No reviewed off-shell vector branching prescription is available')
+                raise ValueError('No reviewed off-shell branching prescription is available for this pole current')
             pdg, pole = abs(parent['pdg_id']), parent['mass_gev']
             settings.extend([f'{pdg}:mWidth=0', f'{pdg}:mMin={pole:.17g}', f'{pdg}:mMax={pole:.17g}'])
             settings.append(f"{abs(parent['recoil_pdg_id'])}:m0={parent['recoil_mass_gev']:.17g}")
@@ -166,8 +176,9 @@ def source_settings(card):
 
 
 def run(args):
-    if not 2*MUON_MASS_GEV < args.mass < .958 or not 0 < args.epsilon <= .01:
-        raise ValueError('Require an open visible dimuon channel below the eta-prime endpoint')
+    if (not math.isfinite(args.mass) or args.mass<=2*MUON_MASS_GEV
+            or not math.isfinite(args.epsilon) or not 0<args.epsilon<=.01):
+        raise ValueError('Require an open visible dimuon channel and physical small mixing')
     if not 2 <= args.source_collisions <= 10000000 or not 1 <= args.seed <= 899999800:
         raise ValueError('Require bounded fixed source exposure and a valid unused seed')
     if args.timeout <= 0 or not 1 <= args.run_number <= 4294967295:
@@ -229,6 +240,8 @@ def run(args):
         common, tune, beam, settings = (resolved_settings[key] for key in
             ('common', 'cp5', 'beam_settings', 'source_settings'))
         source = native_source(settings, args.seed, list(dict.fromkeys(parent['pdg_id'] for parent in card['parents'])))
+        if getattr(source,'_shift_evtgen_provenance',None) is not None:
+            manifest['correlated_recoil_runtime']=source._shift_evtgen_provenance
         native_libraries = [dict(path=library, sha256=digest(Path(library)))
                             for library in cmssw_native_libraries()]
         manifest['native_libraries'] = native_libraries
@@ -365,6 +378,8 @@ def run(args):
                                     channel, **native_precision)
                             elif kaon_channel(channel):
                                 mean=kaon_mean_beta_gamma(parent,channel,args.mass)
+                            elif current_channel(channel):
+                                mean=current_kernel(channel).mean_lab_beta_gamma(parent['p4'],args.mass,channel)
                             elif vector_parent(channel):
                                 mean = vector_meson.mean_lab_beta_gamma(parent['p4'], channel['recoil_mass_gev'],
                                     args.mass, polarization=channel['parent_polarization'])
@@ -393,6 +408,8 @@ def run(args):
                             decay = vector_meson.sample_decay(parent['p4'], model['recoil_mass_gev'],
                                 args.mass, width['ctau_mm'], rng, polarization=model['parent_polarization'])
                             decay['recoil_pdg_id'] = model['recoil_pdg_id']
+                        elif current_channel(model):
+                            decay=current_kernel(model).sample_decay(parent['p4'],args.mass,width['ctau_mm'],rng,model=model)
                         elif dipion_channel(model):
                             native_precision = (dict(native_mass_gev=parent['native_mass_gev'],
                                 native_mass_tolerance=parent['native_mass_tolerance'])
