@@ -16,6 +16,52 @@ from prepare_shift_sm_decay_validation import frozen_draw, original_census
 
 
 class GroupedStatisticsTest(unittest.TestCase):
+    def test_fixed_size_variance_matches_exact_enumeration_of_every_control_draw(self):
+        import itertools
+        observed=[];estimates=[];values=[0.,0.,1.,3.]
+        for selected in itertools.combinations(range(4),2):
+            draw=[dict(event_id=[1,1,i+1],selected=i in selected,region='control',
+                       native_weight=1.,sampling_probability=.5) for i in range(4)]
+            rows=[dict(labels=dict(event_id=[1,1,i+1],pair_counts=dict(target=values[i])),
+                authority=dict(native_weight=1.,sampling_probability=.5,proposal_correction=1.,
+                               proposal_gen_weight=2.)) for i in selected]
+            result=collection.cohort_variance(rows,draw,4,'target')
+            observed.append(result['sumw']);estimates.append(result)
+        design_variance=sum((x-4.)**2 for x in observed)/6
+        self.assertAlmostEqual(design_variance,8.)
+        self.assertAlmostEqual(sum(r['fixed_size_control_variance_estimate'] for r in estimates)/6,8.)
+        self.assertAlmostEqual(sum(r['total_variance_estimate'] for r in estimates)/6,16.)
+        self.assertAlmostEqual(sum(r['natural_sampling_variance_estimate'] for r in estimates)/6,8.)
+        with self.assertRaisesRegex(ValueError,'every selected original'):
+            collection.cohort_variance(rows[:-1],draw,4,'target')
+
+    def precision_rows(self,probability,correction):
+        row=dict(labels=dict(event_id=[1,1,1],pair_counts=dict(both_both=2)),
+            authority=dict(native_weight=3.,sampling_probability=probability,
+                proposal_correction=correction,proposal_gen_weight=3.*correction/probability),
+            payload_seconds=2.)
+        ordinary=copy.deepcopy(row);ordinary['authority']['proposal_correction']=1.
+        ordinary['authority']['proposal_gen_weight']=3./probability
+        return [row],[ordinary]
+
+    def test_uniform_thinning_of_useful_events_does_not_invent_a_precision_gain(self):
+        rows,ordinary=self.precision_rows(.125,1.)
+        comparison=collection.natural_sampling_comparison(rows,ordinary,'both_both')
+        self.assertAlmostEqual(comparison['second_moment_ratio'],.125)
+        self.assertAlmostEqual(comparison['second_moment_per_wall_time_gain_estimate'],1.)
+
+    def test_actual_density_can_estimate_natural_variance_without_an_observed_control_pair(self):
+        rows,ordinary=self.precision_rows(1.,.001)
+        ordinary[0]['labels']['pair_counts']['both_both']=0
+        comparison=collection.natural_sampling_comparison(rows,ordinary,'both_both')
+        self.assertAlmostEqual(comparison['second_moment_ratio'],1000.)
+        self.assertTrue(comparison['baseline_estimated_with_exact_likelihood_not_observed_tail'])
+        self.assertFalse(comparison['production_gain_qualified'])
+        self.assertIsNone(comparison['confidence_interval'])
+        rows,ordinary=self.precision_rows(1.,10.)
+        self.assertAlmostEqual(collection.natural_sampling_comparison(rows,ordinary,'both_both')[
+            'second_moment_per_wall_time_gain_estimate'],.1)
+
     def test_cross_DAG_wait_does_not_turn_missing_or_failed_responses_into_zero(self):
         with tempfile.TemporaryDirectory() as directory:
             request=Path(directory)/'request.json'

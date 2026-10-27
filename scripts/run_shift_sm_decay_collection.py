@@ -31,6 +31,105 @@ def statistics(rows,category,tail=None):
                 zero_observed_is_not_zero_rate=raw==0)
 
 
+def natural_sampling_comparison(rows,ordinary_rows,category,tail=None,feature_seconds=0.):
+    """Estimate natural-sampling second moments from the known decay density.
+
+    For a whole-original pair count K, E_q[(f/q)(W K)^2] is the
+    ordinary-decay second moment. The observed admitted estimator therefore
+    contributes (f/q)(W K)^2/p, whereas its importance counterpart contributes
+    ((f/q)W K/p)^2. This is an importance-based estimate, not observed ordinary
+    tail statistics or a confidence interval. Fixed-size sampling covariance
+    and finite-source uncertainty still need separate treatment.
+    """
+    ordinary={tuple(r['labels']['event_id']):r for r in ordinary_rows}
+    identities={tuple(r['labels']['event_id']) for r in rows}
+    if (len(ordinary)!=len(ordinary_rows) or len(identities)!=len(rows) or set(ordinary)!=identities):
+        raise ValueError('Precision comparison requires the same distinct original events')
+    if not math.isfinite(feature_seconds) or feature_seconds<0:
+        raise ValueError('Feature cost must be finite and nonnegative')
+    natural=[];importance=[];cost=[]
+    for row in rows:
+        label=row['labels'];count=(label['pair_counts'][category] if tail is None
+                                 else label['tail_counts'][category][tail])
+        authority=row['authority'];probability=authority['sampling_probability']
+        natural.append((authority['native_weight']*count)**2*authority['proposal_correction']/probability)
+        importance.append((authority['proposal_gen_weight']*count)**2)
+        baseline=ordinary[tuple(label['event_id'])]
+        if (baseline['authority']['sampling_probability']!=probability
+                or baseline['authority']['native_weight']!=authority['native_weight']):
+            raise ValueError('Paired source weights or inclusion probabilities differ')
+        cost.append(baseline['payload_seconds']/probability)
+    first=math.fsum(natural);second=math.fsum(importance)
+    baseline_cost=math.fsum(cost);candidate_cost=math.fsum(r['payload_seconds'] for r in rows)+feature_seconds
+    ratio=first/second if second else None
+    gain=ratio*baseline_cost/candidate_cost if ratio is not None and candidate_cost else None
+    return dict(natural_decay_second_moment_estimate=first,importance_second_moment=second,
+        second_moment_ratio=ratio,ordinary_full_census_wall_seconds_estimate=baseline_cost,
+        importance_validation_wall_seconds=candidate_cost,
+        second_moment_per_wall_time_gain_estimate=gain,
+        baseline_estimated_with_exact_likelihood_not_observed_tail=True,
+        fixed_size_control_covariance_not_included=True,confidence_interval=None,
+        production_gain_qualified=False)
+
+
+def cohort_variance(rows,draw,full_source_trials,category,tail=None):
+    """Include the fixed-size control covariance and unsaved source slots.
+
+    Conditional on a complete counterfactual vector Y=W(f/q)K, the control
+    sample has the usual without-replacement variance V_s. With independent
+    source slots, (N*S2_hat-T_hat^2+N*V_s_hat)/(N-1) estimates the total
+    source/decay/transport/sampling variance. Here S2_hat=sum(Y^2/p), not
+    sum((Y/p)^2). Unsaved source slots have zero contribution, but still
+    belong to N. Low-count standard errors are not confidence intervals.
+    """
+    if type(full_source_trials) is not int or full_source_trials<max(2,len(draw)):
+        raise ValueError('Full original source denominator is missing or too small')
+    population={tuple(r['event_id']):r for r in draw}
+    selected={identity for identity,row in population.items() if row['selected']}
+    observed={tuple(r['labels']['event_id']):r for r in rows}
+    if (len(population)!=len(draw) or len(observed)!=len(rows) or set(observed)!=selected):
+        raise ValueError('Variance needs every selected original exactly once; missing is not zero')
+    values={};total=[];second=[];natural=[]
+    for identity,row in observed.items():
+        authority=row['authority'];reference=population[identity];p=reference['sampling_probability']
+        if (authority['sampling_probability']!=p
+                or authority['native_weight']!=reference['native_weight']):
+            raise ValueError('Variance authority differs from the frozen original draw')
+        label=row['labels'];count=(label['pair_counts'][category] if tail is None
+                                 else label['tail_counts'][category][tail])
+        w=authority['native_weight'];r=authority['proposal_correction'];y=w*r*count
+        if not math.isclose(authority['proposal_gen_weight']*count,y/p,rel_tol=2.e-12,abs_tol=0.):
+            raise ValueError('Variance received a duplicated or missing weight correction')
+        values[identity]=y;total.append(y/p);second.append(y*y/p)
+        natural.append((w*count)**2*r/p)
+    controls=[identity for identity,row in population.items() if row['region']=='control']
+    sampled=[identity for identity in controls if population[identity]['selected']]
+    n=len(sampled);size=len(controls);design=0.
+    if size:
+        p=n/size
+        if not p or any(population[i]['sampling_probability']!=p for i in controls):
+            raise ValueError('Control probabilities do not match the fixed-size draw')
+        if n<size and n<2:
+            return dict(complete=False,uncertainty_unknown=True,
+                        reason='Fewer than two controls cannot estimate without-replacement variance')
+        if n<size:
+            mean=math.fsum(values[i] for i in sampled)/n
+            sample_variance=math.fsum((values[i]-mean)**2 for i in sampled)/(n-1)
+            design=size*size*(1.-p)*sample_variance/n
+    estimate=math.fsum(total);nsource=full_source_trials
+    variance=(nsource*math.fsum(second)-estimate*estimate+nsource*design)/(nsource-1)
+    natural_variance=math.fsum(natural)-estimate*estimate/nsource+variance/nsource
+    return dict(complete=True,full_source_trials=nsource,saved_originals=len(draw),
+        reconstructed_originals=len(rows),sumw=estimate,
+        fixed_size_control_variance_estimate=design,total_variance_estimate=variance,
+        standard_error=math.sqrt(variance) if variance>=0 else None,
+        uncertainty_unknown=variance<0,
+        natural_sampling_variance_estimate=natural_variance,
+        natural_baseline_is_likelihood_estimate=True,source_slots_assumed_independent=True,
+        zero_observed_is_not_zero_rate=not any(values.values()),confidence_interval=None,
+        low_count_standard_error_is_not_a_confidence_bound=True)
+
+
 def histogram_arm(arm,rows,payload,conditional=True):
     import ROOT
     from shift_nano_integrity import compare_all_branches
