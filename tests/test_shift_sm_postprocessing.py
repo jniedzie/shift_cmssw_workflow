@@ -65,6 +65,23 @@ class PostprocessingTest(unittest.TestCase):
         self.assertEqual(result['full_source_sumw'], 8)
         self.assertEqual(result['cross_section_pb'], 25.)
 
+    def test_signal_histograms_keep_conditional_gen_denominator_and_physical_rate(self):
+        source=dict(source_id='signal',gen_sha256='a',stratum='darkphoton_m0p7_lab_100m',
+            denominator_kind='conditional_signal_events',full_source_events=141,
+            physical_dimuon_cross_section_pb=1.5e-5,
+            signal_rate_record=dict(full_gen=dict(accepted_events=141,sum_weights=141.),
+                physical_selected_cross_sections_pb=[dict(value_pb=1.5e-5)],
+                source_exposure=dict(source_collisions=10000)))
+        result=exposure([source],source['stratum'])
+        self.assertEqual(result['full_source_sumw'],141)
+        self.assertEqual(result['cross_section_pb'],1.5e-5)
+        self.assertTrue(result['no_second_filter_efficiency'])
+        with self.assertRaisesRegex(ValueError,'source-aware aggregator'):
+            exposure([source,dict(source,gen_sha256='b')],source['stratum'])
+        source['physical_dimuon_cross_section_pb']*=.4
+        with self.assertRaisesRegex(ValueError,'full source-rate record'):
+            exposure([source],source['stratum'])
+
     def test_partial_source_waits_but_zero_selected_source_closes(self):
         sources = [dict(descriptor_hashes=['a'], normalization=self.source('a'),
                         selected=dict(event_ids=[[1, 1, 1], [1, 1, 2]])),

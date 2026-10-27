@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# Code style: AI-code. AI-generated rolling SM merge and histogram worker.
-"""Publish closed-source SM snapshots through the ordinary histogrammer.
+# Code style: AI-code. AI-generated shared merge and histogram worker.
+"""Publish closed SM or conditional-signal sources through the main histogrammer.
 
 The original small Nano files and all production settings remain unchanged.
 Only complete, predetermined source selections contribute exposure. Zero-
@@ -106,6 +106,13 @@ def exposure(sources, stratum):
             count, rate = source['full_source_trials'], source['sigma_nd_pb']
         elif kind == 'accepted_gen_events':
             count, rate = source['full_source_events'], source['native_cross_section_pb']
+        elif kind == 'conditional_signal_events':
+            count, rate = source['full_source_events'], source['physical_dimuon_cross_section_pb']
+            record = source['signal_rate_record']
+            if (record['full_gen']['accepted_events'] != count or
+                    record['full_gen']['sum_weights'] != count or
+                    record['physical_selected_cross_sections_pb'][0]['value_pb'] != rate):
+                raise ValueError('Conditional signal normalization differs from its full source-rate record')
         else:
             raise ValueError('Unknown original denominator convention')
         if type(count) is not int or count <= 0 or not math.isfinite(rate) or rate <= 0:
@@ -114,6 +121,8 @@ def exposure(sources, stratum):
         rates.append((rate, count))
     if len(kinds) != 1 or not rates:
         raise ValueError('Incompatible source estimators cannot be pooled')
+    if kinds == {'conditional_signal_events'} and len(rates) != 1:
+        raise ValueError('Combine independent signal source banks with their source-aware aggregator before postprocessing')
     if kinds == {'fixed_source_trials'}:
         if any(not math.isclose(r, rates[0][0], rel_tol=1e-12) for r, n in rates):
             raise ValueError('Fixed-trial sources have different ND cross sections')
@@ -202,7 +211,7 @@ def hadd_command(output, inputs, maximum_open_files=50):
 
 def run(request_path, maximum_open_files=50, merge_timeout=3600):
     request = read(request_path)
-    assert request['schema'] == 'shift-smart-SM-postprocessing-v1'
+    assert request['schema'] in ('shift-smart-SM-postprocessing-v1','shift-production-postprocessing-v1')
     assert request['complete_source_selections_only'] is True
     expected = {}
     for source in request['selected_sources']:
@@ -287,7 +296,9 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     hist.rename(work / name)
     published['histogram'] = publish(work / name, request['sample_directory'] + '/histograms')
     published['merged_histogram'] = publish(work / name, request['sample_directory'] + '/histograms_merged')
-    receipt = dict(schema='shift-smart-SM-postprocessing-complete-v1', complete=True,
+    schema = ('shift-production-postprocessing-complete-v1' if request['schema']=='shift-production-postprocessing-v1'
+              else 'shift-smart-SM-postprocessing-complete-v1')
+    receipt = dict(schema=schema, complete=True,
         campaign=request['campaign'], stratum=request['stratum'],
         request_sha256=digest(request_path), events=len(expected), sumw=sumw, sumw2=sumw2,
         source_ids=[s['source_id'] for s in request['normalization_sources']],
