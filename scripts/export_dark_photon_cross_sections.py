@@ -715,6 +715,10 @@ def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_pa
 
 def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256, source_directory=None):
     """Keep proposal and physical dimuon rates distinct; correct exactly once."""
+    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+        from run_dark_photon_senscalc_gen import rate_record as reference_rate_record
+        return reference_rate_record(contract,audit,point=point,campaign=campaign,
+            source_hashes=source_hashes,gen_path=gen_path,gen_sha256=gen_sha256,source_directory=source_directory)
     if contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         return meson_rate_record(contract, audit, point=point, campaign=campaign,
             source_hashes=source_hashes, gen_path=gen_path, gen_sha256=gen_sha256, source_directory=source_directory)
@@ -811,11 +815,20 @@ def input_files(directory, manifest):
         if sha256(runtime) != manifest.get('runtime_provenance_sha256'):
             raise ValueError('Worker-local runtime provenance changed')
         names.add('runtime_provenance.json')
+    if manifest.get('detector_runtime_profile') is not None:
+        if sha256(directory/'detector_runtime_profile.json')!=manifest['detector_runtime_profile_sha256']:
+            raise ValueError('GEN detector capsule profile changed')
+        names.add('detector_runtime_profile.json')
     if manifest.get('native_source_configuration_sha256') is not None:
         if sha256(directory/'source_configuration.json')!=manifest['native_source_configuration_sha256']:
             raise ValueError('Initialized native source configuration changed')
         names.add('source_configuration.json')
     contract=read(directory/'contract.json')
+    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+        names.update({'source_exposure.json','source_manifest.json',
+                      'selected_signals.json','radiative_model.json'})
+        if (directory/'source_ledger.jsonl').is_file():names.add('source_ledger.jsonl')
+        names.update(str(path.relative_to(directory)) for path in (directory/'source_bank').iterdir() if path.is_file())
     if contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative"):
         names.update({"source_exposure.json", "meson_model.json"})
         names.update(meson_physics_input_files(directory,contract))
@@ -918,9 +931,14 @@ def export_plan(plan_path, output, *, publish=False, eos_rpc=False):
             raise ValueError("Production GEN population differs from its retained audit")
         meson = contract.get("production_mechanism") in ("eta-etaprime-radiative", "meson-radiative")
         expected_native = contract["source_exposure"]["source_collisions"] if meson else audit["events"]
-        fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=expected_native)
+        if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+            from run_dark_photon_senscalc_gen import accounting
+            fresh_ledger = accounting(gen,contract)['proposal_ledger']
+        else:
+            fresh_ledger = read_pythia_generation_ledger(gen / "cmsRun.log", expected_accepted=expected_native)
         # Scratch-only workers relocate the unchanged log before handoff.
-        ledger_matches = same_ledger_content(fresh_ledger, audit["proposal_ledger"])
+        ledger_matches = (fresh_ledger == audit['proposal_ledger'] if contract.get('production_mechanism') == 'senscalc-meson-fragmentation'
+                          else same_ledger_content(fresh_ledger, audit["proposal_ledger"]))
         if not ledger_matches:
             raise ValueError("Generator log differs from the retained trial ledger")
         if publication:

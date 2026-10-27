@@ -158,6 +158,34 @@ class DisjointParentAccounting(unittest.TestCase):
 
 
 class PopulationAccounting(unittest.TestCase):
+    def reference(self,run,source_collisions,draws,rate):
+        sample=population(run,2,draws,rate)
+        record=sample['rate'];record.update(mechanism='senscalc-meson-fragmentation',rate_profile='pointlike',
+            radiative_model_sha256='a'*64,source_graph_scope='isolated signal',polarization_model='isotropic',
+            rate_scope='reference ND mesons and fragmentation',source_ledger_sha256=str(run).zfill(64),
+            source_seed=run,source_sampling=dict(proposal_probability=.01,unweighting_envelope=4.),
+            source_exposure=dict(source_collisions=source_collisions,fixed_source_collisions=source_collisions,accepted_signal_events=2))
+        record['full_gen']['source_collisions']=source_collisions
+        return sample
+
+    def test_reference_uses_original_collisions_instead_of_bank_unweighting_draws(self):
+        a=self.reference(10,100,999,2.);b=self.reference(20,300,3,6.)
+        result=combined_rate([a,b],point='test',campaign='test')
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],5.)
+        self.assertEqual(result['combination']['normalized_weights'],[.25,.75])
+        self.assertEqual(result['full_gen']['source_collisions'],400)
+        self.assertEqual(result['full_gen']['accepted_events'],4)
+        self.assertEqual(result['rate_profile'],'pointlike')
+        b['rate']['source_ledger_sha256']=a['rate']['source_ledger_sha256']
+        with self.assertRaisesRegex(ValueError,'banks overlap'):
+            combined_rate([a,b],point='test',campaign='test')
+
+    def test_reference_rate_profiles_must_never_be_pooled_as_extra_exposure(self):
+        a=self.reference(10,100,999,2.);b=self.reference(20,300,3,6.)
+        b['rate']['rate_profile']='measured-form-factor'
+        with self.assertRaisesRegex(ValueError,'identical physics'):
+            combined_rate([a,b],point='test',campaign='test')
+
     def test_recovery_cannot_replace_an_empty_frozen_draw_with_detected_events(self):
         first=population();first.update(selected_event_ids=[],sampling_probabilities=[],rate_only=True)
         changed=copy.deepcopy(first)

@@ -152,6 +152,9 @@ def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bo
 def generation_accounting(directory, contract):
     """Keep the unfiltered hadronic source distinct from conditional signals."""
     directory = Path(directory)
+    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+        from run_dark_photon_senscalc_gen import accounting
+        return accounting(directory, contract)
     if contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
         from export_dark_photon_cross_sections import meson_source_exposure
         exposure, rate, uncertainty = meson_source_exposure(contract, directory)
@@ -430,7 +433,10 @@ def audit(directory):
     accounting = generation_accounting(out, contract)
     proposal_ledger = accounting['proposal_ledger']
     meson_slots = None
-    if 'source_exposure' in accounting:
+    flux_slots = None
+    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+        flux_slots = {row['event_slot']: row for row in json.loads((out/'selected_signals.json').read_text())}
+    elif 'source_exposure' in accounting:
         from export_dark_photon_cross_sections import resolve_meson_ledger
         meson_slots = meson_accepted_slots(resolve_meson_ledger(out,contract),contract)
     root = ROOT.TFile.Open(str(out / 'gen.root'))
@@ -456,13 +462,18 @@ def audit(directory):
             raise ValueError('Native LO signal pilot requires unit GEN weights')
         original = read_product(event, ('generator', 'unsmeared'), 'edm::HepMCProduct').GetEvent()
         beams = original.beam_particles()
-        target, projectile = beams.first.momentum(), beams.second.momentum()
-        if abs(target.pz()) > 1e-6 or abs(target.e() - 0.938272) > 1e-4 or (
-                abs(projectile.e() - 6800.) > 1e-4 or projectile.pz() >= 0):
-            raise ValueError('Signal beams differ from the fixed-target Beam-B convention')
-        beam_summary = dict(target_energy_gev=float(target.e()), beam_energy_gev=float(projectile.e()),
-            beam_pz_gev=float(projectile.pz()),
-            sqrt_s_gev=math.sqrt((target.e()+projectile.e())**2-(target.pz()+projectile.pz())**2))
+        if flux_slots is not None:
+            if beams.first or beams.second:
+                raise ValueError('Isolated reference flux must not invent beam particles or recoil')
+            beam_summary = dict(scope='Source collision beams are audited in the reference bank; isolated signal graph has no beams')
+        else:
+            target, projectile = beams.first.momentum(), beams.second.momentum()
+            if abs(target.pz()) > 1e-6 or abs(target.e() - 0.938272) > 1e-4 or (
+                    abs(projectile.e() - 6800.) > 1e-4 or projectile.pz() >= 0):
+                raise ValueError('Signal beams differ from the fixed-target Beam-B convention')
+            beam_summary = dict(target_energy_gev=float(target.e()), beam_energy_gev=float(projectile.e()),
+                beam_pz_gev=float(projectile.pz()),
+                sqrt_s_gev=math.sqrt((target.e()+projectile.e())**2-(target.pz()+projectile.pz())**2))
         source_z = float(read_product(event, ('shiftEventTime', 'sourceZmm'), 'double')[0])
         shift = float(read_product(event, ('shiftEventTime', 'appliedShiftCtMm'), 'double')[0])
         max_source_error = max(max_source_error, abs(shift + source_z))
@@ -507,6 +518,12 @@ def audit(directory):
                                  float(native_mom.pz()), float(native_mom.e())]
             if native_components != components:
                 raise ValueError('Source placement changed the signal parent momentum')
+            if flux_slots is not None:
+                expected = flux_slots[identity[2]]['p4']
+                if components != expected[1:]+expected[:1]:
+                    raise ValueError('GEN signal differs from its selected source momentum')
+                if native_parent.production_vertex().particles_in_size() != 0:
+                    raise ValueError('Isolated flux contains invented incoming particles')
             native_start = native_parent.production_vertex().position()
             native_end = native_parent.end_vertex().position()
             length = proper_length_from_native_time(float(native_end.t()-native_start.t()), mass, components[3])
@@ -532,6 +549,8 @@ def audit(directory):
                 signal_decays[-1]['radiative_source'] = radiative
         if meson_slots is not None and len(signal_decays) != 1:
             raise ValueError('A meson source collision must emit exactly one radiative signal')
+        if flux_slots is not None and len(signal_decays) != 1:
+            raise ValueError('An isolated reference flux slot must contain exactly one signal')
         if not signal_decays:
             raise ValueError('No physical terminal signal decay')
         decayed = int(read_product(event, ('shiftMuonDecays', 'decayedParents'), 'unsigned int')[0])
@@ -592,6 +611,8 @@ def audit(directory):
         report['full_gen_denominator'].update(
             source_collisions=accounting['source_exposure']['source_collisions'],
             interpretation='Accepted GEN counts conditional unit-weight signals; fixed unfiltered source collisions determine the physical production rate')
+    if flux_slots is not None:
+        report['rate_scope'] = 'Pinned SensCalc-associated ND meson/fragmentation prescription, '+contract['rate_profile']+'; isolated signal with isotropic dimuon decay; no bremsstrahlung or DY'
     (out / 'validation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k!='event_rows'},indent=2))
     return report

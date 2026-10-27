@@ -38,6 +38,8 @@ SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'run_dark_ph
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
            'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
+           'run_dark_photon_senscalc_gen.py', 'dark_photon_senscalc.py', 'dark_photon_meson.py',
+           'run_dark_photon_spectral_gen.py', 'export_dark_photon_cross_sections.py', 'dark_photon_meson_gen_cfg.py',
            'dark_photon_detector_runtime.py', 'dark_photon_material_selection.py') + RUNTIME_HELPER_SOURCES + tuple(dict.fromkeys(
                MATERIAL_SELECTION_SOURCES + SOURCE_PLACEMENT_SOURCES))
 VALIDATION_REQUIREMENTS = (
@@ -195,9 +197,50 @@ def meson_width_qualification(points):
                 absolute_production_rate_validated=False)
 
 
+def senscalc_width_qualification(points):
+    """Check the exact imported population, source exposure and physical lifetime."""
+    from run_dark_photon_senscalc_gen import accounting
+    qualified={}
+    for row in points:
+        gen=Path(row['gen_directory']);contract=json.loads(Path(row['signal_contract']).read_text())
+        audit=json.loads((gen/'validation.json').read_text());manifest=json.loads((gen/'manifest.json').read_text())
+        count=row.get('full_gen_events',row['events'])
+        if (contract.get('production_mechanism')!='senscalc-meson-fragmentation' or
+                contract.get('filtering')!='none' or contract['requested_events']!=count or
+                any(contract[key]!=row[key] for key in ('mass_gev','epsilon','seed','run_number')) or
+                audit.get('runtime_validated') is not True or audit['events']!=count or
+                audit['sum_weights']!=count or audit['sum_weights_squared']!=count or
+                audit['event_ids']!=[[row['run_number'],1,i] for i in range(1,count+1)] or
+                contract!=json.loads((gen/'contract.json').read_text())):
+            raise ValueError('Reference flux lacks its exact complete physical GEN qualification')
+        if (gen/'gen.root').is_file():
+            if digest(gen/'gen.root')!=manifest['output_sha256']:
+                raise ValueError('Reference GEN differs from its full audit')
+        else:
+            from run_dark_photon_gen_stage import root_publication
+            root_publication(row,manifest)  # The detector handoff separately checks canonical EOS bytes.
+        fresh=accounting(gen,contract)
+        if (fresh['proposal_ledger']!=audit['proposal_ledger'] or
+                fresh['target_cross_sections']!=audit['target_cross_sections'] or
+                fresh['source_exposure']!=audit['source_exposure']):
+            raise ValueError('Reference source rate, exposure or sampling changed after the GEN audit')
+        if row['point'] in qualified:raise ValueError('Repeated reference-flux point')
+        qualified[row['point']]=dict(contract_sha256=digest(gen/'contract.json'),
+            validation_sha256=digest(gen/'validation.json'),rate_profile=contract['rate_profile'])
+    if not qualified:raise ValueError('Require a nonempty reference flux population')
+    return dict(schema='shift-senscalc-physical-width-preflight-v1',points=qualified,
+                absolute_production_rate_validated=False)
+
+
 def validate_physical_preflight(plan):
     if not isinstance(plan, dict):
         raise ValueError('Require a qualified physical GEN plan')
+    if plan.get('production_mechanism')=='senscalc-meson-fragmentation':
+        if (plan.get('native_width_preflight_passed') is True or
+                plan.get('physical_width_preflight_passed') is not True or
+                plan.get('senscalc_width_qualification')!=senscalc_width_qualification(plan['points'])):
+            raise ValueError('Reference flux requires its explicit source and physical-width preflight')
+        return
     if plan.get('native_width_preflight_passed') is True:
         if plan.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
             raise ValueError('Meson injection cannot claim native-resonance qualification')

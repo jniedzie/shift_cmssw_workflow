@@ -174,6 +174,7 @@ def combined_rate(populations, *, point, campaign):
     populations = unique_populations(populations)
     first = populations[0]['rate']
     meson = first.get('mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
+    reference = first.get('mechanism') == 'senscalc-meson-fragmentation'
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
               'sampling_epsilon', 'beam_energy_GeV', 'source_model',
               'generated_mass_support_gev')
@@ -181,6 +182,13 @@ def combined_rate(populations, *, point, campaign):
     # which fluctuates between independent source populations. The model card
     # and source definition must agree; the measured means need not be equal.
     fields += ('meson_model_card', 'rate_scope') if meson else ('corrections',)
+    if reference:
+        fields += ('rate_profile','radiative_model_sha256','source_graph_scope','polarization_model','rate_scope','source_sampling',
+                   'source_vertex_approximation','decay_radiation_model')
+        banks=[p['rate']['source_ledger_sha256'] for p in populations]
+        source_seeds=[p['rate']['source_seed'] for p in populations]
+        if len(set(banks))!=len(banks) or len(set(source_seeds))!=len(source_seeds):
+            raise ValueError('Reference source banks overlap; new unweighting seeds are not new collision exposure')
     if any(any(population['rate'].get(key) != first.get(key) for key in fields)
            for population in populations[1:]):
         raise ValueError('Rate estimates require identical physics and generation proposals')
@@ -191,6 +199,11 @@ def combined_rate(populations, *, point, campaign):
             raise ValueError('A per-run trial ledger is required for multi-run GEN files')
         rate = record['physical_selected_cross_sections_pb'][0]
         trial = record['proposal_ledger']['n_tried']
+        if reference:
+            source=record['source_exposure'];trial=source['fixed_source_collisions']
+            if (source['source_collisions']!=trial or record['full_gen']['source_collisions']!=trial or
+                    source['accepted_signal_events']!=record['full_gen']['accepted_events']):
+                raise ValueError('Reference source exposure differs from its conditional GEN population')
         if meson:
             source = record['source_exposure']
             trial = source['fixed_source_collisions']
@@ -240,6 +253,17 @@ def combined_rate(populations, *, point, campaign):
                            'physical_probability_sum', 'physical_probability_sum_squared')})
         result['meson_model_card'] = first['meson_model_card']
         result['rate_scope'] = first['rate_scope']
+    if reference:
+        result['combination'].update(method='Independent identical reference banks weighted by original source-collision exposure',
+                                     source_collisions_is_luminosity=False)
+        result['full_gen']['source_collisions']=total_trials
+        result['source_exposure']=dict(schema='shift-additive-senscalc-source-exposure-v1',
+            fixed_source_collisions=total_trials,source_collisions=total_trials,accepted_signal_events=len(identities),
+            source_ledger_sha256s=[p['rate']['source_ledger_sha256'] for p in populations])
+        for key in ('rate_profile','radiative_model_sha256','source_graph_scope','polarization_model','rate_scope',
+                    'source_vertex_approximation','decay_radiation_model'):
+            result[key]=first.get(key)
+        result['source_sampling']=first['source_sampling']
     return result
 
 
@@ -372,10 +396,16 @@ def load_source(source, expected_model, conditions_digest):
     contract, audit, manifest = [contracts[name] for name in ('contract.json', 'validation.json', 'manifest.json')]
     meson = contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     native_count = contract['source_exposure']['source_collisions'] if meson else row.get('full_gen_events', row['events'])
-    fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
+    reference=contract.get('production_mechanism')=='senscalc-meson-fragmentation'
+    if reference:
+        from run_dark_photon_senscalc_gen import accounting
+        fresh_ledger=accounting(gen,contract)['proposal_ledger']
+    else:
+        fresh_ledger = read_pythia_generation_ledger(gen / 'cmsRun.log', expected_accepted=native_count)
     # GEN logs move from worker scratch into retained production storage.
     # Their path is provenance; content hashes and every counter remain exact.
-    ledger_matches = same_ledger_content(fresh_ledger, audit['proposal_ledger'])
+    ledger_matches = (fresh_ledger==audit['proposal_ledger'] if reference else
+                      same_ledger_content(fresh_ledger, audit['proposal_ledger']))
     if (audit['event_ids'] != parent['event_ids'] or audit['sum_weights'] != parent['native_sumw']
             or audit['sum_weights_squared'] != parent['native_sumw2']
             or manifest['output_sha256'] != parent['gen_sha256']
