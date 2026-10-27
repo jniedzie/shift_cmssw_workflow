@@ -64,7 +64,39 @@ def compare_graphs(before,after,target_mm,shift_ct):
 PROCESS='SHIFTFULLGEN'
 COMPLETE='shiftFullMuonDecays'
 
-def audit_completion(event,before,after):
+def audit_smooth_proposal(definition,barcodes,taus,means,ordinary,ratio,correction,component,chosen):
+    """Independently sum every frozen component, retaining all latent lifetimes."""
+    require(len(barcodes)==len(set(barcodes))==len(taus)==len(means),'Ambiguous lifetime ledger')
+    require(all(math.isfinite(t) and t>=0 for t in taus)
+            and all(math.isfinite(m) and m>0 for m in means),'Invalid latent lifetime')
+    components=definition['components'];alpha=definition['ordinary_fraction']
+    require(math.isfinite(alpha) and 0<alpha<=1 and ordinary==alpha,'Wrong ordinary support')
+    require(math.isclose(alpha+math.fsum(c['probability'] for c in components),1.,rel_tol=0,abs_tol=1.e-12),
+            'Whole-event proposal probabilities must sum to one')
+    require(type(component) is int and 0<=component<=len(components),'Unknown proposal component')
+    expected=[] if component==0 else components[component-1]['parent_barcodes']
+    require(chosen==expected,'Selected parents differ from the frozen component')
+    ledger=dict(zip(barcodes,zip(taus,means)));logs=[math.log(alpha)]
+    for c in components:
+        parents=c['parent_barcodes'];scales=c['mean_proper_lifetime_mm'];probability=c['probability']
+        require(math.isfinite(probability) and 0<=probability<=1 and 1<=len(parents)<=2
+                and len(parents)==len(set(parents))==len(scales)
+                and all(b in ledger for b in parents)
+                and all(math.isfinite(m) and m>0 for m in scales),'Invalid frozen smooth component')
+        if not probability:continue
+        terms=[math.log(probability)]
+        for barcode,scale in zip(parents,scales):
+            tau,natural=ledger[barcode]
+            terms.append(math.log(natural/scale)+tau/natural-tau/scale)
+        logs.append(math.fsum(terms))
+    high=max(logs);logratio=high+math.log(math.fsum(math.exp(v-high) for v in logs))
+    require(math.isfinite(ratio) and ratio>0 and math.isfinite(correction) and correction>0
+            and math.isclose(math.log(ratio),logratio,rel_tol=1.e-12,abs_tol=1.e-12)
+            and math.isclose(math.log(correction),-logratio,rel_tol=1.e-12,abs_tol=1.e-12),
+            'Native full-event density differs from the independent full mixture')
+
+
+def audit_completion(event,before,after,proposal=None):
     def val(instance,kind):
         h,v=product(event,(COMPLETE,instance,PROCESS),kind)
         return list(v) if 'vector' in kind else v[0]
@@ -76,9 +108,16 @@ def audit_completion(event,before,after):
     require(len(parent_ids)==len(set(parent_ids))==len(parent_pdgs)==len(taus)==len(means),'Lifetime ledger dimensions differ')
     ordinary=float(val('proposalOrdinaryFraction','double'))
     ratio=float(val('proposalDensityRatio','double'));correction=float(val('proposalCorrection','double'))
-    require(ordinary==ratio==correction==1. and bool(val('proposalAuditPassed','bool')),'Ordinary completion introduced a proposal weight')
-    require(int(val('proposalComponent','unsigned int'))==0 and int(val('eligiblePairCount','unsigned int'))==0,'Unexpected conditioned decay component')
-    for name,kind in [('eligibleParentBarcodes','std::vector<int>'),('eligibleMaximumProperLifetimeMm','std::vector<double>'),('eligibleDecayProbabilities','std::vector<double>'),('selectedPairBarcodes','std::vector<int>')]:
+    component=int(val('proposalComponent','unsigned int'))
+    chosen=list(map(int,val('selectedPairBarcodes','std::vector<int>')))
+    require(bool(val('proposalAuditPassed','bool')),'Native proposal audit failed')
+    if proposal is None:
+        require(ordinary==ratio==correction==1. and component==0 and not chosen,
+                'Ordinary completion introduced a proposal weight')
+    else:
+        audit_smooth_proposal(proposal,parent_ids,taus,means,ordinary,ratio,correction,component,chosen)
+    require(int(val('eligiblePairCount','unsigned int'))==0,'Unexpected legacy finite-lifetime component')
+    for name,kind in [('eligibleParentBarcodes','std::vector<int>'),('eligibleMaximumProperLifetimeMm','std::vector<double>'),('eligibleDecayProbabilities','std::vector<double>')]:
         require(not val(name,kind),'Ordinary completion unexpectedly contains finite or selected lifetimes')
     a,b=copy.deepcopy(before),copy.deepcopy(after)
     old_particles={x['barcode']:x for x in a.pop('particles')};new_particles={x['barcode']:x for x in b.pop('particles')}
@@ -114,7 +153,7 @@ def audit_completion(event,before,after):
             require(residual<=1.e-6+1.e-9*max(abs(end[i]),abs(expected)),'Natural decay vertex does not match sampled proper lifetime and parent p4')
     added=[p for k,p in new_particles.items() if k not in old_particles and abs(p['pdg'])==13 and p['status']==1]
     require(int(val('decayedParents','unsigned int'))==len(changed) and int(val('addedMuons','unsigned int'))==len(added),'Native decay counts differ from full graph')
-    return dict(enabled_PDG_ids=enabled,parent_barcodes=parent_ids,parent_PDG_ids=parent_pdgs,sampled_proper_lifetime_mm=taus,nominal_proper_lifetime_mm=means,decayed_parents=len(changed),added_stable_muons=len(added),added_particles=len(new_particles)-len(old_particles),added_vertices=len(new_vertices)-len(old_vertices),all_original_p4_and_ancestry_preserved=True,ordinary_fraction=ordinary,proposal_density_ratio=ratio,proposal_correction=correction,maximum_p4_residual_GeV=maximum,maximum_proper_clock_residual_mm=maximum_clock,completed_unshifted_graph_sha256=graph_hash(after))
+    return dict(enabled_PDG_ids=enabled,parent_barcodes=parent_ids,parent_PDG_ids=parent_pdgs,sampled_proper_lifetime_mm=taus,nominal_proper_lifetime_mm=means,decayed_parents=len(changed),added_stable_muons=len(added),added_particles=len(new_particles)-len(old_particles),added_vertices=len(new_vertices)-len(old_vertices),all_original_p4_and_ancestry_preserved=True,ordinary_fraction=ordinary,proposal_density_ratio=ratio,proposal_correction=correction,proposal_component=component,selected_parent_barcodes=chosen,maximum_p4_residual_GeV=maximum,maximum_proper_clock_residual_mm=maximum_clock,completed_unshifted_graph_sha256=graph_hash(after))
 
 ROUND_UNIT=2.**-53
 MASS_FLOAT32_UNIT=2.**-24

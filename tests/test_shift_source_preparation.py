@@ -32,6 +32,26 @@ def plan(count=3):
 
 
 class SourceCensusTests(unittest.TestCase):
+    def test_smooth_audit_sums_all_components_and_requires_absorbed_latent_parents(self):
+        definition=dict(ordinary_fraction=.1,components=[
+            dict(probability=.2,parent_barcodes=[11],mean_proper_lifetime_mm=[2.]),
+            dict(probability=.2,parent_barcodes=[22],mean_proper_lifetime_mm=[3.]),
+            dict(probability=.5,parent_barcodes=[11,22],mean_proper_lifetime_mm=[2.,3.])])
+        a=5.*math.exp(1./10.-1./2.)
+        b=(20./3.)*math.exp(2./20.-2./3.)
+        ratio=.1+.2*a+.2*b+.5*a*b
+        prep.audit_smooth_proposal(definition,[11,22,33],[1.,2.,50.],[10.,20.,30.],
+                                   .1,ratio,1./ratio,3,[11,22])
+        with self.assertRaisesRegex(ValueError,'full mixture'):
+            prep.audit_smooth_proposal(definition,[11,22],[1.,2.],[10.,20.],
+                                       .1,.5*a*b,1./(.5*a*b),3,[11,22])
+        # Absorption occurs after the draw and cannot remove a latent density.
+        with self.assertRaisesRegex(ValueError,'component'):
+            prep.audit_smooth_proposal(definition,[11],[1.],[10.],.1,ratio,1./ratio,3,[11,22])
+        with self.assertRaisesRegex(ValueError,'Selected parents'):
+            prep.audit_smooth_proposal(definition,[11,22],[1.,2.],[10.,20.],
+                                       .1,ratio,1./ratio,1,[22])
+
     def test_all_295_originals_and_native_exposure_are_preserved(self):
         value=plan(295);before=copy.deepcopy(value)
         self.assertEqual(prep.validate_plan(value),295)
