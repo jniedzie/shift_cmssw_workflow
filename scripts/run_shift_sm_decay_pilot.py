@@ -34,6 +34,9 @@ def validate(request):
             'Redraw before the decay-dependent muon filter')
     require(source['full_source_trials']>0 and source['saved_events']>0,'Missing full original exposure')
     require(len(request['event_id'])==3 and request['native_weight']>0,'Invalid original authority')
+    probability=request.get('source_inclusion_probability',1.)
+    require(math.isfinite(probability) and 0.<probability<=1.,
+            'Invalid frozen original-event inclusion probability')
     require(len(request['parent_barcodes'])==len(set(request['parent_barcodes']))==2
             and len(request['first_depth_one_distances_cm'])==2
             and all(math.isfinite(x) and x>0 for x in request['first_depth_one_distances_cm']),
@@ -120,7 +123,8 @@ def prepare(request):
                 pt_GeV=math.hypot(*p4[:2])))
     audit.update(placement=placement,timing=timing,truth=truth,proposal_definition=definition,
         original_full_source=source,original_event_id=request['event_id'],new_GEN_exposure=0,
-        conditional_original_choice=True,prepared_GEN_sha256=sha('placed.root'),
+        conditional_original_choice=request.get('conditional_original_choice',True),
+        prepared_GEN_sha256=sha('placed.root'),
         selected_original_pion_direct_muon_pairs=pairs)
     dump('gen_audit.json',audit)
     return audit
@@ -148,6 +152,44 @@ def preflight(request,descriptor):
     return result
 
 
+def weight_authority(request,audit):
+    """Keep source inclusion and the full decay likelihood as separate factors."""
+    from shift_event_weights import validate_proposal_rows
+    weight=request['native_weight'];probability=request.get('source_inclusion_probability',1.)
+    authority=dict(event_id=request['event_id'],source_id=request['original_source']['source_id'],
+        original_source_sha256=request['original_source']['gen_sha256'],proposal_draw_id=request['decay_seed'],
+        native_weight=weight,sampling_probability=probability,sampling_gen_weight=weight/probability,
+        proposal_density_ratio=audit['proposal_density_ratio'],proposal_correction=audit['proposal_correction'],
+        proposal_gen_weight=weight/probability*audit['proposal_correction'],
+        proposal_kind='ordinary' if request['arm']=='ordinary' else 'importance')
+    validate_proposal_rows([authority])
+    return authority
+
+
+def truth_diagnostics(path):
+    """Evaluation only: retain momentum/hit associations without cutting pairs."""
+    import ROOT
+    file=ROOT.TFile.Open(str(path))
+    if not file or file.IsZombie():
+        raise ValueError('Cannot read Nano truth diagnostics')
+    try:
+        tree=file.Get('Events')
+        require(tree and tree.GetEntries()==1,'Expected one original in truth readback')
+        tree.GetEntry(0)
+        names=[b.GetName() for b in tree.GetListOfBranches()]
+        fields=[name for name in names if name.startswith('ShiftMuon_') and (
+            name in ['ShiftMuon_pt','ShiftMuon_pz','ShiftMuon_charge','ShiftMuon_topology']
+            or any(token in name.lower() for token in ['hitsimtrack','hitgenpart','hittruthpurity',
+                'simtruthmatched','simpatfitted','qoverp','chi2','ndof']))]
+        values={name:[float(v) if math.isfinite(float(v)) else None
+                      for v in getattr(tree,name)] for name in fields}
+        return dict(evaluation_only=True,applies_no_reco_or_histogram_cut=True,
+            stored_fields=values,strict_hit_GEN_field_available='ShiftMuon_hitGenPartIdx' in fields,
+            missing_truth_fields_are_not_zero_efficiency=True)
+    finally:
+        file.Close()
+
+
 def run(request,prepare_only=False):
     validate(request);started=time.monotonic()
     report=dict(complete=False,diagnostic_only=True,new_GEN_exposure=0,case_id=request['case_id'],
@@ -156,14 +198,17 @@ def run(request,prepare_only=False):
     try:
         audit=prepare(request);report['GEN_audit']=audit;dump('pilot_report.json',report)
         descriptor=copy.deepcopy(request['detector_source'])
+        probability=request.get('source_inclusion_probability',1.)
         descriptor.update(gen=str(Path('placed.root').resolve()),gen_path_resolved=True,
             gen_sha256=sha('placed.root'),event_ids=[request['event_id']],weights=[request['native_weight']],
-            selected_indices=[0],sampling_probabilities=[1.])
+            selected_indices=[0],sampling_probabilities=[probability])
         dump('pilot_admission_authority.json',dict(diagnostic_only=True,
-            conditional_original_choice=True,production_admission_policy_applied=False,
+            conditional_original_choice=request.get('conditional_original_choice',True),
+            production_admission_policy_applied=False,
             original_source_sha256=request['original_source']['gen_sha256'],
             event_id=request['event_id'],proposal_draw_id=request['decay_seed'],
-            prepared_GEN_sha256=descriptor['gen_sha256'],sampling_probability=1.))
+            prepared_GEN_sha256=descriptor['gen_sha256'],sampling_probability=probability,
+            validation_draw_sha256=request.get('validation_draw_sha256')))
         # Reuse only the frozen physical transport contract. Never label the
         # diagnostic full admission as the old production Bernoulli draw.
         descriptor['production_selection']['ledger_sha256']=sha('pilot_admission_authority.json')
@@ -185,28 +230,25 @@ def run(request,prepare_only=False):
             '--first-event-stall-timeout','3600','--event-stall-timeout','1800'],timeout=13500)
         detector=json.loads(Path('report.json').read_text());require(detector['complete'],'Incomplete detector chain')
         from shift_event_weights import annotate_proposal_weights
-        weight=request['native_weight'];density=audit['proposal_density_ratio'];correction=audit['proposal_correction']
-        authority=dict(event_id=request['event_id'],source_id=request['original_source']['source_id'],
-            original_source_sha256=request['original_source']['gen_sha256'],proposal_draw_id=request['decay_seed'],
-            native_weight=weight,sampling_probability=1.,sampling_gen_weight=weight,
-            proposal_density_ratio=density,proposal_correction=correction,proposal_gen_weight=weight*correction,
-            proposal_kind='ordinary' if request['arm']=='ordinary' else 'importance')
+        weight=request['native_weight'];authority=weight_authority(request,audit)
         exposure=dict(source_id=authority['source_id'],original_source_sha256=authority['original_source_sha256'],
                       full_source_trials=request['original_source']['full_source_trials'])
         annotation=annotate_proposal_weights('nano.root',[authority],[exposure],
                                             expected_nano_sha256=detector['nano_sha256'])
         from shift_sm_response_labels import read_nano
         labels=read_nano('nano.root',[dict(event_id=request['event_id'],gen_sha256=authority['original_source_sha256'],
-                        native_weight=weight,sampling_probability=1.)],sha('nano.root'))
+                        native_weight=weight,sampling_probability=probability)],sha('nano.root'))
+        truth=truth_diagnostics('nano.root');dump('truth_diagnostics.json',truth)
         dump('weight_authority.json',[authority]);dump('weight_annotation.json',annotation)
         dump('response_labels.json',labels);dump('detector_report.json',detector)
         outputs=[(Path(name),name) for name in ['nano.root','gen_audit.json','weight_authority.json',
-            'weight_annotation.json','response_labels.json','detector_report.json','pilot_admission_authority.json']]
+            'weight_annotation.json','response_labels.json','detector_report.json',
+            'pilot_admission_authority.json','truth_diagnostics.json']]
         require(sum(path.stat().st_size for path,_ in outputs)+sum(v['bytes'] for v in gen_publications)
                 <request['reservation_bytes'],'Pilot publication exceeds its registered bound')
         report.update(complete=True,GEN_publications=gen_publications,
             publications=publish(outputs,request['publication_directory']+'/response'),
-            labels=labels,weight_authority=authority,detector=detector,
+            labels=labels,weight_authority=authority,detector=detector,truth_diagnostics=truth,
             wall_seconds=time.monotonic()-started,detector_run=True)
         dump('pilot_report.json',report)
     except Exception as error:

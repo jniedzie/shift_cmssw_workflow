@@ -30,7 +30,7 @@ def statistics(rows,category,tail=None):
                 zero_observed_is_not_zero_rate=raw==0)
 
 
-def histogram_arm(arm,rows,payload):
+def histogram_arm(arm,rows,payload,conditional=True):
     import ROOT
     from shift_nano_integrity import compare_all_branches
     annotations=combine_annotation_metadata(rows)
@@ -81,7 +81,7 @@ def histogram_arm(arm,rows,payload):
                         raise ValueError('Standard histogram lost weighted sumw2: '+key+variable)
         metadata=dict(schema='shift-conditional-decay-pilot-histogram-v1',arm=arm,
             diagnostic_only=True,physics_normalization_ready=False,histogram_weight=WEIGHT_POLICY,
-            independent_originals=len(rows),conditional_original_choice=True,
+            independent_originals=len(rows),conditional_original_choice=conditional,
             source_exposures=annotations['source_exposures'],
             source_exposure_counted_once=True,repeated_arm_exposures_must_not_be_added=True,
             pair_errors_need_original_grouping=True)
@@ -151,10 +151,13 @@ def run(path):
                     or result['original_event_id']!=frozen['event_id']):
                 raise ValueError('Missing/failed response is not a physics rejection: '+case['case_id'])
             authority=result['weight_authority'];validate_proposal_rows([authority])
+            probability=frozen.get('source_inclusion_probability',1.)
+            if authority['sampling_probability']!=probability:
+                raise ValueError('Original draw probability differs from its frozen request')
             pin=next(v for v in result['publications'] if v['name']=='nano.root')
             local=Path(case['case_id']+'.root');download(pin['path'],local,pin['sha256'])
             expected=dict(event_id=frozen['event_id'],gen_sha256=frozen['original_source']['gen_sha256'],
-                          native_weight=frozen['native_weight'],sampling_probability=1.)
+                          native_weight=frozen['native_weight'],sampling_probability=probability)
             labels=read_nano(local,[expected],pin['sha256'])[0]
             if labels!=result['labels'][0]:raise ValueError('Independent Nano response changed')
             import ROOT
@@ -183,7 +186,7 @@ def run(path):
             if digest(payload/name)!=record['sha256']:raise ValueError('Frozen histogram payload changed')
         summary={};outputs=[]
         for arm,rows in grouped.items():
-            hist=histogram_arm(arm,rows,payload)
+            hist=histogram_arm(arm,rows,payload,plan.get('conditional_original_choice',True))
             summary[arm]=dict(events=len(rows),SIM_seconds=math.fsum(r['sim_seconds'] for r in rows),
                 payload_seconds=math.fsum(r['payload_seconds'] for r in rows),
                 categories={category:dict(all=statistics(rows,category),
@@ -194,8 +197,11 @@ def run(path):
             outputs.extend([(hist['merged'],arm+'_nano.root'),(hist['histograms'],arm+'_histograms.root')])
         if sum(f.stat().st_size for f,_ in outputs)>request['reservation_bytes']-1048576:raise ValueError('Collection exceeds reservation')
         report.update(complete=True,complete_frozen_draw_collected=True,arms=summary,
+            conditional_original_choice=plan.get('conditional_original_choice',True),
+            original_population_events=plan.get('original_population_events'),
+            sampling_design=plan.get('sampling_design'),
             publications=publish(outputs,request['publication_directory']),wall_seconds=time.monotonic()-started,
-            note='Conditional selected-original mechanism test; ordinary and biased copies are not added exposure. Zero observed controls do not establish zero physical rate. Tail gain needs independent-original closure and adequate grouped effective statistics.')
+            note='Frozen paired validation; ordinary and biased copies are not added exposure. Native W/p and full-mixture f/q enter once. Zero observed controls do not establish zero physical rate. Tail gain needs independent-original closure and adequate grouped effective statistics.')
         Path('report.json').write_text(json.dumps(report,indent=2)+'\n')
     except Exception as error:
         report.update(error=repr(error),wall_seconds=time.monotonic()-started)

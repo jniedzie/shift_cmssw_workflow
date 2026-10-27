@@ -11,9 +11,23 @@ ROOT_DIR=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT_DIR/'tea_shift_cmssw/utils'))
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_shift_sm_decay_collection as collection
+from run_shift_sm_decay_pilot import weight_authority
+from prepare_shift_sm_decay_validation import frozen_draw, original_census
 
 
 class GroupedStatisticsTest(unittest.TestCase):
+    def test_native_inclusion_and_decay_corrections_are_each_applied_once(self):
+        request=dict(event_id=[1,1,2],original_source=dict(source_id='synthetic',gen_sha256='a'*64),
+                     native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')
+        authority=weight_authority(request,dict(proposal_density_ratio=2.e8,proposal_correction=5.e-9))
+        self.assertAlmostEqual(authority['sampling_gen_weight']/3.e-9,8.)
+        self.assertAlmostEqual(authority['proposal_gen_weight']/(3.e-9*5.e-9),8.)
+        request['arm']='ordinary'
+        self.assertEqual(weight_authority(request,dict(proposal_density_ratio=1.,proposal_correction=1.))[
+            'proposal_gen_weight'],3.e-9/.125)
+        with self.assertRaisesRegex(ValueError,'ordinary'):
+            weight_authority(request,dict(proposal_density_ratio=2.,proposal_correction=.5))
+
     def test_several_pairs_from_one_original_remain_one_independent_contribution(self):
         rows=[dict(labels=dict(pair_counts=dict(both_both=2)),
                    authority=dict(proposal_gen_weight=3.)),
@@ -27,6 +41,44 @@ class GroupedStatisticsTest(unittest.TestCase):
         self.assertEqual(result['effective_originals'],1.)
         rows[0]['labels']['pair_counts']['both_both']=0
         self.assertTrue(collection.statistics(rows,'both_both')['zero_observed_is_not_zero_rate'])
+
+
+class IndependentDrawTest(unittest.TestCase):
+    def test_pion_pointing_away_is_a_known_miss_not_an_unknown_model(self):
+        import math
+        source=dict(saved_events=1,gen_sha256='a'*64)
+        event=dict(event_id=[1,1,1],native_weight=2.,target_position_cm=[0.,0.,14800.],
+            completion=dict(parent_barcodes=[1,2,3],parent_PDG_ids=[211,-211,211]))
+        parents=[dict(barcode=i,pdg=pdg,birth_cm=[0.,0.,14800.],momentum_GeV=p,
+            energy_GeV=math.sqrt(sum(v*v for v in p)+.14**2),
+            material=dict(first_depth_one_distance_cm=10.))
+            for i,pdg,p in [(1,211,[10.,0.,-500.]),(2,-211,[-10.,0.,-500.]),
+                            (3,211,[1.,0.,500.])]]
+        feature=dict(event_id=[1,1,1],native_weight=2.,original_source_sha256='a'*64,parent_flights=parents)
+        audit=dict(complete=True,units=[dict(source=source,events=[event])])
+        census=original_census(audit,dict(events=[feature]),source)
+        self.assertEqual(census[0]['region'],'tail')
+        self.assertEqual(census[0]['proposal']['parent_barcodes'],[1,2])
+
+    def test_complete_population_controls_have_exact_inclusion_and_unknowns_stay(self):
+        rows=[dict(event_id=[1,1,i],region='control') for i in range(1,12)]
+        rows.extend([dict(event_id=[1,1,12],region='tail'),dict(event_id=[1,1,13],region='unknown')])
+        before=copy.deepcopy(rows);draw=frozen_draw(rows,'frozen-before-reco')
+        self.assertEqual(rows,before)
+        self.assertEqual(draw,frozen_draw(rows,'frozen-before-reco'))
+        self.assertEqual(sum(r['selected'] for r in draw),4)
+        self.assertTrue(all(r['selected'] and r['sampling_probability']==1. for r in draw[-2:]))
+        self.assertTrue(all(r['sampling_probability']==2/11 for r in draw[:11]))
+        # A constant observable closes exactly to all 13 originals after W/p.
+        self.assertAlmostEqual(sum(1/r['sampling_probability'] for r in draw if r['selected']),13.)
+        with self.assertRaisesRegex(ValueError,'Repeated'):
+            frozen_draw(rows+[rows[0]],'seed')
+
+    def test_missing_or_differently_ordered_originals_stop_census_preparation(self):
+        source=dict(saved_events=1,gen_sha256='a'*64)
+        audit=dict(complete=True,units=[dict(source=source,events=[dict(event_id=[1,1,1])])])
+        with self.assertRaisesRegex(ValueError,'ordered events'):
+            original_census(audit,dict(events=[dict(event_id=[1,1,2])]),source)
 
 
 @unittest.skipUnless(importlib.util.find_spec('ROOT') and importlib.util.find_spec('uproot'),
