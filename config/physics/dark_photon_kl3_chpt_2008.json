@@ -1,0 +1,81 @@
+{
+  "code_style": "AI-code. AI-generated attributed neutral semileptonic-kaon current inputs.",
+  "schema": "shift-neutral-kl3-current-reference-v1",
+  "physical_production_ready": false,
+  "scope": "Development reference for the finite neutral K0 to pion lepton neutrino virtual-photon current through chiral O(p4). A weighted four-body/dimuon rest-frame probe exists; it is not integrated into the unit-weight production runner. Absolute virtual-rate qualification, KL/KS source ownership, the charged-kaon projection and native transport remain separate qualifications.",
+  "primary": {
+    "reference": "https://arxiv.org/pdf/0708.1576v2",
+    "publication": "https://doi.org/10.1103/PhysRevD.77.054022",
+    "authors": "K. Tsuji and T. Sato",
+    "equations": "14-33 and Appendices A/B",
+    "independent_weak_form_factors": "https://arxiv.org/pdf/hep-ph/0303103#page=6",
+    "independent_real_photon_reference": "https://arxiv.org/pdf/hep-ph/9209261#page=32"
+  },
+  "form_factor_model": {
+    "kind": "chpt-p4-neutral-kaon-semileptonic-vector",
+    "reference": "https://arxiv.org/pdf/0708.1576v2",
+    "loop_mass_scheme": "LO-GMO",
+    "mixed_mass_b1_routing": "reversed-kaon-leg",
+    "parent_mass_gev": 0.49767,
+    "pion_mass_gev": 0.13957,
+    "fpi_gev": 0.0924,
+    "lec_scale_gev": 0.77,
+    "l5": 0.0014616767572030644,
+    "l9": 0.0069,
+    "l10": -0.0055,
+    "alpha_em": 0.007297352573756914,
+    "fermi_constant_gev_minus2": 1.16637e-05,
+    "v_us": 0.22
+  },
+  "explicit_conventions": {
+    "electron_mass_gev": 0.000511,
+    "muon_mass_gev": 0.1056583715,
+    "reference_fk_over_fpi": 1.22,
+    "eta_mass_squared": "(4*MK^2-Mpi^2)/3 in all one-loop functions",
+    "l5_derivation": "Invert the one-loop FK/Fpi expression: 1+5*mu_pi/4-mu_K/2-3*mu_eta/4+4*(MK^2-Mpi^2)*L5/Fpi^2, mu_P=MP^2*log(MP^2/mu^2)/(32*pi^2*Fpi^2). No decay rate was fitted.",
+    "subtraction": "Primary lambda0=Delta_UV+1; L_i=L_i^r-Gamma_i*lambda0/(32*pi^2). Gamma5=3/8, Gamma9=1/4, Gamma10=-1/4.",
+    "normalization": "The neutral K0 amplitude carries GF*Vus*epsilon_EM*e/sqrt(2). No dark-photon dimuon branching fraction or kaon source yield is included.",
+    "charge_sum": "A KL/KS total over both charge-conjugate final states equals the single-flavour K0 partial width in the CP-symmetric DeltaS=DeltaQ limit. Do not add a second factor two."
+  },
+  "derived_transcription_corrections": [
+    "Eq22 requires 2*p_pi^mu contracted with the pair current, rather than the printed slash-pi between pair spinors.",
+    "The last K/eta B in Eq24 is B21. Its UV pole and independent on-shell f-minus comparison fix the tensor coefficient.",
+    "In Eq30 only the half-K dot Q B1 term uses the reversed mixed-mass routing: B1(K,pi)=B0(pi,K)-B1(pi,K). The printed common B1(pi,K) leaves the exact finite contact-Ward defect K dot Q*(B1(pi,K)-B0/2)*q^nu. Raw and corrected variants remain independently accessible."
+  ],
+  "remaining_qualifications": [
+    "Resolve the absolute distinguishable K_mu3 e+e- TableII discrepancy; no factor-ten rate repair is authorized. The conversion factor independently matches the explicit pair-spin trace and two-body phase space, and two exact production proposals agree on the lower tree-level rate.",
+    "Converged integrated timelike rates and a qualified production proposal. The existing weighted rest-frame sampler preserves polarization, recoil and flight, but is not a unit-weight event generator.",
+    "Charged-kaon O(p4) projection and its distinct contact/loop terms.",
+    "Native kaon flight, material transport, recoil ownership and weighted full-source normalization."
+  ],
+  "real_photon_rate_control": {
+    "reference": "https://arxiv.org/pdf/hep-ph/9209261#page=32",
+    "table": 12,
+    "photon_energy_min_gev": 0.03,
+    "lepton_photon_angle_min_degrees": 20,
+    "fpi_gev": 0.0932,
+    "fk_gev": 0.1136,
+    "kaon_lifetime_seconds": 5.17e-8,
+    "rounded_electron_branching_p2_p4": [0.0036, 0.0038],
+    "rounded_muon_branching_p2_p4": [0.00052, 0.00056],
+    "scope": "Historical real-photon validation only. These cuts and input changes are not production selections or fitted normalization factors. Timelike rates and native transport require separate qualification."
+  },
+  "charged_leading_control": {
+    "kind": "chpt-p2-charged-kaon-semileptonic-control",
+    "production_ready": false,
+    "reference": "https://arxiv.org/pdf/hep-ph/9209261",
+    "equations": "5.1 and 5.15, gauged initial-kaon pole and contact with massive-vector q terms retained",
+    "table": 11,
+    "parent_mass_gev": 0.493677,
+    "pion_mass_gev": 0.1349768,
+    "charged_kaon_lifetime_seconds": 1.24e-8,
+    "rounded_electron_branching_p2": 0.00028,
+    "rounded_muon_branching_p2": 0.000019,
+    "scope": "Leading-current control only. Includes the amplitude Clebsch 1/sqrt(2), exact initial-kaon and final-lepton radiation and weak contact. The charged O(p4) timelike structure-dependent current is not implemented; the API rejects that order rather than using the neutral expression."
+  },
+  "physics_limits": [
+    "Historical chiral input benchmark; not a modern global fit of Kl3 form factors.",
+    "Chiral O(p6), isospin/electromagnetic corrections, and higher weak/electroweak matching are not supplied as a universal uncertainty bound.",
+    "Measured nonradiative f-plus/f-zero shapes do not determine the transverse timelike radiative current; no IB-only completeness claim is made."
+  ]
+}
