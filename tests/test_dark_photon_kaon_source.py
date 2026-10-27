@@ -68,6 +68,100 @@ def parent_row(pdg,model,index=1):
 
 
 class KaonSourceTest(unittest.TestCase):
+    def test_kl_cpv_source_freezes_coherent_ks_current_and_actual_signal_point(self):
+        from dark_photon_weak_meson import kl_cpv_form_factor
+        from run_dark_photon_meson_gen import sample_kaon_decay
+        card,native=inputs()
+        template=json.loads((ROOT/'config/physics/dark_photon_kl_pi0_cpv_reference.json').read_text())
+        row=copy.deepcopy(card['parents'][0]);row.update(decay_type='weak-kaon-pion',channel='KL_pi0',
+            recoil_pdg_id=111,recoil_mass_gev=.1349768,alpha_em=1/137.035999084)
+        weak=copy.deepcopy(template['form_factor_template'])
+        weak['kaon_mixing_epsilon']=[.002228*math.cos(math.radians(43.52)),.002228*math.sin(math.radians(43.52))]
+        weak['indirect_ks_form_factor_model']=copy.deepcopy(card['parents'][-1]['weak_form_factor_model'])
+        row['weak_form_factor_model']=weak
+        card=dict(card,parents=[row],channels=['KL_pi0'])
+        native=dict(native,parents=[p for p in native['parents'] if p['pdg_id']==130])
+        model=resolved_parent_models(card,native,MASS,epsilon=EPSILON)[130]
+        fixed=model['weak_form_factor_model']
+        self.assertEqual(fixed['physical_epsilon'],EPSILON);self.assertEqual(fixed['signal_mass_gev'],MASS)
+        ks=chiral_form_factor(.497611,.1349768,MASS,weak['indirect_ks_form_factor_model'])
+        self.assertEqual(fixed['indirect_ks_form_factor_at_signal_mass'],[ks.real,ks.imag])
+        form=kl_cpv_form_factor(.497611,.1349768,MASS,fixed)
+        expected=decay_width(.497611,.1349768,MASS,.001,row['alpha_em'],form)/1.e-6
+        expected*=model['em_mixing_over_epsilon_abs2']*BR/model['total_parent_width_gev']
+        self.assertAlmostEqual(parent_branching_coefficient(.497611,MASS,model,BR)/expected,1.)
+        sample=sample_kaon_decay(dict(pdg_id=130,p4=(.497611,0.,0.,0.)),model,MASS,10.,random.Random(37))
+        self.assertEqual(sample['recoil_pdg_id'],111);self.assertFalse(sample['parent_flight_included'])
+        self.assertEqual(sample['dark_photon_polarization'],'longitudinal')
+        self.assertEqual(weak['physical_epsilon'],None)
+        closed=resolved_parent_models(card,native,.4,epsilon=EPSILON)[130]
+        self.assertFalse(closed['kinematically_open'])
+        self.assertEqual(parent_branching_coefficient(.497611,.4,closed,BR),0.)
+        changed=copy.deepcopy(card);changed['parents'][0]['weak_form_factor_model']['physical_epsilon']=2*EPSILON
+        with self.assertRaisesRegex(ValueError,'different physical signal point'):
+            resolved_parent_models(changed,native,MASS,epsilon=EPSILON)
+
+    @staticmethod
+    def neutral_dipion_source(pdg=130):
+        mass=.497611;pion=.1349768;mean=15340. if pdg==130 else 26.844
+        current=dict(kind='neutral-kaon-dipion-finite-current',parent_pdg_id=pdg,
+            reference_parent_mass_gev=mass,pion_mass_gev=pion,total_width_gev=HBAR_C_GEV_MM/mean,
+            alpha_em=1/137.035999084,valid_mass_range_gev=[0.,mass-2*pion],
+            reference='synthetic finite-current source test',coefficient_reference='synthetic coefficients, not a production authority',
+            coefficients=dict(electric_quadrupole=[1.e-9,0.],charge_radius_pole=[2.e-10,1.e-10],
+                electric_contact=[1.e-10,0.],magnetic_quadrupole=[3.e-10,0.]))
+        row=dict(pdg_id=pdg,mass_gev=mass,mean_proper_ctau_mm=mean,decay_type='neutral-kaon-dipion',
+            channel=('KL' if pdg==130 else 'KS')+'->pi0_pi0_Aprime',parent_mass_model='native-stable-kaon',
+            pdg_reference='synthetic native table',lifetime_reference='synthetic lifetime',
+            relative_numerical_mass_precision_budget=1.e-5,native_record_mass_support_gev=[mass],
+            native_record_mass_support_reference='synthetic initialized physical/flavor union',
+            recoil_pdg_ids=[111,111],recoil_masses_gev=[pion,pion],neutral_kaon_dipion_model=current)
+        card=dict(mechanism='meson-radiative',parents=[row],channels=[row['channel']])
+        native=dict(ecm_gev=ECM,check_event=True,parents=[dict(pdg_id=pdg,mass_min_gev=mass,mass_max_gev=mass,mass_width_gev=0.)],
+            native_kaon_mass_authorities=[dict(pdg_id=p,mass_gev=mass,mass_min_gev=mass,mass_max_gev=mass,mass_width_gev=0.) for p in (130,310,311)])
+        return card,native
+
+    def test_neutral_dipion_current_rate_and_source_count_have_one_physical_normalization(self):
+        from dark_photon_weak_meson import neutral_dipion_branching_coefficient
+        for pdg in (130,310):
+            card,native=self.neutral_dipion_source(pdg)
+            model=resolved_parent_models(card,native,.22,epsilon=EPSILON)[pdg]
+            bare=neutral_dipion_branching_coefficient(.497611,.22,model)
+            factor=(mixing_parameters(.22,EPSILON).em_coefficient/EPSILON)**2
+            expected=bare*factor*BR
+            self.assertAlmostEqual(parent_branching_coefficient(.497611,.22,model,BR)/expected,1.)
+            self.assertAlmostEqual(coefficient_bound(ECM,BR,{pdg:model},.22)/expected,math.floor(ECM/.497611))
+            closed=resolved_parent_models(card,native,.25,epsilon=EPSILON)[pdg]
+            self.assertFalse(closed['kinematically_open'])
+            self.assertEqual(parent_branching_coefficient(.497611,.25,closed,BR),0.)
+            damaged=copy.deepcopy(card);damaged['parents'][0]['neutral_kaon_dipion_model']['total_width_gev']*=2
+            with self.assertRaisesRegex(ValueError,'same native pole and lifetime'):
+                resolved_parent_models(damaged,native,.22,epsilon=EPSILON)
+
+    def test_neutral_dipion_source_sampler_does_not_redraw_the_kaon_flight(self):
+        from run_dark_photon_meson_gen import sample_kaon_decay,kaon_mean_beta_gamma
+        card,native=self.neutral_dipion_source()
+        model=resolved_parent_models(card,native,.22,epsilon=EPSILON)[130]
+        raw=parent_row(130,{130:model}[130])
+        parent,=resolve_parent_kinematics([raw],.001,.22,{130:model},BR)
+        sample=sample_kaon_decay(parent,model,.22,10.,random.Random(37))
+        self.assertEqual(sample['recoil_pdg_ids'],[111,111]);self.assertFalse(sample['parent_flight_included'])
+        self.assertEqual(sample['parent_pdg_id'],130)
+        self.assertNotIn('parent_proper_decay_length_mm',sample)
+        self.assertGreater(kaon_mean_beta_gamma(parent,model,.22),0.)
+
+    def test_neutral_dipion_rate_precision_uses_the_actual_native_energy(self):
+        card,native=self.neutral_dipion_source()
+        model=resolved_parent_models(card,native,.22,epsilon=EPSILON)[130]
+        energy=math.hypot(6800.,model['reference_parent_mass_gev'])
+        invariant=math.sqrt(math.fsum([energy**2,-6800.**2]))
+        nominal=parent_branching_coefficient(model['reference_parent_mass_gev'],.22,model,BR)
+        shifted=parent_branching_coefficient(invariant,.22,model,BR,native_precision=dict(native_energy_gev=energy))
+        self.assertLess(abs(shifted/nominal-1.),1.e-3)
+        from dark_photon_weak_meson import neutral_dipion_branching_coefficient
+        with self.assertRaisesRegex(ValueError,'mass mismatch'):
+            neutral_dipion_branching_coefficient(invariant,.22,model)
+
     def setUp(self):
         self.card,self.native=inputs()
         self.models=resolved_parent_models(self.card,self.native,MASS,epsilon=EPSILON)

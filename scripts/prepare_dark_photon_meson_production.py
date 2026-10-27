@@ -83,7 +83,7 @@ def meson_storage_limit(config):
 
 def validate_batches(rows, prior_inventories, seed_base=761216001,
                      run_base=1761216001, detector_job_base=5500000,
-                     mechanism='eta-etaprime-radiative', execution_limits=None):
+                     mechanism='eta-etaprime-radiative', execution_limits=None, model_card=None):
     limits = source_execution_limits({}) if execution_limits is None else source_execution_limits(
         dict(source_execution_policy=execution_limits))
     if not isinstance(rows, list) or not 2 <= len(rows) <= limits['maximum_batches']:
@@ -98,10 +98,20 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
                 old_runs.add(row['run_number'])
             old_runs.update(item[0] for item in row.get('event_ids', []))
     result, identifiers, seeds, runs = [], set(), set(), set()
+    endpoint=.958  # Historical callers without a card retain their original scope.
+    if model_card is not None:
+        from dark_photon_meson_source import recoil_threshold
+        parents=model_card.get('parents',[])
+        if not parents:
+            raise ValueError('A source worklist requires its declared meson mass support')
+        endpoints=[parent['mass_gev']-recoil_threshold(parent) for parent in parents]
+        if any(type(value) not in (int,float) or not math.isfinite(value) or value<=0 for value in endpoints):
+            raise ValueError('Declared meson endpoints must be finite and positive')
+        endpoint=max(endpoints)
     for index, original in enumerate(rows):
         row = copy.deepcopy(original)
         mass, epsilon = row['mass_gev'], row['epsilon']
-        if not 2*.1056583755 < mass < .958 or not math.isfinite(epsilon) or not 0 < epsilon <= .01:
+        if not 2*.1056583755 < mass < endpoint or not math.isfinite(epsilon) or not 0 < epsilon <= .01:
             raise ValueError('Require an open dimuon meson mass and physical epsilon')
         count = row['source_collisions']
         maximum = limits['maximum_canary_source_collisions'] if row.get('operational_canary', False) else limits['maximum_source_collisions_per_batch']
@@ -172,7 +182,8 @@ def prepare(configuration, output, scripts=None):
     meson_storage_limit(config)
     batches = validate_batches(config['batches'], config['prior_inventories'],
         config.get('seed_base',761216001),config.get('run_base',1761216001),
-        config.get('detector_job_base',5500000), mechanism, execution_limits)
+        config.get('detector_job_base',5500000), mechanism, execution_limits,
+        model_card=json.loads(Path(config['model_card']).read_text()))
     campaign_pattern = (r'[A-Za-z0-9_-]*20[0-9]{6}[A-Za-z0-9_-]*'
                         if mechanism == 'meson-radiative' else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
     if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or

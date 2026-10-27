@@ -374,7 +374,8 @@ def meson_source_exposure(contract, directory):
     parents = {item["pdg_id"]: item for item in card["parents"]}
     unified = contract.get("production_mechanism") == "meson-radiative"
     from dark_photon_meson_source import (PARENTS,validate_native_precision_policy,
-        deferred_native_precision_measure,full_source_native_precision_summary)
+        deferred_native_precision_measure,full_source_native_precision_summary,
+        exclusive_channels,radiative_cascade_owner)
     precision_policy=card.get('native_precision_policy')
     deferred_precision=validate_native_precision_policy(precision_policy)
     supported = set(PARENTS) if unified else {221, 331}
@@ -503,6 +504,7 @@ def meson_source_exposure(contract, directory):
             if row["native_weight"] != 1. or type(row["native_weight"]) is bool:
                 raise ValueError("Meson source requires unit native collision weights")
             identities, weights = set(), {}
+            coherent_replacements=[]
             checked_parents = {}
             if precision is not None:
                 checked_parents = {parent["index"]: parent for parent in resolve_parent_kinematics(
@@ -555,8 +557,14 @@ def meson_source_exposure(contract, directory):
                     if precision is None:
                         raise ValueError("Unified meson sources require pinned native precision support")
                     from dark_photon_meson_source import parent_branching_coefficient
-                    weights[identity] = parent_branching_coefficient(mass, contract["mass_gev"],
-                                                                    precision_models[pdg], branching)
+                    owned_weights=[]
+                    for channel in exclusive_channels(precision_models[pdg]):
+                        owner=radiative_cascade_owner(parent,channel,precision_models,row['parents'])
+                        if owner is not None:
+                            coherent_replacements.append(dict(parent_index=identity,channel=channel['channel'],owner=owner))
+                        else:
+                            owned_weights.append(parent_branching_coefficient(mass,contract['mass_gev'],channel,branching))
+                    weights[identity]=math.fsum(owned_weights)
                     continue
                 if mass <= contract["mass_gev"]:
                     weights[identity] = 0.
@@ -565,6 +573,8 @@ def meson_source_exposure(contract, directory):
                 form_factor = transition_form_factor_abs2(contract["mass_gev"], model["transition_form_factor"])
                 weights[identity] = radiative_branching(mass, contract["mass_gev"], 1e-3,
                     model["br_gamma_gamma"], math.sqrt(form_factor)) / 1e-6 * branching
+            if row.get('coherently_replaced_cascades',[])!=coherent_replacements:
+                raise ValueError('Coherent radiative-cascade ownership differs from its native source inventory')
             expected = math.fsum(weights.values())
             same_number(coefficient, expected, "per-collision parent branching sum")
             same_number(probability, epsilon**2 * coefficient, "epsilon-squared probability")
@@ -586,6 +596,8 @@ def meson_source_exposure(contract, directory):
                         if len(chosen) != 1 or parent_branching_coefficient(parent['mass_gev'],
                                 contract['mass_gev'], chosen[0], branching) <= 0:
                             raise ValueError('Accepted meson signal lacks a unique open exclusive channel')
+                        if radiative_cascade_owner(parent,chosen[0],precision_models,row['parents']) is not None:
+                            raise ValueError('A coherently replaced vector cascade cannot own a second signal')
                 slots.append(slot)
             elif row.get("accepted_slot") is not None or row.get("parent_index") is not None:
                 raise ValueError("Rejected source collision owns an emitted signal")

@@ -20,7 +20,7 @@ from dark_photon_meson import MUON_MASS_GEV, radiative_branching, transition_for
 import dark_photon_vector_meson as vector_meson
 
 PARENTS = (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
-           130, 310, 321, -321)
+           130, 310, 321, -321, 441, 10441, 20443, 445, 10443, 100443)
 PSEUDOSCALAR_DIPION_CORRECTION_LIMIT = 1.e-3
 FULL_SOURCE_NATIVE_PRECISION_POLICY = dict(
     kind='full-fixed-source-conservative-parent-measure-v1',required_relative_bound=1.e-3)
@@ -79,7 +79,7 @@ def exclusive_channels(model):
 def kaon_channel(model):
     """Qualified fixed-native-mass kaon electromagnetic current families."""
     return model.get('decay_type') in ('neutral-kaon-photon','weak-kaon-pion','weak-kaon-leptonic',
-                                      'weak-kaon-pion-photon')
+                                      'weak-kaon-pion-photon','neutral-kaon-dipion')
 
 
 def _kaon_group(model):
@@ -191,10 +191,16 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
         return width/model['total_parent_width_gev']*model['em_mixing_over_epsilon_abs2']*br_mumu
     if signal_mass+recoil_threshold(model) >= parent_mass:
         return 0.
+    if model['decay_type']=='neutral-kaon-dipion':
+        from dark_photon_weak_meson import neutral_dipion_branching_coefficient
+        return (neutral_dipion_branching_coefficient(parent_mass,signal_mass,model,
+                    native_energy_gev=(native_precision or {}).get('native_energy_gev'))
+                *model['em_mixing_over_epsilon_abs2']*br_mumu)
     if model['decay_type']=='weak-kaon-pion-photon':
         coefficient=_weak_radiative_coefficient(parent_mass,signal_mass,
             json.dumps(dict(weak_radiative_model=model['weak_radiative_model'],
-                total_parent_width_gev=model['total_parent_width_gev']),sort_keys=True))
+                total_parent_width_gev=model['total_parent_width_gev']),sort_keys=True),
+            (native_precision or {}).get('native_energy_gev'))
         return coefficient*model['em_mixing_over_epsilon_abs2']*br_mumu
     if model['decay_type']=='neutral-kaon-photon':
         width = (parent_mass**3/(32*math.pi)*(1-(signal_mass/parent_mass)**2)**3
@@ -209,9 +215,9 @@ def _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,*,native_precision=N
 
 
 @lru_cache(maxsize=512)
-def _weak_radiative_coefficient(parent_mass,signal_mass,inputs):
+def _weak_radiative_coefficient(parent_mass,signal_mass,inputs,native_energy_gev=None):
     from dark_photon_weak_radiative import branching_coefficient
-    return branching_coefficient(parent_mass,signal_mass,json.loads(inputs))
+    return branching_coefficient(parent_mass,signal_mass,json.loads(inputs),native_energy_gev=native_energy_gev)
 
 
 def _kaon_weak_form_factor(parent_mass,recoil_mass,signal_mass,current):
@@ -221,9 +227,11 @@ def _kaon_weak_form_factor(parent_mass,recoil_mass,signal_mass,current):
     reference mass. Shrinking the fit domain changes no coefficient and
     never extends it beyond the published range.
     """
-    from dark_photon_weak_meson import chiral_form_factor
+    from dark_photon_weak_meson import chiral_form_factor,kl_cpv_form_factor
     domain=current['valid_mass_range_gev']
     restricted=dict(current,valid_mass_range_gev=[domain[0],min(domain[1],parent_mass-recoil_mass)])
+    if current.get('kind')=='hypercharge-kl-pi0-cpv':
+        return kl_cpv_form_factor(parent_mass,recoil_mass,signal_mass,restricted)
     return chiral_form_factor(parent_mass,recoil_mass,signal_mass,restricted)
 
 
@@ -291,21 +299,54 @@ def _resolved_kaon_model(parent,native,signal_mass,epsilon,ecm,model_directory=N
             model['provenance']['transition']=dict(authority,publication=reference.publication)
         model.update(recoil_pdg_id=22,recoil_mass_gev=0.,radiative_amplitude_abs2_gev_minus2=absolute)
     elif parent['decay_type']=='weak-kaon-pion':
-        expected={321:211,-321:-211,310:111}
+        expected={321:211,-321:-211,310:111,130:111}
         if (pdg not in expected or parent.get('recoil_pdg_id')!=expected[pdg]
                 or type(parent.get('recoil_mass_gev')) not in (int,float)
                 or not 0<parent['recoil_mass_gev']<mass):
             raise ValueError('Qualified Kpi current requires its explicit charge and recoil mass')
-        weak=parent['weak_form_factor_model'];alpha=parent.get('alpha_em')
-        if (weak.get('kind')!='chpt-p6-kaon-em-vector' or not weak.get('reference')
-                or not weak.get('loop_reference') or weak.get('parent_pdg_id')!=pdg
+        weak=dict(parent['weak_form_factor_model']);alpha=parent.get('alpha_em')
+        kind='hypercharge-kl-pi0-cpv' if pdg==130 else 'chpt-p6-kaon-em-vector'
+        if (weak.get('kind')!=kind or not weak.get('reference')
+                or pdg!=130 and not weak.get('loop_reference') or weak.get('parent_pdg_id')!=pdg
                 or type(alpha) not in (int,float) or not math.isfinite(alpha) or alpha<=0):
-            raise ValueError('Require the matching charged/KS weak-current model and EM convention')
+            raise ValueError('Require the matching kaon weak-current model and EM convention')
+        if pdg==130:
+            from dark_photon_model import ElectroweakInputs
+            if ElectroweakInputs(**weak.get('electroweak_inputs',{}))!=ElectroweakInputs():
+                raise ValueError('KL matched current and shared source must use the same electroweak convention')
+            for key,value in (('physical_epsilon',epsilon),('signal_mass_gev',signal_mass)):
+                if weak.get(key) is not None and weak[key]!=value:
+                    raise ValueError('KL CPV current belongs to a different physical signal point')
+                weak[key]=value
+            indirect=weak.get('indirect_ks_form_factor_model')
+            if indirect is not None and signal_mass<mass-parent['recoil_mass_gev']:
+                if indirect.get('parent_pdg_id')!=310 or indirect.get('kind')!='chpt-p6-kaon-em-vector':
+                    raise ValueError('KL indirect CPV requires the separately attributed KS pion current')
+                form=_kaon_weak_form_factor(mass,parent['recoil_mass_gev'],signal_mass,indirect)
+                evaluated=[form.real,form.imag]
+                if weak.get('indirect_ks_form_factor_at_signal_mass') not in (None,evaluated):
+                    raise ValueError('KL indirect CPV scalar differs from its declared KS current')
+                weak['indirect_ks_form_factor_at_signal_mass']=evaluated
         opened=signal_mass<max(support)-parent['recoil_mass_gev']
         form=_kaon_weak_form_factor(mass,parent['recoil_mass_gev'],signal_mass,weak) if signal_mass<mass-parent['recoil_mass_gev'] else 0j
         model.update(recoil_pdg_id=expected[pdg],recoil_mass_gev=parent['recoil_mass_gev'],
             weak_form_factor=[form.real,form.imag],weak_form_factor_model=dict(weak),alpha_em=alpha)
         model['provenance']['transition']=weak
+    elif parent['decay_type']=='neutral-kaon-dipion':
+        current=json.loads(json.dumps(parent.get('neutral_kaon_dipion_model',{}),allow_nan=False))
+        pion=current.get('pion_mass_gev')
+        if (pdg not in (130,310) or current.get('parent_pdg_id')!=pdg
+                or current.get('reference_parent_mass_gev')!=mass
+                or current.get('total_width_gev')!=width
+                or current.get('kind')!='neutral-kaon-dipion-finite-current'
+                or type(pion) not in (int,float) or not 0<2*pion<mass
+                or parent.get('recoil_pdg_ids')!=[111,111]
+                or parent.get('recoil_masses_gev')!=[pion,pion]):
+            raise ValueError('Require an attributed KL/KS neutral-dipion current with the same native pole and lifetime')
+        current['pole_mass_numerical_tolerance_gev']=max(abs(value-mass) for value in support)
+        model.update(neutral_kaon_dipion_model=current,recoil_pdg_ids=[111,111],recoil_masses_gev=[pion,pion])
+        opened=signal_mass<max(support)-2*pion
+        model['provenance']['transition']=current
     elif parent['decay_type']=='weak-kaon-pion-photon':
         current=json.loads(json.dumps(parent.get('weak_radiative_model',{}),allow_nan=False))
         recoil=parent.get('recoil_mass_gev')
@@ -387,15 +428,28 @@ def _validate_kaon_model(pdg,model):
             raise ValueError('Require the separately qualified neutral-kaon gamma amplitude')
     elif kind=='weak-kaon-pion':
         form=model.get('weak_form_factor');current=model.get('weak_form_factor_model',{})
-        if (model.get('recoil_pdg_id')!={321:211,-321:-211,310:111}.get(pdg)
+        if (model.get('recoil_pdg_id')!={321:211,-321:-211,310:111,130:111}.get(pdg)
                 or type(model.get('recoil_mass_gev')) not in (int,float)
                 or not 0<model['recoil_mass_gev']<mass
                 or type(model.get('alpha_em')) not in (int,float)
                 or not math.isfinite(model['alpha_em']) or model['alpha_em']<=0
                 or not isinstance(form,list) or len(form)!=2
                 or any(type(x) not in (int,float) or not math.isfinite(x) for x in form)
-                or current.get('parent_pdg_id')!=pdg or current.get('kind')!='chpt-p6-kaon-em-vector'):
-            raise ValueError('Require a matching charged/KS weak current and pion recoil')
+                or current.get('parent_pdg_id')!=pdg or current.get('kind')!=
+                    ('hypercharge-kl-pi0-cpv' if pdg==130 else 'chpt-p6-kaon-em-vector')
+                or pdg==130 and (current.get('physical_epsilon')!=model['physical_epsilon'] or
+                    current.get('signal_mass_gev')!=model['signal_mass_gev'])):
+            raise ValueError('Require a matching kaon weak current and pion recoil')
+    elif kind=='neutral-kaon-dipion':
+        current=model.get('neutral_kaon_dipion_model',{});pion=current.get('pion_mass_gev')
+        if (pdg not in (130,310) or current.get('parent_pdg_id')!=pdg
+                or current.get('reference_parent_mass_gev')!=mass
+                or current.get('total_width_gev')!=model['total_parent_width_gev']
+                or current.get('kind')!='neutral-kaon-dipion-finite-current'
+                or type(pion) not in (int,float) or not 0<2*pion<mass
+                or model.get('recoil_pdg_ids')!=[111,111] or model.get('recoil_masses_gev')!=[pion,pion]
+                or current.get('pole_mass_numerical_tolerance_gev')!=max(abs(value-mass) for value in support)):
+            raise ValueError('Neutral-dipion current differs from its attributed kaon pole and lifetime')
     elif kind=='weak-kaon-pion-photon':
         current=model.get('weak_radiative_model',{})
         if (pdg!=130 or model.get('recoil_pdg_id')!=111
@@ -531,6 +585,8 @@ def dipion_kernel(model):
 
 
 def recoil_threshold(model):
+    if model.get('decay_type')=='neutral-kaon-dipion':
+        return 2*model['neutral_kaon_dipion_model']['pion_mass_gev']
     if model.get('decay_type')=='weak-kaon-leptonic':
         return model.get('charged_lepton_mass_gev',model['leptonic_form_factor_model']['lepton_mass_gev'])
     if model.get('decay_type') in ('weak-kaon-pion','weak-kaon-pion-photon'):
@@ -539,11 +595,84 @@ def recoil_threshold(model):
         return model['charged_pion_mass_gev']+model['neutral_pion_mass_gev']
     if dipion_channel(model):
         return 2 * model['pion_mass_gev']
+    if current_channel(model):
+        return model['recoil_mass_gev']
     return model.get('recoil_mass_gev', 0.) if vector_parent(model) else 0.
 
 
 def vector_parent(model):
     return model.get('decay_type', 'pseudoscalar-photon') == 'vector-pseudoscalar'
+
+
+def current_channel(model):
+    return model.get('decay_type') in ('pseudoscalar-double-radiative', 'quarkonium-radiative')
+
+
+def current_kernel(model):
+    if model.get('decay_type') == 'pseudoscalar-double-radiative':
+        import dark_photon_double_radiative
+        return dark_photon_double_radiative
+    if model.get('decay_type') == 'quarkonium-radiative':
+        import dark_photon_quarkonium
+        return dark_photon_quarkonium
+    raise ValueError('Unsupported correlated electromagnetic current')
+
+
+def _validate_current_model(pdg, model):
+    """Validate declared narrow-source rates without inventing model errors."""
+    from dark_photon_model import mixing_parameters
+    minimum, maximum = model.get('mass_min_gev'), model.get('mass_max_gev')
+    budget = model.get('relative_numerical_mass_precision_budget')
+    epsilon, mass = model.get('physical_epsilon'), model.get('signal_mass_gev')
+    if (type(minimum) not in (int,float) or not math.isfinite(minimum) or minimum<=0
+            or maximum!=minimum or model.get('parent_mass_model')!='zero-width-pole'
+            or type(budget) not in (int,float) or not math.isfinite(budget) or not 0<budget<=1.e-3
+            or type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01
+            or type(mass) not in (int,float) or not math.isfinite(mass) or mass<=2*MUON_MASS_GEV
+            or model.get('em_mixing_over_epsilon_abs2')!=(mixing_parameters(mass,epsilon).em_coefficient/epsilon)**2):
+        raise ValueError('Correlated current requires its explicit native pole, physical coupling and numerical budget')
+    if model['decay_type']=='pseudoscalar-double-radiative':
+        vectors=model.get('coherent_replaced_vector_pdgs')
+        if (pdg not in (221,331) or model.get('recoil_pdg_id') not in (111,221)
+                or (pdg==221 and model['recoil_pdg_id']!=111)
+                or not isinstance(vectors,list) or not vectors or len(set(vectors))!=len(vectors)
+                or set(vectors)-{113,223,333}):
+            raise ValueError('Double-radiative source requires explicit coherent vector-cascade ownership')
+        scalar=model.get('double_radiative_model',{}).get('scalar_current')
+        if scalar is not None and (scalar.get('parent_pdg_id')!=pdg
+                or scalar.get('recoil_pdg_id')!=model['recoil_pdg_id']
+                or scalar.get('parent_mass_gev')!=minimum
+                or scalar.get('recoil_mass_gev')!=model.get('recoil_mass_gev')):
+            raise ValueError('Scalar current and source must share their physical species and pole masses')
+    else:
+        names={441:'eta_c',10441:'chi_c0',20443:'chi_c1',445:'chi_c2',10443:'h_c',100443:'psi_2S'}
+        if pdg not in names or not model.get('channel','').startswith(names[pdg]+'->'):
+            raise ValueError('Quarkonium current does not match the physical parent species')
+        current=model.get('quarkonium_model',{})
+        if (current.get('reference_parent_mass_gev')!=minimum
+                or current.get('reference_recoil_mass_gev')!=model.get('recoil_mass_gev')):
+            raise ValueError('Quarkonium current and native source must share their attributed pole masses')
+    coefficient=current_kernel(model).branching_coefficient(minimum,mass,model)
+    if not math.isfinite(coefficient) or coefficient<0:
+        raise ValueError('Correlated current produced an invalid source rate')
+
+
+def _resolved_current_model(parent, native, signal_mass, epsilon):
+    from dark_photon_model import mixing_parameters
+    if (type(epsilon) not in (int,float) or not math.isfinite(epsilon) or not 0<epsilon<=.01
+            or native.get('mass_width_gev')!=0.
+            or native['mass_min_gev']!=parent['mass_gev'] or native['mass_max_gev']!=parent['mass_gev']):
+        raise ValueError('Correlated current requires the exact declared zero-width native source and physical epsilon')
+    model=json.loads(json.dumps(parent,allow_nan=False))
+    model.update(mass_min_gev=parent['mass_gev'],mass_max_gev=parent['mass_gev'],
+        signal_mass_gev=signal_mass,physical_epsilon=epsilon,
+        em_mixing_over_epsilon_abs2=(mixing_parameters(signal_mass,epsilon).em_coefficient/epsilon)**2,
+        kinematically_open=parent['mass_gev']>signal_mass+recoil_threshold(parent),
+        provenance=dict(pdg=parent['pdg_reference'],
+            transition=parent['double_radiative_model' if parent['decay_type']=='pseudoscalar-double-radiative'
+                              else 'quarkonium_model']['reference']))
+    _validate_current_model(parent['pdg_id'],model)
+    return model
 
 
 def radiative_cascade_owner(parent, channel, models, parents):
@@ -591,7 +720,7 @@ def production_mechanism(card):
     if mechanism == 'meson-radiative' and not card.get('channels'):
         raise ValueError('Unified radiative production requires an explicit exclusive channel inventory')
     if mechanism == 'eta-etaprime-radiative' and any(
-            vector_parent(channel) or dipion_channel(channel) or kaon_channel(channel)
+            vector_parent(channel) or dipion_channel(channel) or kaon_channel(channel) or current_channel(channel)
             for parent in card['parents'] for channel in exclusive_channels(parent)):
         raise ValueError('Vector and dipion channels require the explicitly named meson-radiative mechanism')
     return mechanism
@@ -605,6 +734,11 @@ def parent_branching_coefficient(parent_mass, signal_mass, model, br_mumu, *, na
                          for channel in exclusive_channels(model))
     if kaon_channel(model):
         return _kaon_coefficient(parent_mass,signal_mass,model,br_mumu,native_precision=native_precision)
+    if current_channel(model):
+        if signal_mass!=model['signal_mass_gev']:
+            raise ValueError('Resolved correlated current belongs to another signal mass')
+        return (current_kernel(model).branching_coefficient(parent_mass,signal_mass,model)
+                *model['em_mixing_over_epsilon_abs2']*br_mumu)
     if dipion_channel(model):
         context = dict(native_precision or {}) if vector_dipion_channel(model) else {}
         if model.get('decay_type') not in ('neutral-vector-dipion','charged-vector-dipion'):
@@ -663,6 +797,16 @@ def resolved_parent_models(card, configuration, mass, *, epsilon=None, model_dir
                     raise ValueError('Duplicate exclusive kaon current for one physical parent')
                 models[pdg]=dict(mass_min_gev=model['mass_min_gev'],mass_max_gev=model['mass_max_gev'],
                     exclusive_channels=channels+[model])
+            continue
+        if current_channel(parent):
+            model=_resolved_current_model(parent,native[pdg],mass,epsilon)
+            if pdg not in models:
+                models[pdg]=model
+            else:
+                channels=exclusive_channels(models[pdg])
+                if any(row['channel']==model['channel'] for row in channels):
+                    raise ValueError('Duplicate correlated current for one physical parent')
+                models[pdg]=dict(mass_min_gev=minimum,mass_max_gev=maximum,exclusive_channels=channels+[model])
             continue
         recoil = recoil_threshold(parent)
         opened = maximum > mass + recoil
@@ -781,11 +925,15 @@ def pseudoscalar_dipion_precision_report(parent, kinematic_mass, signal_mass, mo
     shift must also fit its original nominal-weighted BR/TFF envelope. This
     does not claim 0.1% accuracy for the photon sibling or the full parent.
     """
-    channels = exclusive_channels(model)
+    all_channels = exclusive_channels(model)
+    channels = [row for row in all_channels if row.get('decay_type','pseudoscalar-photon')
+                in ('pseudoscalar-dipion','pseudoscalar-photon')]
+    additional = [row for row in all_channels if row not in channels]
     kinds = [row.get('decay_type', 'pseudoscalar-photon') for row in channels]
     native = parent['native_mass_gev']
     if (parent['pdg_id'] not in (221, 331) or len(channels) != 2
             or sorted(kinds) != ['pseudoscalar-dipion', 'pseudoscalar-photon']
+            or any(row.get('decay_type')!='pseudoscalar-double-radiative' for row in additional)
             or model.get('mass_min_gev') != native or model.get('mass_max_gev') != native):
         raise ValueError('Exceptional dipion precision requires the two owned eta/eta-prime pole channels')
     rates = []
@@ -816,13 +964,31 @@ def pseudoscalar_dipion_precision_report(parent, kinematic_mass, signal_mass, mo
         raise ValueError('Exceptional dipion rate plus conditional-shape bound exceeds 0.1% of its own parent')
     if l1 > measured_budget:
         raise ValueError('Total parent rate shift exceeds its original weighted BR/TFF precision budget')
-    return dict(schema='shift-pseudoscalar-native-dipion-precision-v1',
+    report=dict(schema='shift-pseudoscalar-native-dipion-precision-v1',
                 parent_pdg_id=parent['pdg_id'], signal_mass_gev=signal_mass,
                 native_parent_mass_gev=native, kinematic_parent_mass_gev=kinematic_mass,
                 channels=rates, exceptional_dipion_rate_plus_shape_bound=correction,
                 required_exceptional_dipion_bound=PSEUDOSCALAR_DIPION_CORRECTION_LIMIT,
                 parent_l1_relative_rate_shift=l1, parent_original_weighted_model_budget=measured_budget,
                 scope='0.1% applies only to the exceptional dipion contribution; sibling BR/TFF checks remain unchanged')
+    if additional:
+        checked=[]
+        for channel in additional:
+            if ((kinematic_mass>signal_mass+recoil_threshold(channel))!=
+                    (native>signal_mass+recoil_threshold(channel))):
+                raise ValueError('Native precision changes whether an additional current is open')
+            nominal=parent_branching_coefficient(native,signal_mass,channel,br_mumu)
+            shifted=parent_branching_coefficient(kinematic_mass,signal_mass,channel,br_mumu)
+            relative=shifted/nominal-1 if nominal else 0.
+            budget=channel['relative_numerical_mass_precision_budget']
+            if not math.isfinite(budget) or not 0<budget<=1.e-3 or abs(relative)>budget:
+                raise ValueError('Additional current exceeds its independent numerical precision budget')
+            checked.append(dict(channel=channel['channel'],relative_shift=relative,numerical_budget=budget))
+        # Preserve the original two-channel denominator. A new large current
+        # must not dilute the exceptional dipion's previously qualified bound.
+        report['precision_normalization_channels']=[row['channel'] for row in rates]
+        report['independently_checked_additional_channels']=checked
+    return report
 
 
 def resolve_parent_kinematics(parents, mass_tolerance, signal_mass, models, br_mumu,*,native_precision_policy=None):
@@ -977,6 +1143,9 @@ def validate_models(models):
         if kaon_channel(model):
             _validate_kaon_model(pdg,model)
             continue
+        if current_channel(model):
+            _validate_current_model(pdg,model)
+            continue
         if model.get('decay_type', 'pseudoscalar-photon') not in ('pseudoscalar-photon', 'vector-pseudoscalar', 'pseudoscalar-dipion', 'vector-dipion', 'charged-vector-dipion','neutral-vector-dipion'):
             raise ValueError('Unsupported exclusive radiative decay type')
         if model.get('decay_type')=='neutral-vector-dipion':
@@ -1065,6 +1234,12 @@ def coefficient_bound(ecm_gev, br_mumu, models, mass_gev=None):
             maximum=max(parent_branching_coefficient(value,mass_gev,model,br_mumu)
                 for value in model['native_record_mass_support_gev'])
             terms.append(model['native_parent_count_bound']*maximum)
+            continue
+        if current_channel(model):
+            if mass_gev is None:
+                raise ValueError('Correlated current bounds require a fixed signal mass')
+            value=parent_branching_coefficient(model['mass_min_gev'],mass_gev,model,br_mumu)
+            terms.append(math.floor(ecm_gev/model['mass_min_gev'])*value)
             continue
         if dipion_channel(model):
             if mass_gev is None:

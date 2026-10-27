@@ -5,6 +5,7 @@ Generation and graph replacement run in a private interpreter. No shared
 release, detector configuration, electronics or trigger settings are changed.
 """
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -18,6 +19,7 @@ CPP = r'''
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <limits>
@@ -53,6 +55,8 @@ public:
   std::unique_ptr<HepMC::GenEvent> current;
   long calls=0, failures=0, collisions=0;
   std::vector<int> parent_ids;
+  std::vector<double> recoil_spin_data;
+  std::function<bool(HepMC::GenParticle*,HepMC::FourVector const&)> correlated_recoil_decay;
   Source(std::vector<std::string> const& commands,int seed,std::vector<int> const& parents)
       :pythia(std::string(std::getenv("PYTHIA8DATA")),false),parent_ids(parents) {
     if(parent_ids.empty())throw std::runtime_error("Explicit source parent inventory is empty");
@@ -314,6 +318,7 @@ public:
     return record;
   }
   void decay_recoil(HepMC::GenParticle* recoil,HepMC::FourVector const& position) {
+    if(correlated_recoil_decay&&correlated_recoil_decay(recoil,position))return;
     // The new recoil uses the ordinary source particle tables and RNG. Only a
     // private temporary Event is decayed; the original source record/counters
     // are restored, including when Pythia rejects the decay.
@@ -382,7 +387,7 @@ public:
       bool lepton=id==11||id==12||id==13||id==14;
       leptonic=leptonic||lepton;
       bool massless=id==22||id==12||id==14;
-      if((!lepton&&id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321)||
+      if((!lepton&&id!=22&&id!=111&&id!=211&&id!=221&&id!=311&&id!=321&&id!=441&&id!=443)||
          !std::isfinite(recoil_masses[i])||
          (massless?recoil_masses[i]!=0.:recoil_masses[i]<=0.))
         throw std::runtime_error("Invalid exclusive recoil identity or mass");
@@ -500,6 +505,155 @@ public:
 '''
 
 
+EVTGEN_CPP = r'''
+#include "EvtGen/EvtGen.hh"
+#include "EvtGenBase/EvtParticleFactory.hh"
+#include "EvtGenBase/EvtRandom.hh"
+#include "EvtGenBase/EvtRandomEngine.hh"
+#include "EvtGenBase/EvtSpinDensity.hh"
+#include "EvtGenBase/EvtVectorParticle.hh"
+#include "EvtGenExternal/EvtExternalGenList.hh"
+#include <complex>
+namespace ShiftMesonEvtGen {
+using Complex=std::complex<double>;
+class Random:public EvtRandomEngine {
+  ShiftMesonNative::Source& source;
+public:
+  explicit Random(ShiftMesonNative::Source& value):source(value){}
+  double random()override{return source.pythia.rndm.flat();}
+};
+class RecoilDecay {
+  ShiftMesonNative::Source& source;
+  Random random;
+  EvtExternalGenList external;
+  std::list<EvtDecayBase*> models;
+  EvtGen generator;
+  bool allowed(EvtParticle* particle)const {
+    auto const& table=source.pythia.particleData;
+    int id=particle->getPDGId();
+    if(!table.isParticle(id)||!table.canDecay(id)||!table.mayDecay(id))return false;
+    auto& settings=source.pythia.settings;
+    if(settings.flag("ParticleDecays:limitTau0")&&
+       table.tau0(id)>settings.parm("ParticleDecays:tau0Max"))return false;
+    if(settings.flag("ParticleDecays:limitTau")&&
+       particle->getLifetime()>settings.parm("ParticleDecays:tauMax"))return false;
+    return true;
+  }
+  void attach(EvtParticle* generated,HepMC::GenParticle* particle,
+              HepMC::FourVector const& birth) {
+    if(generated->getNDaug()==0) {
+      int id=std::abs(generated->getPDGId());
+      if(id<=6||id==21)throw std::runtime_error("EvtGen left an unhadronized recoil parton");
+      return;
+    }
+    // EvtGen may have generated weak descendants. Retain them as undecayed
+    // particles whenever the unchanged native source would stop that decay;
+    // material transport then determines their physical fate.
+    if(!allowed(generated))return;
+    auto const& q=particle->momentum();double mass=generated->mass();
+    if(!(mass>0.)||!std::isfinite(generated->getLifetime())||generated->getLifetime()<0.)
+      throw std::runtime_error("Invalid correlated recoil flight");
+    double scale=generated->getLifetime()/mass;
+    auto* vertex=new HepMC::GenVertex(HepMC::FourVector(birth.x()+q.px()*scale,
+        birth.y()+q.py()*scale,birth.z()+q.pz()*scale,birth.t()+q.e()*scale));
+    vertex->add_particle_in(particle);particle->set_status(2);
+    std::vector<std::pair<EvtParticle*,HepMC::GenParticle*>> children;
+    std::array<double,4> total{};
+    for(size_t index=0;index<generated->getNDaug();++index) {
+      auto* daughter=generated->getDaug(index);auto p=daughter->getP4Lab();
+      auto* child=new HepMC::GenParticle(HepMC::FourVector(p.get(1),p.get(2),p.get(3),p.get(0)),
+                                         daughter->getPDGId(),1);
+      child->set_generated_mass(daughter->mass());vertex->add_particle_out(child);
+      for(int i=0;i<4;++i)total[i]+=p.get(i);
+      children.emplace_back(daughter,child);
+    }
+    // Match decay_recoil's existing external-generator graph contract.
+    // EvtGen/PHOTOS descendants need not close at machine epsilon; do not
+    // repair their momenta. Whole-event and mass-shell audits remain separate.
+    double tolerance=1.e-6*std::max(1.,std::abs(q.e()));
+    if(std::max({std::abs(total[0]-q.e()),std::abs(total[1]-q.px()),
+        std::abs(total[2]-q.py()),std::abs(total[3]-q.pz())})>tolerance) {
+      std::ostringstream message;message<<std::setprecision(17)
+        <<"Correlated recoil decay violates momentum conservation: pdg="<<particle->pdg_id()
+        <<" parent="<<q.e()<<','<<q.px()<<','<<q.py()<<','<<q.pz()
+        <<" daughters="<<total[0]<<','<<total[1]<<','<<total[2]<<','<<total[3]
+        <<" tolerance="<<tolerance;
+      throw std::runtime_error(message.str());
+    }
+    source.current->add_vertex(vertex);
+    for(auto const& child:children)attach(child.first,child.second,vertex->position());
+  }
+public:
+  RecoilDecay(ShiftMesonNative::Source& value,std::string const& decay,
+              std::string const& pdl,std::string const& xml)
+      :source(value),random(value),external(false,xml,"gamma",true),
+       models(external.getListOfModels()),
+       generator(decay.c_str(),pdl.c_str(),&random,external.getPhotosModel(),&models) {
+    if(source.pythia.settings.flag("ParticleDecays:limitRadius")||
+       source.pythia.settings.flag("ParticleDecays:limitCylinder"))
+      throw std::runtime_error("Correlated recoil adapter needs a qualified native spatial decay policy");
+  }
+  bool decay(HepMC::GenParticle* recoil,HepMC::FourVector const& position) {
+    if(recoil->pdg_id()!=441&&recoil->pdg_id()!=443)return false;
+    if(!source.pythia.particleData.mayDecay(recoil->pdg_id()))
+      throw std::runtime_error("A spin-carrying recoil must decay in the qualified source adapter");
+    EvtRandom::setRandomEngine(&random);
+    auto const& p=recoil->momentum();
+    auto* generated=EvtParticleFactory::particleFactory(EvtPDL::evtIdFromStdHep(recoil->pdg_id()),
+        EvtVector4R(p.e(),p.px(),p.py(),p.pz()));
+    if(!generated)throw std::runtime_error("EvtGen has no physical recoil definition");
+    try {
+      if(recoil->pdg_id()==443) {
+        auto const& data=source.recoil_spin_data;
+        if(data.size()!=30)throw std::runtime_error("Missing conditional Jpsi spin density and basis");
+        Complex overlap[3][3],density[3][3];
+        for(int i=0;i<3;++i)for(int j=0;j<3;++j) {
+          density[i][j]=Complex(data[2*(3*i+j)],data[2*(3*i+j)+1]);
+          auto basis=generated->epsParent(i);Complex product{};
+          for(int k=0;k<4;++k)product+=(k==0?1.:-1.)*
+              std::conj(Complex(real(basis.get(k)),imag(basis.get(k))))*data[18+4*j+k];
+          overlap[i][j]=-product;
+        }
+        double precision=2048*std::numeric_limits<double>::epsilon()*
+            std::max(1.,p.e()*p.e()/(recoil->generated_mass()*recoil->generated_mass()));
+        for(int i=0;i<3;++i)for(int j=0;j<3;++j) {
+          Complex product{};for(int k=0;k<3;++k)product+=overlap[i][k]*std::conj(overlap[j][k]);
+          if(std::abs(product-Complex(i==j?1.:0.,0.))>precision)
+            throw std::runtime_error("Correlated recoil polarization bases are not orthonormal");
+        }
+        EvtSpinDensity rho;rho.setDim(3);
+        for(int i=0;i<3;++i)for(int j=0;j<3;++j) {
+          Complex value{};
+          for(int b=0;b<3;++b)for(int c=0;c<3;++c)
+            value+=overlap[i][b]*density[b][c]*std::conj(overlap[j][c]);
+          rho.set(i,j,EvtComplex(value.real(),value.imag()));
+        }
+        if(!rho.check())throw std::runtime_error("Invalid conditional EvtGen recoil density");
+        generated->setSpinDensityForward(rho);
+      } else generated->setDiagonalSpinDensity();
+      generator.generateDecay(generated);
+      if(generated->getNDaug()==0)throw std::runtime_error("Correlated recoil has no actual daughters");
+      attach(generated,recoil,position);
+      generated->deleteTree();source.recoil_spin_data.clear();
+    } catch(...) {generated->deleteTree();throw;}
+    return true;
+  }
+};
+struct Callback {
+  std::shared_ptr<RecoilDecay> engine;
+  bool operator()(HepMC::GenParticle* particle,HepMC::FourVector const& position)const {
+    return engine->decay(particle,position);
+  }
+};
+void enable(ShiftMesonNative::Source& source,std::string const& decay,
+             std::string const& pdl,std::string const& xml) {
+  auto engine=std::make_shared<RecoilDecay>(source,decay,pdl,xml);
+  source.correlated_recoil_decay=Callback{engine};
+}
+}
+'''
+
+
 def cmssw_native_libraries():
     """Resolve this release's libraries, including versioned HepMC sonames.
 
@@ -532,7 +686,7 @@ def native_source(settings, seed, parent_ids=(221, 331)):
     if (not parent_ids or len(set(parent_ids)) != len(parent_ids) or
             any(type(pdg) is not int or pdg not in
                 (221, 331, 113, 213, -213, 223, 333, 313, -313, 323, -323,
-                 130, 310, 321, -321) for pdg in parent_ids)):
+                 130, 310, 321, -321, 441, 10441, 20443, 445, 10443, 100443) for pdg in parent_ids)):
         raise ValueError('Require distinct explicitly supported meson source parents')
     import ROOT
     libraries = cmssw_native_libraries()
@@ -550,7 +704,43 @@ def native_source(settings, seed, parent_ids=(221, 331)):
     parents = ROOT.std.vector('int')()
     for pdg in parent_ids:
         parents.push_back(pdg)
-    return ROOT.ShiftMesonNative.Source(commands, seed, parents)
+    source = ROOT.ShiftMesonNative.Source(commands, seed, parents)
+    if any(abs(pdg) in (441,10441,20443,445,10443,100443) for pdg in parent_ids):
+        source._shift_evtgen_provenance = enable_correlated_recoils(source)
+    return source
+
+
+def enable_correlated_recoils(source, *, decay_file=None):
+    """Use this release's EvtGen and native RNG for spin-carrying recoils.
+
+    The explicit decay-file override is for bounded native validation only.
+    Actual source runs use and fingerprint the release's default tables.
+    """
+    import ROOT
+    base=Path(os.environ['CMSSW_BASE'])
+    configuration=subprocess.check_output(['scram','tool','info','evtgen'],cwd=base/'src',text=True)
+    values=dict(line.split('=',1) for line in configuration.splitlines() if '=' in line)
+    include=Path(values['INCLUDE']);directory=Path(values['LIBDIR'])
+    ROOT.gInterpreter.AddIncludePath(str(include))
+    libraries=[]
+    for name in ('EvtGen','EvtGenExternal'):
+        paths={path.resolve() for path in directory.glob('lib'+name+'.so*') if path.is_file()}
+        if len(paths)!=1:
+            raise RuntimeError('Missing or ambiguous release EvtGen library: '+name)
+        library=paths.pop()
+        if ROOT.gSystem.Load(str(library))<0:
+            raise RuntimeError('Cannot load the release correlated-recoil library: '+str(library))
+        libraries.append(library)
+    if not hasattr(ROOT,'ShiftMesonEvtGen') and not ROOT.gInterpreter.Declare(EVTGEN_CPP):
+        raise RuntimeError('Cannot declare the correlated heavy-recoil adapter')
+    data=Path(os.environ['EVTGENDATA'])
+    decay=Path(decay_file) if decay_file is not None else data/'DECAY.DEC'
+    pdl=data/'evt.pdl'
+    ROOT.ShiftMesonEvtGen.enable(source,str(decay),str(pdl),os.environ['PYTHIA8DATA'])
+    return dict(adapter='EvtGen-forward-density-v1',native_source_rng_unchanged=True,
+        native_decay_limits_unchanged=True,
+        files=[dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+               for path in [*libraries,decay,pdl]])
 
 
 def resolved_meson_production_parameters(source):
@@ -616,6 +806,21 @@ def _native_recoil_vectors(recoils):
 
 def inject_decay(source, parent_index, sampled_decay):
     import ROOT
+    if sampled_decay.get('recoil_spin_correlations_required'):
+        if not getattr(source,'_shift_evtgen_provenance',None):
+            raise ValueError('A conditional recoil density needs the qualified native spin adapter')
+        density=sampled_decay.get('recoil_spin_density_matrix')
+        basis=sampled_decay.get('recoil_polarization_basis_p4')
+        if (not isinstance(density,list) or len(density)!=3
+                or any(not isinstance(row,list) or len(row)!=3 for row in density)
+                or not isinstance(basis,list) or len(basis)!=3 or any(len(row)!=4 for row in basis)):
+            raise ValueError('Missing conditional recoil spin matrix or transported polarization basis')
+        packed=[value for row in density for entry in row for value in entry]
+        packed.extend(value for row in basis for value in row)
+        if len(packed)!=30 or not all(math.isfinite(value) for value in packed):
+            raise ValueError('Nonfinite or malformed conditional recoil spin information')
+        source.recoil_spin_data.clear()
+        for value in packed:source.recoil_spin_data.push_back(value)
     values = ROOT.std.vector('double')()
     recoils = _sampled_recoils(sampled_decay)
     momenta = [sampled_decay['dark_photon_p4']] + [row['p4'] for row in recoils] + [
@@ -630,6 +835,12 @@ def inject_decay(source, parent_index, sampled_decay):
     values.push_back(sampled_decay['muon_mass_gev'])
     identifiers, masses = _native_recoil_vectors(recoils)
     source.inject(parent_index, values, identifiers, masses)
+    if sampled_decay.get('recoil_spin_correlations_required'):
+        if not source.recoil_spin_data.empty():
+            raise RuntimeError('Native recoil adapter did not consume the conditional density')
+        sampled_decay.update(recoil_spin_density_attached=True,
+            recoil_spin_adapter='EvtGen-forward-density-v1',
+            recoil_decay_provenance=source._shift_evtgen_provenance)
     # Pin the actual ordinary recoil outcome for the independent FWLite audit.
     sampled_decay['recoil_records'] = json.loads(str(source.recoil_record(parent_index)))
     if len(recoils) == 1:

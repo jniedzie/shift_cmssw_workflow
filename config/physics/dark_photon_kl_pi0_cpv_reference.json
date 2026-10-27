@@ -1,0 +1,118 @@
+{
+  "code_style": "AI-code. AI-generated attributed matched hypercharge KL current inputs.",
+  "schema": "shift-kl-pi0-matched-hypercharge-cpv-reference-v1",
+  "scope": "An explicit dimension-six short-distance hypercharge-current benchmark and coherent indirect-CPV interface. This is not the complete semileptonic KL to pi0 ll amplitude. Frozen point cards must supply physical epsilon, signal mass and the separately attributed complex KS current. Historical QCD and CKM scenarios below are reproducible reference choices, not a new global fit or universal error envelope.",
+  "matching": {
+    "hypercharge_source": "https://arxiv.org/html/1811.00595v2#S7",
+    "one_loop_and_qcd_source": "https://arxiv.org/pdf/hep-ph/9512380#page=177",
+    "original_nlo_source": "https://arxiv.org/pdf/hep-ph/9402347#page=15",
+    "independent_wilson_convention": "https://doi.org/10.1007/JHEP11(2021)127",
+    "derivation": "After factoring exact epsilon_EM, the on-shell photon current is D0-P0-PE*E0. Neutral mixing contributes 4*rNC*C0, where rNC=(epsilon_NC/epsilon_EM)*mW^2/(sin(thetaW)*cos(thetaW)*q^2). With shared-EW-tree mW=cos(thetaW)*mZ, rNC->1 gives 4*Z0-P0-PE*E0, Z0=C0+D0/4. The semileptonic Y0/sin^2(thetaW) term, which contains Z/box lepton couplings, is excluded. The exact mixing ratio is retained, while other dimension-eight weak matching corrections are not supplied.",
+    "state_convention": "KL=(K0-Kbar0+epsilonK*(K0+Kbar0))/sqrt(2*(1+abs(epsilonK)^2)); the same phase convention must be used for WKS and Im(lambda_t). A' is longitudinal for every coherent spin-zero to spin-zero contribution."
+  },
+  "form_factor_template": {
+    "kind": "hypercharge-kl-pi0-cpv",
+    "parent_pdg_id": 130,
+    "normalization_convention": "matched-hypercharge-current-after-factoring-exact-em-mixing",
+    "qcd_scheme": "NDR",
+    "qcd_scale_gev": 1.0,
+    "qcd_p0": 3.053,
+    "qcd_pe": 0.0,
+    "fermi_constant_gev_minus2": 1.1663787e-05,
+    "imag_lambda_t": 0.000143,
+    "running_top_mass_gev": 163.0,
+    "w_mass_gev": 80.27652079904809,
+    "fplus_zero": 0.9698,
+    "fplus_pole_mass_gev": 0.88232,
+    "electroweak_inputs": {
+      "alpha_inverse": 127.9,
+      "sin2_theta_w": 0.225,
+      "m_z_gev": 91.188,
+      "scheme": "fixed-weak-angle-physical-masses-tree"
+    },
+    "valid_mass_range_gev": [
+      0.211316751,
+      0.3626342
+    ],
+    "physical_epsilon": null,
+    "signal_mass_gev": null,
+    "kaon_mixing_epsilon": null,
+    "indirect_ks_form_factor_at_signal_mass": null,
+    "reference": "https://arxiv.org/html/1811.00595v2#S7",
+    "qcd_reference": "https://arxiv.org/pdf/hep-ph/9512380#page=177",
+    "ckm_reference": "https://arxiv.org/html/1503.02693#S4",
+    "semileptonic_reference": "https://arxiv.org/pdf/hep-ex/0406003#page=10",
+    "running_top_mass_scale_gev": 163.0,
+    "running_top_mass_scheme": "MSbar"
+  },
+  "qcd_scenarios": {
+    "reference": "https://arxiv.org/pdf/hep-ph/9512380#page=178",
+    "central": {
+      "scheme": "NDR",
+      "scale_gev": 1.0,
+      "lambda_ms_four_flavour_gev": 0.325,
+      "p0": 3.053
+    },
+    "ndr_scale_and_lambda_scan": [
+      2.939,
+      2.965,
+      2.976,
+      3.028,
+      3.053,
+      3.08,
+      3.112,
+      3.133,
+      3.159
+    ],
+    "historical_ndr_hv_scan_range": [
+      2.872,
+      3.159
+    ],
+    "pe_zero_convention": "The publication describes PE as order 1e-2 and neglects it in the kaon numerical discussion. Zero here is an explicit truncation, not an exact vanishing coefficient or quantified error. The kernel supports a separately supplied PE.",
+    "interpretation": "These are historical scale/scheme/input scenarios, not independent Gaussian errors. The cancellation between 4Z0 and P0 makes relative errors on the direct current sensitive to the scenario. Nonlocal matrix elements of Q3-Q6 are neglected in the published short-distance approximation; its smallness in total KL->pi0 ll does not automatically bound its fraction of this cancelling dark-vector amplitude."
+  },
+  "ckm_input": {
+    "reference": "https://arxiv.org/html/1503.02693#S4.T4",
+    "scenario": "Table 4 first column, SM input set epsilonK, DeltaMd/DeltaMs, SpsiKS",
+    "imag_lambda_t": 0.000143,
+    "uncertainty_plus": 8e-06,
+    "uncertainty_minus": 7e-06,
+    "meaning": "An attributed historical CKM scenario. It must not be described as the latest global fit. Vary the common Im(lambda_t) amplitude once, preserving its correlation across all signal masses."
+  },
+  "semileptonic_inputs": {
+    "normalization_reference": "https://pdg.lbl.gov/2025/reviews/rpp2025-rev-ckm-matrix.pdf#page=3",
+    "fplus_zero": 0.9698,
+    "fplus_zero_uncertainty": 0.0017,
+    "shape_reference": "https://arxiv.org/pdf/hep-ex/0406003#page=10",
+    "shape_scenario": "KTeV Table II electron/muon-universal pole fit",
+    "pole_mass_gev": 0.88232,
+    "pole_mass_uncertainty_gev": 0.00654,
+    "meaning": "The measured pole parameter describes f+(q^2)=f+(0)/(1-q^2/MV^2); it is not an inserted Kstar branching fraction. The quoted pole-fit error does not constitute a universal shape error. Isospin/electromagnetic corrections beyond the stated Kpi relation need separate treatment."
+  },
+  "kaon_mixing_input": {
+    "reference": "https://scoap3-prod-backend.s3.cern.ch/media/files/43451/10.1103/PhysRevD.98.094505.pdf#page=1",
+    "absolute_epsilon_k": 0.002228,
+    "absolute_epsilon_k_uncertainty": 1.1e-05,
+    "phase_degrees": 43.52,
+    "phase_uncertainty_degrees": 0.05,
+    "meaning": "Evaluate the complex epsilonK once in the declared CP convention, multiply the attributed KS current, and add it coherently to the direct term. A separate probability for the indirect term would lose interference."
+  },
+  "perturbative_mass_inputs": {
+    "reference": "https://arxiv.org/html/1503.02693#S2",
+    "running_top_mass_gev": 163.0,
+    "w_mass_gev": 80.27652079904809,
+    "meaning": "Nominal MW=cos(thetaW)*MZ from the shared fixed-angle dark-photon EW scheme, coherent with its exact EM/neutral mixing. The 2015 physical MW=80.385 GeV is an explicit weak-matching scheme variation; it changes the neutral prefactor by about 0.27%, with its own loop-mass change. The running top reference is MSbar mt(mt)=163 GeV. Higher-order weak/QCD matching is not silently included; varying this scheme is distinct from its parametric input error.",
+    "shared_ew_tree_w_mass_gev": 80.27652079904809,
+    "physical_w_mass_scheme_scenario_gev": 80.385,
+    "running_top_mass_scale_gev": 163.0,
+    "running_top_mass_scheme": "MSbar"
+  },
+  "unqualified_terms": [
+    "Nonlocal direct-CPV four-quark electromagnetic matrix elements, important to bound when local coefficients cancel.",
+    "Higher-order QCD/electroweak and dimension-eight charm/weak matching corrections.",
+    "The KS timelike shape and its interference-sign choice must come from an independently attributed current; no current is supplied by the null template fields.",
+    "A universal confidence band is not obtained by combining the historical scenario scans.",
+    "Native kaon flight, material attenuation/regeneration and secondary kaon sources remain separate."
+  ],
+  "physical_production_ready": false
+}

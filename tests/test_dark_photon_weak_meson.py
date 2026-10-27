@@ -11,7 +11,16 @@ from dark_photon_meson import MUON_MASS_GEV, boost
 from dark_photon_vector_meson import two_body_momentum
 from dark_photon_weak_meson import (
     amplitude, born_dilepton_differential_width, chiral_form_factor,
-    decay_width, longitudinal_muon_density, pion_loop_chi, sample_decay)
+    decay_width, longitudinal_muon_density, pion_loop_chi, sample_decay,
+    _dipion_angular_polynomial, _dipion_integral, _dipion_t_density,
+    neutral_dipion_current, neutral_dipion_rest_kinematics,
+    neutral_dipion_polarization_density, neutral_dipion_differential_width,
+    neutral_dipion_decay_width, neutral_dipion_branching_coefficient,
+    sample_neutral_dipion_decay, mean_neutral_dipion_lab_beta_gamma,
+    inami_lim_functions, kl_cpv_form_factor, kl_cpv_form_factor_components)
+from dark_photon_model import DEFAULT_EW_INPUTS, mixing_parameters
+from dark_photon_dipion_meson import _gauss_legendre
+from dark_photon_double_radiative import polarizations
 
 
 KAON, PION = .493677, .13957039
@@ -253,6 +262,285 @@ class LongitudinalDecayTest(unittest.TestCase):
         expected = (1/3-beta_squared/5)/(1-beta_squared/3)
         self.assertLess(abs(math.fsum(c*c for c in angles)/count-expected), .012)
         self.assertLess(abs(math.fsum(row['proper_decay_length_mm'] for row in rows)/count/2.-1.), .04)
+
+
+def neutral_dipion_model(**changes):
+    parent, pion, fs = .497611, .1349768, 3.92e-7
+    radius = -.07*5.067730716**2
+    pole = -fs*radius*parent**3/(3*math.sqrt(2)*(parent**2-pion**2))
+    result = dict(kind='neutral-kaon-dipion-finite-current', parent_pdg_id=130,
+        reference_parent_mass_gev=parent, pion_mass_gev=pion, alpha_em=ALPHA,
+        total_width_gev=1.286575365324472e-17, valid_mass_range_gev=[0., parent-2*pion],
+        reference='https://arxiv.org/html/2602.15117v1#A1',
+        coefficient_reference='https://arxiv.org/html/2602.15117v1#A3',
+        coefficients=dict(electric_quadrupole=[fs*1.28*parent, 0.],
+            charge_radius_pole=[pole, 0.],
+            electric_contact=[pole*.5/math.log(parent**2/pion**2), 0.],
+            magnetic_quadrupole=[0., 0.]))
+    result.update(changes)
+    return result
+
+
+def only_dipion_component(name, coefficient=1.):
+    card = neutral_dipion_model()
+    card['coefficients'] = {key: [coefficient.real, coefficient.imag] if key == name else [0., 0.]
+                            for key in card['coefficients']}
+    return card
+
+
+class NeutralKaonDipionTest(unittest.TestCase):
+    def test_all_four_currents_are_ward_transverse_and_bose_even_in_moving_frames(self):
+        card, mass = neutral_dipion_model(), .22
+        parent, q, first, second = neutral_dipion_rest_kinematics(.497611, .1349768, mass, .075, .43)
+        inner = lambda a, b: a[0]*b[0]-sum(x*y for x, y in zip(a[1:], b[1:]))
+        beta = (.2, -.31, .65)
+        for name in card['coefficients']:
+            card = only_dipion_component(name, .5+.7j)
+            current = neutral_dipion_current(parent, first, second, model=card)
+            swapped = neutral_dipion_current(parent, second, first, model=card)
+            scale = max(abs(x) for x in current)
+            self.assertGreater(scale, 0.)
+            self.assertLess(abs(inner(q, current)), 2.e-14*scale)
+            for a, b in zip(current, swapped):
+                self.assertAlmostEqual(abs(a-b)/scale, 0., places=13)
+            moved = neutral_dipion_current(boost(parent, beta), boost(first, beta), boost(second, beta), model=card)
+            real = boost(tuple(x.real for x in current), beta)
+            imaginary = boost(tuple(x.imag for x in current), beta)
+            for a, b in zip(moved, (complex(r, i) for r, i in zip(real, imaginary))):
+                self.assertLess(abs(a-b)/scale, 2.e-12)
+
+    def test_spin_density_is_hermitian_positive_and_retains_coherent_interference(self):
+        card = neutral_dipion_model()
+        card['coefficients']['magnetic_quadrupole'] = [1.e-6, 2.e-6]
+        rho = neutral_dipion_polarization_density(.075, .43, .22, card)
+        for i in range(3):
+            self.assertGreaterEqual(rho[i][i].real, 0.)
+            for j in range(3):
+                self.assertEqual(rho[i][j], rho[j][i].conjugate())
+        self.assertTrue(any(abs(rho[i][j]) > 0 for i in range(3) for j in range(3) if i != j))
+        for probe in ((1, 2j, .3-1j), (1, 1, 1), (0, 1j, -2)):
+            value = sum(probe[i].conjugate()*rho[i][j]*probe[j] for i in range(3) for j in range(3))
+            self.assertGreaterEqual(value.real, -1.e-30)
+            self.assertLess(abs(value.imag), 1.e-27)
+
+    def test_magnetic_quadrupole_is_transverse_and_its_bose_node_is_preserved(self):
+        card = only_dipion_component('magnetic_quadrupole')
+        for cosine in (-1., -.4, 0., .4, 1.):
+            rho = neutral_dipion_polarization_density(.075, cosine, .22, card)
+            self.assertEqual(rho[2][2], 0.)
+            trace = sum(rho[i][i].real for i in range(3))
+            if cosine in (-1., 0., 1.):
+                self.assertEqual(trace, 0.)
+            else:
+                self.assertGreater(trace, 0.)
+
+    def test_angular_polynomial_is_exact_for_arbitrary_complex_finite_coefficients(self):
+        card = neutral_dipion_model()
+        for index, name in enumerate(card['coefficients']):
+            card['coefficients'][name] = [1+index, -.4*index]
+        for invariant in (.073, .075, .0768):
+            a, b, c = _dipion_angular_polynomial(invariant, .22, card)
+            for cosine in (-.83, -.24, .17, .68):
+                actual = neutral_dipion_differential_width(invariant, cosine, .22, card)
+                self.assertLess(abs((a+b*cosine**2+c*cosine**4)/actual-1.), 2.e-12)
+
+    def test_absolute_phase_space_has_one_identical_pion_factor_and_epsilon_squared(self):
+        card = only_dipion_component('electric_contact', 2.+3j)
+        invariant, cosine, mass = .075, .17, .22
+        parent, dark, first, second = neutral_dipion_rest_kinematics(.497611, .1349768, mass, invariant, cosine)
+        # Independent H_contact^2 in P rest: sum|e H.eps|²=e² |c|² q² k²/M⁴.
+        momentum = dark[3]
+        matrix = 4*math.pi*ALPHA*13*mass**2*momentum**2/.497611**4
+        phase = momentum*math.sqrt(invariant/4-.1349768**2)/(256*math.pi**3*.497611**2*math.sqrt(invariant))
+        self.assertAlmostEqual(neutral_dipion_differential_width(invariant, cosine, mass, card)/(matrix*phase), 1., places=12)
+        width = neutral_dipion_decay_width(card, mass, epsilon=.001)
+        self.assertEqual(neutral_dipion_decay_width(card, mass, epsilon=.002)/width, 4.)
+
+    def test_rate_integral_converges_and_matches_sampler_normalization(self):
+        card = neutral_dipion_model()
+        widths = [neutral_dipion_decay_width(card, .22, epsilon=.001, quadrature_order=n) for n in (16, 32, 64)]
+        for value in widths:
+            self.assertLess(abs(value/widths[-1]-1.), 1.e-10)
+        source = neutral_dipion_branching_coefficient(.497611, .22, card)
+        self.assertLess(abs(source*card['total_width_gev']*1.e-6/widths[-1]-1.), 1.e-10)
+
+    def test_corrected_sehgal_continuum_benchmarks_without_rate_rescaling(self):
+        # Eq63 and Appendix A.3 historical rounded totals. Current constants
+        # and exact hbar*c conversion differ by ~2%; no factor is fitted here.
+        card, electron = neutral_dipion_model(), .00051099895
+        low = math.log((2*electron)**2)
+        high = math.log((.497611-2*.1349768)**2)
+        for sign, expected in ((1., 1.96e-10), (-1., 2.68e-10)):
+            card['coefficients']['electric_quadrupole'][0] = sign*3.92e-7*1.28*.497611
+            total = 0.
+            for node, weight in _gauss_legendre(48):
+                q2 = math.exp((high+low)/2+(high-low)*node/2)
+                ratio = electron**2/q2
+                spectral = ALPHA/(3*math.pi)*math.sqrt(1-4*ratio)*(1+2*ratio)
+                width = neutral_dipion_decay_width(card, math.sqrt(q2), epsilon=.001, quadrature_order=24)/1.e-6
+                total += weight*(high-low)/2*spectral*width/card['total_width_gev']
+            self.assertLess(abs(total/expected-1.), .03)
+
+    def test_sampler_conserves_shells_and_both_relative_lifetime_quantities(self):
+        card, rng = neutral_dipion_model(), random.Random(1761623101)
+        for momentum in (0., 3., 300.):
+            parent = (math.hypot(momentum, .497611), 0., 0., -momentum)
+            for _ in range(4):
+                row = sample_neutral_dipion_decay(parent, .22, 7., rng, model=card)
+                vectors = [row['muon_p4'], row['antimuon_p4'], *row['recoil_p4s']]
+                for actual, expected in zip(map(sum, zip(*vectors)), parent):
+                    self.assertLess(abs(actual-expected), 2.e-8)
+                for value, mass in zip(vectors, (MUON_MASS_GEV, MUON_MASS_GEV, .1349768, .1349768)):
+                    squared = math.fsum((value[0]**2, *(-x*x for x in value[1:])))
+                    self.assertLess(abs(squared-mass**2), 1.e-8)
+                self.assertEqual(row['recoil_pdg_ids'], [111, 111])
+                self.assertTrue(row['unconditional_decay'])
+                self.assertAlmostEqual(row['decay_ct_mm'], row['proper_decay_length_mm']*row['dark_photon_p4'][0]/.22)
+                for offset, component in zip(row['decay_displacement_mm'], row['dark_photon_p4'][1:]):
+                    self.assertAlmostEqual(offset, row['proper_decay_length_mm']*component/.22)
+
+    def test_magnetic_sampler_and_mean_boost_preserve_the_conditional_angular_law(self):
+        card = only_dipion_component('magnetic_quadrupole', 1.e-6)
+        rng, count = random.Random(1761623102), 240
+        rows = [sample_neutral_dipion_decay((.497611, 0., 0., 0.), .22, 1., rng, model=card) for _ in range(count)]
+        # M2 unpolarized angular spectrum is c²(1-c²), with <c²>=3/7.
+        self.assertLess(abs(sum(row['pion_helicity_cosine']**2 for row in rows)/count-3/7), .055)
+        observed = sum(math.sqrt(sum(x*x for x in row['dark_photon_p4'][1:]))/.22 for row in rows)/count
+        expected = mean_neutral_dipion_lab_beta_gamma((.497611, 0., 0., 0.), .22, card)
+        self.assertLess(abs(observed/expected-1.), .05)
+
+    def test_native_pole_continuation_is_explicit_and_conserves_actual_mass(self):
+        card = neutral_dipion_model()
+        with self.assertRaises(ValueError):
+            neutral_dipion_branching_coefficient(.497614, .22, card)
+        card['pole_mass_numerical_tolerance_gev'] = 3.1e-6
+        row = sample_neutral_dipion_decay((.497614, 0., 0., 0.), .22, 1., random.Random(81), model=card)
+        self.assertAlmostEqual(sum(v[0] for v in [row['dark_photon_p4'], *row['recoil_p4s']]), .497614)
+        self.assertEqual(row['event_parent_mass_gev'], .497614)
+        self.assertEqual(row['reference_parent_mass_gev'], .497611)
+
+    def test_unattributed_models_missing_coefficients_and_closed_points_fail(self):
+        for changes in (dict(reference=''), dict(coefficient_reference=''), dict(parent_pdg_id=321),
+                        dict(coefficients={}), dict(valid_mass_range_gev=[0., .3])):
+            with self.assertRaises(ValueError):
+                neutral_dipion_decay_width(neutral_dipion_model(**changes), .22, epsilon=.001)
+        with self.assertRaises(ValueError):
+            neutral_dipion_decay_width(neutral_dipion_model(), .25, epsilon=.001)
+
+
+def cpv_model(mass=.25, epsilon=.001):
+    directory = Path(__file__).resolve().parents[1]/'config/physics'
+    authority = json.loads((directory/'dark_photon_kl_pi0_cpv_reference.json').read_text())
+    card = authority['form_factor_template']
+    mixing = authority['kaon_mixing_input']
+    phase = math.radians(mixing['phase_degrees'])
+    card.update(physical_epsilon=epsilon, signal_mass_gev=mass,
+        kaon_mixing_epsilon=[mixing['absolute_epsilon_k']*math.cos(phase), mixing['absolute_epsilon_k']*math.sin(phase)])
+    ks_model = json.loads((directory/'dark_photon_ks_pi0_vector_na48_2004.json').read_text())['form_factor_model']
+    ks_current = chiral_form_factor(.497611, .1349768, mass, ks_model)
+    card['indirect_ks_form_factor_at_signal_mass'] = [ks_current.real, ks_current.imag]
+    return card
+
+
+class MatchedKLCurrentTest(unittest.TestCase):
+    def test_inami_lim_functions_have_smooth_removable_poles_and_independent_Z0(self):
+        self.assertEqual(inami_lim_functions(1.)['C0'], 3/16)
+        self.assertEqual(inami_lim_functions(1.)['D0'], 11/216)
+        self.assertEqual(inami_lim_functions(1.)['E0'], 43/72)
+        for x in (1.-1.e-8, 1.+1.e-8):
+            for name, value in inami_lim_functions(1.).items():
+                self.assertLess(abs(inami_lim_functions(x)[name]-value), 1.e-8)
+        for x in (.2, 2., 4.3, 10.):
+            independent = (-math.log(x)/9+(18*x**4-163*x**3+259*x*x-108*x)/(144*(x-1)**3)
+                +(32*x**4-38*x**3-15*x*x+18*x)/(72*(x-1)**4)*math.log(x))
+            self.assertLess(abs(inami_lim_functions(x)['Z0']-independent), 2.e-13)
+
+    def test_full_mixing_and_matched_photon_neutral_current_coefficients_are_retained(self):
+        mass, epsilon = .3, .02
+        card = cpv_model(mass, epsilon)
+        values = kl_cpv_form_factor_components(.497611, .1349768, mass, card)
+        mix = mixing_parameters(mass, epsilon)
+        ew = DEFAULT_EW_INPUTS
+        ratio = mix.neutral_current_coefficient/mix.em_coefficient*card['w_mass_gev']**2/(ew.sin_theta_w*ew.cos_theta_w*mass**2)
+        self.assertEqual(values['neutral_current_ratio'], ratio)
+        self.assertGreater(abs(ratio-1.), 1.e-5)
+        functions = inami_lim_functions((card['running_top_mass_gev']/card['w_mass_gev'])**2)
+        expected = 4*functions['Z0']-card['qcd_p0']-card['qcd_pe']*functions['E0']+4*(ratio-1)*functions['C0']
+        self.assertAlmostEqual(values['matched_short_distance_coefficient'], expected)
+        # Replacing this with complete y7V would insert the independent
+        # semileptonic Z/box term, which has no emitted on-shell A' here.
+        x = (card['running_top_mass_gev']/card['w_mass_gev'])**2
+        y0 = x/8*((x-4)/(x-1)+3*x/(x-1)**2*math.log(x))
+        self.assertGreater(abs(expected-(expected-y0/ew.sin2_theta_w)), 1.)
+
+    def test_physical_MW_scheme_is_explicit_and_not_hidden_in_mixing(self):
+        card = cpv_model(epsilon=1.e-6)
+        nominal = kl_cpv_form_factor_components(.497611, .1349768, .25, card)
+        moved = kl_cpv_form_factor_components(.497611, .1349768, .25, dict(card, w_mass_gev=80.385))
+        self.assertLess(abs(nominal['neutral_current_ratio']-1.), 1.e-5)
+        self.assertAlmostEqual(moved['neutral_current_ratio']/nominal['neutral_current_ratio'],
+                               (80.385/card['w_mass_gev'])**2, places=12)
+        self.assertGreater(abs(moved['neutral_current_ratio']-nominal['neutral_current_ratio']), .002)
+
+    def test_absolute_direct_normalization_closes_against_the_matched_quark_current(self):
+        mass, epsilon, parent_mass, pion = .25, .001, .497611, .1349768
+        card = cpv_model(mass, epsilon)
+        card.update(kaon_mixing_epsilon=[0., 0.], indirect_ks_form_factor_at_signal_mass=[0., 0.])
+        values = kl_cpv_form_factor_components(parent_mass, pion, mass, card)
+        coefficient = (mixing_parameters(mass, epsilon).em_coefficient*FERMI*math.sqrt(4*math.pi*ALPHA)
+            /(8*math.sqrt(2)*math.pi**2)*mass**2*card['imag_lambda_t']
+            *values['semileptonic_form_factor']*values['matched_short_distance_coefficient'])
+        momentum = two_body_momentum(parent_mass, pion, mass)
+        independent = momentum**3*abs(coefficient)**2/(2*math.pi*mass**2)
+        calculated = decay_width(parent_mass, pion, mass, mixing_parameters(mass, epsilon).em_coefficient,
+            ALPHA, values['total'])
+        self.assertAlmostEqual(calculated/independent, 1., places=12)
+
+    def test_indirect_current_is_coherent_and_can_cancel_or_enhance_direct_current(self):
+        card, parent, pion, mass = cpv_model(), .497611, .1349768, .25
+        values = kl_cpv_form_factor_components(parent, pion, mass, card)
+        self.assertLess(abs(values['total']-values['direct']-values['indirect']), 1.e-23)
+        self.assertNotEqual(abs(values['total'])**2, abs(values['direct'])**2+abs(values['indirect'])**2)
+        mixing = complex(*card['kaon_mixing_epsilon'])
+        cancelling_ks = -values['direct']*math.sqrt(1+abs(mixing)**2)/mixing
+        card['indirect_ks_form_factor_at_signal_mass'] = [cancelling_ks.real, cancelling_ks.imag]
+        cancelled = kl_cpv_form_factor(parent, pion, mass, card)
+        self.assertLess(abs(cancelled), 1.e-23)
+        card['indirect_ks_form_factor_at_signal_mass'] = [-cancelling_ks.real, -cancelling_ks.imag]
+        enhanced = kl_cpv_form_factor(parent, pion, mass, card)
+        self.assertAlmostEqual(abs(enhanced/values['direct']), 2.)
+
+    def test_common_CKM_uncertainty_scales_the_direct_amplitude_once(self):
+        card = cpv_model()
+        first = kl_cpv_form_factor_components(.497611, .1349768, .25, card)
+        second = kl_cpv_form_factor_components(.497611, .1349768, .25,
+            dict(card, imag_lambda_t=2*card['imag_lambda_t']))
+        self.assertEqual(second['direct'], 2*first['direct'])
+        self.assertEqual(second['indirect'], first['indirect'])
+        self.assertAlmostEqual(abs(second['direct'])**2/abs(first['direct'])**2, 4.)
+
+    def test_current_remains_longitudinal_and_uses_the_same_polarized_decay(self):
+        parent, pion, mass = .497611, .1349768, .25
+        form = kl_cpv_form_factor(parent, pion, mass, cpv_model(mass))
+        momentum = two_body_momentum(parent, pion, mass)
+        recoil = (math.hypot(momentum, pion), 0., 0., -momentum)
+        for state in ((0., 1., 0., 0.), (0., 0., 1., 0.)):
+            self.assertEqual(amplitude((parent, 0., 0., 0.), recoil, state, .001, ALPHA, form), 0.)
+        row = sample_decay((parent, 0., 0., 0.), pion, mass, 2., random.Random(44))
+        self.assertEqual(row['dark_photon_polarization'], 'longitudinal')
+
+    def test_unresolved_or_wrong_mass_CP_phase_and_inclusive_models_are_rejected(self):
+        card = cpv_model()
+        for changes in (dict(physical_epsilon=None), dict(signal_mass_gev=.3),
+                        dict(indirect_ks_form_factor_at_signal_mass=None), dict(kaon_mixing_epsilon=None),
+                        dict(parent_pdg_id=310), dict(qcd_scheme='inclusive-y7V'), dict(qcd_reference='')):
+            with self.assertRaises(ValueError):
+                kl_cpv_form_factor(.497611, .1349768, .25, dict(card, **changes))
+        path = Path(__file__).resolve().parents[1]/'config/physics/dark_photon_kl_pi0_cpv_reference.json'
+        authority = json.loads(path.read_text())
+        self.assertFalse(authority['physical_production_ready'])
+        self.assertGreater(authority['ckm_input']['uncertainty_plus'], 0.)
+        self.assertIn('Nonlocal', authority['unqualified_terms'][0])
 
 
 if __name__ == '__main__':

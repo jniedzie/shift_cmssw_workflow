@@ -16,6 +16,75 @@ from audit_dark_photon_gen import validate_lifetime_sample, validate_event_ids, 
 
 
 class MesonRadiativeGraphTest(unittest.TestCase):
+    @staticmethod
+    def current_record(pdg, mass, sample, model):
+        sample=json.loads(json.dumps(sample))
+        graph=dict(barcode=38,pdg_id=pdg,native_mass_gev=mass,
+            production_position_mm=[0.,0.,0.,0.],decay_position_mm=[0.,0.,0.,.001])
+        parent=dict(index=38,pdg_id=pdg,native_mass_gev=mass,p4=[mass,0.,0.,0.])
+        selected=dict(slot=1,trial=12,parent=parent,graph=graph,sampled_decay=sample,resolved_model=model)
+        if 'recoil_p4s' in sample:
+            recoils=list(zip(sample['recoil_pdg_ids'],sample['recoil_p4s']))
+        else:recoils=[(sample['recoil_pdg_id'],sample['recoil_p4'])]
+        record=dict(mother_barcode=38,mother_pdg_id=pdg,mother_generated_mass_gev=mass,mother_p4=parent['p4'],
+            mother_production_position_mm=graph['production_position_mm'],decay_position_mm=graph['decay_position_mm'],
+            outgoing=[dict(pdg_id=32,status=3,p4=sample['dark_photon_p4'])]+
+                [dict(pdg_id=recoil,status=1 if recoil==22 else 2,p4=momentum) for recoil,momentum in recoils])
+        return record,selected
+
+    def test_coherent_double_radiative_vertex_requires_both_exact_recoils_and_scope(self):
+        from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
+        from dark_photon_double_radiative import sample_decay
+        model=CorrelatedCurrentSourceTest().double();mass=model['mass_gev']
+        sample=sample_decay((mass,0.,0.,0.),.22,10.,random.Random(11),model=model)
+        record,selected=self.current_record(221,mass,sample,model)
+        self.assertLess(validate_meson_radiative_record(record,selected)['maximum_momentum_residual_gev'],1.e-12)
+        for key,value in [('coherent_parent_replacement_required',False),('unconditional_decay',False),
+                          ('recoil_pdg_ids',[111,111])]:
+            changed=copy.deepcopy(selected);changed['sampled_decay'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):validate_meson_radiative_record(record,changed)
+
+    def test_quarkonium_vertex_requires_successful_native_spin_transfer_for_jpsi(self):
+        from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
+        from dark_photon_quarkonium import sample_decay
+        model=CorrelatedCurrentSourceTest().quark('chi_c1->Jpsi_Aprime');mass=model['mass_gev']
+        sample=sample_decay((mass,0.,0.,0.),.22,10.,random.Random(11),model=model)
+        record,selected=self.current_record(20443,mass,sample,model)
+        with self.assertRaisesRegex(ValueError,'native spin transfer'):validate_meson_radiative_record(record,selected)
+        selected['sampled_decay'].update(recoil_spin_density_attached=True,recoil_spin_adapter='EvtGen-forward-density-v1')
+        self.assertLess(validate_meson_radiative_record(record,selected)['maximum_momentum_residual_gev'],1.e-12)
+        changed=copy.deepcopy(selected);changed['sampled_decay']['current_reference']='unrelated current'
+        with self.assertRaisesRegex(ValueError,'declared current'):validate_meson_radiative_record(record,changed)
+
+    def test_scalar_current_receipt_keeps_the_declared_model_and_omissions(self):
+        from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
+        from dark_photon_double_radiative import sample_decay
+        model=CorrelatedCurrentSourceTest().double(scalar=True);mass=model['mass_gev']
+        sample=sample_decay((mass,0.,0.,0.),.3,10.,random.Random(78),model=model)
+        record,selected=self.current_record(221,mass,sample,model)
+        self.assertLess(validate_meson_radiative_record(record,selected)['maximum_momentum_residual_gev'],1.e-12)
+        for key,value in [('scalar_current_model','escribano-2020-chpt'),
+                          ('additional_timelike_operators_omitted',False),
+                          ('scalar_chiral_and_additional_timelike_terms_omitted',True)]:
+            changed=copy.deepcopy(selected);changed['sampled_decay'][key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):validate_meson_radiative_record(record,changed)
+
+    def test_weak_radiative_kaon_keeps_its_native_flight_and_two_recoils(self):
+        from test_dark_photon_weak_radiative import model as weak_model
+        from dark_photon_weak_radiative import sample_decay
+        inputs=weak_model();mass=inputs['parent_mass_gev']
+        model=dict(decay_type='weak-kaon-pion-photon',recoil_pdg_id=111,
+            recoil_mass_gev=inputs['recoil_pion_mass_gev'],weak_radiative_model=inputs)
+        sample=sample_decay((mass,0.,0.,0.),.22,10.,random.Random(11),model=model)
+        sample.update(parent_pdg_id=130,parent_flight_included=False,native_parent_flight_attached=True)
+        record,selected=self.current_record(130,mass,sample,model)
+        native=dict(pdg_id=130,production_position_mm=selected['graph']['production_position_mm'],
+            stored_decay_position_mm=selected['graph']['decay_position_mm'])
+        selected['parent'].update(native);selected['sampled_decay']['native_parent_flight']=native
+        self.assertLess(validate_meson_radiative_record(record,selected)['maximum_momentum_residual_gev'],1.e-12)
+        changed=copy.deepcopy(selected);changed['sampled_decay']['native_parent_flight_attached']=False
+        with self.assertRaisesRegex(ValueError,'pinned native flight'):validate_meson_radiative_record(record,changed)
+
     def setUp(self):
         self.selected = dict(slot=1,trial=12,
             parent=dict(index=38,pdg_id=221,native_mass_gev=.548,p4=[.548,0.,0.,0.]),

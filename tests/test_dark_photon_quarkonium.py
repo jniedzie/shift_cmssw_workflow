@@ -115,7 +115,22 @@ class QuarkoniumRateTest(unittest.TestCase):
         self.assertEqual(eta_c_form_factor(0.,nr),1.)
         self.assertAlmostEqual(abs(eta_c_form_factor(0.,vmd)-1),0.,places=14)
         self.assertGreater(abs(eta_c_form_factor(.7,vmd))**2,abs(eta_c_form_factor(.7,nr))**2*10)
-        with self.assertRaises(ValueError):eta_c_form_factor(1.,nr)
+        with self.assertRaises(ValueError):eta_c_form_factor(MASSES['eta_c']+1.e-6,nr)
+
+    def test_eta_c_theoretical_continuations_cover_full_physical_interval(self):
+        parent = MASSES['eta_c']
+        for name in ('eta_c_nr_charm_pole', 'eta_c_rho_jpsi_two_pole'):
+            current = INPUTS[name]
+            self.assertEqual(current['valid_mass_range_gev'][1], parent)
+            self.assertIn('theoretical', current['domain_scope'])
+            for mass in (1.5, 1.8, 2., parent*(1-1.e-7), parent):
+                self.assertTrue(math.isfinite(abs(eta_c_form_factor(mass, current))))
+            model = channel_model('eta_c->gamma_Aprime')
+            model['quarkonium_model'] = copy.deepcopy(current)
+            for mass in (1.5, 1.8, 2., parent*(1-1.e-7)):
+                expected = 2*model['br_gamma_gamma']*(1-(mass/parent)**2)**3*abs(eta_c_form_factor(mass, current))**2
+                self.assertAlmostEqual(branching_coefficient(parent, mass, model)/expected, 1., places=12)
+            self.assertEqual(branching_coefficient(parent, parent, model), 0.)
 
     def test_explicit_authority_and_fit_domain_required(self):
         model=copy.deepcopy(INPUTS['chi_c1_lattice']);model.pop('reference')
@@ -155,6 +170,39 @@ class QuarkoniumDecayTest(unittest.TestCase):
         # A pole J/psi -> eta_c transition cannot create an on-shell dimuon.
         self.assertLess(MASSES['Jpsi']-MASSES['eta_c'],2*MUON_MASS_GEV)
         self.assertGreater(MASSES['psi_2S']-MASSES['eta_c'],.7)
+
+    def test_eta_c_high_mass_and_endpoint_samples_remain_on_shell(self):
+        parent, rng = MASSES['eta_c'], random.Random(1761624101)
+        for kind in ('eta_c_nr_charm_pole', 'eta_c_rho_jpsi_two_pole'):
+            model = channel_model('eta_c->gamma_Aprime')
+            model['quarkonium_model'] = copy.deepcopy(INPUTS[kind])
+            for mass in (1.5, 1.8, 2., parent*(1-1.e-5)):
+                for momentum in (0., 20.):
+                    p4 = (math.hypot(parent, momentum), 0., 0., momentum)
+                    row = sample_decay(p4, mass, 2., rng, model=model)
+                    self.assertEqual(row['longitudinal_fraction'], 0.)
+                    vectors = (row['muon_p4'], row['antimuon_p4'], row['photon_p4'])
+                    for actual, expected in zip(map(sum, zip(*vectors)), p4):
+                        self.assertLess(abs(actual-expected), 1.e-10)
+                    for value, expected_mass in zip(vectors, (MUON_MASS_GEV, MUON_MASS_GEV, 0.)):
+                        self.assertLess(abs(self.scalar(value, value)-expected_mass**2), 1.e-10)
+            with self.assertRaises(ValueError):
+                sample_decay((parent, 0., 0., 0.), parent, 2., rng, model=model)
+
+    def test_attributed_physical_photon_inputs_define_each_massless_normalization(self):
+        inputs=INPUTS['radiative_branching_inputs']
+        self.assertEqual(set(inputs),set(self.channels))
+        for channel in self.channels:
+            calibration=inputs[channel];model=channel_model(channel)
+            self.assertTrue(calibration['reference'].startswith('https://pdg.lbl.gov/2025/listings/'))
+            self.assertGreater(calibration['page'],0)
+            self.assertTrue(0<calibration['uncertainty']<calibration['value']<1)
+            self.assertEqual(calibration['recoil_pdg_id'],model['recoil_pdg_id'])
+            key=calibration['branching_key'];model[key]=calibration['value']
+            parent=MASSES[channel.split('->')[0]]
+            identical_photons=2 if key=='br_gamma_gamma' else 1
+            self.assertAlmostEqual(branching_coefficient(parent,0.,model),
+                                   identical_photons*calibration['value'],places=14)
 
     def test_absolute_lattice_and_photon_normalized_calibrations_cannot_be_mixed(self):
         for channel,model_key,width in [('chi_c1->Jpsi_Aprime','chi_c1_lattice',chi1_lattice_width),

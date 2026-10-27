@@ -4,6 +4,15 @@
   "scope": "Conditional leading electromagnetic rates and unpolarized-parent spin currents. Source normalization, material transport, native recoil-spin integration and detector acceptance remain separate qualifications.",
   "alpha_em": 0.0072973525692838015,
   "physical_reference_masses_gev": {"eta_c": 2.9839, "Jpsi": 3.09690, "chi_c0": 3.41471, "chi_c1": 3.51067, "chi_c2": 3.55617, "h_c": 3.52538, "psi_2S": 3.686097},
+  "radiative_branching_inputs": {
+    "eta_c->gamma_Aprime": {"parent_pdg_id": 441, "recoil_pdg_id": 22, "branching_key": "br_gamma_gamma", "value": 0.000166, "uncertainty": 0.000013, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-eta-c-1S.pdf", "page": 5, "mode": "Gamma59: gamma gamma"},
+    "chi_c0->Jpsi_Aprime": {"parent_pdg_id": 10441, "recoil_pdg_id": 443, "branching_key": "br_p_gamma", "value": 0.0141, "uncertainty": 0.0009, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-chi-c0-1P.pdf", "page": 4, "mode": "Gamma100: gamma J/psi(1S)"},
+    "chi_c1->Jpsi_Aprime": {"parent_pdg_id": 20443, "recoil_pdg_id": 443, "branching_key": "br_p_gamma", "value": 0.343, "uncertainty": 0.013, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-chi-c1-1P.pdf", "page": 4, "mode": "Gamma102: gamma J/psi(1S)"},
+    "chi_c2->Jpsi_Aprime": {"parent_pdg_id": 445, "recoil_pdg_id": 443, "branching_key": "br_p_gamma", "value": 0.195, "uncertainty": 0.007, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-chi-c2-1P.pdf", "page": 4, "mode": "Gamma100: gamma J/psi(1S)"},
+    "h_c->eta_c_Aprime": {"parent_pdg_id": 10443, "recoil_pdg_id": 441, "branching_key": "br_p_gamma", "value": 0.60, "uncertainty": 0.04, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-hc-1P.pdf", "page": 2, "mode": "Gamma30: gamma eta_c(1S)"},
+    "psi_2S->eta_c_Aprime": {"parent_pdg_id": 100443, "recoil_pdg_id": 441, "branching_key": "br_p_gamma", "value": 0.0036, "uncertainty": 0.0005, "reference": "https://pdg.lbl.gov/2025/listings/rpp2025-list-psi-2S.pdf", "page": 6, "mode": "Gamma184: gamma eta_c(1S)"}
+  },
+  "radiative_branching_input_scope": "PDG 2025 fitted physical photon branching fractions. These calibrate the stated current's photon limit; they do not measure its timelike shape, the parent production spectrum or a universal model uncertainty. Parent/recoil reference masses belong to the explicitly declared source/fit card, and are not silently replaced by a later PDG average.",
   "chi_c1_lattice": {
     "kind": "chi-c1-lattice-e1-m2-c1",
     "reference": "https://arxiv.org/pdf/2604.15256v2#page=16",
@@ -44,8 +53,9 @@
     "kind": "eta-c-nr-charm-pole",
     "reference": "https://arxiv.org/pdf/hep-ph/0004112#page=7",
     "charm_pole_gev": 3.09690,
-    "valid_mass_range_gev": [0, 0.9],
-    "prescription": "2mc=mJpsi, F(q2)/F(0)=1/(1-q2/(2mc)^2); leading nonrelativistic charm annihilation, not an M1 transition."
+    "valid_mass_range_gev": [0, 2.9839],
+    "prescription": "2mc=mJpsi, F(q2)/F(0)=1/(1-q2/(2mc)^2); leading nonrelativistic charm annihilation, not an M1 transition.",
+    "domain_scope": "The theoretical NR formula is continued over the full physical eta_c -> gamma A-prime interval, below the charm pole. This does not extend an empirical fit or establish measured form-factor validation above 0.9 GeV. Relativistic, QCD and possible resonance corrections remain model uncertainties."
   },
   "eta_c_rho_jpsi_two_pole": {
     "kind": "eta-c-rho-jpsi-two-pole",
@@ -54,8 +64,9 @@
     "rho_width_gev": 0.1491,
     "jpsi_mass_gev": 3.09690,
     "jpsi_width_gev": 0.0000926,
-    "valid_mass_range_gev": [0, 0.9],
-    "prescription": "Eq14 with complex squared poles mV^2-i mV GammaV, renormalized exactly to F(0)=1. Alternative model, not a universal QCD upper bound."
+    "valid_mass_range_gev": [0, 2.9839],
+    "prescription": "Eq14 with complex squared poles mV^2-i mV GammaV, renormalized exactly to F(0)=1. Alternative model, not a universal QCD upper bound.",
+    "domain_scope": "The theoretical two-pole formula is continued over the full physical eta_c interval, which remains below its J/psi pole. This is an attributed alternative benchmark, not empirical form-factor validation above 0.9 GeV or a bound on omitted vector states and widths."
   },
   "h_c_lattice": {
     "kind": "h-c-lattice-f1-f2",

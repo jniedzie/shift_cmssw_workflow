@@ -6,15 +6,49 @@ import subprocess
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from run_dark_photon_meson_gen import audit_generated_source, remaining_timeout, resolved_parent_models, run
+from run_dark_photon_meson_gen import audit_generated_source, remaining_timeout, resolved_parent_models, run, source_settings, SOURCES
 from dark_photon_meson_source import coefficient_bound
 
 
 class MesonRunnerTest(unittest.TestCase):
+    def test_heavy_current_reaches_runtime_checks_above_old_eta_prime_cutoff(self):
+        arguments=SimpleNamespace(mass=1.5,epsilon=1.e-6,source_collisions=2,
+            seed=761016999,run_number=1761016999,timeout=60)
+        with patch('run_dark_photon_meson_gen.shutil.which',return_value=None):
+            with self.assertRaisesRegex(RuntimeError,'prepared CMSSW runtime'):
+                run(arguments)
+
+    def test_correlated_source_helpers_are_frozen_together(self):
+        for name in ['dark_photon_double_radiative.py','dark_photon_scalar_meson.py',
+                     'dark_photon_quarkonium.py','dark_photon_weak_radiative.py']:
+            self.assertIn(name,SOURCES)
+            self.assertTrue((Path(__file__).resolve().parents[1]/'scripts'/name).is_file())
+
+    def test_source_settings_keep_explicit_heavy_poles_and_recoil_masses(self):
+        from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
+        parent=CorrelatedCurrentSourceTest().quark('chi_c1->Jpsi_Aprime')
+        card=dict(parents=[parent],source=dict(beam_energy_gev=6800.))
+        common=types.SimpleNamespace(pythia8CommonSettingsBlock=types.SimpleNamespace(pythia8CommonSettings=['common']))
+        cp5=types.SimpleNamespace(pythia8CP5SettingsBlock=types.SimpleNamespace(pythia8CP5Settings=['tune']))
+        with patch.dict(sys.modules,{'Configuration.Generator.Pythia8CommonSettings_cfi':common,
+                'Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi':cp5}):
+            settings=source_settings(card)
+        self.assertEqual(settings['common'],['common']);self.assertEqual(settings['cp5'],['tune'])
+        self.assertIn('SoftQCD:nonDiffractive=on',settings['source_settings'])
+        self.assertIn('13:mayDecay=off',settings['source_settings'])
+        self.assertIn('20443:mWidth=0',settings['source_settings'])
+        self.assertIn(f"443:m0={parent['recoil_mass_gev']:.17g}",settings['source_settings'])
+        changed=dict(parent,parent_mass_model='unreviewed-broad-source')
+        with patch.dict(sys.modules,{'Configuration.Generator.Pythia8CommonSettings_cfi':common,
+                'Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi':cp5}):
+            with self.assertRaisesRegex(ValueError,'off-shell'):
+                source_settings(dict(card,parents=[changed]))
+
     def test_closed_eta_does_not_evaluate_its_unphysical_pole(self):
         card = json.loads((Path(__file__).resolve().parents[1] /
             'config/campaigns/dark_photon_meson_model.json').read_text())

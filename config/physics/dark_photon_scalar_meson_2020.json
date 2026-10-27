@@ -1,0 +1,51 @@
+{
+  "code_style": "AI-code. AI-generated attributed scalar/chiral meson benchmark inputs.",
+  "schema": "shift-pseudoscalar-scalar-loop-reference-v1",
+  "publication": {
+    "title": "Theoretical analysis of the doubly radiative decays eta(') -> pi0 gamma gamma and eta' -> eta gamma gamma",
+    "citation": "Escribano et al., Phys. Rev. D 102, 034026 (2020)",
+    "url": "https://doi.org/10.1103/PhysRevD.102.034026",
+    "full_text": "https://inspirehep.net/files/5ad4546e0dd36019a3d991effe34b3d9",
+    "equations": "Leading ChPT4-7; replacement linear-sigma amplitudes16-21; complete one-loop propagatorsA1-A7; component widthsTableII."
+  },
+  "reference_parameters": {
+    "kind": "escribano-2020-linear-sigma",
+    "reference": "https://doi.org/10.1103/PhysRevD.102.034026",
+    "alpha_em": 0.0072973525692838015,
+    "f_pi_gev": 0.09207,
+    "f_k_gev": 0.11010,
+    "phi_p_deg": 41.4,
+    "phi_s_deg": -8.0,
+    "pion_mass_gev": 0.13957039,
+    "kaon_mass_gev": 0.493677,
+    "eta_mass_gev": 0.547862,
+    "eta_prime_mass_gev": 0.95778,
+    "scalar_masses_gev": {"sigma": 0.498, "f0": 0.990, "a0": 0.980},
+    "isospin_limit": true,
+    "crossed_scalar_prescription": "chiral-matched-infinite-mass"
+  },
+  "pseudoscalars": {
+    "111": {"mass_gev": 0.1349768},
+    "221": {"mass_gev": 0.547862},
+    "331": {"mass_gev": 0.95778}
+  },
+  "published_component_widths_ev": {
+    "221_to_111": {"chpt": 0.00187, "linear_sigma": 0.0005},
+    "331_to_111": {"chpt": 0.11, "linear_sigma": 0.13},
+    "331_to_221": {"chpt": 0.014, "linear_sigma": 3.29}
+  },
+  "conventions": {
+    "loop_isospin_masses": "Charged pion and charged kaon masses are used throughout the charged loops and the isospin-symmetric scalar self energies. The observed neutral recoil mass is used in phase space. The primary does not print its complete numerical pseudoscalar input card; rounded TableII agreement is a control, not a precision fit.",
+    "scalar_width": "First-sheet threshold-dependent one-loop self energies with on-shell real subtraction; no constant scalar Breit-Wigner widths.",
+    "matching": "The linear-sigma amplitude replaces the ChPT strong amplitude. They must never be added as independent contributions.",
+    "photon_symmetry": "The real-photon control includes the identical-photon factor1/2. A photon plus massive A-prime is distinguishable."
+  },
+  "model_scope": [
+    "Isospin-limit phenomenological linear-sigma plus separately supplied VMD model; not a complete all-orders QCD or effective-field-theory prediction.",
+    "Nonresonant crossed scalar exchange uses the primary's chiral-matched infinite-mass approximation, not explicit scalar exchange in t and u.",
+    "The helper supplies only strong four-pseudoscalar amplitudes; the calling electromagnetic-current model declares its own timelike continuation and retained operators.",
+    "Measured radiative branching ratios are not used as multiplicative corrections. The primary cannot reproduce all three measured widths simultaneously and reports that limitation.",
+    "Material transport, native recoil decay, weighted source normalization and the full detector/publication chain require independent qualification."
+  ],
+  "physical_production_ready": false
+}

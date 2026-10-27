@@ -1,5 +1,5 @@
 {
-  "code_style": "AI-code. AI-generated attributed leading weak radiative-kaon benchmark; no source is configured.",
+  "code_style": "AI-code. AI-generated attributed weak radiative-kaon leading and higher-order benchmark inputs.",
   "schema": "shift-kl-pi0-gamma-em-vector-reference-v1",
   "form_factor_model": {
     "kind": "chpt-p4-kl-pi0-photon-vector",
@@ -8,34 +8,88 @@
     "recoil_pion_mass_gev": 0.1349768,
     "charged_loop_pion_mass_gev": 0.13957039,
     "charged_loop_kaon_mass_gev": 0.493677,
-    "g8_gev_minus2": 9.1e-6,
+    "g8_gev_minus2": 9.1e-06,
     "alpha_em": 0.0072973525692838015,
-    "valid_vector_mass_range_gev": [0.0, 0.3626342],
+    "valid_vector_mass_range_gev": [
+      0.0,
+      0.3626342
+    ],
     "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=4"
   },
   "g8_convention_reference": "https://cds.cern.ch/record/217766/files/PhysRevD.44.3555.pdf",
   "explicit_conventions": {
     "hbar_gev_seconds": 6.582119569e-25,
-    "kaon_lifetime_seconds": 5.116e-8,
+    "kaon_lifetime_seconds": 5.116e-08,
     "electron_mass_gev": 0.00051099895,
     "muon_mass_gev": 0.1056583755,
     "loop_normalization": "The independently stated G8=9.1e-6 GeV^-2 convention is retained without tuning to the rounded published virtual rates.",
     "photon_symmetry": "One real photon plus A-prime is distinguishable. Gamma(gamma gamma) is the zero-vector-mass rate divided by 2 epsilon^2."
   },
   "primary_controls": {
-    "leading_ee_gamma_branching_rounded": 1.0e-8,
+    "leading_ee_gamma_branching_rounded": 1e-08,
     "leading_mumu_gamma_branching_rounded": 4.5e-11,
     "muon_prediction_reference": "https://arxiv.org/pdf/hep-ph/9803331",
-    "measured_gamma_gamma_branching": 1.29e-6,
+    "measured_gamma_gamma_branching": 1.29e-06,
     "measured_gamma_gamma_reference": "https://arxiv.org/pdf/0805.0031",
-    "measured_ee_gamma_branching": 1.62e-8,
+    "measured_ee_gamma_branching": 1.62e-08,
     "measured_ee_gamma_reference": "https://doi.org/10.1103/PhysRevD.76.052001"
   },
   "unqualified_terms": [
-    "The leading A tensor omits O(p6) A/B/D and VMD structures. The leading calculation underpredicts measured real/virtual photon rates, so it is not a full off-shell rate envelope.",
-    "No model or experimental uncertainty band is inferred by multiplying the leading rate by a measured total branching ratio.",
-    "The single-virtual-photon loop is distinct from the CP-conserving two-photon dilepton amplitude and from the direct CP-violating K to pi0 single-vector current.",
-    "Parent transport, material, source exposure, dimuon branching and an event sampler are separate."
+    "The form_factor_model retains the historical leading-only calculation; higher_order_model adds the attributed a1/a2 unitarity loops and off-shell rho/omega exchange with all three massive-vector polarizations.",
+    "Unknown higher timelike operators and weak-vector counterterms are not universally bounded by this fixed declared model. No total measured branching-ratio factor is used to rescale it.",
+    "KL->pi0pi0 A-prime and KS magnetic/other current coefficients remain separate finite-current source models, not inferred from this radiative mode.",
+    "The single-virtual-photon radiative current is distinct from a two-photon dilepton amplitude and direct CP-violating K->pi0 single-vector matching.",
+    "Parent material transport, source exposure, BR(A-prime->muons) and full-chain qualification remain separate."
   ],
-  "physical_production_ready": false
+  "physical_production_ready": false,
+  "higher_order_model": {
+    "kind": "chpt-p6-unitarity-offshell-vmd-kl-pi0-photon-vector",
+    "parent_pdg_id": 130,
+    "parent_mass_gev": 0.497611,
+    "recoil_pion_mass_gev": 0.1349768,
+    "charged_loop_pion_mass_gev": 0.13957039,
+    "charged_loop_kaon_mass_gev": 0.493677,
+    "g8_gev_minus2": 9.1e-06,
+    "alpha_em": 0.0072973525692838015,
+    "valid_vector_mass_range_gev": [
+      0.0,
+      0.3626342
+    ],
+    "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+    "full_p6_loop_model": true,
+    "vmd_reference": "https://arxiv.org/pdf/hep-ph/9702278#page=10",
+    "vmd_exchange": [
+      {
+        "mass_gev": 0.77526,
+        "coupling_gev_minus2": 2.7461798008584136e-08
+      },
+      {
+        "mass_gev": 0.78265,
+        "coupling_gev_minus2": -1.1307799180005234e-07
+      }
+    ],
+    "unitarity_model": {
+      "kind": "kl-three-pion-polynomial-msbar",
+      "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=8",
+      "a1_gev_minus4": 5.055938764228492e-05,
+      "a2_gev_minus4": -2.0549944654606128e-05,
+      "renormalization_scale_gev": 0.77526,
+      "quadrature_order": 48,
+      "unqualified_higher_operators": true,
+      "normalization": "All compact loop invariants and momenta in mK units; verified against unreduced dimensional tensors24-27; a_i dimensionful inputs include mK^-4 exactly once.",
+      "a1_a2_relative_parameter_rectangle": 0.2,
+      "uncertainty_scope": "Independent parameter rectangle following the primary10-20percent theoretical input estimate; not a statistical confidence region or a universal higher-operator bound."
+    }
+  },
+  "higher_order_primary_controls": {
+    "reference": "https://arxiv.org/pdf/hep-ph/9702278#page=10",
+    "electron_branching_rounded": 2.3e-08,
+    "muon_reference": "https://arxiv.org/pdf/hep-ph/9803331#page=3",
+    "muon_branching_rounded": 5.8e-11,
+    "primary_recoil_convention": "The primary analytic formulas use one r_pi, but do not print their exact numerical mass card. The reproduction control explicitly adopts the common charged-pion mass for loop and recoil; this agreement is not proof of the authors unprinted inputs. Production retains the actual neutral-recoil mass.",
+    "current_neutral_recoil_electron_check": 2.356308312425707e-08,
+    "current_neutral_recoil_muon_check": 6.56614489747317e-11,
+    "current_common_charged_recoil_muon_check": 5.701879911098717e-11,
+    "integration_scope": "Independent conversion-spectrum integration without measured-rate rescaling; finite quadrature checks retained in regression tests."
+  }
 }

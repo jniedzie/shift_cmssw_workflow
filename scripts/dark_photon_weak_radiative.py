@@ -10,12 +10,17 @@ for the soft-real-photon limit. Tests compare to the original double integral.
 The complex pion cut and both loops are retained. Optional off-shell rho/omega
 exchange follows Eqs.(38)--(41), rather than an on-shell a_V rescaling. P4
 plus that exchange is not the full O(p6) loop amplitude or a rate envelope.
+The separate P6_KIND includes both a1/a2 unitarity-loop corrections. Its
+dimensionless compact integrals are independently matched to unreduced
+dimensional-regularization tensors, with exact negative-i0 pion cuts.
+Unknown higher timelike operators remain outside this declared model.
 Measured gamma gamma and gamma ee rates exceed this leading prediction;
 none of them is used here to rescale the amplitude. Parent flight, material,
 source exposure and BR(A' -> mu+mu-) remain separate.
 Four-vectors are (E,px,py,pz), GeV, with metric (+---).
 """
 import bisect
+import cmath
 from functools import lru_cache
 import json
 import math
@@ -26,6 +31,7 @@ from dark_photon_vector_meson import two_body_momentum, mean_lab_beta_gamma as t
 
 
 REFERENCE = 'https://arxiv.org/pdf/hep-ph/9702278'
+P6_KIND = 'chpt-p6-unitarity-offshell-vmd-kl-pi0-photon-vector'
 
 
 def _dot(first, second):
@@ -93,7 +99,7 @@ def scalar_loop(pair_invariant, vector_invariant, loop_mass):
 
 def _model(model, mass):
     if (model.get('kind') not in ('chpt-p4-kl-pi0-photon-vector',
-            'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector') or
+            'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND) or
             model.get('parent_pdg_id') != 130 or not model.get('reference')):
         raise ValueError('Explicit leading KL radiative-current authority required')
     for key in ('parent_mass_gev', 'recoil_pion_mass_gev', 'charged_loop_pion_mass_gev',
@@ -105,10 +111,11 @@ def _model(model, mass):
             not 0 <= domain[0] < domain[1] or not domain[0] <= mass <= domain[1] or
             domain[1] > model['parent_mass_gev']-model['recoil_pion_mass_gev']):
         raise ValueError('Requested vector mass exceeds the explicit current domain')
-    if model['kind'] == 'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector':
+    if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         terms = model.get('vmd_exchange')
         if (not isinstance(terms, list) or not terms or
-                not model.get('vmd_reference') or model.get('full_p6_loop_model') is not False):
+                not model.get('vmd_reference') or
+                model.get('full_p6_loop_model') is not (model['kind'] == P6_KIND)):
             raise ValueError('Explicit off-shell VMD inputs and incomplete-p6 scope required')
         for term in terms:
             _number(term.get('mass_gev'), 'vector exchange mass', positive=True)
@@ -116,6 +123,19 @@ def _model(model, mass):
             if (term['mass_gev'] <= model['parent_mass_gev'] or type(coupling) not in (int, float)
                     or not math.isfinite(coupling)):
                 raise ValueError('Finite signed VMD coupling and an above-kaon vector pole required')
+    if model['kind'] == P6_KIND:
+        current = model.get('unitarity_model', {})
+        if (current.get('kind') != 'kl-three-pion-polynomial-msbar' or
+                not current.get('reference') or current.get('unqualified_higher_operators') is not True):
+            raise ValueError('Explicit polynomial-loop model, subtraction convention and remaining operators required')
+        for key in ('a1_gev_minus4', 'a2_gev_minus4'):
+            value = current.get(key)
+            if type(value) not in (int, float) or not math.isfinite(value):
+                raise ValueError('Finite signed weak polynomial coefficient required')
+        _number(current.get('renormalization_scale_gev'), 'loop subtraction scale', positive=True)
+        order = current.get('quadrature_order')
+        if type(order) is not int or not 16 <= order <= 128:
+            raise ValueError('Explicit bounded unitarity-loop quadrature required')
 
 
 def reduced_loop_current(pair_invariant, vector_mass, model):
@@ -129,6 +149,94 @@ def reduced_loop_current(pair_invariant, vector_mass, model):
     return ((pair_invariant-pion**2)*scalar_loop(pair_invariant, q2, pion)+
         (model['parent_mass_gev']**2+pion**2-pair_invariant)*
         scalar_loop(pair_invariant, q2, kaon))
+
+
+def _cut_moments(a, change, scale, maximum=4):
+    """Integrals of t^n/D and t^n log(D/scale^2), D=a-change*t-i0.
+
+    Integrating the second Feynman parameter analytically preserves the pion
+    cut without a finite imaginary regulator or quadrature across a pole.
+    """
+    ratio = change/a
+    if abs(ratio) < .2:
+        logarithm = cmath.log(complex(a/scale**2, -0.))
+        inverse = [sum(ratio**j/(n+j+1) for j in range(32))/a
+                   for n in range(maximum+1)]
+        logs = [logarithm/(n+1)-sum(ratio**j/(j*(n+j+1)) for j in range(1, 32))
+                for n in range(maximum+1)]
+        return inverse, logs
+    first = cmath.log(complex(a/scale**2, -0.))
+    last = cmath.log(complex((a-change)/scale**2, -0.))
+    inverse = [(first-last)/change]
+    for n in range(1, maximum+2):
+        inverse.append(a/change*inverse[-1]-1/(change*n))
+    logs = [(last+change*inverse[n+1])/(n+1) for n in range(maximum+1)]
+    return inverse[:maximum+1], logs
+
+
+@lru_cache(maxsize=4096)
+def _unitarity_integrals(z, q, pion, scale, order):
+    """Dimensionless Eq.(32)--(37) integrals, all momenta in units of mK.
+
+    These normalization choices are independently checked against the
+    unreduced dimensional-regularization tensors of Eqs.(24)--(27).
+    """
+    squared = pion**2
+    def panels(invariant):
+        if invariant <= 4*squared:
+            return [0., .5, 1.]
+        beta = math.sqrt(1-4*squared/invariant)
+        return sorted(set([0., (1-beta)/2, .5, (1+beta)/2, 1.]))
+    def nodes(edges):
+        for low, high in zip(edges, edges[1:]):
+            for node, weight in _gauss_legendre(order):
+                angle = math.pi*(node+1)/2
+                yield low+(high-low)*math.sin(angle/2)**2, weight*(high-low)*math.pi/4*math.sin(angle)
+    logarithms = {(1,1):0j, (0,1):0j, (0,2):0j, (1,0):0j, (0,0):0j}
+    inverses = {(3,1):0j, (2,1):0j, (2,2):0j, (1,1):0j, (1,2):0j, (1,3):0j}
+    third = 0j
+    for first, weight in nodes(sorted(set(panels(z)+panels(q)))):
+        length = 1-first
+        a, change = squared-first*(1-first)*q, first*length*(z-q)
+        inverse, logs = _cut_moments(a, change, pion)
+        for n, m in logarithms:
+            logarithms[n,m] += weight*first**n*length**(m+1)*logs[m]
+        for n, m in inverses:
+            inverses[n,m] += weight*first**n*length**(m+1)*inverse[m]
+        third += weight*length*(a*logs[0]-change*logs[1])
+    fourth = fifth = 0j
+    for first, weight in nodes(panels(q)):
+        a = squared-first*(1-first)*q
+        logarithm = cmath.log(complex(a/squared, -0.))
+        fourth += weight*a*logarithm
+        fifth += weight*(4*first**2-4*first+1)*logarithm
+    return logarithms, inverses, third, fourth, fifth, math.log(squared/scale**2)
+
+
+def unitarity_form_factors(parent, dark, photon, model):
+    """A/B/D from the signed a2 polynomial loop, Eqs.(24)--(37).
+
+    Output includes a2*e^2, but not i/(4pi)^2 or the dark-photon mixing.
+    The a1 scalar-current term is added separately in amplitude().
+    """
+    mass = model['parent_mass_gev'];squared = mass**2
+    current = model['unitarity_model']
+    q = _dot(dark, dark)/squared
+    z = (2*_dot(dark, photon)+_dot(dark, dark))/squared
+    x1, x2 = _dot(parent, dark)/squared, _dot(parent, photon)/squared
+    i1, i2, i3, i4, i5, logarithm = _unitarity_integrals(z, q,
+        model['charged_loop_pion_mass_gev']/mass,
+        current['renormalization_scale_gev']/mass, current['quadrature_order'])
+    first = 16*(2*(1-2*(x1+x2))*i1[1,1]+x1*i1[0,1]+x2*(2*i1[0,2]-i1[0,1]+i1[1,0]))
+    first -= 32*((2*x1*x1-x1*(z+q))*(-i2[3,1]+i2[2,1])+
+        (2*x1*x2-x1*(z-q)/2-x2*(z+q)/2)*(2*i2[2,2]+i2[1,1]-i2[2,1]-i2[1,2])+
+        (2*x2*x2-x2*(z-q))*(i2[1,2]-i2[1,3]))
+    first += 4*logarithm/3
+    second = -32*i3+16*i4+4*(z-q)*(-1+logarithm)/3
+    third = (-second/2+16*(2*x2-(z-q)/2)*(2*i1[1,1]-i1[0,1])+
+        16*(2*(x1-x2)-q)*(i1[1,0]-i1[0,0]/2)+4*(2*x1-(z+q)/2)*i5)
+    coefficient = current['a2_gev_minus4']*squared*(4*math.pi*model['alpha_em'])
+    return tuple(coefficient*value for value in (first, second, third))
 
 
 def amplitude(dark, photon, dark_polarization, photon_polarization, vector_mass,
@@ -150,14 +258,23 @@ def amplitude(dark, photon, dark_polarization, photon_polarization, vector_mass,
     if product <= 0:
         raise ValueError('Open future-directed photon phase space required')
     scalar = reduced_loop_current(vector_mass**2+2*product, vector_mass, model)
+    if model['kind'] == P6_KIND:
+        invariant = vector_mass**2+2*product
+        polynomial = ((model['parent_mass_gev']**2+model['recoil_pion_mass_gev']**2-invariant)*
+                      (invariant-2*model['charged_loop_pion_mass_gev']**2))
+        scalar += (model['unitarity_model']['a1_gev_minus4']/model['g8_gev_minus2']*
+                   polynomial*scalar_loop(invariant, vector_mass**2, model['charged_loop_pion_mass_gev']))
     tensor = (_dot(dark_polarization, photon_polarization)-
         _dot(dark_polarization, photon)*_dot(photon_polarization, dark)/product)
     coefficient = -1j*epsilon*2*(4*math.pi*model['alpha_em'])*model['g8_gev_minus2']/(16*math.pi**2)
     result = coefficient*scalar*tensor
-    if model['kind'] == 'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector':
+    if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         if parent is None:
             raise ValueError('Off-shell vector exchange requires the parent four-vector')
         a, b, d = vmd_form_factors(parent, dark, photon, model)
+        if model['kind'] == P6_KIND:
+            correction = unitarity_form_factors(parent, dark, photon, model)
+            a, b, d = (value+loop/(4*math.pi)**2 for value, loop in zip((a,b,d), correction))
         pq, pk = _dot(parent, dark), _dot(parent, photon)
         eq, ek = _dot(dark_polarization, dark), _dot(dark_polarization, photon)
         fq, fp = _dot(photon_polarization, dark), _dot(photon_polarization, parent)
@@ -177,7 +294,7 @@ def vmd_form_factors(parent, dark, photon, model):
         if len(vector) != 4 or not all(math.isfinite(value) for value in vector):
             raise ValueError('Three finite physical four-vectors required')
     _model(model, math.sqrt(max(0., _dot(dark, dark))))
-    if model['kind'] != 'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector':
+    if model['kind'] not in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         raise ValueError('Explicit off-shell VMD model required')
     parent_squared, pq, pk, product = _dot(parent, parent), _dot(parent, dark), _dot(parent, photon), _dot(dark, photon)
     if parent_squared <= 0 or min(pq, pk, product) <= 0:
@@ -206,7 +323,7 @@ def decay_width(model, vector_mass, *, epsilon, quadrature_order=64):
     if epsilon > .1 or type(quadrature_order) is not int or quadrature_order < 8:
         raise ValueError('Require small mixing and an explicit quadrature order >=8')
     _model(model, vector_mass)
-    if model['kind'] == 'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector':
+    if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         return _integrated_width(model, vector_mass, epsilon, quadrature_order)
     parent, recoil = model['parent_mass_gev'], model['recoil_pion_mass_gev']
     low, high = vector_mass**2, (parent-recoil)**2
@@ -304,7 +421,7 @@ def _density(invariant, cosine, mass, model):
     scalar = reduced_loop_current(invariant, mass, model)
     coefficient = 2*(4*math.pi*model['alpha_em'])*model['g8_gev_minus2']/(16*math.pi**2)
     trace = 2*abs(coefficient*scalar)**2
-    if model['kind'] == 'chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector':
+    if model['kind'] in ('chpt-p4-plus-offshell-vmd-kl-pi0-photon-vector', P6_KIND):
         density = polarization_density(invariant, cosine, mass, model)
         trace = sum(density[i][i].real for i in range(3))
     phase = 2*parent*two_body_momentum(parent, pion, math.sqrt(invariant))*(invariant-mass**2)/invariant
@@ -332,12 +449,19 @@ def _integrated_width(model, mass, epsilon, order):
     return epsilon**2*total/(512*math.pi**3*model['parent_mass_gev']**3)
 
 
-def branching_coefficient(parent_mass, mass, model):
+@lru_cache(maxsize=256)
+def _source_width(mass, model_key):
+    """Fixed-source rates repeat across collisions; never redo their integral."""
+    return decay_width(json.loads(model_key), mass, epsilon=.001)/1.e-6
+
+
+def branching_coefficient(parent_mass, mass, model, *, native_energy_gev=None):
     """BR(KL -> pi0 gamma A') / epsilon_em^2; dimuon BR is separate."""
-    inputs = _resolved_model(parent_mass, model)
+    inputs = _resolved_model(parent_mass, model, energy=native_energy_gev)
     width = model.get('total_parent_width_gev')
     _number(width, 'total kaon width', positive=True)
-    value = decay_width(inputs, mass, epsilon=.001)/1.e-6/width
+    key = json.dumps(inputs, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    value = _source_width(mass, key)/width
     if not math.isfinite(value) or value < 0:
         raise ValueError('Invalid weak radiative branching coefficient')
     return value

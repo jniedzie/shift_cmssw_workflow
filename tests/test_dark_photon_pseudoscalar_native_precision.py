@@ -6,6 +6,7 @@ from pathlib import Path
 import random
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import dark_photon_meson_source as source
@@ -81,6 +82,30 @@ class PseudoscalarNativePrecisionTest(unittest.TestCase):
         for name in ('exceptional_dipion_rate_plus_shape_bound', 'parent_l1_relative_rate_shift',
                      'parent_original_weighted_model_budget'):
             self.assertAlmostEqual(first[name], second[name], delta=1.e-15)
+
+    def test_new_coherent_current_cannot_dilute_the_original_dipion_bound(self):
+        original=self.report()
+        model=copy.deepcopy(self.models[221])
+        current=dict(channel='eta->pi0_gamma_Aprime',decay_type='pseudoscalar-double-radiative',
+            recoil_mass_gev=.1349768,relative_numerical_mass_precision_budget=1.e-3)
+        model['exclusive_channels'].append(current)
+        physical=source.parent_branching_coefficient
+        def rate(parent_mass,mass,channel,br):
+            if channel['channel']==current['channel']:return 1000.*br
+            return physical(parent_mass,mass,channel,br)
+        with patch.object(source,'parent_branching_coefficient',side_effect=rate):
+            extended=source.pseudoscalar_dipion_precision_report(self.parent,self.mass,.25,model,.2)
+        for name in ('exceptional_dipion_rate_plus_shape_bound','parent_l1_relative_rate_shift',
+                     'parent_original_weighted_model_budget'):
+            self.assertEqual(extended[name],original[name])
+        self.assertEqual(len(extended['precision_normalization_channels']),2)
+        self.assertEqual(extended['independently_checked_additional_channels'][0]['channel'],current['channel'])
+        def bad_rate(parent_mass,mass,channel,br):
+            if channel['channel']==current['channel']:return (1000. if parent_mass==self.parent['native_mass_gev'] else 1002.)*br
+            return physical(parent_mass,mass,channel,br)
+        with patch.object(source,'parent_branching_coefficient',side_effect=bad_rate):
+            with self.assertRaisesRegex(ValueError,'independent numerical precision budget'):
+                source.pseudoscalar_dipion_precision_report(self.parent,self.mass,.25,model,.2)
 
     def test_large_exceptional_component_still_fails(self):
         photon = self.models[221]['exclusive_channels'][0]

@@ -43,6 +43,7 @@ class AggregateMesonKernels(unittest.TestCase):
         names += ['dark_photon_rho_radiative.py','dark_photon_charged_rho_radiative.py',
             'dark_photon_kaon.py','dark_photon_kaon_leptonic.py','dark_photon_weak_meson.py',
             'dark_photon_model.py','dark_photon_neutral_vector_dipion.py','dark_photon_double_radiative.py',
+            'dark_photon_weak_radiative.py','dark_photon_scalar_meson.py','dark_photon_quarkonium.py',
             'dark_photon_material_selection.py','shift_production_selection.py','shift_material_preselection.py']
         for name in names:
             if name!=missing:shutil.copy2(Path(controller.__file__).with_name(name),tools/name)

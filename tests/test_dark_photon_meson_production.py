@@ -16,6 +16,19 @@ import audit_dark_photon_meson_coverage as coverage_audit
 
 
 class FixedExposure(unittest.TestCase):
+    def test_heavy_source_mass_scope_comes_from_the_declared_current(self):
+        from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
+        parent=CorrelatedCurrentSourceTest().quark()
+        card=dict(parents=[parent])
+        rows=self.rows();rows[1].update(mass_gev=1.5)
+        prepared=preparation.validate_batches(rows,[],mechanism='meson-radiative',model_card=card)
+        self.assertEqual(prepared[1]['mass_gev'],1.5)
+        with self.assertRaises(ValueError):
+            preparation.validate_batches(rows,[],mechanism='meson-radiative')
+        rows[1]['mass_gev']=parent['mass_gev']
+        with self.assertRaises(ValueError):
+            preparation.validate_batches(rows,[],mechanism='meson-radiative',model_card=card)
+
     def rows(self):
         return [dict(mass_gev=.3,epsilon=.001,source_collisions=4000,prompt=True,
                      operational_canary=True),

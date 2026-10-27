@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_dipion_meson import _gauss_legendre
 from dark_photon_meson import boost
 from dark_photon_weak_radiative import (
-    _g_prime, _density, _integrated_width, _sampling_segments, amplitude, branching_coefficient,
+    P6_KIND, _cut_moments, _g_prime, _density, _integrated_width, _sampling_segments, amplitude, branching_coefficient,
     decay_width, loop_functions, mean_lab_beta_gamma, polarization_density, reduced_loop_current,
     sample_decay, scalar_loop, vmd_form_factors)
 
@@ -32,7 +32,111 @@ def vmd_model():
                       dict(mass_gev=.78265, coupling_gev_minus2=-.28e-7/parent**2)])
 
 
+def p6_model():
+    inputs = vmd_model();mass = inputs['parent_mass_gev']
+    return dict(inputs, kind=P6_KIND, full_p6_loop_model=True,
+        unitarity_model=dict(kind='kl-three-pion-polynomial-msbar',
+            reference='https://arxiv.org/pdf/hep-ph/9702278#page=8',
+            a1_gev_minus4=3.1e-6/mass**4, a2_gev_minus4=-1.26e-6/mass**4,
+            renormalization_scale_gev=.77526, quadrature_order=48,
+            unqualified_higher_operators=True))
+
+
+class HigherOrderUnitarityTest(unittest.TestCase):
+    def test_full_known_current_samples_an_unconditional_on_shell_decay_chain(self):
+        current = p6_model();parent = (current['parent_mass_gev'],0.,0.,0.)
+        event = sample_decay(parent,.22,7.,random.Random(521),model=current)
+        self.assertTrue(event['unconditional_decay'])
+        self.assertEqual(event['amplitude_model'],P6_KIND)
+        final = [event['dark_photon_p4'],*event['recoil_p4s']]
+        for i in range(4):
+            self.assertAlmostEqual(math.fsum(row[i] for row in final),parent[i],places=12)
+            self.assertAlmostEqual(event['muon_p4'][i]+event['antimuon_p4'][i],event['dark_photon_p4'][i],places=12)
+        dark = event['dark_photon_p4']
+        self.assertAlmostEqual(dark[0]**2-math.fsum(x*x for x in dark[1:]),.22**2,places=12)
+        self.assertAlmostEqual(event['decay_ct_mm']/event['proper_decay_length_mm'],dark[0]/.22,places=12)
+
+    def test_independent_higher_order_electron_and_muon_primary_controls(self):
+        authority = json.loads(CARD.read_text())
+        card = authority['higher_order_model'];constants = authority['explicit_conventions']
+        conversion = constants['kaon_lifetime_seconds']/constants['hbar_gev_seconds']
+        for lepton, target in [('electron',2.3e-8), ('muon',5.8e-11)]:
+            # The primary analytic formulas have a shared r_pi convention.
+            # Adopt an explicit common charged-pion reproduction convention;
+            # the primary does not print its exact numerical input card.
+            # Production retains the actual neutral-recoil mass.
+            current = dict(card)
+            if lepton == 'muon':
+                current['recoil_pion_mass_gev'] = current['charged_loop_pion_mass_gev']
+                current['valid_vector_mass_range_gev'] = [0.,current['parent_mass_gev']-current['recoil_pion_mass_gev']]
+            ml = constants[lepton+'_mass_gev']
+            edges = [math.log((2*ml)**2), math.log((2*current['charged_loop_pion_mass_gev'])**2),
+                     math.log((current['parent_mass_gev']-current['recoil_pion_mass_gev'])**2)]
+            integral = 0.
+            for low, high in zip(edges,edges[1:]):
+                for node, weight in _gauss_legendre(16):
+                    q2 = math.exp((low+high)/2+(high-low)*node/2);ratio = ml**2/q2
+                    spectral = current['alpha_em']/(3*math.pi)*math.sqrt(1-4*ratio)*(1+2*ratio)
+                    integral += weight*(high-low)/2*spectral*decay_width(current,math.sqrt(q2),
+                        epsilon=.001,quadrature_order=16)/1.e-6
+            self.assertLess(abs(integral*conversion/target-1),.05)
+
+    def test_analytic_feynman_moments_keep_the_exact_negative_i0_cut(self):
+        a, change = .1, .3
+        inverse, logs = _cut_moments(a, change, .77526)
+        self.assertAlmostEqual(inverse[0].real, math.log(.5)/change, places=13)
+        self.assertAlmostEqual(inverse[0].imag, math.pi/change, places=13)
+        for n, value in enumerate(logs):
+            self.assertAlmostEqual(value.imag, -math.pi*(1-(a/change)**(n+1))/(n+1), places=13)
+
+    def test_compact_amplitude_matches_unreduced_dimensional_loop_tensors(self):
+        from dark_photon_weak_radiative import _pair_frame
+        card = p6_model();card['unitarity_model']['a1_gev_minus4'] = 0.
+        card['vmd_exchange'] = [dict(row, coupling_gev_minus2=0.) for row in card['vmd_exchange']]
+        # Independent direct integration of Eqs.(24)--(27), with dimensional
+        # Gaussian tensor moments before compact A/B/D reduction. The pion cut
+        # uses analytic inner-parameter integration and endpoint panels.
+        references = [(.05,.1,complex(-.006264823132713232,0.)),
+                      (.1,.22,complex(-.004036876714898746,.04324890214172304)),
+                      (.12,.3,complex(-.016278775563534617,.010693954600110585))]
+        coefficient = 1j*.001*card['unitarity_model']['a2_gev_minus4']*4*math.pi*card['alpha_em']/(4*math.pi)**2
+        for invariant, mass, expected in references:
+            parent, dark, photon, _ = _pair_frame(invariant, .3, mass, card)
+            first, second = (0.,0.,1.,0.), (0.,0.,-1.,0.)
+            full = amplitude(dark, photon, first, second, mass, .001, card, parent=parent)
+            leading = amplitude(dark, photon, first, second, mass, .001, model(), parent=parent)
+            self.assertLess(abs((full-leading)/coefficient-expected), 5.e-7)
+
+    def test_known_loop_current_is_gauge_invariant_and_preserves_the_declared_scope(self):
+        from dark_photon_weak_radiative import _pair_frame
+        card = p6_model();mass = .3
+        parent, dark, photon, _ = _pair_frame(.12, -.4, mass, card)
+        first = (0.,1.,0.,0.);second = (0.,0.,1.,0.)
+        self.assertLess(abs(amplitude(dark, photon, dark, first, mass, .001, card, parent=parent)), 1.e-20)
+        self.assertLess(abs(amplitude(dark, photon, second, photon, mass, .001, card, parent=parent)), 1.e-20)
+        broken = dict(card, unitarity_model=dict(card['unitarity_model'], unqualified_higher_operators=False))
+        with self.assertRaisesRegex(ValueError, 'remaining operators'):
+            decay_width(broken, mass, epsilon=.001, quadrature_order=16)
+
+    def test_zero_polynomial_coefficients_return_the_unchanged_p4_plus_vmd_model(self):
+        card = p6_model();card['unitarity_model'].update(a1_gev_minus4=0., a2_gev_minus4=0.)
+        for mass in (.22, .3):
+            self.assertAlmostEqual(decay_width(card, mass, epsilon=.001, quadrature_order=16)/
+                decay_width(vmd_model(), mass, epsilon=.001, quadrature_order=16), 1., places=13)
+
+
 class WeakRadiativeSourceTest(unittest.TestCase):
+    def test_native_energy_allows_only_propagated_boosted_shell_roundoff(self):
+        inputs = model();mass = inputs['parent_mass_gev']
+        card = dict(weak_radiative_model=inputs, total_parent_width_gev=1.e-17)
+        with self.assertRaisesRegex(ValueError, 'pole'):
+            branching_coefficient(mass+1.e-7, .22, card)
+        shifted = branching_coefficient(mass+1.e-7, .22, card, native_energy_gev=6800.)
+        central = branching_coefficient(mass, .22, card)
+        self.assertLess(abs(shifted/central-1), 1.e-4)
+        with self.assertRaisesRegex(ValueError, 'pole'):
+            branching_coefficient(mass+.001, .22, card, native_energy_gev=6800.)
+
     def test_branching_coefficient_keeps_parent_width_and_mixing_separate(self):
         inputs = model();parent = inputs['parent_mass_gev'];width = 6.582119569e-25/5.116e-8
         card = dict(weak_radiative_model=inputs, total_parent_width_gev=width)

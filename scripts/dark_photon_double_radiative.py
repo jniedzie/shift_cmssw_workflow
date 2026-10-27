@@ -12,9 +12,13 @@ polarizations are included; a three-body decay need not be transverse-only.
 The CONSTANT local VP-current couplings at timelike q2 are an explicit model
 prescription, not a measurement or a general bound on an unknown form factor.
 The rho running width is exactly their Eq10, not another model's convention.
-Scalar/chiral amplitudes and extra timelike vertex structures are omitted.
-Photon predictions do not fix those omissions: this paper underpredicts the
-eta photon rate by about a factor two. Its eta'-eta scalar term is substantial.
+An optional charged-scalar loop includes either the paper's leading ChPT
+strong amplitude or its complete threshold-aware linear-sigma prescription.
+It replaces the scalar-free control; ChPT and the linear-sigma amplitude are
+never added together. The unequal-virtuality scalar-QED loop is retained,
+including its pion cut, and interferes coherently with the vector diagrams.
+Additional timelike operators remain unmeasured. Even the paper's combined
+model underpredicts the eta photon rate by about a factor two.
 
 An optional absolute-amplitude envelope encloses the supplied coupling
 magnitudes and all interference phases within this fixed local VMD model.
@@ -27,6 +31,7 @@ Four-vectors are (E,px,py,pz), masses/widths GeV, VP couplings GeV^-1.
 import cmath
 import bisect
 import functools
+import json
 import math
 
 from dark_photon_dipion_meson import _gauss_legendre
@@ -84,7 +89,7 @@ def quark_model_couplings(g, z_non_strange, z_strange_mass_ratio, phi_p, phi_v):
         333:{111:g*sv,221:g/3*(n*c*sv+2*strange*s*cv),331:g/3*(n*s*sv-2*strange*c*cv)}}
 
 
-def empirical_reference_model(inputs, parent_pdg_id, recoil_pdg_id, *, coupling_errors):
+def empirical_reference_model(inputs, parent_pdg_id, recoil_pdg_id, *, coupling_errors,scalar_current=None):
     """Build an explicit channel card from attributed TableI reference inputs.
 
     coupling_errors is the caller's rectangular error multiplier, not a CL.
@@ -110,19 +115,34 @@ def empirical_reference_model(inputs, parent_pdg_id, recoil_pdg_id, *, coupling_
             absolute_product_ceiling_gev_inverse2=(abs(first)+coupling_errors*error_first)*
                 (abs(second)+coupling_errors*error_second),
             width_prescription=row['width_prescription'],pion_mass_gev=inputs['pion_mass_gev']))
-    return dict(kind='local-vp-field-strength-vmd',reference=inputs['publication']['url'],
+    result=dict(kind='local-vp-field-strength-vmd',reference=inputs['publication']['url'],
         virtual_vertex_prescription=inputs['virtual_vertex_prescription'],
         omitted_scalar_and_chiral_terms=inputs['omitted_scalar_and_chiral_terms'],
         valid_mass_range_gev=[0.,parent['mass_gev']-recoil['mass_gev']],vectors=vectors)
+    if scalar_current is not None:
+        result.update(kind='local-vp-field-strength-vmd-plus-scalar-loop',
+            omitted_scalar_and_chiral_terms=False,scalar_current=scalar_current)
+    return result
 
 
 class LocalVMDCurrent:
     def __init__(self, model):
-        if (model.get('kind') != 'local-vp-field-strength-vmd' or not model.get('reference')
+        self.kind=model.get('kind')
+        scalar=model.get('scalar_current')
+        if (self.kind not in ('local-vp-field-strength-vmd','local-vp-field-strength-vmd-plus-scalar-loop')
+                or not model.get('reference')
                 or model.get('virtual_vertex_prescription') != 'constant-local-couplings'
-                or not model.get('omitted_scalar_and_chiral_terms')
+                or (scalar is None and (self.kind!='local-vp-field-strength-vmd'
+                    or model.get('omitted_scalar_and_chiral_terms') is not True))
+                or (scalar is not None and (self.kind!='local-vp-field-strength-vmd-plus-scalar-loop'
+                    or model.get('omitted_scalar_and_chiral_terms') is not False))
                 or not model.get('vectors')):
             raise ValueError('Require an explicit local-VMD model, virtual prescription and omissions')
+        self.scalar=None
+        if scalar is not None:
+            from dark_photon_scalar_meson import validate_scalar_model
+            validate_scalar_model(scalar)
+            self.scalar=json.loads(json.dumps(scalar,allow_nan=False))
         domain = model.get('valid_mass_range_gev')
         if (not isinstance(domain,(tuple,list)) or len(domain) != 2
                 or any(type(x) not in (int,float) or not math.isfinite(x) for x in domain)
@@ -146,6 +166,41 @@ class LocalVMDCurrent:
                 raise ValueError('Only explicit primary Eq10 rho or constant widths are supported')
             self.vectors.append(dict(row))
         self.reference = model['reference']
+
+    def vector_only(self):
+        return LocalVMDCurrent(dict(kind='local-vp-field-strength-vmd',reference=self.reference,
+            virtual_vertex_prescription='constant-local-couplings',omitted_scalar_and_chiral_terms=True,
+            valid_mass_range_gev=self.domain,vectors=self.vectors))
+
+    def scalar_reduced(self, invariant, virtuality):
+        """Sum A_strong * S(s,q²), before -alpha/(2pi) and unit T1.
+
+        At q²=0, S=-2(s/m_loop²)L(s/m_loop²). Consequently this exactly
+        recovers the primary 2alpha/(pi*m_loop²)*L*A_strong*T1, including
+        its relative sign to Eq8 VMD. No weak-current overall phase enters.
+        """
+        if self.scalar is None:
+            return 0j
+        from dark_photon_scalar_meson import scalar_strong_amplitudes
+        from dark_photon_weak_radiative import scalar_loop
+        return sum(amplitude*scalar_loop(invariant,virtuality,loop_mass)
+            for loop_mass,amplitude in scalar_strong_amplitudes(invariant,self.scalar))
+
+    def scalar_amplitude(self, photon, dark, first, second):
+        if self.scalar is None:
+            return 0j
+        product=_dot(photon,dark)
+        if product<=0:
+            raise ValueError('An open future-directed real-photon current is required')
+        virtuality=max(0.,_dot(dark,dark))
+        reduced=self.scalar_reduced(virtuality+2*product,virtuality)
+        tensor=_dot(first,second)-_dot(first,dark)*_dot(second,photon)/product
+        return -self.scalar['alpha_em']/(2*math.pi)*reduced*tensor
+
+    def scalar_spin_sum(self, invariant, virtuality):
+        if self.scalar is None:
+            return 0.
+        return self.scalar['alpha_em']**2/(2*math.pi**2)*abs(self.scalar_reduced(invariant,virtuality))**2
 
     def _coefficients(self, invariant):
         central, envelope = 0j, 0.
@@ -174,7 +229,8 @@ class LocalVMDCurrent:
         r = tuple(x-y for x,y in zip(parent,photon))
         s = tuple(x-y for x,y in zip(parent,dark))
         a,b = self._kinematic_terms(parent,photon,dark,first,second)
-        return self._coefficients(_dot(r,r))[0]*a+self._coefficients(_dot(s,s))[0]*b
+        return (self._coefficients(_dot(r,r))[0]*a+self._coefficients(_dot(s,s))[0]*b
+                +self.scalar_amplitude(photon,dark,first,second))
 
     def spin_sum(self, parent, photon, dark, mass, *, envelope=False):
         r = tuple(x-y for x,y in zip(parent,photon))
@@ -185,11 +241,12 @@ class LocalVMDCurrent:
         for first in polarizations(photon,0.):
             for second in polarizations(dark,mass):
                 a,b = self._kinematic_terms(parent,photon,dark,first,second)
-                result += (et*abs(a)+eu*abs(b))**2 if envelope else abs(ct*a+cu*b)**2
+                scalar=self.scalar_amplitude(photon,dark,first,second)
+                result += (et*abs(a)+eu*abs(b)+abs(scalar))**2 if envelope else abs(ct*a+cu*b+scalar)**2
         return result
 
-    def _panels(self, low, high, transform=lambda x:x):
-        boundaries = {low,high}
+    def _panels(self, low, high, transform=lambda x:x, *, additional=()):
+        boundaries = {low,high,*[point for point in additional if low<point<high]}
         for row in self.vectors:
             pole, scale = row['mass_gev']**2, row['mass_gev']*row['width_gev']
             for offset in (0.,-1.,1.,-4.,4.,-16.,16.):
@@ -233,7 +290,12 @@ class LocalVMDCurrent:
                 b = 2*parent_mass*outer/pair_mass*inner
                 photon = (outer,0.,0.,outer)
                 angular = 0.
-                for first,last in self._panels(-1.,1.,lambda value:(value-a)/b):
+                scalar_cuts=[]
+                if self.scalar is not None:
+                    from dark_photon_scalar_meson import scalar_thresholds
+                    scalar_cuts=[(parent_mass**2+recoil_mass**2+mass**2-invariant-cut-a)/b
+                                 for cut in scalar_thresholds(self.scalar)]
+                for first,last in self._panels(-1.,1.,lambda value:(value-a)/b,additional=scalar_cuts):
                     for cosine_node,cosine_weight in _gauss_legendre(order):
                         cosine = (first+last)/2+(last-first)/2*cosine_node
                         dark = boost((dark_energy,inner*math.sqrt(1-cosine*cosine),0.,inner*cosine),
@@ -449,11 +511,139 @@ class LocalVMDSampler:
             dark_photon_mass_gev=self.mass,muon_mass_gev=MUON_MASS_GEV,
             proper_decay_length_mm=length,decay_displacement_mm=tuple(length*x/self.mass for x in dark_lab[1:]),
             decay_ct_mm=length*dark_lab[0]/self.mass,unconditional_decay=True,
-            amplitude_model='coherent-local-vp-field-strength-vmd',
+            amplitude_model='coherent-'+self.current.kind,
             polarization_model='full-coherent-massive-vector-density-matrix',
-            scalar_chiral_and_additional_timelike_terms_omitted=True,
+            scalar_chiral_and_additional_timelike_terms_omitted=self.current.scalar is None,
+            additional_timelike_operators_omitted=True,
+            scalar_current_model=self.current.scalar['kind'] if self.current.scalar else None,
             coherent_parent_replacement_required=True,
             t_gev2=event['t_gev2'],u_gev2=event['u_gev2'],proposal_trials=event['proposal_trials'])
+
+
+class ScalarPairCDF:
+    """Positive scalar-component proposal with controlled numerical inversion.
+
+    Its spin sum depends only on s=(gamma+A')². Threshold-split adaptive
+    quadrature establishes each panel's integral at relative 2e-8 (absolute
+    2e-11 of the total). CDF inversion recomputes the partial panel integral;
+    a tabulated interpolation or a sampled maximum never sets the shape.
+    This numerical budget is separate from the exact coherent Cauchy bound.
+    """
+    def __init__(self,current,parent_mass,recoil_mass,mass):
+        from dark_photon_scalar_meson import scalar_thresholds
+        self.current,self.parent_mass,self.recoil_mass,self.mass=current,parent_mass,recoil_mass,mass
+        low,high=mass**2,(parent_mass-recoil_mass)**2
+        edges=sorted({low,high,*[value for value in scalar_thresholds(current.scalar) if low<value<high]})
+        initial=[(first,last,self.integral(first,last,24)) for first,last in zip(edges,edges[1:])]
+        scale=math.fsum(value for _,_,value in initial)
+        if not math.isfinite(scale) or scale<=0:
+            raise ValueError('The declared scalar current has zero or nonfinite phase-space measure')
+        self.panels=[]
+        def refine(first,last,coarse,depth=0):
+            center=(first+last)/2
+            left,right=self.integral(first,center,24),self.integral(center,last,24)
+            fine=left+right
+            if abs(fine-coarse)<=max(2.e-8*fine,2.e-11*scale):
+                self.panels.extend([(first,center,left),(center,last,right)])
+            elif depth<22:
+                refine(first,center,left,depth+1);refine(center,last,right,depth+1)
+            else:
+                raise ValueError('Scalar proposal CDF failed its quadrature accuracy budget')
+        for first,last,value in initial:
+            refine(first,last,value)
+        self.cumulative=[0.]
+        for _,_,value in self.panels:
+            self.cumulative.append(self.cumulative[-1]+value)
+        self.width=self.cumulative[-1]
+
+    def density(self,invariant):
+        momentum=two_body_momentum(self.parent_mass,self.recoil_mass,math.sqrt(invariant))
+        phase=momentum*(invariant-self.mass**2)/(128*math.pi**3*self.parent_mass**2*invariant)
+        return phase*self.current.scalar_spin_sum(invariant,self.mass**2)
+
+    def integral(self,low,high,order):
+        return (high-low)/2*math.fsum(weight*self.density((low+high)/2+(high-low)/2*node)
+                                     for node,weight in _gauss_legendre(order))
+
+    def sample(self,rng):
+        target=rng.random()*self.width
+        index=min(bisect.bisect_right(self.cumulative,target)-1,len(self.panels)-1)
+        low,high,area=self.panels[index]
+        target-=self.cumulative[index]
+        first,last=low,high
+        point=low+(high-low)*target/area
+        for _ in range(64):
+            residual=self.integral(low,point,24)-target
+            if abs(residual)<=max(2.e-10*area,2.e-14*self.width):
+                return point
+            if residual>0:last=point
+            else:first=point
+            derivative=self.density(point)
+            proposal=point-residual/derivative if derivative>0 else (first+last)/2
+            point=proposal if first<proposal<last else (first+last)/2
+        raise RuntimeError('Scalar proposal inverse CDF failed its numerical accuracy budget')
+
+
+class CoherentScalarSampler(LocalVMDSampler):
+    """Positive VMD/scalar mixture followed by exact coherent rejection.
+
+    q=(dGamma_V+dGamma_S)/(Gamma_V+Gamma_S). Cauchy gives
+    |A_V+A_S|² <= 2(|A_V|²+|A_S|²) for every Dalitz point and physical
+    polarization. Accepting that ratio samples the interfering current.
+    Scalar proposal integration/inversion is independently accuracy-gated;
+    the positive VMD integral converges to relative 2e-6 before mixing.
+    no unknown phase-space maximum is estimated from a pilot point scan.
+    """
+    def __init__(self,current,parent_mass,recoil_mass,mass):
+        self.vector_sampler=LocalVMDSampler(current.vector_only(),parent_mass,recoil_mass,mass)
+        self.current,self.parent_mass,self.recoil_mass,self.mass=current,parent_mass,recoil_mass,mass
+        self.t_range,self.u_range=self.vector_sampler.t_range,self.vector_sampler.u_range
+        self.scalar_cdf=ScalarPairCDF(current,parent_mass,recoil_mass,mass)
+        vector=self.vector_sampler.current
+        previous=vector.integrated_width(parent_mass,recoil_mass,mass,1.,order=16)
+        for order in (24,40,64,80):
+            width=vector.integrated_width(parent_mass,recoil_mass,mass,1.,order=order)
+            if abs(width-previous)<=2.e-6*max(width,previous):break
+            previous=width
+        else:
+            raise ValueError('VMD mixture normalization failed its numerical convergence budget')
+        self.vector_width=width
+        self.vector_probability=width/(width+self.scalar_cdf.width)
+
+    def sample_rest(self,rng,*,maximum_trials=1000000):
+        for trial in range(1,maximum_trials+1):
+            if rng.random()<self.vector_probability:
+                event=self.vector_sampler.sample_rest(rng,maximum_trials=maximum_trials)
+            else:
+                invariant=self.scalar_cdf.sample(rng)
+                pair=math.sqrt(invariant)
+                momentum=two_body_momentum(self.parent_mass,self.recoil_mass,pair)
+                energy=(self.parent_mass**2+invariant-self.recoil_mass**2)/(2*self.parent_mass)
+                inner=(invariant-self.mass**2)/(2*pair)
+                cosine=2*rng.random()-1
+                photon_energy=energy/pair*inner-momentum/pair*inner*cosine
+                dark_energy=energy/pair*(invariant+self.mass**2)/(2*pair)+momentum/pair*inner*cosine
+                t=self.parent_mass**2-2*self.parent_mass*photon_energy
+                u=self.parent_mass**2+self.mass**2-2*self.parent_mass*dark_energy
+                rest=self.vector_sampler.rest_event(t,u)
+                if rest is None:
+                    raise RuntimeError('Scalar CDF generated a nonphysical Dalitz point')
+                daughter,photon,dark=rest
+                event=dict(recoil_p4=daughter,photon_p4=photon,dark_photon_p4=dark,t_gev2=t,u_gev2=u)
+            photon,dark=event['photon_p4'],event['dark_photon_p4']
+            parent=(self.parent_mass,0.,0.,0.)
+            invariant=self.mass**2+2*_dot(photon,dark)
+            positive=(self.vector_sampler.current.spin_sum(parent,photon,dark,self.mass)+
+                      self.current.scalar_spin_sum(invariant,self.mass**2))
+            density=self.current.spin_sum(parent,photon,dark,self.mass)
+            probability=density/(2*positive)
+            if not math.isfinite(probability) or probability<0 or probability>1+2.e-10:
+                raise RuntimeError('Coherent VMD/scalar Cauchy acceptance bound violated')
+            if rng.random()<=probability:
+                event['component_proposal_trials']=event.get('proposal_trials',1)
+                event['proposal_trials']=trial
+                return event
+        raise RuntimeError('Coherent VMD/scalar sampler exhausted its bounded trial budget')
 
 
 def _source_inputs(model):
@@ -464,17 +654,20 @@ def _source_inputs(model):
     if any(type(value) not in (int,float) or not math.isfinite(value) or value <= 0 for value in (recoil,width)):
         raise ValueError('Explicit positive recoil mass and parent total width are required')
     current = LocalVMDCurrent(model['double_radiative_model'])
-    key = (current.domain,current.reference,tuple(tuple(sorted(row.items())) for row in current.vectors))
+    key = (current.domain,current.reference,tuple(tuple(sorted(row.items())) for row in current.vectors),
+           json.dumps(current.scalar,sort_keys=True,allow_nan=False),current.kind)
     return recoil,width,key
 
 
 @functools.lru_cache(maxsize=64)
 def _sampler(parent_mass,recoil_mass,mass,key):
-    domain,reference,vectors = key
-    current = LocalVMDCurrent(dict(kind='local-vp-field-strength-vmd',reference=reference,
-        virtual_vertex_prescription='constant-local-couplings',omitted_scalar_and_chiral_terms=True,
-        valid_mass_range_gev=domain,vectors=[dict(row) for row in vectors]))
-    return LocalVMDSampler(current,parent_mass,recoil_mass,mass)
+    domain,reference,vectors,scalar,kind = key
+    scalar=json.loads(scalar)
+    current = LocalVMDCurrent(dict(kind=kind,reference=reference,
+        virtual_vertex_prescription='constant-local-couplings',omitted_scalar_and_chiral_terms=scalar is None,
+        scalar_current=scalar,valid_mass_range_gev=domain,vectors=[dict(row) for row in vectors]))
+    sampler=CoherentScalarSampler if scalar is not None else LocalVMDSampler
+    return sampler(current,parent_mass,recoil_mass,mass)
 
 
 @functools.lru_cache(maxsize=128)

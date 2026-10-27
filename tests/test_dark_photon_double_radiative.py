@@ -8,7 +8,7 @@ import sys
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from dark_photon_double_radiative import (LocalVMDCurrent,LocalVMDSampler,branching_coefficient,
+from dark_photon_double_radiative import (LocalVMDCurrent,LocalVMDSampler,CoherentScalarSampler,ScalarPairCDF,branching_coefficient,
     empirical_reference_model,mean_lab_beta_gamma,polarizations,quark_model_couplings,sample_decay)
 from dark_photon_meson import boost
 from dark_photon_vector_meson import two_body_momentum
@@ -278,6 +278,116 @@ class CorrelatedDoubleRadiativeProduction(unittest.TestCase):
             self.assertEqual(rng.getstate(),before)
         for key in ['total_parent_width_gev','recoil_mass_gev']:
             with self.assertRaises(ValueError):branching_coefficient(MASSES[221],.3,dict(model,**{key:0.}))
+
+
+def scalar_model(parent,recoil,kind='escribano-2020-linear-sigma'):
+    inputs=json.loads((Path(__file__).resolve().parents[1]/'config/physics/dark_photon_scalar_meson_2020.json').read_text())
+    scalar=dict(inputs['reference_parameters'],parent_pdg_id=parent,recoil_pdg_id=recoil,
+        parent_mass_gev=MASSES[parent],recoil_mass_gev=MASSES[recoil],kind=kind)
+    return dict(reference_model(parent,recoil),kind='local-vp-field-strength-vmd-plus-scalar-loop',
+        omitted_scalar_and_chiral_terms=False,scalar_current=scalar)
+
+
+class ScalarDoubleRadiativeProduction(unittest.TestCase):
+    def test_scalar_loop_matches_primary_real_photon_normalization_and_relative_phase(self):
+        import cmath
+        from dark_photon_scalar_meson import scalar_strong_amplitudes
+        for parent,recoil in [(221,111),(331,111),(331,221)]:
+            current=LocalVMDCurrent(scalar_model(parent,recoil))
+            for fraction in [.1,.45,.8]:
+                p,k,q=rest_event(MASSES[parent],MASSES[recoil],0.,fraction=fraction)
+                invariant=2*dot(k,q)
+                coefficient=0j
+                for loop_mass,strong in scalar_strong_amplitudes(invariant,current.scalar):
+                    z=invariant/loop_mass**2
+                    if z<4:
+                        f=-math.asin(math.sqrt(z)/2)**2
+                    else:
+                        beta=math.sqrt(1-4/z)
+                        f=(math.log((1+beta)/(1-beta))-1j*math.pi)**2/4
+                    loop=-1/(2*z)-2*f/z**2
+                    coefficient+=2*current.scalar['alpha_em']/(math.pi*loop_mass**2)*loop*strong
+                for first in polarizations(k,0.):
+                    for second in polarizations(q,0.):
+                        tensor=dot(first,second)*dot(k,q)-dot(first,q)*dot(second,k)
+                        expected=coefficient*tensor
+                        self.assertAlmostEqual(abs(current.scalar_amplitude(k,q,first,second)-expected),0.,delta=2.e-15)
+
+    def test_scalar_and_full_currents_preserve_two_ward_identities_and_scalar_pair_spin(self):
+        current=LocalVMDCurrent(scalar_model(331,221))
+        for mass in [.22,.3,.4]:
+            p,k,q=rest_event(MASSES[331],MASSES[221],mass)
+            a,b=polarizations(k,0.)[0],polarizations(q,mass)[0]
+            for beta in [(0.,0.,0.),(.2,-.3,.6)]:
+                parent,photon,dark,first,second=[boost(v,beta) for v in (p,k,q,a,b)]
+                scale=abs(current.amplitude(parent,photon,dark,first,second))
+                self.assertLess(abs(current.amplitude(parent,photon,dark,photon,second)),1.e-11*scale)
+                self.assertLess(abs(current.amplitude(parent,photon,dark,first,dark)),1.e-11*scale)
+            direct=math.fsum(abs(current.scalar_amplitude(k,q,first,second))**2
+                for first in polarizations(k,0.) for second in polarizations(q,mass))
+            invariant=mass**2+2*dot(k,q)
+            self.assertAlmostEqual(direct/current.scalar_spin_sum(invariant,mass**2),1.,places=12)
+
+    def test_primary_scalar_component_widths_without_empirical_rescaling(self):
+        targets=[(221,111,.00187,.0005),(331,111,.11,.13),(331,221,.014,3.29)]
+        for parent,recoil,chiral,sigma in targets:
+            for kind,target in [('escribano-2020-chpt',chiral),('escribano-2020-linear-sigma',sigma)]:
+                current=LocalVMDCurrent(scalar_model(parent,recoil,kind))
+                actual=ScalarPairCDF(current,MASSES[parent],MASSES[recoil],0.).width/2*1.e9
+                # The primary prints rounded component widths and no exact
+                # pion input card. The declared charged-loop convention has
+                # at most7.4% discrepancy; no coupling is fitted to hide it.
+                self.assertLess(abs(actual/target-1),.08)
+                if parent==331 and recoil==221 and kind.endswith('linear-sigma'):
+                    self.assertAlmostEqual(actual,3.27756974,delta=2.e-7)
+
+    def test_full_scalar_proposal_rate_closes_against_independent_three_body_phase_space(self):
+        current=LocalVMDCurrent(scalar_model(331,221))
+        for mass in [.22,.3]:
+            proposal=ScalarPairCDF(current,MASSES[331],MASSES[221],mass)
+            class ScalarOnly(LocalVMDCurrent):
+                def spin_sum(self,p,k,q,mass,**kwargs):
+                    return math.fsum(abs(self.scalar_amplitude(k,q,a,b))**2
+                        for a in polarizations(k,0.) for b in polarizations(q,mass))
+            independent=ScalarOnly(scalar_model(331,221)).integrated_width(MASSES[331],MASSES[221],mass,1.,order=64)
+            self.assertAlmostEqual(independent/proposal.width,1.,delta=2.e-5)
+            for index in range(1,100):
+                target=index/100*proposal.width
+                class Quantile:
+                    def random(self):return index/100
+                value=proposal.sample(Quantile())
+                partial=math.fsum(proposal.integral(low,min(value,high),40)
+                    for low,high,_ in proposal.panels if low<value)
+                self.assertAlmostEqual(partial/target,1.,delta=2.e-7)
+
+    def test_coherent_mixture_has_rate_acceptance_and_energy_moment(self):
+        parent,recoil,mass=331,221,.22
+        current=LocalVMDCurrent(scalar_model(parent,recoil))
+        sampler=CoherentScalarSampler(current,MASSES[parent],MASSES[recoil],mass)
+        width=current.integrated_width(MASSES[parent],MASSES[recoil],mass,1.,order=32)
+        probability=width/(2*(sampler.vector_width+sampler.scalar_cdf.width))
+        expected=current.integrated_width(MASSES[parent],MASSES[recoil],mass,1.,order=32,
+            moment=lambda dark:dark[0])/width
+        rng=random.Random(98173);rows=[sampler.sample_rest(rng) for _ in range(1000)]
+        trials=statistics.mean(row['proposal_trials'] for row in rows)
+        self.assertAlmostEqual(trials,1/probability,
+            delta=6*math.sqrt((1-probability)/(len(rows)*probability**2)))
+        energies=[row['dark_photon_p4'][0] for row in rows]
+        self.assertAlmostEqual(statistics.mean(energies),expected,
+            delta=6*statistics.stdev(energies)/math.sqrt(len(rows)))
+
+    def test_declared_full_current_survives_source_cache_and_correlated_decay(self):
+        for parent,recoil,mass in [(221,111,.3),(331,111,.3),(331,221,.3)]:
+            source=source_model(parent,recoil);source['double_radiative_model']=scalar_model(parent,recoil)
+            row=sample_decay((MASSES[parent],0.,0.,0.),mass,10.,random.Random(parent),model=source)
+            self.assertEqual(row['amplitude_model'],'coherent-local-vp-field-strength-vmd-plus-scalar-loop')
+            self.assertEqual(row['scalar_current_model'],'escribano-2020-linear-sigma')
+            self.assertFalse(row['scalar_chiral_and_additional_timelike_terms_omitted'])
+            self.assertTrue(row['additional_timelike_operators_omitted'])
+            for component in range(4):
+                total=sum(p[component] for p in [row['dark_photon_p4'],*row['recoil_p4s']])
+                self.assertAlmostEqual(total,(MASSES[parent],0.,0.,0.)[component],delta=2.e-13)
+            self.assertTrue(row['unconditional_decay'])
 
 
 if __name__=='__main__':

@@ -510,20 +510,20 @@ def sample_radiative_decay(parent_pdg_id, parent, mass, proper_ctau_mm, rng):
 
 
 def sample_weak_decay(parent_pdg_id, parent, recoil_mass, mass, proper_ctau_mm, rng):
-    """Unconditional K+/-/KS -> pi+/-/pi0 A' using the qualified weak sampler.
+    """Unconditional K+/-/KS/KL -> pion A' using the longitudinal sampler.
 
-    Rates and their separately qualified charged/KS weak amplitudes are caller
-    inputs. No KL CP-violating pi0 current is silently substituted. The pion
-    recoil's ordinary decay is the native bridge's responsibility.
+    Rates and their separately qualified weak amplitudes are caller inputs.
+    The source must supply the explicit KL CPV current for that parent. The
+    pion recoil's ordinary decay is the native bridge's responsibility.
     """
-    if type(parent_pdg_id) is not int or parent_pdg_id not in (321,-321,310):
-        raise ValueError('Explicit charged-kaon or KS weak-current parent required')
+    if type(parent_pdg_id) is not int or parent_pdg_id not in (321,-321,310,130):
+        raise ValueError('Explicit charged-kaon, KS or KL weak-current parent required')
     # Sampler-only dependency: rate-only neutral-kaon deployments do not use
     # this API. Any new GEN freeze must include the weak helper coherently.
     from dark_photon_weak_meson import sample_decay
     result = sample_decay(parent,recoil_mass,mass,proper_ctau_mm,rng)
     result.update(parent_pdg_id=parent_pdg_id,
-        recoil_pdg_id={321:211,-321:-211,310:111}[parent_pdg_id],
+        recoil_pdg_id={321:211,-321:-211,310:111,130:111}[parent_pdg_id],
         parent_flight_included=False)
     return result
 

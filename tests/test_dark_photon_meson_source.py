@@ -1,15 +1,187 @@
 # Code style: AI-code. AI-generated full-source sampling and normalization tests.
 import math
+import copy
+import hashlib
+import json
 from pathlib import Path
 import random
 import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from dark_photon_meson_source import (coefficient_bound, choose_collision, source_cross_section_pb,
     resolve_parent_kinematics, parent_branching_coefficient, resolved_parent_models, production_mechanism,
     radiative_cascade_owner)
 from dark_photon_vector_meson import two_body_momentum
+
+
+class CorrelatedCurrentSourceTest(unittest.TestCase):
+    def double(self, pdg=221, recoil=111, *, scalar=False):
+        from test_dark_photon_double_radiative import reference_model,scalar_model,MASSES
+        return dict(pdg_id=pdg,channel=('eta' if pdg==221 else 'eta_prime')+
+            ('->pi0_gamma_Aprime' if recoil==111 else '->eta_gamma_Aprime'),
+            mass_gev=MASSES[pdg],decay_type='pseudoscalar-double-radiative',
+            parent_mass_model='zero-width-pole',recoil_pdg_id=recoil,recoil_mass_gev=MASSES[recoil],
+            total_parent_width_gev=1.31e-6 if pdg==221 else .000196,
+            relative_numerical_mass_precision_budget=1.e-3,
+            coherent_replaced_vector_pdgs=[113,223,333],pdg_reference='synthetic source wrapper; kernel inputs attributed',
+            double_radiative_model=(scalar_model if scalar else reference_model)(pdg,recoil))
+
+    def quark(self, channel='eta_c->gamma_Aprime'):
+        from test_dark_photon_quarkonium import channel_model, MASSES
+        row=channel_model(channel);name=channel.split('->')[0]
+        pdg=dict(eta_c=441,chi_c0=10441,chi_c1=20443,chi_c2=445,h_c=10443,psi_2S=100443)[name]
+        mass=MASSES[name]
+        row.update(pdg_id=pdg,mass_gev=mass,parent_mass_model='zero-width-pole',
+            relative_numerical_mass_precision_budget=1.e-3,
+            pdg_reference='synthetic source wrapper; kernel inputs attributed')
+        row['quarkonium_model'].update(reference_parent_mass_gev=mass,
+            reference_recoil_mass_gev=row['recoil_mass_gev'])
+        return row
+
+    @staticmethod
+    def resolve(parents, mass=.22, epsilon=1.e-6):
+        card=dict(mechanism='meson-radiative',parents=parents,channels=[p['channel'] for p in parents])
+        native={p['pdg_id']:dict(pdg_id=p['pdg_id'],mass_min_gev=p['mass_gev'],
+            mass_max_gev=p['mass_gev'],mass_width_gev=0.) for p in parents}
+        return resolved_parent_models(card,dict(parents=list(native.values())),mass,epsilon=epsilon)
+
+    def test_rate_uses_physical_em_coupling_and_dimuon_branching_once(self):
+        from dark_photon_meson_source import current_kernel
+        from dark_photon_model import mixing_parameters
+        for parent in [self.double(),self.double(scalar=True),self.quark(),self.quark('chi_c1->Jpsi_Aprime')]:
+            with self.subTest(channel=parent['channel']):
+                model=self.resolve([parent])[parent['pdg_id']]
+                bare=current_kernel(model).branching_coefficient(parent['mass_gev'],.22,model)
+                factor=(mixing_parameters(.22,1.e-6).em_coefficient/1.e-6)**2
+                self.assertAlmostEqual(parent_branching_coefficient(parent['mass_gev'],.22,model,.17),bare*factor*.17)
+                self.assertEqual(parent_branching_coefficient(parent['mass_gev'],.22,model,0.),0.)
+                with self.assertRaisesRegex(ValueError,'another signal mass'):
+                    parent_branching_coefficient(parent['mass_gev'],.25,model,.17)
+
+    def test_fixed_pole_count_envelope_and_closed_heavy_channel(self):
+        parent=self.quark('chi_c0->Jpsi_Aprime')
+        model=self.resolve([parent])[parent['pdg_id']]
+        rate=parent_branching_coefficient(parent['mass_gev'],.22,model,.2)
+        bound=coefficient_bound(113.,.2,{parent['pdg_id']:model},.22)
+        self.assertEqual(bound,math.floor(113./parent['mass_gev'])*rate)
+        closed=self.resolve([parent],mass=.4)[parent['pdg_id']]
+        self.assertFalse(closed['kinematically_open'])
+        self.assertEqual(coefficient_bound(113.,.2,{parent['pdg_id']:closed},.4),0.)
+        with self.assertRaisesRegex(ValueError,'fixed signal mass'):
+            coefficient_bound(113.,.2,{parent['pdg_id']:model})
+
+    def test_scalar_current_must_match_its_source_parent_and_recoil(self):
+        for key,value in [('parent_pdg_id',331),('recoil_pdg_id',221),
+                          ('parent_mass_gev',.6),('recoil_mass_gev',.14)]:
+            parent=self.double(scalar=True)
+            parent['double_radiative_model']['scalar_current'][key]=value
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'species and pole masses'):
+                self.resolve([parent])
+
+    def test_source_rejects_wrong_species_pole_or_undeclared_ownership(self):
+        for change in ['species','current_pole','native_pole','budget','overlap']:
+            parent=self.double() if change=='overlap' else self.quark('chi_c1->Jpsi_Aprime')
+            if change=='species':parent['pdg_id']=441
+            if change=='current_pole':parent['quarkonium_model']['reference_parent_mass_gev']+=.01
+            if change=='native_pole':parent['parent_mass_model']='broad-unreviewed'
+            if change=='budget':parent['relative_numerical_mass_precision_budget']=.1
+            if change=='overlap':parent.pop('coherent_replaced_vector_pdgs')
+            with self.subTest(change=change),self.assertRaises(ValueError):self.resolve([parent])
+        parent=self.quark()
+        with self.assertRaisesRegex(ValueError,'physical epsilon'):
+            self.resolve([parent],epsilon=None)
+
+    def test_coherent_replacement_removes_only_the_owned_channel_from_collision_rate(self):
+        import dark_photon_meson_source as source
+        owner=self.double(331)
+        owner_model=self.resolve([owner])[331]
+        vector=dict(mass_min_gev=.77526,mass_max_gev=.77526,decay_type='vector-pseudoscalar',
+            channel='rho0->pi0_Aprime',recoil_pdg_id=111)
+        models={331:owner_model,113:dict(mass_min_gev=.77526,mass_max_gev=.77526,
+            exclusive_channels=[vector,dict(vector,channel='rho0->eta_Aprime',recoil_pdg_id=221)])}
+        parents=[dict(index=5,pdg_id=331,mass_gev=.95778),dict(index=12,pdg_id=113,mass_gev=.77526,
+            radiative_ancestor=dict(index=5,pdg_id=331,vector_pdg_id=113,sibling_pdg_id=22))]
+        def rate(parent_mass,mass,channel,br):
+            return 7. if channel['channel']==owner['channel'] else 3.
+        with patch.object(source,'validate_models'),patch.object(source,'parent_branching_coefficient',side_effect=rate):
+            result=choose_collision(parents,.22,.2,models,100.,random.Random(2))
+        self.assertEqual(result['coefficient_sum'],10.)
+        self.assertEqual(result['coherently_replaced_cascades'],
+            [dict(parent_index=12,channel='rho0->pi0_Aprime',owner=owner['channel'])])
+
+    def test_native_precision_preserves_the_original_record_and_checks_the_same_current(self):
+        model=self.resolve([self.quark()])[441]
+        parent=dict(index=1,pdg_id=441,native_mass_gev=model['mass_min_gev'],
+            p4=[model['mass_min_gev'],0.,0.,0.])
+        original=copy.deepcopy(parent)
+        checked,=resolve_parent_kinematics([parent],.001,.22,{441:model},.2)
+        self.assertEqual(parent,original)
+        self.assertEqual(checked['p4'],original['p4'])
+        self.assertEqual(checked['coefficient_relative_precision_shift'],0.)
+
+    def test_exporter_reconstructs_coherent_ownership_and_rejects_double_counting(self):
+        from export_dark_photon_cross_sections import meson_source_exposure
+        owner=self.double(331)
+        path=Path(__file__).resolve().parents[1]/'config/campaigns/dark_photon_meson_extended_model.json'
+        vector=next(row for row in json.loads(path.read_text())['parents'] if row['channel']=='rho0->pi0_Aprime')
+        card=dict(schema='shift-dark-photon-meson-model-v1',mechanism='meson-radiative',
+            parents=[owner,vector],channels=[owner['channel'],vector['channel']])
+        configuration=dict(ecm_gev=113.,check_event=True,mass_tolerance=.001,energy_tolerance=.01,
+            parents=[dict(pdg_id=p['pdg_id'],mass_min_gev=p['mass_gev'],mass_max_gev=p['mass_gev'],mass_width_gev=0.)
+                     for p in card['parents']])
+        models=resolved_parent_models(card,configuration,.22,epsilon=.001)
+        momentum=two_body_momentum(owner['mass_gev'],vector['mass_gev'],0.)
+        raw=[dict(index=5,pdg_id=331,native_mass_gev=owner['mass_gev'],p4=[owner['mass_gev'],0.,0.,0.]),
+             dict(index=12,pdg_id=113,native_mass_gev=vector['mass_gev'],
+                p4=[math.hypot(vector['mass_gev'],momentum),0.,0.,momentum],
+                radiative_ancestor=dict(index=5,pdg_id=331,vector_pdg_id=113,sibling_pdg_id=22))]
+        parents=resolve_parent_kinematics(raw,.001,.22,models,.4)
+        bound=coefficient_bound(113.,.4,models,.22)
+        class AcceptFirst:
+            def random(self):return 0.
+        decision=choose_collision(parents,.22,.4,models,bound,AcceptFirst())
+        coefficient=decision['coefficient_sum'];probability=1.e-6*coefficient
+        rows=[dict(decision,schema='shift-meson-source-trial-v1',trial=1,generator_success=True,native_weight=1.,
+            parents=parents,physical_probability=probability,accepted_slot=1),
+            dict(schema='shift-meson-source-trial-v1',trial=2,generator_success=True,native_weight=1.,
+                parents=[],coefficient_sum=0.,physical_probability=0.,acceptance_probability=0.,accepted=False,parent_index=None)]
+        difference=math.fsum(p['coefficient_difference_from_kinematic_mass'] for p in parents)
+        exposure=dict(schema='shift-meson-source-exposure-v1',fixed_source_collisions=2,source_calls=2,
+            source_collisions=2,generator_failures=0,zero_eligible_parent_collisions=1,
+            sum_native_weights=2.,sum_native_weights_squared=2.,sigma_source_mb=30.,sigma_source_error_mb=.3,
+            coefficient_sum=coefficient,coefficient_sum_squared=coefficient**2,
+            physical_probability_sum=probability,physical_probability_sum_squared=probability**2,
+            accepted_signal_events=1,analytic_coefficient_bound=bound,coefficient_includes_br_mumu=True,
+            coefficient_excludes_epsilon_squared=True,unit_output_gen_weights=True,
+            coefficient_precision_difference_sum=difference,
+            maximum_coefficient_relative_precision_shift=max(abs(p['coefficient_relative_precision_shift']) for p in parents),
+            relative_rate_precision_shift=difference/coefficient)
+        authority=dict(provider='synthetic pinned width source')
+        width=dict(mass_gev=.22,epsilon=.001,br_mumu=.4,ctau_mm=1.973269804e-3,total_width_gev=1.e-10,
+            partial_widths_gev=dict(e_e=6.e-11,mu_mu=4.e-11),spectral_source=authority)
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);reference=directory/'ErrorChecks.xml';reference.write_text('Synthetic source precision authority\n')
+            precision=dict(configuration,reference=str(reference),reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+                prescription='native generated mass for branching and bound; unchanged p4 invariant for decay')
+            contract=dict(production_mechanism='meson-radiative',exclusive_channels=card['channels'],epsilon=.001,mass_gev=.22,
+                physical_width_table=width,width_authority=authority,source_precision=precision,
+                resolved_parent_models={str(k):v for k,v in models.items()},requested_events=1)
+            def freeze():
+                ledger=''.join(json.dumps(row)+'\n' for row in rows).encode();(directory/'meson_source_ledger.jsonl').write_bytes(ledger)
+                contract['source_ledger_sha256']=exposure['source_ledger_sha256']=hashlib.sha256(ledger).hexdigest()
+                contract['source_exposure']=copy.deepcopy(exposure);contract['meson_model_card']=copy.deepcopy(card)
+                for filename,value,key in [('source_exposure.json',exposure,'source_exposure_sha256'),('meson_model.json',card,'meson_model_card_sha256')]:
+                    payload=json.dumps(value).encode();(directory/filename).write_bytes(payload);contract[key]=hashlib.sha256(payload).hexdigest()
+            freeze();_,rate,_=meson_source_exposure(contract,directory)
+            self.assertAlmostEqual(rate['value_pb'],30.e9*probability/2)
+            replacement=rows[0]['coherently_replaced_cascades'];rows[0]['coherently_replaced_cascades']=[];freeze()
+            with self.assertRaisesRegex(ValueError,'ownership'):meson_source_exposure(contract,directory)
+            rows[0]['coherently_replaced_cascades']=replacement
+            rows[0]['coefficient_sum']+=parent_branching_coefficient(vector['mass_gev'],.22,models[113],.4);freeze()
+            with self.assertRaisesRegex(ValueError,'parent branching sum'):meson_source_exposure(contract,directory)
 
 
 class MesonSourceTest(unittest.TestCase):
