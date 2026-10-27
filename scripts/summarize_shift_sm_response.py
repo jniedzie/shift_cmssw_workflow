@@ -162,6 +162,132 @@ def sampling_forecast(rows, category, region, floor, tail=None):
         zero_tail_outcomes_cannot_qualify_gain=positive == 0)
 
 
+def zero_success_population_upper(population, sampled, alpha=.05):
+    """Invert P(no successes) for a uniform draw WITHOUT replacement.
+
+    This bounds positive original-event counts in one finite sampling cell.
+    It is not a bound on weighted yield, pair multiplicity or a future source.
+    """
+    if (type(population) is not int or type(sampled) is not int
+            or not 0 <= sampled <= population or not 0 < alpha < 1):
+        raise ValueError('Invalid finite-population draw')
+    if sampled == 0:
+        return population
+    low, high = 0, population-sampled+1
+    threshold = math.log(alpha)
+    while high-low > 1:
+        positives = (low+high)//2
+        log_zero = math.fsum(math.log1p(-positives/(population-i))
+                             for i in range(sampled))
+        if log_zero >= threshold:
+            low = positives
+        else:
+            high = positives
+    return low
+
+
+def protected_response_path(row):
+    """Protect unknown models and paths of actually pointing pairs.
+
+    An incomplete path of an unrelated, nonpointing muon is not evidence of
+    an unknown pointing opportunity. This is a diagnostic proposal, not a
+    change to the frozen production default's unknown-path protection.
+    """
+    features = row['features']
+    return (row.get('unclassified_physical_model') is True
+            or features['n_pointing_pairs_full_parent_coverage']
+            < features['n_pointing_os_pairs']
+            or features['n_pointing_pairs_known_muon_column']
+            < features['n_pointing_os_pairs'])
+
+
+def benchmark_report(population, plan, rows):
+    """Audit a fixed stratified draw against its complete eligible census.
+
+    Group definitions predate these outcomes. Policy forecasts remain planning
+    calculations; zero controls must not become a claimed zero leakage rate.
+    """
+    from prepare_shift_sm_prospective_benchmark import benchmark_region, identity
+
+    originals = {identity(row): row for row in population}
+    expected = {identity(row): row for row in plan['selected']}
+    observed = {identity(row): row for row in rows}
+    if (len(originals) != len(population) or len(expected) != len(plan['selected'])
+            or len(observed) != len(rows) or set(observed) != set(expected)
+            or len(population) != plan['population_events']
+            or len(rows) != plan['selected_events']):
+        raise ValueError('Require the complete unique frozen draw and population')
+    groups, sampled = defaultdict(list), defaultdict(list)
+    for key, original in originals.items():
+        groups[(original['stratum'], benchmark_region(original))].append(original)
+    for key, row in observed.items():
+        if key not in originals:
+            raise ValueError('Response is outside its eligible original population')
+        original, chosen = originals[key], expected[key]
+        if (row['stratum'] != original['stratum'] or chosen['stratum'] != original['stratum']
+                or chosen['native_weight'] != original['native_weight']
+                or chosen['existing_sampling_probability'] != original['existing_sampling_probability']
+                or row['native_weight'] != original['native_weight']
+                or row['original_sampling_probability'] != original['existing_sampling_probability']
+                or row['features'] != original['features']
+                or row['benchmark_sampling_probability'] != chosen['benchmark_inclusion_probability']
+                or row['sampling_probability'] != chosen['cumulative_study_probability']):
+            raise ValueError('Response changed original features, weights or sampling')
+        sampled[(original['stratum'], benchmark_region(original))].append(row)
+    cells = []
+    for (stratum, region), cohort in sorted(groups.items()):
+        sample = sampled[(stratum, region)]
+        probability = len(sample)/len(cohort)
+        if not sample or any(not math.isclose(row['benchmark_sampling_probability'], probability,
+                                             rel_tol=1e-12) for row in sample):
+            raise ValueError('Frozen draw lacks positive uniform support in a cell')
+        targets = {}
+        for category in MAP_CATEGORIES:
+            stats = response_statistics(sample, category)
+            stats['finite_cell_zero_success_upper95_positive_events'] = (
+                zero_success_population_upper(len(cohort), len(sample))
+                if stats['positive_originals'] == 0 else None)
+            targets[category] = stats
+        cells.append(dict(stratum=stratum, region=region, population_events=len(cohort),
+            sampled_events=len(sample), inclusion_probability=probability,
+            complete_cell=len(sample) == len(cohort), targets=targets))
+    forecasts = []
+    for stratum in sorted({row['stratum'] for row in population}):
+        cohort = [row for row in population if row['stratum'] == stratum]
+        sample = [row for row in rows if row['stratum'] == stratum]
+        def retained(row):
+            original = originals[identity(row)]
+            return (benchmark_region(original) in ('credible_shallow_pointing',
+                    'unknown_parent', 'protected_unknown_model') or protected_response_path(original))
+        high = sum(retained(row) for row in cohort)
+        for floor in (.1, .01, .001):
+            costs = [row['cost']['sim_wall_seconds_per_event']/row['sampling_probability']
+                     for row in sample]
+            proposal = [1. if retained(row) else floor for row in sample]
+            second = [row['native_weight']**2*target_value(row, 'both_both_good')**2
+                      /row['sampling_probability'] for row in sample]
+            base, new = math.fsum(costs), math.fsum(c*p for c, p in zip(costs, proposal))
+            before = math.fsum(second)
+            after = math.fsum(s/p for s, p in zip(second, proposal))
+            forecasts.append(dict(stratum=stratum, control_floor=floor,
+                population_events=len(cohort), protected_or_promising_events=high,
+                expected_admitted_events=high+floor*(len(cohort)-high),
+                expected_admission_fraction=(high+floor*(len(cohort)-high))/len(cohort),
+                conditional_SIM_wall_fraction=new/base if base else None,
+                conditional_good_BothBoth_information_gain=base*before/(new*after) if new*after else None,
+                demoted_observed_good_BothBoth=sum(target_value(row, 'both_both_good') > 0
+                    and not retained(row) for row in sample),
+                tail_statistics_improvement_qualified=False))
+    return dict(schema='shift-sm-stratified-response-validation-v1',
+        population_events=len(population), observed_events=len(rows), cells=cells,
+        planning_forecasts=forecasts, unknown_pointing_paths_and_models_kept_at_probability_one=True,
+        forecast_scope='existing selected census, not a new draw on original GEN',
+        cell_intervals_are_not_simultaneous_or_weighted_yield_bounds=True,
+        full_exposure_must_include_all_original_sources=True,
+        sampling_weights_applied_once=True, production_policy_qualified=False,
+        tail_statistics_improvement_qualified=False)
+
+
 def summarize(rows):
     keys = [(row['gen_sha256'], tuple(row['event_id'])) for row in rows]
     if len(keys) != len(set(keys)):
@@ -212,11 +338,20 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('joined_jsonl', type=Path)
     parser.add_argument('output', type=Path)
+    parser.add_argument('--population', type=Path)
+    parser.add_argument('--benchmark-plan', type=Path)
     args = parser.parse_args()
+    if bool(args.population) != bool(args.benchmark_plan):
+        parser.error('--population and --benchmark-plan are required together')
     opener = gzip.open if args.joined_jsonl.suffix == '.gz' else open
     with opener(args.joined_jsonl, 'rt') as stream:
         rows = [json.loads(line) for line in stream if line.strip()]
     result = summarize(rows)
+    if args.population:
+        with gzip.open(args.population, 'rt') as stream:
+            population = [json.loads(line) for line in stream if line.strip()]
+        plan = json.loads(args.benchmark_plan.read_text())
+        result['stratified_benchmark'] = benchmark_report(population, plan, rows)
     args.output.write_text(json.dumps(result, indent=2, allow_nan=False)+'\n')
 
 

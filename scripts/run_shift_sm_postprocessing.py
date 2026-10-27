@@ -20,6 +20,23 @@ import tarfile
 import time
 
 
+DIMUON_CATEGORIES = ('', 'Good', 'Near-Both', 'Near-Far', 'Both-Both', 'Both-Far', 'Other')
+
+
+def validate_dimuon_histograms(root):
+    """Require main-config mass, pT and logMass in every dimuon category.
+
+    Individual production files may have zero pairs. Runtime qualification
+    separately requires an actual reconstructed positive-mass control pair.
+    """
+    required = ['dimuon/ShiftDimuonVertex'+category+'_'+variable
+                for category in DIMUON_CATEGORIES for variable in ('mass', 'pt', 'logMass')]
+    missing = [name for name in required if not root.Get(name)]
+    if missing:
+        raise ValueError('Missing histogram: '+', '.join(missing))
+    return required
+
+
 def digest(path):
     h = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -253,12 +270,7 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         values = math.fsum(float(event.GetBinContent(i)) for i in range(event.GetNcells()))
         if not math.isclose(values, sumw, rel_tol=1e-9, abs_tol=1e-300):
             raise ValueError('Histogram W/p sum changed')
-        # All categories, including Both-Both, must actually be present.
-        for category in ('', 'Both-Both'):
-            for variable in ('mass', 'pt', 'logMass'):
-                name = 'dimuon/ShiftDimuonVertex' + category + '_' + variable
-                if not root.Get(name):
-                    raise ValueError('Missing histogram: ' + name)
+        validate_dimuon_histograms(root)
         ROOT.TObjString(json.dumps(metadata, sort_keys=True)).Write('ShiftFullGenNormalization')
     finally:
         root.Close()

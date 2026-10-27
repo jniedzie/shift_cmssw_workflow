@@ -8,13 +8,30 @@ import errno
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command
+from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command, validate_dimuon_histograms
 from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update
 from run_shift_smart_sm_controller import postprocessing_charge
 import run_shift_smart_sm_controller as main_controller
 
 
 class PostprocessingTest(unittest.TestCase):
+    def test_publication_requires_categories_beyond_inclusive_and_both(self):
+        class Root:
+            def Get(self, name):
+                return name not in ('dimuon/ShiftDimuonVertexOther_logMass',
+                                    'dimuon/ShiftDimuonVertexNear-Far_mass')
+        with self.assertRaisesRegex(ValueError, 'Other_logMass'):
+            validate_dimuon_histograms(Root())
+
+    def test_empty_booked_categories_are_valid_for_a_production_chunk(self):
+        class EmptyHistogram:
+            def GetEntries(self):
+                return 0
+        class Root:
+            def Get(self, name):
+                return EmptyHistogram()
+        self.assertEqual(len(validate_dimuon_histograms(Root())), 21)
+
     def test_larger_hadd_file_limit_preserves_input_order_and_compression(self):
         self.assertEqual(hadd_command('out.root', ['a.root', 'b.root'], 200),
             ['hadd', '-fk', '-n', '200', 'out.root', 'a.root', 'b.root'])

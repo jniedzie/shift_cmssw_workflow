@@ -1,12 +1,16 @@
 # Code style: AI-code. AI-generated tests for measured response accounting.
 import copy
+import math
 import sys
 from pathlib import Path
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_sm_response_labels import event_labels
-from summarize_shift_sm_response import candidate_regions, response_statistics, sampling_forecast, summarize, wilson_interval
+from summarize_shift_sm_response import (benchmark_report, candidate_regions,
+    response_statistics, sampling_forecast, summarize, wilson_interval,
+    zero_success_population_upper)
+from prepare_shift_sm_prospective_benchmark import prepare_benchmark
 
 
 def event(number, pairs=(), native=1., probability=1.):
@@ -115,6 +119,105 @@ class ResponseSummaryTest(unittest.TestCase):
         self.assertTrue(forecast['response_sampling_probability_used_for_estimation'])
         summary = summarize([positive, negative])
         self.assertFalse(summary['counterfactual_sampling_includes_tails'])
+
+
+class StratifiedResponseTest(unittest.TestCase):
+    def fixture(self, unknown_pointing=False):
+        population = []
+        for number in range(1, 7):
+            positive_region = number <= 2
+            features = dict(event(number)['features'], n_incomplete_incoming_parent_paths=0,
+                n_pointing_pairs_known_muon_column=int(positive_region),
+                n_pointing_pairs_full_parent_coverage=int(positive_region),
+                n_pointing_os_pairs=int(positive_region),
+                min_parent_prefix_depth_among_pointing_pairs=0. if positive_region else None)
+            population.append(dict(gen_sha256='a'*64, event_id=[1, 1, number],
+                native_weight=2., existing_sampling_probability=.5,
+                stratum='qcd_20toinf', features=features,
+                joint=dict(n_credible_shallow_pairs=int(positive_region),
+                    n_shallow_parent_unknown_column_pairs=0,
+                    n_unknown_parent_shallow_prefix_pairs=0,
+                    n_joint_pointing_pairs=int(positive_region))))
+        if unknown_pointing:
+            row = population[2]
+            row['features'].update(n_pointing_os_pairs=1,
+                n_pointing_pairs_known_muon_column=1,
+                n_incomplete_incoming_parent_paths=1,
+                min_parent_prefix_depth_among_pointing_pairs=12.)
+            row['joint']['n_joint_pointing_pairs'] = 1
+        plan = prepare_benchmark(population, 'fixed-test', controls=dict(
+            border_pointing=1, deep_pointing=1, no_both_sides_pointing_pair=1, unknown_parent=1))
+        rows = []
+        for selected in plan['selected']:
+            number = selected['event_id'][2]
+            row = event(number, [pair()] if number == 1 else [], native=2.,
+                probability=selected['cumulative_study_probability'])
+            row.update(features=selected['features'], original_sampling_probability=.5,
+                benchmark_sampling_probability=selected['benchmark_inclusion_probability'],
+                cost=dict(sim_wall_seconds_per_event=10., cost_kind='single_event_actual'))
+            rows.append(row)
+        return population, plan, rows
+
+    def test_finite_zero_bound_matches_exhaustive_small_populations(self):
+        for population in range(1, 15):
+            for sampled in range(population+1):
+                accepted = [positive for positive in range(population+1)
+                    if (math.comb(population-positive, sampled)/math.comb(population, sampled)
+                        if population-positive >= sampled else 0.) >= .05]
+                self.assertEqual(zero_success_population_upper(population, sampled), max(accepted))
+        self.assertEqual(zero_success_population_upper(10000, 0), 10000)
+        self.assertEqual(zero_success_population_upper(10000, 10000), 0)
+        with self.assertRaises(ValueError):
+            zero_success_population_upper(5, 6)
+
+    def test_complete_cell_and_tiny_control_have_different_zero_bounds(self):
+        population, plan, rows = self.fixture()
+        result = benchmark_report(population, plan, rows)
+        cells = {cell['region']: cell for cell in result['cells']}
+        self.assertTrue(cells['credible_shallow_pointing']['complete_cell'])
+        missed = cells['no_both_sides_pointing_pair']
+        self.assertEqual(missed['targets']['both_both']['finite_cell_zero_success_upper95_positive_events'], 3)
+        self.assertFalse(result['production_policy_qualified'])
+
+    def test_native_p_and_benchmark_q_are_not_applied_twice(self):
+        population, plan, rows = self.fixture()
+        result = benchmark_report(population, plan, rows)
+        credible = next(cell for cell in result['cells'] if cell['region']=='credible_shallow_pointing')
+        self.assertEqual(credible['targets']['both_both']['weighted_pair_sum'], 4.)
+        forecast = result['planning_forecasts'][0]
+        self.assertAlmostEqual(forecast['expected_admission_fraction'], (2+.1*4)/6)
+        self.assertEqual(forecast['demoted_observed_good_BothBoth'], 0)
+        self.assertFalse(forecast['tail_statistics_improvement_qualified'])
+
+    def test_unknown_paths_keep_unit_probability_in_forecast(self):
+        original, plan, rows = self.fixture(unknown_pointing=True)
+        forecast = benchmark_report(original, plan, rows)['planning_forecasts'][0]
+        self.assertEqual(forecast['protected_or_promising_events'], 3)
+        self.assertAlmostEqual(forecast['expected_admission_fraction'], .55)
+
+    def test_unrelated_nonpointing_unknown_path_does_not_force_admission(self):
+        original, plan, rows = self.fixture()
+        original[2]['features']['n_incomplete_incoming_parent_paths'] = 1
+        for chosen in plan['selected']:
+            if chosen['event_id'][2] == 3:
+                chosen['features'] = copy.deepcopy(original[2]['features'])
+        for row in rows:
+            if row['event_id'][2] == 3:
+                row['features'] = copy.deepcopy(original[2]['features'])
+        forecast = benchmark_report(original, plan, rows)['planning_forecasts'][0]
+        self.assertEqual(forecast['protected_or_promising_events'], 2)
+
+    def test_missing_repeated_and_changed_responses_fail(self):
+        population, plan, rows = self.fixture()
+        for invalid in [rows[:-1], rows+[copy.deepcopy(rows[0])]]:
+            with self.assertRaises(ValueError):
+                benchmark_report(population, plan, invalid)
+        for field, value in [('native_weight', 7.), ('benchmark_sampling_probability', 1.),
+                             ('original_sampling_probability', 1.), ('stratum', 'qcd_1to2')]:
+            changed = copy.deepcopy(rows)
+            changed[-1][field] = value
+            with self.assertRaises(ValueError):
+                benchmark_report(population, plan, changed)
 
 
 if __name__ == '__main__':
