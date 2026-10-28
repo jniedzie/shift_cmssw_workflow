@@ -32,7 +32,112 @@ def descriptor(rows, stratum='qcd_20toinf'):
                 normalization_record=dict(full_trials=2000), output_base='/eos/original')
 
 
+def native_proposal_fixture(count=2):
+    """A complete synthetic original census with one chosen native bank per event."""
+    from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+    from shift_sm_decay_bank import choose
+    rows = [event(i+1, native=3.25+i) for i in range(count)]
+    data = bundle(rows)
+    choice = choose([0., 1.], .4, 17)
+    for row in data['authority']['events']:
+        members = [dict(index=i, seed=71+i, score=dict(score=score), GEN_sha256=str(i)*64,
+            graph_sha256='c'*64, audit_sha256='e'*64, material_features_sha256='f'*64,
+            base_kernel='native_ordinary', lifetime_density_ratio=1., lifetime_correction=1.)
+            for i, score in enumerate([0., 1.])]
+        bank = dict(schema='shift-finite-decay-bank-v1', size=2, base_kernel='native_ordinary',
+            same_original_event_id=row['event_id'], members=members, control_fraction=.4,
+            selection_seed=17, selection=choice, new_original_exposure=0,
+            selected_GEN_sha256=members[choice['index']]['GEN_sha256'],
+            one_reconstructed_state_per_original=True, raw_original_GEN_sha256='a'*64,
+            material_survival_correction_applied=False)
+        density = 2*choice['probabilities'][choice['index']]
+        row.update(proposal_kind='importance', proposal_density_ratio=density,
+                   proposal_correction=1./density, native_decay_bank=bank,
+                   bank_record=dict(sha256='f'*64, size=2, base_kernel='native_ordinary',
+                       selected_index=choice['index'], selected_probability=.8,
+                       selection_correction=choice['selection_correction']))
+    ledger = common.prepare_default_selection(data)
+    # A declared synthetic p=.4 makes confusion with bank s_i=.8 visible.
+    for row in ledger['events']:
+        row.update(admitted=True, sampling_probability=.4, sampling_gen_weight=row['native_weight']/.4,
+                   proposal_gen_weight=row['native_weight']/.4*row['proposal_correction'])
+    source = descriptor(rows)
+    source.update(decay_proposal=dict(schema=common.DECAY_PROPOSAL_SCHEMA),
+        normalization_record=dict(source_id='hard-source-1', gen_sha256='a'*64,
+            denominator_kind='fixed_source_trials', full_source_trials=2000, saved_events=count,
+            generator_profile=DEFERRED_CHARM_PROFILE, source_family='qcd_ordinary',
+            decay_dependent_filter=False))
+    return source, ledger
+
+
 class ProductionSelectionTests(unittest.TestCase):
+    def test_native_bank_keeps_original_weight_inclusion_and_choice_separate(self):
+        source, ledger = native_proposal_fixture()
+        bound = common.bind_source(source, ledger)
+        rows, exposures = common.selected_decay_proposals(bound, [1])
+        self.assertEqual(bound['weights'], source['weights'])
+        self.assertEqual(bound['normalization_record'], source['normalization_record'])
+        self.assertEqual(rows[0]['sampling_probability'], .4)
+        self.assertEqual(rows[0]['native_bank']['selected_probability'], .8)
+        self.assertEqual(rows[0]['sampling_gen_weight'], source['weights'][1]/.4)
+        self.assertEqual(rows[0]['proposal_gen_weight'], source['weights'][1]/.4/1.6)
+        self.assertEqual(exposures[0]['full_source_trials'], 2000)
+        self.assertEqual(len(bound['decay_proposal']['events']), 2)
+        # Compact authority retains no auxiliary GEN payload or repeated full bank.
+        self.assertNotIn('native_decay_bank', rows[0])
+
+    def test_native_bank_binding_rejects_incomplete_or_wrong_graph_and_model(self):
+        source, ledger = native_proposal_fixture()
+        for change in ('missing_member', 'wrong_graph', 'bad_member_density', 'wrong_source',
+                       'filtered', 'forced443', 'wrong_pin'):
+            bad_source, bad_ledger = copy.deepcopy(source), copy.deepcopy(ledger)
+            bank = bad_ledger['events'][0]['native_decay_bank']
+            if change == 'missing_member': bank['members'].pop()
+            elif change == 'wrong_graph': bank['members'][1]['graph_sha256'] = 'd'*64
+            elif change == 'bad_member_density': bank['members'][0]['lifetime_correction'] = .5
+            elif change == 'wrong_source': bank['raw_original_GEN_sha256'] = 'd'*64
+            elif change == 'filtered': bad_source['normalization_record']['decay_dependent_filter'] = True
+            elif change == 'wrong_pin': bad_ledger['events'][0]['bank_record']['selected_index'] = 0
+            else: bad_source['normalization_record']['generator_profile'] = 'ordinary'
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                common.bind_source(bad_source, bad_ledger)
+
+    def test_worker_authority_requires_full_census_exact_p_and_single_correction(self):
+        source, ledger = native_proposal_fixture()
+        bound = common.bind_source(source, ledger)
+        for change in ('census', 'weight', 'inclusion', 'double_factor', 'mixture', 'GEN', 'exposure'):
+            changed = copy.deepcopy(bound)
+            contract = changed['decay_proposal']
+            if change == 'census': contract['events'].pop()
+            elif change == 'weight': contract['events'][0]['native_weight'] *= 2
+            elif change == 'inclusion': contract['events'][0]['sampling_probability'] = .8
+            elif change == 'double_factor': contract['events'][0]['proposal_gen_weight'] /= 1.6
+            elif change == 'mixture': contract['events'][0]['proposal_kind'] = '443_mixture'
+            elif change == 'GEN': changed['gen_sha256'] = 'd'*64
+            else: contract['source_exposure']['full_source_trials'] += 1
+            contract['authority_sha256'] = common.checksum({k:v for k,v in contract.items() if k != 'authority_sha256'})
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                common.selected_decay_proposals(changed)
+        with self.assertRaisesRegex(ValueError, 'repeated or unadmitted'):
+            common.selected_decay_proposals(bound, [0, 0])
+        with self.assertRaisesRegex(ValueError, 'repeated or unadmitted'):
+            common.selected_decay_proposals(bound, [True])
+        changed = copy.deepcopy(bound)
+        changed['decay_proposal']['events'][0]['proposal_draw_id'] = 'another-draw'
+        with self.assertRaisesRegex(ValueError, 'authority changed'):
+            common.selected_decay_proposals(changed)
+
+    def test_optional_identity_rows_use_the_same_separate_contract(self):
+        source, ledger = native_proposal_fixture()
+        row = ledger['events'][0]
+        row.pop('native_decay_bank')
+        row.pop('bank_record')
+        row.update(proposal_kind='ordinary', proposal_density_ratio=1., proposal_correction=1.,
+                   proposal_gen_weight=row['sampling_gen_weight'])
+        rows, _ = common.selected_decay_proposals(common.bind_source(source, ledger))
+        self.assertEqual(rows[0]['proposal_gen_weight'], rows[0]['sampling_gen_weight'])
+        self.assertIsNone(common.selected_decay_proposals(descriptor([event()])))
+
     def test_default_without_override_is_shared_and_reproducible(self):
         census, authority = inputs([event()])
         first = admission.prepare_selection(census, authority)

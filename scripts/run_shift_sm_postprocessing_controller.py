@@ -24,6 +24,11 @@ def descriptor_hashes(source):
 
 def compact_source(source):
     selected = selected_rows(source)
+    if source.get('decay_proposal') is not None:
+        # The optional authority covers rejected originals as well as selected rows.
+        keys = ('event_ids', 'weights', 'selected_indices', 'sampling_probabilities', 'gen_sha256',
+                'normalization_record', 'sampling', 'production_selection', 'decay_proposal')
+        return json.loads(json.dumps({key: source[key] for key in keys}, allow_nan=False))
     return dict(event_ids=[r['event_id'] for r in selected],
                 weights=[r['native_weight'] for r in selected],
                 selected_indices=list(range(len(selected))),

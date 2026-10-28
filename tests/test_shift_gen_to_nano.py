@@ -12,6 +12,7 @@ import subprocess
 from contextlib import redirect_stdout
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tea_shift_cmssw/utils'))
 import run_shift_gen_to_nano as worker
 import run_dark_photon_detector as signal_runner
 
@@ -21,6 +22,34 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_optional_proposal_is_validated_before_detector_processing(self):
+        from test_shift_production_selection import native_proposal_fixture
+        from shift_production_selection import bind_source
+        source, ledger = native_proposal_fixture()
+        bound = bind_source(source, ledger)
+        rows, exposures = worker.prepare_decay_annotation(bound, [1])
+        self.assertEqual(rows[0]['sampling_probability'], .4)
+        self.assertEqual(rows[0]['native_bank']['selected_probability'], .8)
+        self.assertEqual(exposures[0]['full_source_trials'], 2000)
+        bound['decay_proposal']['events'].pop()
+        with self.assertRaisesRegex(ValueError, 'authority changed'):
+            worker.prepare_decay_annotation(bound, [1])
+        self.assertIsNone(worker.prepare_decay_annotation({}, [0]))
+
+    def test_weight_finalization_orders_annotation_before_final_audit(self):
+        from types import SimpleNamespace
+        calls = []
+        annotator = SimpleNamespace(annotate_proposal_weights=lambda *args, **kwargs:
+            calls.append(('proposal', kwargs['expected_nano_sha256'])) or {'exactly_once': True})
+        with patch.object(worker, 'add_sampling_fields', side_effect=lambda *args: calls.append(('detector',))), \
+                patch.object(worker, 'sha', return_value='f'*64), \
+                patch.object(worker, 'audit_nano', side_effect=lambda *args: calls.append(('audit',)) or {'events': 1}), \
+                patch.dict(sys.modules, {'shift_event_weights': annotator}):
+            audit, annotation = worker.finalize_nano_weights('nano.root', [], [.4], ([], []))
+        self.assertEqual(calls, [('detector',), ('proposal', 'f'*64), ('audit',)])
+        self.assertEqual(audit, {'events': 1})
+        self.assertEqual(annotation, {'exactly_once': True})
+
     def test_predefined_transport_requires_explicit_physical_point_and_mass_support(self):
         point = dict(schema='shift-predefined-dark-photon-transport-v1', mass_gev=.3,
                      proper_ctau_mm=58.55432679904731, generated_mass_support_gev=[.2999997, .3000003])

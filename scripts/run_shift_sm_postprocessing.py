@@ -204,6 +204,9 @@ def exposure(sources, stratum):
 
 
 def selected_rows(source):
+    if source.get('decay_proposal') is not None:
+        from shift_production_selection import selected_decay_proposals
+        return selected_decay_proposals(source)[0]
     indices, probabilities = source['selected_indices'], source['sampling_probabilities']
     if len(indices) != len(probabilities) or len(set(indices)) != len(indices):
         raise ValueError('Invalid frozen selected indices')
@@ -216,12 +219,108 @@ def selected_rows(source):
     return rows
 
 
-def inspect_nano(path, expected):
+def histogram_weight_branch(sources):
+    """Require an explicit homogeneous contract, never guess from ROOT branches."""
+    modes = {source.get('decay_proposal') is not None for source in sources if selected_rows(source)}
+    if len(modes) > 1:
+        raise ValueError('Legacy and proposal sources require separate publication snapshots')
+    return 'shiftProposalGenWeight' if modes == {True} else 'shiftSamplingGenWeight'
+
+
+def _proposal_exposures(rows, expected):
+    """Read full denominators from the frozen descriptor, never selected counts."""
+    keys = {(row['source_id'], row['original_source_sha256']) for row in rows}
+    return [expected[key] for key in sorted(keys)]
+
+
+def validate_proposal_annotation(annotation, rows, exposures):
+    from shift_event_weights import WEIGHT_POLICY, validate_proposal_rows
+    from shift_material_preselection import checksum, sha256
+    validate_proposal_rows(rows, exposures)
+    expected_ids = [row['event_id'] for row in rows]
+    if (annotation.get('weight_policy') != WEIGHT_POLICY
+            or annotation.get('weight_branch') != 'shiftProposalGenWeight'
+            or annotation.get('original_event_ids') != expected_ids
+            or annotation.get('events') != len(rows)
+            or annotation.get('event_authority_sha256') != checksum(rows)
+            or annotation.get('source_exposures') != exposures
+            or any(annotation.get(key) is not True for key in
+                   ('one_draw_per_original', 'native_weights_unchanged', 'detector_probability_unchanged'))
+            or type(annotation.get('decay_correction_application_count')) is not int
+            or annotation['decay_correction_application_count'] != 1
+            or annotation.get('material_survival_correction_applied') is not False):
+        raise ValueError('Nano proposal annotation differs from its exact frozen event/exposure authority')
+    if annotation.get('schema') == 'shift-decay-proposal-weight-annotation-v1':
+        sha256(annotation['input_nano_sha256'], 'pre-annotation Nano')
+    elif annotation.get('schema') == 'shift-native-proposal-merged-annotations-v1':
+        by_id = {tuple(row['event_id']): row for row in rows}
+        exposure_map = {(row['source_id'], row['original_source_sha256']): row for row in exposures}
+        covered = []
+        for member in annotation.get('members', []):
+            original = member['annotation']
+            if original.get('schema') != 'shift-decay-proposal-weight-annotation-v1':
+                raise ValueError('Only original worker annotations may enter a proposal merge')
+            sha256(member['upstream_Nano_sha256'], 'original annotated Nano')
+            identities = original['original_event_ids']
+            if any(tuple(identity) not in by_id for identity in identities):
+                raise ValueError('Merged annotation contains an unknown original')
+            subset = [by_id[tuple(identity)] for identity in identities]
+            validate_proposal_annotation(original, subset, _proposal_exposures(subset, exposure_map))
+            covered.extend(identities)
+        if covered != expected_ids:
+            raise ValueError('Merged annotation omits, repeats or reorders original event authority')
+    else:
+        raise ValueError('Unsupported Nano proposal annotation')
+
+
+def combine_proposal_annotations(paths, expected, exposures):
+    """Normalize only the known string key on audited scratch copies for hadd."""
+    import ROOT
+    from shift_event_weights import METADATA_KEY, WEIGHT_POLICY
+    from shift_material_preselection import checksum
+    from shift_nano_integrity import semantic_inventory
+    inventories, members, ordered = [], [], []
+    for path in paths:
+        inventory = semantic_inventory([path])
+        annotation = json.loads(inventory[METADATA_KEY]['value'])
+        rows = [expected[tuple(identity)] for identity in annotation['original_event_ids']]
+        validate_proposal_annotation(annotation, rows, _proposal_exposures(rows, exposures))
+        if annotation['schema'] != 'shift-decay-proposal-weight-annotation-v1':
+            raise ValueError('Ordinary postprocessing expects original worker Nano inputs')
+        inventories.append(inventory)
+        members.append(dict(upstream_Nano_sha256=digest(path), annotation=annotation))
+        ordered.extend(rows)
+    metadata = dict(schema='shift-native-proposal-merged-annotations-v1', events=len(ordered),
+        weight_policy=WEIGHT_POLICY, weight_branch='shiftProposalGenWeight', members=members,
+        original_event_ids=[row['event_id'] for row in ordered], event_authority_sha256=checksum(ordered),
+        source_exposures=_proposal_exposures(ordered, exposures), one_draw_per_original=True,
+        native_weights_unchanged=True, detector_probability_unchanged=True,
+        decay_correction_application_count=1, material_survival_correction_applied=False,
+        normalization_ready=False)
+    validate_proposal_annotation(metadata, ordered, metadata['source_exposures'])
+    combined = json.dumps(metadata, sort_keys=True, allow_nan=False)
+    for path, before in zip(paths, inventories):
+        file = ROOT.TFile.Open(str(path), 'UPDATE')
+        if not file or file.IsZombie():
+            raise ValueError('Cannot open proposal histogram working copy')
+        try:
+            if ROOT.TObjString(combined).Write(METADATA_KEY, ROOT.TObject.kOverwrite) <= 0:
+                raise ValueError('Cannot persist the combined proposal authority')
+        finally:
+            file.Close()
+        after = semantic_inventory([path])
+        allowed = dict(before, **{METADATA_KEY: dict(classname='TObjString', value=combined)})
+        if after != allowed:
+            raise ValueError('Combining proposal annotations changed native Nano values or metadata')
+    return metadata
+
+
+def inspect_nano(path, expected, proposal_exposures=None):
     import ROOT
     file = ROOT.TFile.Open(str(path))
     if not file or file.IsZombie() or file.TestBit(ROOT.TFile.kRecovered):
         raise ValueError('Unreadable Nano ' + str(path))
-    seen, weights = [], []
+    seen, weights, ordered = [], [], []
     try:
         tree = file.Get('Events')
         for event in tree:
@@ -233,14 +332,42 @@ def inspect_nano(path, expected):
             for field, reference in [('shiftOriginalGenWeight', native),
                     ('shiftSamplingProbability', probability), ('shiftSamplingWeight', 1 / probability),
                     ('shiftSamplingGenWeight', native / probability)]:
-                if tree.GetLeaf(field).GetTypeName() != 'Double_t':
+                if not tree.GetLeaf(field) or tree.GetLeaf(field).GetTypeName() != 'Double_t':
                     raise ValueError('Sampling fields must remain Double')
                 if not math.isclose(float(getattr(event, field)), reference, rel_tol=1e-10, abs_tol=1e-300):
                     raise ValueError('Frozen W/p changed: ' + field)
             seen.append(identity)
-            weights.append(native / probability)
+            ordered.append(row)
+            weight = native / probability
+            if proposal_exposures is not None:
+                import struct
+                leaf = tree.GetLeaf('genWeight')
+                if not leaf or leaf.GetTypeName() not in ('Float_t', 'Double_t'):
+                    raise ValueError('Native genWeight must remain a Float or Double scalar')
+                native_expected = (struct.unpack('f', struct.pack('f', native))[0]
+                                   if leaf.GetTypeName() == 'Float_t' else native)
+                if not math.isclose(float(event.genWeight), native_expected, rel_tol=2e-12):
+                    raise ValueError('Native GEN weight changed in proposal publication')
+                for field, reference in [('shiftDecayProposalDensity', row['proposal_density_ratio']),
+                        ('shiftDecayProposalWeight', row['proposal_correction']),
+                        ('shiftProposalGenWeight', row['proposal_gen_weight'])]:
+                    if (not tree.GetLeaf(field) or tree.GetLeaf(field).GetTypeName() != 'Double_t'
+                            or not math.isclose(float(getattr(event, field)), reference,
+                                                rel_tol=2e-12, abs_tol=0.)):
+                        raise ValueError('Frozen proposal weight changed: '+field)
+                weight = row['proposal_gen_weight']
+            weights.append(weight)
         if len(seen) != len(set(seen)):
             raise ValueError('Duplicate original event')
+        annotation = file.Get('ShiftDecayProposalWeights')
+        if proposal_exposures is not None:
+            if not annotation:
+                raise ValueError('Missing declared proposal annotation')
+            validate_proposal_annotation(json.loads(str(annotation.GetString())), ordered,
+                                        _proposal_exposures(ordered, proposal_exposures))
+        elif annotation or any(tree.GetBranch(name) for name in
+                ('shiftDecayProposalDensity', 'shiftDecayProposalWeight', 'shiftProposalGenWeight')):
+            raise ValueError('Undeclared proposal fields in legacy publication')
         return seen, math.fsum(weights), math.fsum(w * w for w in weights)
     finally:
         file.Close()
@@ -277,6 +404,21 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     request = read(request_path)
     assert request['schema'] in ('shift-smart-SM-postprocessing-v1','shift-production-postprocessing-v1')
     assert request['complete_source_selections_only'] is True
+    weight_branch = histogram_weight_branch(request['selected_sources'])
+    proposal_exposures = None
+    if weight_branch == 'shiftProposalGenWeight':
+        from shift_production_selection import proposal_source_exposure
+        proposal_exposures = {}
+        for source in request['selected_sources']:
+            if source.get('decay_proposal') is None:
+                continue
+            if source['normalization_record'] not in request['normalization_sources']:
+                raise ValueError('Proposal source normalization is absent from the full publication exposure')
+            authority = proposal_source_exposure(source)
+            key = authority['source_id'], authority['original_source_sha256']
+            if key in proposal_exposures:
+                raise ValueError('Repeated original proposal source exposure')
+            proposal_exposures[key] = authority
     expected = {}
     for source in request['selected_sources']:
         for row in selected_rows(source):
@@ -287,6 +429,10 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     if not expected:
         raise ValueError('A zero-selected bin needs no invented Nano file')
     metadata = exposure(request['normalization_sources'], request['stratum'])
+    if proposal_exposures is not None:
+        metadata.update(histogram_weight='native_gen_weight*decay_proposal_weight/reco_inclusion_probability',
+                        histogram_weight_branch=weight_branch,
+                        decay_correction_application_count=1, material_survival_correction_applied=False)
     work = Path.cwd()
     capsule = work / 'histogram_runtime.tar.gz'
     download(request['histogram_runtime']['path'], capsule, request['histogram_runtime']['sha256'])
@@ -304,20 +450,23 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     for i, row in enumerate(request['nano_inputs']):
         path = work / f'input_{i:05d}.root'
         download(row['path'], path, row['sha256'])
-        identities, _, _ = inspect_nano(path, expected)
+        identities, _, _ = inspect_nano(path, expected, proposal_exposures)
         if len(identities) != row['events'] or seen.intersection(identities):
             raise ValueError('Missing or repeated Nano original')
         seen.update(identities)
         inputs.append(path)
     if seen != set(expected):
         raise ValueError('Source selection is not completely reconstructed')
+    proposal_metadata = None
+    if proposal_exposures is not None:
+        proposal_metadata = combine_proposal_annotations(inputs, expected, proposal_exposures)
     merged = work / 'nano_merged.root'
     with (work / 'merge.log').open('w') as log:
         subprocess.run(hadd_command(merged, inputs, maximum_open_files),
                        check=True, stdout=log, stderr=subprocess.STDOUT, timeout=merge_timeout)
     from shift_nano_integrity import compare_all_branches
     integrity = compare_all_branches(inputs, merged)
-    _, sumw, sumw2 = inspect_nano(merged, expected)
+    _, sumw, sumw2 = inspect_nano(merged, expected, proposal_exposures)
     environment = transfer_env()
     environment.update(PYTHONHOME=str(payload / 'runtime'), ROOTSYS=str(payload / 'runtime'),
         PYTHONPATH=str(payload / 'configs') + ':' + str(payload / 'bin'),
@@ -325,7 +474,7 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         PYTHONDONTWRITEBYTECODE='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
     overlay = work / 'histogram_config.py'
     overlay.write_text("from shift_histogrammer_config import *\n"
-                       "enableBdtDiagnostics = False\nweightsBranchName = 'shiftSamplingGenWeight'\n")
+                       "enableBdtDiagnostics = False\nweightsBranchName = '"+weight_branch+"'\n")
     hist = work / 'histograms.root'
     with (work / 'histogram.log').open('w') as log:
         subprocess.run([str(payload / 'bin/shift_histogrammer'), '--config', str(overlay),
@@ -369,6 +518,8 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         full_original_exposure=metadata, original_nano_inputs=request['nano_inputs'],
         merged_nano_integrity=integrity, published=published,
         original_nano_retired=False, checked_epoch=time.time())
+    if proposal_metadata is not None:
+        receipt.update(decay_proposal_annotation=proposal_metadata, histogram_weight_branch=weight_branch)
     save(work / 'receipt.json', receipt)
     publish(work / 'receipt.json', request['sample_directory'] + '/metadata/postprocessing/' + request['snapshot_name'])
     save(work / 'result.json', receipt)

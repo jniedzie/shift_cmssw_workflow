@@ -498,6 +498,28 @@ def add_sampling_fields(path, source_rows, probabilities):
         file.Close()
 
 
+def prepare_decay_annotation(descriptor, indices):
+    """Reject incomplete proposal authority/dependencies before expensive SIM."""
+    if descriptor.get('decay_proposal') is None:
+        return None
+    from shift_production_selection import selected_decay_proposals
+    from shift_event_weights import validate_proposal_rows
+    authority = selected_decay_proposals(descriptor, indices)
+    validate_proposal_rows(*authority)
+    return authority
+
+
+def finalize_nano_weights(path, source_rows, probabilities, proposal=None):
+    """Apply separate proposal weights once, before hashing or publication."""
+    if probabilities is not None:
+        add_sampling_fields(path, source_rows, probabilities)
+    annotation = None
+    if proposal is not None:
+        from shift_event_weights import annotate_proposal_weights
+        annotation = annotate_proposal_weights(path, *proposal, expected_nano_sha256=sha(path))
+    return audit_nano(path, source_rows, probabilities), annotation
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('source', type=Path)
@@ -564,6 +586,7 @@ def main():
         raise ValueError('Invalid selected source indices')
     probabilities = (None if population_indices is None else
                      descriptor['sampling_probabilities'][args.skip:args.skip + args.count])
+    proposal = prepare_decay_annotation(descriptor, indices)
     work = Path.cwd()
     report = {'schema': 'shift-gen-to-nano-receipt-v1', 'complete': False,
               'job': args.job, 'source_descriptor_sha256': sha(args.source),
@@ -587,6 +610,10 @@ def main():
         report.update(source_indices=indices, sampling_probabilities=probabilities,
                       sampling_plan_sha256=descriptor['sampling']['plan_sha256'],
                       sampling_weight_convention='Native genWeight unchanged; use shiftSamplingGenWeight=W/p with original full-GEN normalization.')
+    if proposal is not None:
+        report['decay_proposal_authority_sha256'] = descriptor['decay_proposal']['authority_sha256']
+        report['histogram_weight_branch'] = 'shiftProposalGenWeight'
+        report['proposal_weight_convention'] = 'Native W and reconstruction p unchanged; histogram weight is W/p times the separate native-bank correction once.'
     started = time.monotonic()
     published_receipt = False
     try:
@@ -689,9 +716,10 @@ def main():
                 remove_consumed_input(input_file, output, report)
             progress(report, tiers[stage]+'_VALIDATED', validated)
             input_file = output
-        if probabilities is not None:
-            add_sampling_fields(input_file, before, probabilities)
-        report['nano'] = audit_nano(input_file, before, probabilities)
+        report['nano'], annotation = finalize_nano_weights(input_file, before, probabilities, proposal)
+        if annotation is not None:
+            report['decay_proposal_annotation'] = annotation
+            report['proposal_corrected_sumw'] = math.fsum(row['proposal_gen_weight'] for row in proposal[0])
         report['source_events'] = before
         report['complete'] = True
         report['wall_seconds'] = time.monotonic() - started
