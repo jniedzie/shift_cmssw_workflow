@@ -852,6 +852,17 @@ class AggregateSubmission(unittest.TestCase):
 
 
 class AggregateDescription(unittest.TestCase):
+    def test_main_aggregate_freezes_its_isolated_postprocessing_import(self):
+        import shutil, subprocess, os
+        scripts=Path(controller.__file__).parent
+        helpers=controller.aggregate_helper_names(dict(tools=str(scripts),main_histogrammer={}))
+        self.assertIn('run_shift_sm_postprocessing.py',helpers)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            for name in helpers:shutil.copy2(scripts/name,root/name)
+            environment=dict(os.environ);environment.pop('PYTHONPATH',None)
+            subprocess.run([sys.executable,'-c','import aggregate_dark_photon_samples; from run_shift_sm_postprocessing import download,publish,hadd_command,validate_dimuon_histograms'],cwd=root,env=environment,check=True)
+
     def test_standalone_aggregate_policy_is_sealed_and_preserves_other_requirements(self):
         for requirement in ('(TARGET.OpSysMajorVer == 9)', '(TARGET.Memory >= 4000)'):
             with self.subTest(requirement=requirement), tempfile.TemporaryDirectory() as temporary:

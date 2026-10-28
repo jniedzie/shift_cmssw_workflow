@@ -894,6 +894,8 @@ def aggregate_helper_names(config):
     """Freeze the model's closure from its own physics tools, including imports."""
     helpers = ['aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
                'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py']
+    if config.get('main_histogrammer') is not None:
+        helpers.append('run_shift_sm_postprocessing.py')
     if config.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         from run_dark_photon_senscalc_gen import SOURCES
         helpers=list(dict.fromkeys([*helpers,*SOURCES,'run_shift_sm_postprocessing.py']))
@@ -1142,7 +1144,7 @@ def retired_aggregate_attempt(config, directory, point, record):
         removed_failed_hold=False
         if native.get('JobStatus')==3:
             held=proof.get('original_held_native_ad',{})
-            removed_failed_hold=(proof.get('failure_kind')=='GEN_ledger_log_path_relocation'
+            removed_failed_hold=(proof.get('failure_kind') in ('GEN_ledger_log_path_relocation', 'missing_main_histogram_helper')
                 and held.get('JobStatus')==5 and held.get('ExitCode')==1
                 and held.get('ExitBySignal') is False
                 and all(held.get(key)==native.get(key) for key in
