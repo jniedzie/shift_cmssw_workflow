@@ -4,12 +4,48 @@ import math
 from pathlib import Path
 import sys
 import unittest
+import random
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import dark_photon_bremsstrahlung as model
 
 
 class PublishedBremsstrahlung(unittest.TestCase):
+    def test_analytic_importance_bound_covers_resonances_variations_and_transverse_tails(self):
+        rng=random.Random(1778)
+        for mass in (.22,.7,.78,.9,1.019,1.4,1.8):
+            for scale,variation in ((.5,'Lower'),(1.,'Central'),(2.,'Upper')):
+                sampler=model.SourceSampler(model.sampling_profile(mass,lambda_p_gev=scale,variation=variation))
+                for left,right,bound in sampler.cells:
+                    for u in (1.e-12,.01,.1,.5,.9,1-1.e-12,rng.random()):
+                        _,_,g=sampler.coordinates(left+(right-left)*rng.random(),u)
+                        self.assertLessEqual(g,bound)
+
+    def test_weighted_and_unweighted_source_reproduce_independent_rate_and_boost(self):
+        sampler=model.SourceSampler(model.sampling_profile(.7))
+        rows=[];weights=[];boosts=[]
+        for trial in range(1,30001):
+            c=sampler.candidate(trial,771,26.004691746871956)
+            rows.append(dict(trial=trial,candidates=[c]))
+            weights.append(c['weight_over_epsilon_squared'])
+            boosts.append(math.hypot(*c['p4'][1:])/.7)
+            self.assertLess(c['p4'][3],0.)
+            self.assertAlmostEqual((c['p4'][0]-math.hypot(*c['p4'][1:]))*(c['p4'][0]+math.hypot(*c['p4'][1:])),.7**2,places=6)
+        mean=math.fsum(weights)/len(weights)
+        error=math.sqrt(math.fsum((w-mean)**2 for w in weights)/(len(weights)*(len(weights)-1)))
+        # Independent adaptive dpT dz quadrature, recorded before adding this sampler.
+        reference=1293147119.834457/(26.004691746871956*1.e9)
+        self.assertLess(abs(mean-reference),5*error)
+        from run_dark_photon_senscalc_gen import unweight
+        selected,_=unweight(rows,772,sampler.coefficient_envelope)
+        sample=[math.hypot(*c['p4'][1:])/.7 for c in selected]
+        self.assertGreater(len(sample),1000)
+        average=math.fsum(sample)/len(sample)
+        se=math.sqrt(math.fsum((x-average)**2 for x in sample)/(len(sample)*(len(sample)-1)))
+        self.assertLess(abs(average-6637.79),5*se)
+        with self.assertRaisesRegex(ValueError,'technical unweighting bound'):
+            sampler.candidate(1,771,24.)
+
     def test_author_ancillary_values_and_senscalc_complex_log_interpolation(self):
         # arXiv:2409.09123 ancillary table, also shipped unchanged by SensCalc.
         f1,f2=model.form_factors(.7)
