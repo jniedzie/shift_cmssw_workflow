@@ -47,7 +47,9 @@ def closed_sources(sources, nanos):
         if len(paths) != len(set(paths)):
             raise ValueError('Duplicate Nano in closed-source census')
         count = sum(r['events'] for r in rows)
-        expected = len(source['selected']['event_ids'])
+        selection = source['selected']
+        expected = len(selection['selected_indices'] if selection.get('decay_proposal') is not None
+                       else selection['event_ids'])
         if count > expected:
             raise ValueError('Nano source over-coverage')
         if count == expected:
@@ -114,7 +116,7 @@ def snapshot(root, config, stratum, sources):
     sources = sorted(sources, key=lambda s: s['normalization']['source_id'])
     normalizations = [s['normalization'] for s in sources]
     exposure(normalizations, stratum)
-    identities = [tuple(e) for s in sources for e in s['selected']['event_ids']]
+    identities = [tuple(row['event_id']) for source in sources for row in selected_rows(source['selected'])]
     if len(identities) != len(set(identities)):
         raise ValueError('Repeated selected original between source cohorts')
     inputs = [r for s in sources for r in s['nano_inputs']]

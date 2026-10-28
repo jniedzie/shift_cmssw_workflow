@@ -13,7 +13,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tea_shift_cmssw/utils'))
 from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command, validate_dimuon_histograms
-from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update
+from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update, snapshot
 from run_shift_smart_sm_controller import postprocessing_charge
 from run_shift_smart_sm_source import accepted_class_authority
 import run_shift_smart_sm_controller as main_controller
@@ -217,6 +217,51 @@ class PostprocessingTest(unittest.TestCase):
                           closed_sources(sources, nanos)['jpsi_5to10']], ['b'])
         nanos.append(dict(source_descriptor_sha256='a', path='two.root', events=1))
         self.assertEqual(len(closed_sources(sources, nanos)['jpsi_5to10']), 2)
+
+    def test_full_census_proposal_closes_only_its_frozen_admitted_count(self):
+        source, ledger = native_proposal_fixture(3)
+        ledger['events'][1]['admitted'] = False
+        bound = bind_source(source, ledger)
+        selected = compact_source(bound)
+        self.assertEqual(len(selected['event_ids']), 3)
+        self.assertEqual(selected['selected_indices'], [0, 2])
+        normalization = dict(source['normalization_record'], stratum=source['stratum'], sigma_nd_pb=123.)
+        cached = dict(descriptor_hashes=['frozen'], normalization=normalization, selected=selected)
+        nanos = [dict(source_descriptor_sha256='frozen', path=f'nano{i}.root', events=1) for i in range(3)]
+        self.assertFalse(closed_sources([cached], nanos[:1]))
+        complete = closed_sources([cached], nanos[:2])[source['stratum']]
+        self.assertEqual(len(complete), 1)
+        self.assertEqual(complete[0]['nano_inputs'], nanos[:2])
+        self.assertEqual(complete[0]['normalization'], normalization)
+        self.assertEqual(exposure([complete[0]['normalization']], source['stratum'])['full_source_sumw'], 2000)
+        config = dict(campaign='synthetic', histogram_runtime=dict(path='runtime', sha256='a'*64),
+            worker_publication_bound_bytes=1000000, output_base='/eos/synthetic',
+            worker_template='initialdir = @DIRECTORY@\nrequest_sha = @REQUEST_SHA@\n')
+        with tempfile.TemporaryDirectory() as directory:
+            task = snapshot(Path(directory), config, source['stratum'], complete)
+            self.assertEqual(task['events'], 2)
+            request = json.loads((Path(task['directory'])/'request.json').read_text())
+            self.assertEqual(len(request['selected_sources'][0]['event_ids']), 3)
+            self.assertEqual(request['selected_sources'][0]['selected_indices'], [0, 2])
+            self.assertEqual(request['normalization_sources'], [normalization])
+        with self.assertRaisesRegex(ValueError, 'over-coverage'):
+            closed_sources([cached], nanos)
+
+    def test_zero_admitted_proposal_closes_without_losing_full_original_exposure(self):
+        source, ledger = native_proposal_fixture(3)
+        for row in ledger['events']: row['admitted'] = False
+        selected = compact_source(bind_source(source, ledger))
+        self.assertEqual(len(selected['event_ids']), 3)
+        self.assertEqual(selected['selected_indices'], [])
+        normalization = dict(source['normalization_record'], stratum=source['stratum'], sigma_nd_pb=123.)
+        cached = dict(descriptor_hashes=['zero'], normalization=normalization, selected=selected)
+        complete = closed_sources([cached], [])[source['stratum']]
+        self.assertEqual(complete[0]['nano_inputs'], [])
+        self.assertEqual(complete[0]['selected']['event_ids'], source['event_ids'])
+        self.assertEqual(exposure([complete[0]['normalization']], source['stratum'])['full_source_sumw'], 2000)
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertIsNone(snapshot(Path(directory), {}, source['stratum'], complete))
+            self.assertFalse(list(Path(directory).iterdir()))
 
     def test_selected_weights_use_selected_position_probability(self):
         rows = selected_rows(dict(event_ids=[[1, 1, 1], [1, 1, 2]], weights=[3., 7.],
