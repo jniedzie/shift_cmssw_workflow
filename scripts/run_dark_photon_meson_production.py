@@ -2670,7 +2670,24 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
                 or sum(forecasts.values())!=gate['total_meson_forecast_bytes']):
             raise ValueError('Bulk storage forecast does not cover every fixed source batch')
         published=(state or {}).get('batches',{})
-        additional=sum(value for batch,value in forecasts.items() if not published.get(batch,{}).get('published'))
+        allowed = set(gate.get('allowed_batches',forecasts))
+        if not allowed <= set(forecasts) or not {b['batch'] for b in config['batches'] if b.get('operational_canary',False)} <= allowed:
+            raise ValueError('Bulk admission subset lost its qualified controls')
+        additional=sum(value for batch,value in forecasts.items() if batch in allowed and not published.get(batch,{}).get('published'))
+        if config.get('automatic_bulk_admission',{}).get('schema') == 'shift-dp-reference-response-admission-v1':
+            # A complete source has already paid quota even while a cumulative
+            # histogram merge waits. Credit only its sealed independent readback.
+            observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
+            live = durable.jobs(config,directory_condition(Path(config['directory'])))
+            additional = sum(value for name,value in forecasts.items() if name in allowed)
+            for batch in config['batches']:
+                entry = published.get(batch['batch'],{})
+                proof = entry.get('primitive_histograms')
+                prefix = str(batch_directory(config,batch))
+                if (batch['batch'] in allowed and proof
+                        and not any(row.get('Iwd','') == prefix or row.get('Iwd','').startswith(prefix+'/') for row in live)
+                        and durable.meson_published_batch(config['directory'],batch,proof,observed)):
+                    additional -= forecasts[batch['batch']]
     accounting = None
     if reviewed:
         import shift_condor_native as native
@@ -3002,6 +3019,11 @@ def publish_batch(config, state, batch):
             row=plan['points'][0],output=Path(plan['points'][0]['final_output_base'])),transport)
         if result is None:
             return None
+        entry = state.setdefault('batches',{}).setdefault(batch['batch'],{})
+        primitive = dict(result,batch=batch['batch'],published_utc=datetime.now(timezone.utc).isoformat())
+        if entry.get('primitive_histograms') is None:
+            entry['primitive_histograms'] = primitive
+            durable.save(Path(config['directory'])/'state.json',state)
         result=cumulative_result(config,state,batch,transport,result)
         if result is None:
             return None
@@ -3555,12 +3577,24 @@ def step(config,state):
     if config.get('automatic_bulk_admission') is not None and (config.get('regroup_complete_points') is not True or canary_ready):
         from dark_photon_automatic_admission import maybe_create_bulk_gate
         state['automatic_bulk_admission'] = maybe_create_bulk_gate(config, state)
+        gate = state['automatic_bulk_admission']
+        if gate and 'allowed_batches' in gate:
+            allowed_batches = set(gate['allowed_batches'])
+            canary_ready = True  # Same-point external full-chain controls own this gate.
+            state['canary_published'] = True
+            for row in config['batches']:
+                if row['batch'] not in allowed_batches:
+                    entry = entries[row['batch']]
+                    if entry.get('source_cluster'):
+                        raise ValueError('Cannot withdraw an already submitted source bank')
+                    entry.update(not_admitted=True,stage='unsubmitted_after_measured_allocation',
+                        admission_gate_sha256=durable.sha(config['bulk_storage_gate']),source_exposure=0)
     observation=durable.quota(config) if config.get('batch_native_queries') is not True else None
     if config.get('source_admission_closed') is True:
         state['source_admission_closed']=True
     for batch in config['batches']:
         entry=entries[batch['batch']]
-        if entry.get('source_cluster'):
+        if entry.get('source_cluster') or entry.get('not_admitted'):
             continue
         if config.get('source_admission_closed') is True:
             continue
@@ -3580,7 +3614,7 @@ def step(config,state):
         entry.update(source_cluster=receipt['cluster'],stage='GEN')
         durable.save(Path(config['directory'])/'state.json',state)
         source_active+=1
-    state['complete']=all(item.get('published') for item in entries.values())
+    state['complete']=all(item.get('published') or item.get('not_admitted') for item in entries.values())
     return state
 
 

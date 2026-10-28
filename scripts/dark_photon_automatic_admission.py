@@ -116,6 +116,125 @@ def fullchain_evidence(config, batch, entry, transport_factory=None):
         events=row['events'], full_gen_events=row['full_gen_events'], histogram_sumw=expected_sumw)
 
 
+def reference_response(config, authority):
+    """Use an exact completed same-point main-histogram control, without replay."""
+    from watch_dark_photon_production import EosRpc, completed_histogram
+    from run_shift_sm_postprocessing import download
+    import ROOT
+    pin = authority['configuration']
+    previous = read(pin['path'])
+    if sha(pin['path']) != pin['sha256']:
+        raise ValueError('Reference response configuration changed')
+    def content(value):
+        if isinstance(value,dict):
+            if 'path' in value and 'sha256' in value:
+                return dict(sha256=value['sha256'])
+            return {k:content(v) for k,v in value.items()}
+        if isinstance(value,list):
+            return [content(v) for v in value]
+        return value
+    for key in ('production_mechanism', 'reference_source', 'jaw_source_profile'):
+        if content(previous[key]) != content(config[key]):
+            raise ValueError('Reference response changes source physics: '+key)
+    if (sha(previous['model_card']) != sha(config['model_card'])
+            or previous['detector_runtime']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']
+            or read(previous['main_histogrammer']['path'])['runtime'] != read(config['main_histogrammer']['path'])['runtime']):
+        raise ValueError('Reference response changes model, detector or histogram runtime')
+    batch, = [b for b in previous['batches'] if b['batch'] == authority['batch']]
+    matches = [b for b in config['batches'] if b['point'] == batch['point']]
+    if not matches or any(any(b[k] != batch[k] for k in ('mass_gev','epsilon','target_mean_lab_flight_m')) for b in matches):
+        raise ValueError('Reference response differs from requested physical point')
+    directory = Path(previous['directory'])/'batches'/batch['batch']/'production'
+    if not (directory/'completed_points'/(batch['point']+'.json')).exists():
+        return None
+    plan = read(directory/'plan.json'); row, = plan['points']
+    transport = EosRpc('root://eosuser.cern.ch', directory/'automatic_admission_readback')
+    ready = completed_histogram(dict(source=dict(directory=directory,campaign=plan['campaign'],
+        plan_sha256=sha(directory/'plan.json'),seal_sha256=sha(directory/'seal.json')),
+        row=row,output=Path(row['final_output_base'])),transport)
+    if ready is None:
+        return None
+    report = read(ready['point_receipt_path']); marker = report['main_histograms']
+    original = read(directory/'gen_inventory.json')['points'][batch['point']]
+    exposure = marker['full_original_exposure']
+    if (marker.get('complete') is not True or marker['events'] != row['events']
+            or exposure['full_source_sumw'] != original['events']
+            or original['native_sumw'] != original['events'] or original['native_sumw2'] != original['events']
+            or len(exposure['original_sources']) != 1
+            or exposure['original_sources'][0]['gen_sha256'] != original['gen_sha256']
+            or marker['merged_nano_integrity'].get('complete') is not True
+            or plan['detector_runtime']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']):
+        raise ValueError('Reference response lost full GEN, exact runtime or Nano integrity')
+    with tempfile.TemporaryDirectory(prefix='reference-response-',dir=os.environ.get('_CONDOR_SCRATCH_DIR','/tmp')) as temporary:
+        path = Path(temporary)/'hist.root'
+        download(ready['histogram_path'], path, ready['histogram_sha256'])
+        root = ROOT.TFile.Open(str(path))
+        try:
+            h = root.Get('event/Event_nShiftDimuonVertexBoth-Both')
+            if (not h or h.GetEntries() != row['events'] or h.GetBinContent(0) != 0
+                    or h.GetXaxis().GetBinUpEdge(1) != 1 or h.GetSumw2N() == 0):
+                raise ValueError('Response histogram does not count the complete weighted event cohort')
+            sumw = h.Integral(2,h.GetNbinsX()+1)
+            sumw2 = math.fsum(h.GetBinError(i)**2 for i in range(2,h.GetNbinsX()+2))
+        finally:
+            root.Close()
+    source = read(directory.parent/'source_status.json')
+    output_bytes = marker['published']['merged_nano']['bytes'] + source['publication']['bytes'] + source['metadata_archive']['bytes']
+    overhead = []
+    for status in (directory/'statuses').glob('chunk_*.json'):
+        payload = read(status)['payload']
+        overhead.append(max(0,payload['publication_bytes_before_receipt']-payload['nano_bytes']))
+    if len(overhead) != len(row['chunks']):
+        raise ValueError('Reference response lacks complete per-job retained-output accounting')
+    return dict(point=batch['point'],source_collisions=batch['source_collisions'],
+        effective_passing_events=sumw*sumw/sumw2 if sumw2 else 0.,passing_sumw=sumw,passing_sumw2=sumw2,
+        output_bytes=output_bytes,selected_events=row['events'],
+        maximum_retained_metadata_bytes_per_job=max(overhead,default=0),
+        point_receipt_path=ready['point_receipt_path'],
+        point_receipt_sha256=ready['point_receipt_sha256'],histogram_sha256=ready['histogram_sha256'])
+
+
+def reference_gate(config, state, settings, forecasts):
+    """Select a finite subset of the frozen banks for the measured 500-event goal."""
+    evidence = [reference_response(config, a) for a in settings['qualified_controls']]
+    if any(row is None for row in evidence):
+        return None
+    if len({row['point'] for row in evidence}) != len(evidence):
+        raise ValueError('Reference response repeats a point')
+    allowed = {b['batch'] for b in config['batches'] if b['operational_canary']}
+    allocations = []
+    for response in evidence:
+        candidates = [b for b in config['batches'] if b['point'] == response['point']]
+        candidates.sort(key=lambda b: not b['operational_canary'])
+        if any(b['source_collisions'] != response['source_collisions'] for b in candidates):
+            raise ValueError('Response planning requires equal independent fixed-exposure banks')
+        effective = response['effective_passing_events']
+        needed = math.ceil(settings['target_effective_events']/effective) if effective > 0 else None
+        chunks = max(math.ceil(response.get('selected_events',0)/b['events_per_job'])
+                     for b in candidates) if response.get('selected_events') else 0
+        cost = math.ceil((response['output_bytes'] + chunks *
+            response.get('maximum_retained_metadata_bytes_per_job',0))*settings['cost_margin']) + 1048576
+        budget = settings['point_budget_bytes'][response['point']]
+        chosen = candidates[:needed] if needed is not None else []
+        eligible = (needed is not None and needed <= len(candidates) and needed*cost <= budget
+                    and all(forecasts[b['batch']] >= cost for b in chosen)
+                    and sum(forecasts[b['batch']] for b in chosen) <= budget)
+        if eligible:
+            allowed.update(b['batch'] for b in candidates[:needed])
+        allocations.append(dict(**response,required_banks=needed,reserved_bytes_per_bank=cost,
+            budget_bytes=budget,admitted=eligible,reason='measured_nominal_500_target' if eligible else
+            'No finite passing efficiency or measured cost exceeds the frozen point budget; only bounded controls run'))
+    gate = dict(schema='shift-meson-bulk-storage-gate-v1',complete=True,automatic_canary_admission=True,
+        all_requested_mass_GEN_audits_passed=True,worklist_sha256=sha(Path(config['directory'])/'config.json'),
+        model_card_sha256=sha(config['model_card']),per_batch_forecast_bytes=forecasts,
+        total_meson_forecast_bytes=sum(forecasts.values()),allowed_batches=sorted(allowed),
+        response_allocations=allocations,fullchain_qualification=evidence,
+        target_effective_events=settings['target_effective_events'],created_utc=datetime.now(timezone.utc).isoformat(),
+        unsubmitted_banks_have_zero_exposure=True,storage_remains_checked_before_each_admission=True)
+    store_gate(Path(config['bulk_storage_gate']),gate)
+    return gate
+
+
 def maybe_create_bulk_gate(config, state):
     settings = config.get('automatic_bulk_admission')
     if settings is None:
@@ -130,7 +249,8 @@ def maybe_create_bulk_gate(config, state):
                 or gate.get('per_batch_forecast_bytes') != settings['per_batch_forecast_bytes']):
             raise ValueError('Existing automatic bulk gate belongs to another frozen request')
         return gate
-    if settings.get('schema') != 'shift-dp-automatic-bulk-admission-v1':
+    schema = settings.get('schema')
+    if schema not in ('shift-dp-automatic-bulk-admission-v1','shift-dp-reference-response-admission-v1'):
         raise ValueError('Unknown automatic admission contract')
     forecasts = settings['per_batch_forecast_bytes']
     batches = config['batches']
@@ -138,6 +258,12 @@ def maybe_create_bulk_gate(config, state):
             or any(type(value) is not int or value <= 0 for value in forecasts.values())
             or sum(forecasts.values()) > config['maximum_meson_forecast_bytes']):
         raise ValueError('Automatic admission changed the frozen batch/storage allocation')
+    if schema == 'shift-dp-reference-response-admission-v1':
+        if (type(settings.get('target_effective_events')) is not int or settings['target_effective_events'] <= 0
+                or not 1 <= settings.get('cost_margin',0) <= 3
+                or sum(settings['point_budget_bytes'].values()) > config['maximum_meson_forecast_bytes']):
+            raise ValueError('Reference target and point budgets must stay inside the frozen allocation')
+        return reference_gate(config,state,settings,forecasts)
     entries = state.get('batches', {})
     gen_batches = [b for b in batches if b.get('gen_qualification_only')]
     expected_masses = set(config['coverage_audit']['masses_gev'])
@@ -173,6 +299,11 @@ def maybe_create_bulk_gate(config, state):
         source_qualification=sources, fullchain_qualification=chains,
         created_utc=datetime.now(timezone.utc).isoformat(),
         storage_remains_checked_before_each_admission=True)
+    store_gate(gate_path,gate)
+    return gate
+
+
+def store_gate(gate_path,gate):
     # Publish a complete gate atomically. A killed controller must not leave a
     # half-written gate that needs manual repair over the weekend.
     temporary = None
@@ -188,4 +319,3 @@ def maybe_create_bulk_gate(config, state):
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
-    return gate
