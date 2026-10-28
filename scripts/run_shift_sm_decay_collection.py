@@ -3,6 +3,7 @@
 """Check real weighted Nano, standard histograms, and original-group statistics."""
 import argparse
 from collections import defaultdict
+import gzip
 import json
 import math
 import os
@@ -255,6 +256,64 @@ def wait_for_case_results(plan,seconds):
         time.sleep(min(30.,remaining))
 
 
+def audit_bank_result(result,frozen,case_id):
+    from shift_sm_decay_bank import audit_record, muon_score
+    from run_shift_source_preparation import audit_smooth_proposal
+    pins={p['name']:p for p in result['GEN_publications']}
+    local=Path(case_id+'_bank.json');pin=pins['decay_bank.json']
+    download(pin['path'],local,pin['sha256']);record=json.loads(local.read_text())
+    choice=audit_record(record,frozen['event_id']);selected=choice['index']
+    settings=frozen['decay_bank']
+    if (record['size']!=settings['size'] or record['control_fraction']!=settings['control_fraction']
+            or record['selection_seed']!=settings['selection_seed']
+            or record['raw_original_GEN_sha256']!=frozen['original_source']['gen_sha256']):
+        raise ValueError('Bank design differs from its frozen request')
+    if pin['sha256']!=result['GEN_audit']['decay_bank']['sha256']:
+        raise ValueError('Bank record differs from its bound worker audit')
+    for member in record['members']:
+        index=member['index'];prefix=f'bank_{index:02d}_'
+        feature_pin=pins[prefix+'material_features.json.gz'];audit_pin=pins[prefix+'audit.json.gz']
+        feature_path=Path(case_id+'_'+prefix+'features.json.gz');audit_path=Path(case_id+'_'+prefix+'audit.json.gz')
+        download(feature_pin['path'],feature_path,feature_pin['sha256'])
+        download(audit_pin['path'],audit_path,audit_pin['sha256'])
+        feature_bytes=gzip.decompress(feature_path.read_bytes());audit_bytes=gzip.decompress(audit_path.read_bytes())
+        import hashlib
+        if (hashlib.sha256(feature_bytes).hexdigest()!=member['material_features_sha256']
+                or hashlib.sha256(audit_bytes).hexdigest()!=member['audit_sha256']):
+            raise ValueError('Bank compressed member changed its audited contents')
+        features=json.loads(feature_bytes);audit=json.loads(audit_bytes)
+        if features['event_id']!=frozen['event_id'] or audit['original_event_id']!=frozen['event_id']:
+            raise ValueError('Bank member has another original identity')
+        if (member['seed']!=frozen['decay_seed']+index or audit['proposal_draw_seed']!=member['seed']
+                or audit['original_full_source']!=frozen['original_source']):
+            raise ValueError('Bank member changed its seed or original source')
+        if audit['prepared_GEN_sha256']!=member['GEN_sha256']:
+            raise ValueError('Bank native audit does not bind its generated state')
+        scored=muon_score(features['muons'],{p['barcode']:p for p in features['parent_flights']})
+        reference=member['score']['pair'];actual=scored['pair']
+        same_pair=(actual is None and reference is None)
+        if actual is not None and reference is not None and actual.keys()==reference.keys():
+            same_pair=all(math.isclose(v,reference[k],rel_tol=2.e-12,abs_tol=2.e-10)
+                          if isinstance(v,float) else v==reference[k] for k,v in actual.items())
+        if (not same_pair or not math.isclose(scored['score'],member['score']['score'],rel_tol=2.e-12,abs_tol=0.)):
+            raise ValueError('Bank scores differ from actual member material/muon features')
+        audit_smooth_proposal(audit['proposal_definition'],audit['parent_barcodes'],
+            audit['sampled_proper_lifetime_mm'],audit['nominal_proper_lifetime_mm'],
+            audit['ordinary_fraction'],audit['proposal_density_ratio'],audit['proposal_correction'],
+            audit['proposal_component'],audit['selected_parent_barcodes'])
+        if (audit['proposal_density_ratio']!=member['lifetime_density_ratio']
+                or audit['proposal_correction']!=member['lifetime_correction']):
+            raise ValueError('Bank lifetime density differs from its native audit')
+    authority=result['weight_authority'];factor=record['size']*choice['probabilities'][selected]
+    if record['selected_GEN_sha256']!=pins['gen.root']['sha256']:
+        raise ValueError('Chosen bank GEN publication changed')
+    if not math.isclose(authority['proposal_density_ratio'],
+            record['members'][selected]['lifetime_density_ratio']*factor,rel_tol=2.e-12):
+        raise ValueError('Final bank weight does not include the exact choice probability once')
+    return dict(complete=True,members=record['size'],selected_member=selected,
+                all_member_lifetime_densities_and_material_scores_reread=True)
+
+
 def run(path):
     request=json.loads(Path(path).read_text());plan_path=Path(request['plan_path'])
     if digest(plan_path)!=request['plan_sha256']:raise ValueError('Pilot plan changed')
@@ -281,6 +340,8 @@ def run(path):
                     or result['original_event_id']!=frozen['event_id']):
                 raise ValueError('Missing/failed response is not a physics rejection: '+case['case_id'])
             authority=result['weight_authority'];validate_proposal_rows([authority])
+            if frozen.get('decay_bank'):
+                audit_bank_result(result,frozen,case['case_id'])
             probability=frozen.get('source_inclusion_probability',1.)
             if authority['sampling_probability']!=probability:
                 raise ValueError('Original draw probability differs from its frozen request')
@@ -324,7 +385,9 @@ def run(path):
                     for category in ['inclusive','both_both','both_both_good']},
                 GEN_direct_parent_dimuon_mass_gt20_originals=sum(any(p['mass_GeV']>20 for p in r['GEN_pairs']) for r in rows),
                 frozen_binary_sha256=hist['frozen_binary_sha256'],full_branch_merge_verified=True)
-            outputs.extend([(hist['merged'],arm+'_nano.root'),(hist['histograms'],arm+'_histograms.root')])
+            if request.get('publish_merged_nano',True):
+                outputs.append((hist['merged'],arm+'_nano.root'))
+            outputs.append((hist['histograms'],arm+'_histograms.root'))
         if sum(f.stat().st_size for f,_ in outputs)>request['reservation_bytes']-1048576:raise ValueError('Collection exceeds reservation')
         report.update(complete=True,complete_frozen_draw_collected=True,arms=summary,
             conditional_original_choice=plan.get('conditional_original_choice',True),

@@ -111,16 +111,24 @@ def freeze_tools(config, directory):
     if sha(original)!=config['base_tools']['sha256']:
         raise ValueError('Original tools capsule changed')
     replacements={name:Path(__file__).with_name(name).read_bytes() for name in
-                  ['run_shift_sm_decay_pilot.py','run_shift_sm_decay_collection.py']}
+        ['run_shift_sm_decay_pilot.py','run_shift_sm_decay_collection.py','shift_sm_decay_bank.py',
+         'shift_sm_response_features.py','shift_gen_material_features.py','shift_material_path_score.py']}
     capsule=directory/'frozen_tools.tar.gz';changed=[]
     with tarfile.open(original) as before,tarfile.open(capsule,'w:gz') as after:
+        names=set()
         for member in before:
+            names.add(member.name)
             if member.name in {'scripts/'+name for name in replacements}:
                 raw=replacements[Path(member.name).name];member=copy.copy(member)
                 member.size=len(raw);after.addfile(member,io.BytesIO(raw));changed.append(member.name)
             else:
                 after.addfile(member,before.extractfile(member) if member.isfile() else None)
-    if len(changed)!=2:
+        for name,raw in replacements.items():
+            member_name='scripts/'+name
+            if member_name not in names:
+                member=tarfile.TarInfo(member_name);member.size=len(raw);member.mode=0o644
+                after.addfile(member,io.BytesIO(raw));changed.append(member_name)
+    if len(changed)!=len(replacements):
         raise ValueError('Incomplete frozen helper replacement')
     bootstrap=Path(config['bootstrap']['path'])
     if sha(bootstrap)!=config['bootstrap']['sha256']:

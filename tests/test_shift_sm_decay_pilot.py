@@ -13,6 +13,7 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_shift_sm_decay_collection as collection
 from run_shift_sm_decay_pilot import weight_authority
 from prepare_shift_sm_decay_validation import frozen_draw, original_census
+from shift_sm_decay_bank import probabilities as bank_probabilities, choose as choose_bank, muon_score
 
 
 class GroupedStatisticsTest(unittest.TestCase):
@@ -137,6 +138,52 @@ class IndependentDrawTest(unittest.TestCase):
         audit=dict(complete=True,units=[dict(source=source,events=[dict(event_id=[1,1,1])])])
         with self.assertRaisesRegex(ValueError,'ordered events'):
             original_census(audit,dict(events=[dict(event_id=[1,1,2])]),source)
+
+
+class FiniteDecayBankTest(unittest.TestCase):
+    def test_material_ranking_uses_the_same_pair_and_counts_shared_parent_once(self):
+        import math
+        muons=[dict(barcode=i,pdg=pdg,momentum_GeV=[px,0.,-500.],
+            birth_cm=[0.,0.,14800.],energy_GeV=math.sqrt(500.**2+px**2+.106**2),
+            transport_parent_barcodes=[1],material_to_CMS_entry=dict(complete=True,column_density_g_cm2=0.))
+            for i,pdg,px in [(1,13,10.),(2,-13,-10.)]]
+        reference=muon_score(muons)
+        parents={1:dict(material=dict(complete=True,interaction_depth_proxy=2.))}
+        measured=muon_score(muons,parents)
+        self.assertAlmostEqual(measured['score']/reference['score'],math.exp(-2.))
+        self.assertFalse(measured['pair']['unknown_material_coverage'])
+        parents[1]['material']=dict(complete=False,interaction_depth_proxy=0.)
+        unknown=muon_score(muons,parents)
+        self.assertTrue(unknown['pair']['unknown_material_coverage'])
+        self.assertGreater(unknown['score'],0.)
+
+    def test_exact_two_state_enumeration_preserves_native_rate_after_bank_choice(self):
+        import itertools
+        native=[.99,.01];proposal=[.5,.5];answer=0.
+        for bank in itertools.product(range(2),repeat=3):
+            probabilities=bank_probabilities([float(x==1) for x in bank],.1)
+            bank_density=1.
+            for state in bank:bank_density*=proposal[state]
+            for index,state in enumerate(bank):
+                correction=native[state]/proposal[state]/(len(bank)*probabilities[index])
+                answer+=bank_density*probabilities[index]*correction*(state==1)
+        self.assertAlmostEqual(answer,.01,places=14)
+        self.assertEqual(bank_probabilities([0.,0.],.1),[.5,.5])
+        self.assertTrue(all(p>=.1/3 for p in bank_probabilities([0.,1.,100.],.1)))
+        self.assertEqual(choose_bank([0.,1.,100.],.1,17),choose_bank([0.,1.,100.],.1,17))
+        with self.assertRaises(ValueError):bank_probabilities([0.,1.],0.)
+
+    def test_lifetime_source_and_bank_corrections_remain_separate(self):
+        request=dict(event_id=[1,1,2],original_source=dict(source_id='synthetic',gen_sha256='a'*64),
+                     native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')
+        audit=dict(proposal_density_ratio=2.e8,proposal_correction=5.e-9,
+            decay_bank=dict(size=8,selected_probability=.5,selection_correction=.25))
+        authority=weight_authority(request,audit)
+        self.assertAlmostEqual(authority['proposal_density_ratio'],8.e8)
+        self.assertAlmostEqual(authority['proposal_gen_weight']/(3.e-9/.125*5.e-9),.25)
+        audit['decay_bank']['selection_correction']=2.
+        with self.assertRaisesRegex(ValueError,'Finite-bank'):
+            weight_authority(request,audit)
 
 
 @unittest.skipUnless(importlib.util.find_spec('ROOT') and importlib.util.find_spec('uproot'),

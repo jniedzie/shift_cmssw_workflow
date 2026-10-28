@@ -7,6 +7,7 @@ source exposure must never be added, and this entry never launches bulk work.
 """
 import argparse
 import copy
+import gzip
 import json
 import math
 import os
@@ -57,15 +58,20 @@ def install_plugins(request):
         origin=TOOLS/'plugin'/name
         require(sha(origin)==expected,'Frozen source plugin changed: '+name)
         require(not (destination/name).is_symlink(),'Refuse linked plugin replacement')
-        shutil.copyfile(origin,destination/name)
+        if not (destination/name).is_file() or sha(destination/name)!=expected:
+            shutil.copyfile(origin,destination/name)
     command(['edmPluginRefresh',str(destination)],timeout=120)
 
 
-def prepare(request):
+def prepare(request,raw_input=None):
     from DataFormats.FWLite import Events
     install_plugins(request)
     source=request['original_source'];local=Path('input.root')
-    download(source['url'],local,source['gen_sha256'])
+    if raw_input is None:
+        download(source['url'],local,source['gen_sha256'])
+    else:
+        require(sha(raw_input)==source['gen_sha256'],'Cached raw GEN differs from original')
+        os.link(raw_input,local)
     events=Events(str(local));require(int(events.size())==source['saved_events'],'Raw GEN census changed')
     events.to(request['original_index']);event=events
     from audit_shift_material_scout import identity
@@ -126,9 +132,73 @@ def prepare(request):
                 pt_GeV=math.hypot(*p4[:2])))
     audit.update(placement=placement,timing=timing,truth=truth,proposal_definition=definition,
         original_full_source=source,original_event_id=request['event_id'],new_GEN_exposure=0,
+        proposal_draw_seed=request['decay_seed'],
         conditional_original_choice=request.get('conditional_original_choice',True),
         prepared_GEN_sha256=sha('placed.root'),
-        selected_original_pion_direct_muon_pairs=pairs)
+        selected_original_pion_direct_muon_pairs=pairs,
+        stable_muons=[dict(barcode=p['barcode'],pdg=p['pdg'],momentum_GeV=p['momentum'][:3],
+            energy_GeV=p['momentum'][3],
+            birth_cm=[x/10. for x in vertices[p['production_vertex']]['position'][:3]])
+            for p in complete['particles'] if abs(p['pdg'])==13 and p['status']==1])
+    dump('gen_audit.json',audit)
+    return audit
+
+
+def prepare_bank(request):
+    from shift_sm_decay_bank import choose, muon_score, audit_record
+    from shift_gen_material_features import read_hepmc, bounded_event_features
+    from DataFormats.FWLite import Events
+    import ROOT
+    settings=request['decay_bank'];size=settings['size'];floor=settings['control_fraction']
+    require(type(size) is int and 2<=size<=32 and request['arm']=='mixture',
+            'Require a bounded mixture bank, not new source exposure')
+    root=Path.cwd();raw=root/'bank_input.root'
+    download(request['original_source']['url'],raw,request['original_source']['gen_sha256'])
+    material=settings['material']
+    require(sha(material['geometry_path'])==material['geometry_sha256'],'Bank geometry changed')
+    ROOT.TGeoManager.LockDefaultUnits(False)
+    ROOT.TGeoManager.SetDefaultUnits(ROOT.TGeoManager.kRootUnits)
+    ROOT.TGeoManager.LockDefaultUnits(True)
+    geometry=ROOT.TGeoManager.Import(material['geometry_path'])
+    require(bool(geometry),'Cannot load the registered bank geometry')
+    audits=[];records=[]
+    for index in range(size):
+        directory=root/f'bank_{index:02d}';directory.mkdir()
+        variant=copy.deepcopy(request);variant['decay_seed']=request['decay_seed']+index
+        try:
+            os.chdir(directory);audit=prepare(variant,raw)
+            event=next(iter(Events('placed.root')))
+            particles,weight,weights,units=read_hepmc(event,'shiftEventTime')
+            features=bounded_event_features(particles,request['event_id'],weight,weights,
+                geometry,material['frame'],material['event_timeout_seconds'])
+            dump('material_features.json',features)
+        finally:
+            os.chdir(root)
+        score=muon_score(features['muons'],{p['barcode']:p for p in features['parent_flights']})
+        audits.append(audit)
+        records.append(dict(index=index,seed=variant['decay_seed'],score=score,
+            GEN_sha256=audit['prepared_GEN_sha256'],audit_sha256=sha(directory/'gen_audit.json'),
+            material_features_sha256=sha(directory/'material_features.json'),
+            lifetime_density_ratio=audit['proposal_density_ratio'],
+            lifetime_correction=audit['proposal_correction']))
+    selection=choose([r['score']['score'] for r in records],floor,settings['selection_seed'])
+    selected=selection['index'];directory=root/f'bank_{selected:02d}'
+    for name in ['placed.root','gen_audit.json']:
+        shutil.copyfile(directory/name,root/name)
+    require(sha('placed.root')==records[selected]['GEN_sha256'],'Chosen GEN state changed')
+    bank=dict(schema='shift-finite-decay-bank-v1',same_original_event_id=request['event_id'],
+        size=size,control_fraction=floor,selection_seed=settings['selection_seed'],
+        members=records,selection=selection,new_original_exposure=0,
+        selected_GEN_sha256=sha('placed.root'),one_reconstructed_state_per_original=True,
+        raw_original_GEN_sha256=request['original_source']['gen_sha256'],
+        unselected_GEN_are_auxiliary_reproducible_states=True,
+        correction_kind='base_full_lifetime_f_over_q/(bank_size*conditional_choice_probability)',
+        material_survival_correction_applied=False)
+    audit_record(bank,request['event_id'])
+    dump('decay_bank.json',bank);audit=audits[selected]
+    audit['decay_bank']=dict(path='decay_bank.json',sha256=sha('decay_bank.json'),
+        size=size,selected_index=selected,selected_probability=selection['probabilities'][selected],
+        selection_correction=selection['selection_correction'])
     dump('gen_audit.json',audit)
     return audit
 
@@ -165,6 +235,16 @@ def weight_authority(request,audit):
         proposal_density_ratio=audit['proposal_density_ratio'],proposal_correction=audit['proposal_correction'],
         proposal_gen_weight=weight/probability*audit['proposal_correction'],
         proposal_kind='ordinary' if request['arm']=='ordinary' else 'importance')
+    if 'decay_bank' in audit:
+        bank=audit['decay_bank'];factor=bank['size']*bank['selected_probability']
+        require(math.isclose(bank['selection_correction'],1./factor,rel_tol=2.e-15),
+                'Finite-bank selection correction differs from its recorded choice')
+        authority.update(lifetime_density_ratio=audit['proposal_density_ratio'],
+            lifetime_correction=audit['proposal_correction'],bank_record=bank,
+            proposal_density_ratio=audit['proposal_density_ratio']*factor,
+            proposal_correction=audit['proposal_correction']/factor,
+            proposal_gen_weight=weight/probability*audit['proposal_correction']/factor,
+            proposal_kind='importance_bank')
     validate_proposal_rows([authority])
     return authority
 
@@ -199,7 +279,8 @@ def run(request,prepare_only=False):
                 arm=request['arm'],original_event_id=request['event_id'])
     dump('pilot_report.json',report)
     try:
-        audit=prepare(request);report['GEN_audit']=audit;dump('pilot_report.json',report)
+        audit=prepare_bank(request) if request.get('decay_bank') else prepare(request)
+        report['GEN_audit']=audit;dump('pilot_report.json',report)
         descriptor=copy.deepcopy(request['detector_source'])
         probability=request.get('source_inclusion_probability',1.)
         descriptor.update(gen=str(Path('placed.root').resolve()),gen_path_resolved=True,
@@ -219,11 +300,22 @@ def run(request,prepare_only=False):
         descriptor['sampling']['plan_sha256']=sha('pilot_admission_authority.json')
         report['preflight']=preflight(request,descriptor)
         report['prepared_GEN_sha256']=descriptor['gen_sha256']
+        report['weight_authority']=weight_authority(request,audit)
         if prepare_only:
             report.update(complete=True,detector_run=False,wall_seconds=time.monotonic()-started)
             dump('pilot_report.json',report);return
-        gen_publications=publish([(Path('placed.root'),'gen.root'),(Path('gen_audit.json'),'gen_audit.json')],
-                                  request['publication_directory']+'/prepared')
+        gen_outputs=[(Path('placed.root'),'gen.root'),(Path('gen_audit.json'),'gen_audit.json')]
+        if 'decay_bank' in audit:
+            gen_outputs.append((Path('decay_bank.json'),'decay_bank.json'))
+            for index in range(audit['decay_bank']['size']):
+                for local,name in [('gen_audit.json','audit.json'),('material_features.json','material_features.json')]:
+                    path=Path(f'bank_{index:02d}')/local
+                    compressed=path.with_suffix(path.suffix+'.gz')
+                    compressed.write_bytes(gzip.compress(path.read_bytes(),mtime=0))
+                    gen_outputs.append((compressed,f'bank_{index:02d}_'+name+'.gz'))
+            require(sum(path.stat().st_size for path,_ in gen_outputs)<request['reservation_bytes']//2,
+                    'GEN bank exceeds its half of the publication reservation')
+        gen_publications=publish(gen_outputs,request['publication_directory']+'/prepared')
         descriptor.update(gen=gen_publications[0]['path'])
         dump('source.json',descriptor)
         command([sys.executable,str(TOOLS/'scripts/run_shift_gen_to_nano.py'),'source.json',
