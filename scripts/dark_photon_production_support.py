@@ -12,10 +12,12 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tarfile
 import tempfile
+from datetime import datetime, timezone
 
 from dark_photon_material_selection import population, validate_nano, WEIGHT_BRANCH, merged_cutflow_sumw
 
@@ -62,6 +64,100 @@ def validate_main_detector_payload(payload,source_path,chunk):
         raise ValueError('Detector response differs from its frozen source, selected slice or Nano readback')
 
 
+def retire_main_nano_inputs(directory, row, source, request, result, settings, scratch):
+    """Retire only exact detector Nano duplicates after complete replacement.
+
+    This opt-in runs in the finalizer after all detector nodes have finished.
+    Full GEN, metadata, weights, rates and the grouped Nano remain untouched.
+    Failure leaves a durable per-file receipt and never authorizes a retry.
+    """
+    if settings.get('retire_primitive_nanos_after_grouping', False) is not True:
+        return None
+    from run_shift_sm_postprocessing import download, publish, transfer_env
+    from shift_nano_integrity import validate_retirement_proof
+    from shift_condor_native import query
+    from run_dark_photon_statistics import save
+    directory, scratch = Path(directory), Path(scratch)
+    if (result.get('complete') is not True or result.get('request_sha256') != sha256(directory/'postprocessing_request.json')
+            or result.get('events') != row['events'] or result.get('original_nano_inputs') != request['nano_inputs']
+            or result.get('full_original_exposure', {}).get('full_source_sumw') != len(source['event_ids'])):
+        raise ValueError('Nano retirement requires the exact complete publication and original exposure')
+    merged = result['published']['merged_nano']
+    validate_retirement_proof(dict(merged_nano_integrity=result['merged_nano_integrity'],
+                                  merged_nano=merged, nano_inputs=request['nano_inputs']))
+    prefix = row['final_output_base']
+    if (merged.get('path') != prefix+'/nanoAOD_merged/ntuple_0.root'
+            or result['published']['merged_histogram'].get('path') != prefix+'/histograms_merged/ntuple_0.root'
+            or '..' in Path(source['output_base']).parts
+            or not (source['output_base'].startswith('/eos/user/j/jniedzie/shift_cmssw/')
+                    or source['output_base'].startswith('/eos/user/j/jniedzie/shift_cmssw_support/'))):
+        raise ValueError('Nano retirement escaped the exact retained publication paths')
+    candidates = request['nano_inputs']
+    expected = [source['output_base']+'/job'+str(chunk['job'])+'/nano.root' for chunk in row['chunks']]
+    if ([item['path'] for item in candidates] != expected or len(set(expected)) != len(expected)
+            or any(not valid_artifact(item, path) for item, path in zip(candidates, expected))):
+        raise ValueError('Nano retirement candidates differ from the exact frozen detector jobs')
+    schedd = settings.get('cleanup_condor_schedd')
+    if not isinstance(schedd, str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch', schedd):
+        raise ValueError('Nano retirement requires its explicit native scheduler')
+    jobs = query('Iwd == '+json.dumps(str(directory))+' || ShiftDPStatisticsTask == '+json.dumps(str(directory)),
+                 ['ClusterId','ProcId','JobStatus','Cmd','Iwd'], schedd=schedd)
+    current = None
+    if os.environ.get('_CONDOR_JOB_AD'):
+        ad = Path(os.environ['_CONDOR_JOB_AD']).read_text()
+        cluster = re.search(r'^ClusterId\s*=\s*([0-9]+)\s*$', ad, re.MULTILINE)
+        proc = re.search(r'^ProcId\s*=\s*([0-9]+)\s*$', ad, re.MULTILINE)
+        if cluster and proc:
+            current = int(cluster[1]), int(proc[1])
+    for job in jobs:
+        if (job.get('JobStatus') in (3,4) or Path(job.get('Cmd','')).name == 'condor_dagman'
+                or (job.get('ClusterId'),job.get('ProcId')) == current):
+            continue
+        raise ValueError('Nano retirement found a live detector writer or unclassified consumer')
+    receipt_path = directory/'primitive_nano_retirement.json'
+    if receipt_path.exists():
+        raise ValueError('Preserve the existing Nano retirement attempt for reviewed recovery')
+    receipt = dict(schema='shift-main-primitive-Nano-retirement-v1',complete=False,
+        source_sha256=sha256(directory/'source.json'),request_sha256=result['request_sha256'],
+        replacement=merged, retained_histogram=result['published']['merged_histogram'],
+        integrity_sha256=hashlib.sha256(json.dumps(result['merged_nano_integrity'],sort_keys=True).encode()).hexdigest(),
+        scheduler_checked_utc=datetime.now(timezone.utc).isoformat(),scheduler_jobs=jobs,
+        candidates=candidates,removed=[],removed_bytes=0)
+    save(receipt_path,receipt)
+    env = transfer_env()
+    def readback(item, name):
+        path=scratch/name
+        download(item['path'],path,item['sha256'])
+        if path.stat().st_size != item['bytes']:
+            raise ValueError('Nano retirement retained or candidate readback changed size')
+        path.unlink()
+    try:
+        readback(merged,'retained_before.root')
+        readback(result['published']['merged_histogram'],'histogram_before.root')
+        for index,item in enumerate(candidates):
+            readback(item,'primitive_'+str(index)+'.root')
+            subprocess.run(['/usr/bin/xrdfs','root://eosuser.cern.ch','rm',item['path']],
+                           env=env,check=True,timeout=120)
+            absent=subprocess.run(['/usr/bin/xrdfs','root://eosuser.cern.ch','stat',item['path']],
+                                  env=env,capture_output=True,text=True,timeout=60)
+            message=(absent.stdout+'\n'+absent.stderr).lower()
+            if absent.returncode == 0 or not ('no such file or directory' in message or '[3011]' in message):
+                raise ValueError('Nano retirement could not verify exact candidate absence')
+            receipt['removed'].append(item)
+            receipt['removed_bytes'] += item['bytes']
+            save(receipt_path,receipt)
+        readback(merged,'retained_after.root')
+        readback(result['published']['merged_histogram'],'histogram_after.root')
+        receipt.update(complete=True,retained_readbacks_verified=True,
+                       finished_utc=datetime.now(timezone.utc).isoformat())
+        save(receipt_path,receipt)
+        return dict(path=str(receipt_path),sha256=sha256(receipt_path),
+                    removed_bytes=receipt['removed_bytes'],complete=True,
+                    published=publish(receipt_path,prefix+'/metadata/retirement'))
+    except BaseException as error:
+        receipt['error']=repr(error);save(receipt_path,receipt);raise
+
+
 def main_histogram_stage(directory,action,chunk_index=None):
     """Execute a sealed common detector slice or its main-histogram finalizer."""
     from run_dark_photon_statistics import save
@@ -84,6 +180,7 @@ def main_histogram_stage(directory,action,chunk_index=None):
     if status.exists():raise ValueError('Preserve the existing attempt; review its outputs before any retry')
     report=dict(complete=False,action=action,plan_sha256=sha256(directory/'plan.json'),
                 seal_sha256=sha256(directory/'seal.json'),
+                full_gen_events=parent['events'],
                 primary_preflight_receipt_sha256=sha256(directory/'primary_preflight/receipt.json'))
     save(status,report)
     previous=Path.cwd()
@@ -151,6 +248,11 @@ def main_histogram_stage(directory,action,chunk_index=None):
                 run(directory/'postprocessing_request.json')
                 result=read(scratch/'result.json')
                 if result.get('complete') is not True:raise ValueError('Main histogram publication did not finish')
+                if type(settings.get('retire_primitive_nanos_after_grouping',False)) is not bool:
+                    raise ValueError('Primitive Nano retirement must be an explicit boolean')
+                retirement=retire_main_nano_inputs(directory,row,source,request,result,settings,scratch)
+                if retirement is not None:
+                    result.update(original_nano_retired=True,primitive_nano_retirement=retirement)
                 report.update(complete=True,point=row['point'],events=row['events'],
                     final_output_base=row['final_output_base'],main_histograms=result)
                 save(directory/'completed_points'/(row['point']+'.json'),report)

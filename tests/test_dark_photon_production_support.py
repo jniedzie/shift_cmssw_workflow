@@ -26,6 +26,7 @@ from prepare_dark_photon_production import extend_worker
 from shift_production_selection import default_policy
 from shift_material_preselection import checksum
 from dark_photon_production_support import main_histogram_stage
+from dark_photon_production_support import retire_main_nano_inputs
 
 
 def write(path, value):
@@ -86,6 +87,7 @@ class MainHistogramHandoff(unittest.TestCase):
             receipt=json.loads((root/'statuses/chunk_0.json').read_text())
             self.assertEqual(receipt['stage_failure_logs']['step1_cmsRun.log'],'native converter failure')
             self.assertFalse(receipt['complete'])
+            self.assertEqual(receipt['full_gen_events'],2)
 
     def test_a_failed_or_missing_response_cannot_reach_histogramming(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,6 +99,112 @@ class MainHistogramHandoff(unittest.TestCase):
             self.assertFalse(result['complete'])
             with self.assertRaisesRegex(ValueError,'Preserve the existing attempt'):
                 main_histogram_stage(root,'finalize')
+
+
+class MainNanoRetirement(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name)
+        sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'tea_shift_cmssw/utils'))
+        self.prefix='/eos/user/j/jniedzie/shift_cmssw/darkphoton_m2_prompt/test_20261028'
+        self.source=dict(output_base=self.prefix+'/detector',event_ids=[[1,1,1],[1,1,2]])
+        write(self.root/'source.json',self.source)
+        self.row=dict(final_output_base=self.prefix,events=2,chunks=[dict(job=10),dict(job=11)])
+        self.blobs={}
+        def item(path,data,**extra):
+            local=self.root/str(len(self.blobs));local.write_bytes(data)
+            self.blobs[path]=data
+            return dict(path=path,bytes=len(data),sha256=sha256(local),**extra)
+        self.inputs=[item(self.source['output_base']+'/job'+str(job)+'/nano.root',str(job).encode(),events=1)
+                     for job in (10,11)]
+        self.merged=item(self.prefix+'/nanoAOD_merged/ntuple_0.root',b'complete merge')
+        self.histogram=item(self.prefix+'/histograms_merged/ntuple_0.root',b'complete histogram')
+        self.request=dict(nano_inputs=self.inputs)
+        write(self.root/'postprocessing_request.json',self.request)
+        proof=dict(schema='shift-nano-all-branch-equivalence-v1',complete=True,
+            edm_metadata_baskets_preserved=True,edm_metadata_values_preserved=True,
+            merged_sha256=self.merged['sha256'],input_sha256=[x['sha256'] for x in self.inputs],
+            events=2,event_branches=5,all_branch_inventory_sha256='a'*64,
+            trees={name:dict(entries=2 if name=='Events' else 1,branches=5 if name=='Events' else 1)
+                   for name in ('Events','Runs','LuminosityBlocks','MetaData','ParameterSets')})
+        self.result=dict(complete=True,events=2,request_sha256=sha256(self.root/'postprocessing_request.json'),
+            original_nano_inputs=self.inputs,full_original_exposure=dict(full_source_sumw=2),
+            merged_nano_integrity=proof,published=dict(merged_nano=self.merged,merged_histogram=self.histogram))
+        self.settings=dict(retire_primitive_nanos_after_grouping=True,cleanup_condor_schedd='bigbird26.cern.ch')
+        self.removed=[]
+
+    def fetch(self,source,destination,checksum):
+        destination.write_bytes(self.blobs[source])
+        if sha256(destination)!=checksum:raise ValueError('Changed remote bytes')
+
+    def storage(self,command,**kwargs):
+        import subprocess
+        action,path=command[-2:]
+        if action=='rm':
+            if path not in self.blobs:raise ValueError('Unexpected deletion')
+            self.removed.append(path);del self.blobs[path]
+            return subprocess.CompletedProcess(command,0)
+        self.assertEqual(action,'stat')
+        return subprocess.CompletedProcess(command,1,stdout='',stderr='[3011] No such file or directory')
+
+    def run_cleanup(self,*,jobs=None):
+        with patch('shift_condor_native.query',return_value=jobs or []) as query, \
+             patch('run_shift_sm_postprocessing.download',side_effect=self.fetch), \
+             patch('run_shift_sm_postprocessing.publish',return_value=dict(path='retirement-receipt')), \
+             patch('dark_photon_production_support.subprocess.run',side_effect=self.storage):
+            return retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
+
+    def test_optin_cleanup_preserves_replacement_and_only_removes_exact_duplicates(self):
+        result=self.run_cleanup()
+        self.assertTrue(result['complete'])
+        self.assertEqual(result['removed_bytes'],sum(x['bytes'] for x in self.inputs))
+        self.assertEqual(self.removed,[x['path'] for x in self.inputs])
+        self.assertIn(self.merged['path'],self.blobs)
+        self.assertIn(self.histogram['path'],self.blobs)
+        receipt=json.loads((self.root/'primitive_nano_retirement.json').read_text())
+        self.assertTrue(receipt['retained_readbacks_verified'])
+
+    def test_default_never_contacts_scheduler_or_deletes(self):
+        self.settings={}
+        with patch('shift_condor_native.query') as query:
+            self.assertIsNone(self.run_cleanup())
+            query.assert_not_called()
+        self.assertFalse(self.removed)
+
+    def test_ids_only_or_changed_metadata_proof_cannot_authorize_deletion(self):
+        self.result['merged_nano_integrity']['edm_metadata_values_preserved']=False
+        with self.assertRaisesRegex(ValueError,'all-branch'):
+            self.run_cleanup()
+        self.assertFalse(self.removed)
+
+    def test_live_or_held_detector_blocks_retirement(self):
+        for status in (1,2,5):
+            with self.subTest(status=status),self.assertRaisesRegex(ValueError,'live detector'):
+                self.run_cleanup(jobs=[dict(ClusterId=20,ProcId=0,JobStatus=status,Cmd='/frozen/detector_worker.sh')])
+        self.assertFalse(self.removed)
+
+    def test_changed_grouped_readback_blocks_every_deletion(self):
+        self.blobs[self.merged['path']]=b'corrupted replacement'
+        with self.assertRaisesRegex(ValueError,'Changed remote bytes'):
+            self.run_cleanup()
+        self.assertFalse(self.removed)
+        self.assertFalse(json.loads((self.root/'primitive_nano_retirement.json').read_text())['complete'])
+
+    def test_unexpected_candidate_never_becomes_a_deletion_target(self):
+        self.inputs[0]['path']=self.prefix+'/GEN/nano.root'
+        with self.assertRaisesRegex(ValueError,'frozen detector jobs'):
+            self.run_cleanup()
+        self.assertFalse(self.removed)
+
+    def test_partial_failure_preserves_exact_removed_manifest(self):
+        self.blobs[self.inputs[1]['path']]=b'changed second primitive'
+        with self.assertRaisesRegex(ValueError,'Changed remote bytes'):
+            self.run_cleanup()
+        receipt=json.loads((self.root/'primitive_nano_retirement.json').read_text())
+        self.assertEqual(receipt['removed'],[self.inputs[0]])
+        self.assertIn(self.inputs[1]['path'],self.blobs)
+        self.assertFalse(receipt['complete'])
 
 
 def root_module():
