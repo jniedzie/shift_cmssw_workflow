@@ -148,6 +148,44 @@ class ProductionSelectionTests(unittest.TestCase):
         self.assertEqual(first['policy'], common.default_policy(
             first['policy']['cohort_id'], first['policy']['selection_seed']))
 
+    def test_scoped_sm_policy_is_explicit_and_preserves_weight_authority(self):
+        rows = [event(i+1, native=2.5+i) for i in range(20)]
+        data = bundle(rows)
+        baseline = common.prepare_default_selection(data)
+        data['policy_variant'] = 'sm-pointing-scoped-v1'
+        ledger = common.prepare_default_selection(data)
+        self.assertNotIn('variant', baseline['policy'])
+        self.assertEqual(ledger['policy']['control_probability'], .1)
+        self.assertEqual(ledger['policy']['unknown_probability'], 1.)
+        for family in ('qcd_20toinf', 'dy_20toinf', 'jpsi_20toinf'):
+            source = descriptor(rows, family)
+            result = common.bind_source(source, ledger)
+            self.assertEqual(result['event_ids'], source['event_ids'])
+            self.assertEqual(result['weights'], source['weights'])
+            self.assertEqual(result['normalization_record'], source['normalization_record'])
+            common.validate_contract(result['production_selection'])
+        with self.assertRaisesRegex(ValueError, 'only as an SM option'):
+            common.bind_source(descriptor(rows, 'darkphoton_new_model'), ledger)
+
+    def test_policy_variant_cannot_silently_change_scope_or_control_floor(self):
+        policy = common.production_policy('cohort', 'seed', 'sm-pointing-scoped-v1')
+        contract = dict(schema=common.SCHEMA, track_all_hadron_decays=True,
+            maximum_untracked_hadron_flight_mm=1.e-5, policy=policy,
+            policy_sha256=admission.checksum(policy), ledger_sha256='a'*64)
+        for field in ('control_probability', 'unknown_probability'):
+            changed = copy.deepcopy(contract)
+            changed['policy'][field] = .01
+            changed['policy_sha256'] = admission.checksum(changed['policy'])
+            with self.assertRaises(ValueError):
+                common.validate_contract(changed)
+        changed = copy.deepcopy(contract)
+        changed['policy']['unknown_material_pointing']['margin_cm'] = 100.
+        changed['policy_sha256'] = admission.checksum(changed['policy'])
+        with self.assertRaises(ValueError):
+            common.validate_contract(changed)
+        with self.assertRaisesRegex(ValueError, 'Unknown production'):
+            common.production_policy('cohort', 'seed', 'typo')
+
     def test_unknown_model_is_not_a_hadron_or_given_guessed_absorption(self):
         for pdg in (32, 1000022, 4900111, 9900015):
             self.assertFalse(features.hadron(pdg))
@@ -159,6 +197,10 @@ class ProductionSelectionTests(unittest.TestCase):
         self.assertEqual(row['parent_flights'], [])
         self.assertEqual(row['unknown_transport_ancestor_barcodes'], [1])
         ledger = common.prepare_default_selection(bundle([row]))
+        self.assertEqual(ledger['events'][0]['sampling_probability'], 1.)
+        scoped = bundle([row])
+        scoped['policy_variant'] = 'sm-pointing-scoped-v1'
+        ledger = common.prepare_default_selection(scoped)
         self.assertEqual(ledger['events'][0]['sampling_probability'], 1.)
 
     def test_same_signed_bad_direction_controls_keep_support_and_native_weights(self):

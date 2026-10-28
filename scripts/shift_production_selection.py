@@ -237,11 +237,27 @@ def default_policy(cohort_id, selection_seed):
     return policy
 
 
+def production_policy(cohort_id, selection_seed, variant='shared-default'):
+    """Keep the common default stable; expose the measured SM option explicitly."""
+    policy = default_policy(cohort_id, selection_seed)
+    if variant == 'shared-default':
+        return policy
+    if variant != 'sm-pointing-scoped-v1':
+        raise ValueError('Unknown production material policy variant: '+str(variant))
+    policy['variant'] = variant
+    policy['unknown_material_pointing'] = dict(
+        schema='shift-unknown-material-pointing-scope-v1',
+        minimum_stations_per_endcap=2, margin_cm=500.)
+    validate_policy(policy)
+    return policy
+
+
 def prepare_default_selection(inputs):
     """Recompute the draw from full evidence, never trust an edited saved mask."""
     if inputs.get('schema') != 'shift-production-material-inputs-v1':
         raise ValueError('Require placed/completed GEN material inputs and original exposure')
-    policy = default_policy(inputs['cohort_id'], inputs['selection_seed'])
+    policy = production_policy(inputs['cohort_id'], inputs['selection_seed'],
+                               inputs.get('policy_variant', 'shared-default'))
     return prepare_selection(inputs['features'], inputs['authority'], policy)
 
 
@@ -261,9 +277,10 @@ def bind_source(descriptor, ledger):
 
 def bind_sources(descriptors, ledger):
     """Index a large cohort and hash its ledger once, before launching workers."""
-    expected_policy = default_policy(ledger['policy']['cohort_id'], ledger['policy']['selection_seed'])
+    expected_policy = production_policy(ledger['policy']['cohort_id'],
+        ledger['policy']['selection_seed'], ledger['policy'].get('variant', 'shared-default'))
     if ledger['policy'] != expected_policy or ledger['policy_sha256'] != checksum(expected_policy):
-        raise ValueError('New production requires the shared default material policy')
+        raise ValueError('Frozen production policy differs from its declared variant')
     by_source = defaultdict(list)
     for row in ledger['events']:
         by_source[row['feature_source_sha256']].append(row)
@@ -273,6 +290,9 @@ def bind_sources(descriptors, ledger):
 
 
 def _bind_source(descriptor, ledger, rows, ledger_sha):
+    if (ledger['policy'].get('variant') == 'sm-pointing-scoped-v1'
+            and descriptor['stratum'].split('_', 1)[0] not in ('qcd', 'dy', 'jpsi')):
+        raise ValueError('The experimental pointing-scoped policy is available only as an SM option')
     if descriptor.get('selected_indices') is not None or descriptor.get('production_selection'):
         raise ValueError('Cannot reopen an existing reconstruction selection')
     by_id = {tuple(row['event_id']): row for row in rows}
@@ -318,7 +338,8 @@ def validate_contract(contract):
     sha256(contract.get('policy_sha256'), 'production policy')
     sha256(contract.get('ledger_sha256'), 'production ledger')
     policy = contract['policy']
-    if (policy != default_policy(policy['cohort_id'], policy['selection_seed'])
+    if (policy != production_policy(policy['cohort_id'], policy['selection_seed'],
+                                    policy.get('variant', 'shared-default'))
             or checksum(policy) != contract['policy_sha256']):
         raise ValueError('Production material policy changed after admission')
 
