@@ -278,6 +278,22 @@ class SupplementAdmission(unittest.TestCase):
         report=production/'completed_points/m2_prompt.json';data=controller.read(report);data['events']=9;controller.save(report,data)
         with self.assertRaises(ValueError):controller.supplement_campaign_claim(self.authority,self.observed,1200)
 
+    def test_material_selected_credit_uses_original_GEN_not_SIM_count(self):
+        production=self.root/'waves/w000/production';production.mkdir(parents=True);(production/'completed_points').mkdir()
+        controller.new(production/'plan.json',dict(points=[dict(point='m2_prompt',events=3,full_gen_events=10,seed=123,run_number=456)]))
+        controller.new(production/'seal.json',dict(files={str(production/'plan.json'):controller.sha(production/'plan.json')}))
+        report=production/'completed_points/m2_prompt.json'
+        controller.new(report,dict(complete=True,point='m2_prompt',events=3,full_gen_events=10,
+            plan_sha256=controller.sha(production/'plan.json'),seal_sha256=controller.sha(production/'seal.json')))
+        state=controller.read(self.root/'state.json');state['published']['m2_prompt']['source_plans']=[str(production/'plan.json')];controller.save(self.root/'state.json',state)
+        claim=controller.supplement_campaign_claim(self.authority,self.observed,1200)
+        self.assertEqual((claim['remaining_bytes'],claim['credited_events']),(0,10))
+        data=controller.read(report);data.pop('full_gen_events');data['main_histograms']=dict(full_original_exposure=dict(full_source_sumw=10));controller.save(report,data)
+        self.assertTrue(controller.closed_primitive(production,'m2_prompt',10,self.observed))
+        data['main_histograms']['full_original_exposure']['full_source_sumw']=3;controller.save(report,data)
+        with self.assertRaisesRegex(ValueError,'original GEN denominator'):
+            controller.closed_primitive(production,'m2_prompt',10,self.observed)
+
     def test_shared_full_forecasts_and_floor_gate_without_double_retirement_credit(self):
         policy=self.root/'policy.json';controller.new(policy,dict(schema='shift-dp-supplement-admission-v1',
             minimum_free_bytes=90000000000,minimum_free_files=100,campaigns=[self.authority]))
@@ -293,6 +309,29 @@ class SupplementAdmission(unittest.TestCase):
         with patch.object(controller,'supplement_canaries',return_value=False):
             self.assertEqual(controller.supplement_admission(config,observation)[1]['reason'],
                              'waiting_for_complete_detector_canary_histogram_readbacks')
+
+
+class MainMesonPrimitiveCredit(unittest.TestCase):
+    def test_closed_main_primitive_credits_before_cumulative_alias(self):
+        import time
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);batch=dict(batch='b000',point='m0p25_lab_0p01m',source_collisions=50000)
+            production=root/'batches/b000/production';(production/'completed_points').mkdir(parents=True)
+            controller.new(production/'plan.json',dict(points=[dict(point=batch['point'],events=3,full_gen_events=10)]))
+            controller.new(production/'seal.json',dict(files={str(production/'plan.json'):controller.sha(production/'plan.json')}))
+            prefix='/eos/user/j/jniedzie/shift_cmssw/darkphoton_'+batch['point']+'/test_campaign'
+            item=dict(path=prefix+'/histograms_merged/ntuple_0.root',sha256='a'*64)
+            report=production/'completed_points'/(batch['point']+'.json')
+            controller.new(report,dict(complete=True,point=batch['point'],events=3,full_gen_events=10,
+                final_output_base=prefix,plan_sha256=controller.sha(production/'plan.json'),seal_sha256=controller.sha(production/'seal.json'),
+                main_histograms=dict(complete=True,published=dict(merged_histogram=item))))
+            controller.new(production.parent/'source_status.json',dict(complete=True,events=10,source_collisions=50000))
+            published=dict(batch='b000',events=3,campaign='test_campaign',point_receipt_path=str(report),point_receipt_sha256=controller.sha(report),
+                histogram_path=item['path'],histogram_sha256=item['sha256'],published_utc=controller.datetime.now(controller.timezone.utc).isoformat())
+            self.assertTrue(controller.meson_published_batch(root,batch,published,time.time()+2))
+            changed=dict(published,histogram_sha256='b'*64)
+            with self.assertRaisesRegex(ValueError,'ROOT receipt'):
+                controller.meson_published_batch(root,batch,changed,time.time()+2)
 
 
 class FreshMesonQualificationStorage(unittest.TestCase):

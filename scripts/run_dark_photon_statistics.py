@@ -421,8 +421,15 @@ def closed_primitive(directory, point, events, before):
         return False
     plan, seal, report = map(read, names)
     plan_hash = sha(names[0])
+    full_gen_events = report.get('full_gen_events', report.get('events'))
+    if 'main_histograms' in report and 'full_gen_events' not in report:
+        row, = [row for row in plan['points'] if row['point'] == point]
+        full_gen_events = row.get('full_gen_events', row['events'])
+        exposure = report['main_histograms'].get('full_original_exposure', {})
+        if exposure.get('full_source_sumw') != full_gen_events:
+            raise ValueError('Main primitive lost its original GEN denominator')
     if (seal['files'].get(str(names[0])) != plan_hash or report.get('complete') is not True
-            or report.get('full_gen_events',report.get('events')) != events or report.get('point') != point
+            or full_gen_events != events or report.get('point') != point
             or report.get('plan_sha256') != plan_hash or report.get('seal_sha256') != sha(names[1])):
         raise ValueError('Published primitive differs from its sealed complete population')
     return True
@@ -447,8 +454,12 @@ def meson_published_batch(directory, batch, published, observed):
             or sha(report_path) != published['point_receipt_sha256']):
         raise ValueError('Meson published receipt changed ownership, source batch or checksum')
     report = read(report_path)
-    marker = report.get('score_histograms', {}).get('marker', {})
-    histogram = marker.get('published', {}).get('histograms', {})
+    marker = report.get('main_histograms')
+    if marker is None:
+        marker = report.get('score_histograms', {}).get('marker', {})
+        histogram = marker.get('published', {}).get('histograms', {})
+    else:
+        histogram = marker.get('published', {}).get('merged_histogram', {})
     histogram_path = Path(published.get('histogram_path', ''))
     campaign = published.get('campaign')
     if (report.get('complete') is not True or report.get('point') != batch['point']
@@ -497,7 +508,9 @@ def supplement_campaign_claim(authority, observed, maximum_age, observer_config=
                 continue
             actual = {row['point']:row for row in read(production/'plan.json')['points']}
             for row in wave['batches']:
-                if any(actual[row['point']][key] != row[key] for key in ('events','seed','run_number')):
+                source = actual[row['point']]
+                if (source.get('full_gen_events', source['events']) != row['events']
+                        or any(source[key] != row[key] for key in ('seed', 'run_number'))):
                     raise ValueError('Supplement credit differs from its fixed source allocation')
             if all(closed_primitive(production,row['point'],row['events'],observed) for row in wave['batches']):
                 credited += sum(row['events'] for row in wave['batches'])
@@ -522,8 +535,15 @@ def supplement_campaign_claim(authority, observed, maximum_age, observer_config=
         if terminal_state is not None:
             state, terminal = terminal_state, True
     credited = 0
+    live = []
+    if observer_config is not None and state:
+        live = jobs(observer_config, 'regexp(' + json.dumps(str(directory)) + ', Iwd)')
     for batch in allocation['batches'] if state else []:
-        published = state.get('batches',{}).get(batch['batch'],{}).get('published')
+        entry = state.get('batches', {}).get(batch['batch'], {})
+        published = entry.get('published') or entry.get('primitive_histograms')
+        batch_root = directory / 'batches' / batch['batch']
+        if any(row.get('Iwd', '').startswith(str(batch_root)) for row in live):
+            continue
         if meson_published_batch(directory, batch, published, observed):
             credited += amounts[batch['batch']]
     return dict(name=authority['name'],remaining_bytes=sum(amounts.values())-credited,
