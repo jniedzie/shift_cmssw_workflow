@@ -914,6 +914,21 @@ class AggregateDescription(unittest.TestCase):
                 controller.aggregate_record(target, 'm15_prompt', sources)
 
 
+class LegacyBaselineAdmission(unittest.TestCase):
+    def test_ready_legacy_baselines_wait_for_an_actual_new_main_population(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);worklist=root/'worklist.json'
+            controller.new(worklist,dict(waves=[dict(batches=[dict(point='m15_prompt')])]))
+            old=root/'old_statistics';source=dict(point='m15_prompt',plan_path=str(old/'plan.json'))
+            config=dict(directory=str(root),worklist=str(worklist),rehistogram_legacy_sources=True,
+                        additional_previous_statistics=[dict(directory=str(old))])
+            with patch.object(controller,'available_sources',return_value={'m15_prompt':[source,dict(source)]}), \
+                 patch.object(controller,'jobs',return_value=[]),patch.object(controller,'aggregate_plan') as aggregate, \
+                 patch('watch_dark_photon_production.EosRpc'):
+                controller.publish(config,{})
+            aggregate.assert_not_called()
+
+
 class CanaryAndAdmission(unittest.TestCase):
     def config(self, directory):
         worklist = directory / 'worklist.json'

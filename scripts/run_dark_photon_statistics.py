@@ -1339,7 +1339,8 @@ def publish(config, state):
     recovery_plans={str(Path(source['directory'])/'plan.json')
                     for source in config.get('additional_previous_statistics',[])}
     sources = {point: populations for point, populations in sources.items()
-               if any(item['plan_path'].startswith(adaptive_prefix) or item['plan_path'] in recovery_plans
+               if any(item['plan_path'].startswith(adaptive_prefix) or
+                      (item['plan_path'] in recovery_plans and not config.get('rehistogram_legacy_sources', False))
                       for item in populations)}
     canary_points = [row['point'] for row in read(config['worklist'])['waves'][0]['batches']]
     sources = dict(sorted(sources.items(), key=lambda item: (item[0] not in canary_points, item[0])))
