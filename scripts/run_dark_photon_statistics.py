@@ -1821,9 +1821,64 @@ def redistribute_detector_workers(config, state, worklist):
                                                spare_workers=available)
 
 
+def adopt_reviewed_main_cleanup(config, state):
+    """Accept only an audited cleanup failure after complete detector publication.
+
+    The original failed native manager and finalizer remain recorded. This
+    never accepts a failed detector slice or repeats scientific processing.
+    """
+    for index, pin in config.get('reviewed_main_cleanup_recoveries', {}).items():
+        if config['dependencies'].get(pin['path']) != pin['sha256']:
+            raise ValueError('Cleanup recovery is outside frozen controller authority')
+        proof = pinned_json(pin)
+        entry = state['waves'][index]
+        if entry.get('reviewed_main_cleanup_sha256') == pin['sha256']:
+            continue
+        directory = wave_directory(config, int(index)) / 'production'
+        old = read(Path(pin['path']).parent / 'original_finalizer.json')
+        report_path = directory / 'completed_points' / (read(directory/'plan.json')['points'][0]['point']+'.json')
+        if (proof.get('schema') != 'shift-reviewed-main-cleanup-recovery-v1' or proof.get('complete') is not True
+                or proof.get('failure_kind') != 'postpublication_cleanup_scheduler_query'
+                or proof.get('GEN_or_SIM_rerun') is not False or proof.get('wave_index') != int(index)
+                or proof.get('directory') != str(directory) or old.get('complete') is not False
+                or 'Collector has no record' not in old.get('error', '')
+                or sha(Path(pin['path']).parent/'original_finalizer.json') != proof['original_failure_sha256']
+                or read(directory/'submission.json')['cluster'] != proof['original_manager']
+                or read(directory/'primitive_nano_retirement.json').get('complete') is not True
+                or sha(directory/'plan.json') != proof['plan_sha256']
+                or sha(directory/'seal.json') != proof['seal_sha256']
+                or sha(report_path) != proof['completed_point_sha256']
+                or sha(directory/'statuses/finalizer.json') != proof['status_sha256']
+                or sha(directory/'primitive_nano_retirement.json') != proof['retirement_receipt_sha256']
+                or read(report_path).get('complete') is not True):
+            raise ValueError('Cleanup recovery changed its exact complete source or failure')
+        expected = {str(directory/'statuses'/('chunk_'+str(i)+'.json'))
+                    for i in range(len(read(directory/'plan.json')['points'][0]['chunks']))}
+        if set(proof['payload_status_hashes']) != expected or any(
+                sha(path) != digest or read(path).get('complete') is not True
+                for path, digest in proof['payload_status_hashes'].items()):
+            raise ValueError('Cleanup recovery cannot accept missing or failed detector responses')
+        manager = proof['original_manager']
+        if jobs(config, 'ClusterId == '+str(manager)):
+            raise RuntimeError('Cleanup recovery waits for the original native manager to stop')
+        native = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
+            str(manager)+'.0', '-limit', '1', '-json'], timeout=45))
+        if (len(native) != 1 or native[0].get('Iwd') != str(directory)
+                or native[0].get('ExitCode') != 1 or native[0].get('ExitBySignal') is not False):
+            raise ValueError('Cleanup recovery lacks its exact native cleanup-only failure')
+        state.setdefault('reviewed_main_cleanup_records', {})[index] = dict(
+            authority=pin, original_entry=copy.deepcopy(entry), terminal_native_ad=native[0])
+        entry.update(terminal=True, successful=True, exit_code=1,
+                     reviewed_main_cleanup_sha256=pin['sha256'], cleanup_recovered=True)
+        for key in ('wave_'+index, 'held_wave_'+index):
+            state.setdefault('failures', {}).pop(key, None)
+        save(Path(config['directory'])/'state.json', state)
+
+
 def step(config, config_path, state):
     now = datetime.now(timezone.utc).isoformat()
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
+    adopt_reviewed_main_cleanup(config, state)
     adopt_reviewed_gen_handoffs(config, config_path, state)
     adopt_reviewed_detector_stages(config, state)
     adopt_reviewed_runtime_rescues(config,state)
