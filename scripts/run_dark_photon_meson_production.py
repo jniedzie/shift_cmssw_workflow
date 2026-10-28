@@ -939,7 +939,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
                                    'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
-                                   'main_cleanup_recovery_guard'}:
+                                   'main_cleanup_recovery_guard', 'eos_executable'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -2939,7 +2939,7 @@ def qualify_regrouping_canary(config,state):
     durable.save(Path(config['directory'])/'state.json',state)
     if native_status(config,receipt) != 'complete':
         return False
-    transport=EosRpc('root://eosuser.cern.ch',directory/'readback')
+    transport=EosRpc('root://eosuser.cern.ch',directory/'readback',config.get('eos_executable','/usr/bin/eos'))
     try:
         result=completed_histogram(dict(source=dict(directory=directory,campaign=plan['campaign'],
             plan_sha256=durable.sha(directory/'plan.json'),seal_sha256=durable.sha(directory/'seal.json')),
@@ -3014,7 +3014,7 @@ def publish_batch(config, state, batch):
         return None
     plan = read(production/'plan.json')
     cache = directory/'readback'
-    transport = EosRpc('root://eosuser.cern.ch', cache)
+    transport = EosRpc('root://eosuser.cern.ch', cache, config.get('eos_executable','/usr/bin/eos'))
     try:
         result = completed_histogram(dict(source=dict(directory=production,campaign=plan['campaign'],
             plan_sha256=durable.sha(production/'plan.json'),seal_sha256=durable.sha(production/'seal.json')),
