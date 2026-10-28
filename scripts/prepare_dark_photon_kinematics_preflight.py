@@ -85,7 +85,7 @@ def prepare(production, new_profile_pin, output_dir, *, point_scope=None):
     submit = output/'worker.sub'
     campaign=plan.get('campaign') or '_'.join(p['point'] for p in scoped_points(plan,point_scope))
     submit.write_text('universe = vanilla\nexecutable = '+str(script)+'\ninitialdir = '+str(output)+
-        '\noutput = worker.out\nerror = worker.err\nlog = events.log\npriority = 1000000\nrequest_cpus = 1\nrequest_memory = 4000\nrequest_disk = 4000000\n+MaxRuntime = 7200\n+SendCredential = True\n+JobBatchName = '+json.dumps('SHIFT_DP_'+campaign+'_full_GEN_check')+'\n'
+        '\noutput = worker.out\nerror = worker.err\nlog = events.log\npriority = 1000000\nrequest_cpus = 1\nrequest_memory = 2000MB\nrequest_disk = 4000000\n+MaxRuntime = 7200\n+SendCredential = True\n+JobBatchName = '+json.dumps('SHIFT_DP_'+campaign+'_full_GEN_check')+'\n'
         '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n'
         'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)\nperiodic_release = False\nqueue 1\n')
     result = {'complete': True, 'config': pin(cfg), 'worker': pin(script),
