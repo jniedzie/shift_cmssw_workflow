@@ -27,6 +27,8 @@ def replacement_tool_names(original):
         names += ('run_shift_gen_to_nano.py',)
     if original.get('automatic_bulk_admission') is not None:
         names += ('dark_photon_automatic_admission.py',)
+    if original.get('main_histogrammer') is not None:
+        names += ('dark_photon_production_support.py',)
     return names
 
 
