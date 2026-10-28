@@ -272,7 +272,8 @@ process.FEVTDEBUGoutput=cms.OutputModule('PoolOutputModule',SelectEvents=cms.unt
             receipt=freeze_tools(config,output)
             with tarfile.open(receipt['capsule']) as archive:
                 for name in ['audit_shift_weighted_gen.py','shift_first_mpi_source_proposal.py',
-                             'run_shift_smart_sm_source.py','run_shift_sm_decay_pilot.py','shift_sm_decay_bank.py']:
+                             'run_shift_smart_sm_source.py','run_shift_sm_decay_pilot.py','shift_sm_decay_bank.py',
+                             'shift_production_selection.py','run_shift_gen_to_nano.py','run_shift_sm_postprocessing.py']:
                     raw=archive.extractfile('scripts/'+name).read()
                     self.assertEqual(raw,(Path(__file__).resolve().parents[1]/'scripts'/name).read_bytes())
                 archive.extractall(root/'extracted')

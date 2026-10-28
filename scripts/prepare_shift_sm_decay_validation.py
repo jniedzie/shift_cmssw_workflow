@@ -113,7 +113,8 @@ def freeze_tools(config, directory):
     replacements={name:Path(__file__).with_name(name).read_bytes() for name in
         ['run_shift_sm_decay_pilot.py','run_shift_sm_decay_collection.py','shift_sm_decay_bank.py',
          'shift_sm_response_features.py','shift_gen_material_features.py','shift_material_path_score.py',
-         'audit_shift_weighted_gen.py','shift_first_mpi_source_proposal.py','run_shift_smart_sm_source.py']}
+         'audit_shift_weighted_gen.py','shift_first_mpi_source_proposal.py','run_shift_smart_sm_source.py',
+         'shift_production_selection.py','run_shift_gen_to_nano.py','run_shift_sm_postprocessing.py']}
     capsule=directory/'frozen_tools.tar.gz';changed=[]
     with tarfile.open(original) as before,tarfile.open(capsule,'w:gz') as after:
         names=set()
