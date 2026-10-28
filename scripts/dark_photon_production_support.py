@@ -98,10 +98,12 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
             or any(not valid_artifact(item, path) for item, path in zip(candidates, expected))):
         raise ValueError('Nano retirement candidates differ from the exact frozen detector jobs')
     schedd = settings.get('cleanup_condor_schedd')
-    if not isinstance(schedd, str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch', schedd):
-        raise ValueError('Nano retirement requires its explicit native scheduler')
+    pool = settings.get('cleanup_condor_pool')
+    if any(not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch',name)
+           for name in (schedd,pool)):
+        raise ValueError('Nano retirement requires its explicit native scheduler and collector pool')
     jobs = query('Iwd == '+json.dumps(str(directory))+' || ShiftDPStatisticsTask == '+json.dumps(str(directory)),
-                 ['ClusterId','ProcId','JobStatus','Cmd','Iwd'], schedd=schedd)
+                 ['ClusterId','ProcId','JobStatus','Cmd','Iwd'], schedd=schedd,pool=pool)
     current = None
     if os.environ.get('_CONDOR_JOB_AD'):
         ad = Path(os.environ['_CONDOR_JOB_AD']).read_text()

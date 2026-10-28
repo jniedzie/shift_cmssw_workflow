@@ -163,7 +163,8 @@ class MainNanoRetirement(unittest.TestCase):
         self.result=dict(complete=True,events=2,request_sha256=sha256(self.root/'postprocessing_request.json'),
             original_nano_inputs=self.inputs,full_original_exposure=dict(full_source_sumw=2),
             merged_nano_integrity=proof,published=dict(merged_nano=self.merged,merged_histogram=self.histogram))
-        self.settings=dict(retire_primitive_nanos_after_grouping=True,cleanup_condor_schedd='bigbird26.cern.ch')
+        self.settings=dict(retire_primitive_nanos_after_grouping=True,cleanup_condor_schedd='bigbird26.cern.ch',
+                           cleanup_condor_pool='tweetybird04.cern.ch')
         self.removed=[]
 
     def fetch(self,source,destination,checksum):
@@ -185,7 +186,11 @@ class MainNanoRetirement(unittest.TestCase):
              patch('run_shift_sm_postprocessing.download',side_effect=self.fetch), \
              patch('run_shift_sm_postprocessing.publish',return_value=dict(path='retirement-receipt')), \
              patch('dark_photon_production_support.subprocess.run',side_effect=self.storage):
-            return retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
+            result=retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
+            if result is not None:
+                self.assertEqual(query.call_args.kwargs['schedd'],'bigbird26.cern.ch')
+                self.assertEqual(query.call_args.kwargs['pool'],'tweetybird04.cern.ch')
+            return result
 
     def test_optin_cleanup_preserves_replacement_and_only_removes_exact_duplicates(self):
         result=self.run_cleanup()
@@ -215,6 +220,13 @@ class MainNanoRetirement(unittest.TestCase):
             with self.subTest(status=status),self.assertRaisesRegex(ValueError,'live detector'):
                 self.run_cleanup(jobs=[dict(ClusterId=20,ProcId=0,JobStatus=status,Cmd='/frozen/detector_worker.sh')])
         self.assertFalse(self.removed)
+
+    def test_cleanup_binds_the_collector_instead_of_worker_default_discovery(self):
+        self.run_cleanup()
+        self.assertFalse(self.removed==[])
+        self.settings.pop('cleanup_condor_pool')
+        with self.assertRaisesRegex(ValueError,'collector pool'):
+            retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
 
     def test_changed_grouped_readback_blocks_every_deletion(self):
         self.blobs[self.merged['path']]=b'corrupted replacement'
