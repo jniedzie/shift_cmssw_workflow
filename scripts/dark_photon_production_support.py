@@ -176,11 +176,23 @@ def main_histogram_stage(directory,action,chunk_index=None):
             converted.get('gen_sha256')!=parent['gen_sha256'] or
             converted.get('full_count')!=parent['events'] or converted.get('converted_count')!=parent['events']):
         raise ValueError('The complete original GEN must pass its actual converter before SIM')
+    settings=read(directory/'main_histogrammer.json')
+    stage_timeouts=settings.get('detector_stage_timeouts',[7200,3600,5400,7200])
+    detector_timeout=settings.get('detector_timeout_seconds',43200)
+    worker_runtime=settings.get('worker_runtime_seconds',43200)
+    if (not isinstance(stage_timeouts,list) or len(stage_timeouts)!=4
+            or any(type(value) is not int or value<=0 for value in stage_timeouts)
+            or type(detector_timeout) is not int or detector_timeout<=0
+            or type(worker_runtime) is not int or worker_runtime<=0
+            or sum(stage_timeouts)>detector_timeout or detector_timeout>worker_runtime):
+        raise ValueError('Detector stage budgets must fit the overall timeout and requested worker lifetime')
     status=directory/'statuses'/('chunk_'+str(chunk_index)+'.json' if action=='detector' else 'finalizer.json')
     if status.exists():raise ValueError('Preserve the existing attempt; review its outputs before any retry')
     report=dict(complete=False,action=action,plan_sha256=sha256(directory/'plan.json'),
                 seal_sha256=sha256(directory/'seal.json'),
                 full_gen_events=parent['events'],
+                detector_stage_timeouts=stage_timeouts,detector_timeout_seconds=detector_timeout,
+                requested_worker_runtime_seconds=worker_runtime,
                 primary_preflight_receipt_sha256=sha256(directory/'primary_preflight/receipt.json'))
     save(status,report)
     previous=Path.cwd()
@@ -200,9 +212,9 @@ def main_histogram_stage(directory,action,chunk_index=None):
                     result=subprocess.run([sys.executable,str(tools/'run_shift_gen_to_nano.py'),str(directory/'source.json'),
                         '--skip',str(chunk['skip']),'--count',str(chunk['count']),'--job',str(chunk['job']),
                         '--templates',str(directory/'frozen/templates'),'--publish','--remove-consumed-intermediates',
-                        '--absolute-stage-timeouts','--stage-timeouts','7200,3600,5400,7200',
+                        '--absolute-stage-timeouts','--stage-timeouts',','.join(map(str,stage_timeouts)),
                         '--first-event-stall-timeout','7200','--event-stall-timeout','3600'],
-                    stdout=log,stderr=subprocess.STDOUT,check=False,timeout=43200,env=environment)
+                    stdout=log,stderr=subprocess.STDOUT,check=False,timeout=detector_timeout,env=environment)
                 if (scratch/'report.json').is_file():report['payload']=read(scratch/'report.json')
                 if result.returncode:
                     report['failure_log']=(scratch/'worker.log').read_text(errors='replace')[-20000:]
@@ -233,7 +245,6 @@ def main_histogram_stage(directory,action,chunk_index=None):
                 gen=Path(row['gen_directory']);contract=read(gen/'contract.json');audit=read(gen/'validation.json')
                 rate=rate_record(contract,audit,point=row['point'],campaign=plan['campaign'],source_hashes={},
                     gen_path=source['gen'],gen_sha256=source['gen_sha256'],source_directory=gen)
-                settings=read(directory/'main_histogrammer.json')
                 normalization=dict(stratum=source['stratum'],source_id=row['point']+':'+str(row['run_number']),
                     gen_sha256=source['gen_sha256'],denominator_kind='conditional_signal_events',
                     full_source_events=contract['requested_events'],

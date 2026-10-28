@@ -40,6 +40,7 @@ class MainHistogramHandoff(unittest.TestCase):
                                    detector_runtime=dict(runtime_sha256='runtime')))
         write(root/'gen_inventory.json',dict(points={'m0p7_lab_100m':dict(events=2,gen_sha256='gen')}))
         write(root/'source.json',{})
+        write(root/'main_histogrammer.json',{})
         write(root/'seal.json',dict(files={}))
         write(root/'primary_preflight/receipt.json',dict(complete=True,
             original_plan_sha256=sha256(root/'plan.json'),original_seal_sha256=sha256(root/'seal.json'),
@@ -65,6 +66,37 @@ class MainHistogramHandoff(unittest.TestCase):
                 with self.assertRaises(ReachedPayload):main_histogram_stage(root,'detector',0)
             bind.assert_called_once_with(plan['detector_runtime'],'gen')
             self.assertEqual({key:run.call_args.kwargs['env'][key] for key in PRIMARY_AUTHORITY_ENV},authority)
+            argv=run.call_args.args[0]
+            self.assertEqual(argv[argv.index('--stage-timeouts')+1],'7200,3600,5400,7200')
+            self.assertEqual(run.call_args.kwargs['timeout'],43200)
+
+    def test_explicit_six_event_stage_budgets_reach_the_existing_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root)
+            write(root/'main_histogrammer.json',dict(detector_stage_timeouts=[21600,3600,5400,7200],
+                detector_timeout_seconds=43200,worker_runtime_seconds=43200))
+            class ReachedPayload(Exception):pass
+            with patch('dark_photon_stage_budget.recorded_primary_environment',return_value={}), \
+                 patch('dark_photon_production_support.subprocess.run',side_effect=ReachedPayload) as run:
+                with self.assertRaises(ReachedPayload):main_histogram_stage(root,'detector',0)
+            argv=run.call_args.args[0]
+            self.assertEqual(argv[argv.index('--stage-timeouts')+1],'21600,3600,5400,7200')
+            self.assertEqual(run.call_args.kwargs['timeout'],43200)
+
+    def test_invalid_stage_budget_cannot_start_or_create_an_attempt(self):
+        invalid=[dict(detector_stage_timeouts=[7200,3600,5400]),
+                 dict(detector_stage_timeouts=[True,3600,5400,7200]),
+                 dict(detector_stage_timeouts=[0,3600,5400,7200]),
+                 dict(detector_stage_timeouts=[21600,3600,5400,7200],detector_timeout_seconds=30000),
+                 dict(detector_timeout_seconds=43200,worker_runtime_seconds=40000)]
+        for settings in invalid:
+            with self.subTest(settings=settings),tempfile.TemporaryDirectory() as tmp:
+                root=Path(tmp);self.stage(root);write(root/'main_histogrammer.json',settings)
+                with patch('dark_photon_production_support.subprocess.run') as run:
+                    with self.assertRaisesRegex(ValueError,'stage budgets'):
+                        main_histogram_stage(root,'detector',0)
+                run.assert_not_called()
+                self.assertEqual(list((root/'statuses').iterdir()),[])
 
     def test_invalid_primary_authority_stops_before_payload_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
