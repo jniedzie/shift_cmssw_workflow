@@ -23,6 +23,13 @@ def write(path, value):
 
 
 class GenIsolation(unittest.TestCase):
+    def test_seed_only_lists_fail_before_gen_with_an_inventory_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'prior.json'
+            write(path,dict(points=[dict(seed=1,run_number=2)]))
+            with self.assertRaisesRegex(ValueError,'audited populations'):
+                production_preparation.prior_gen_identities([path])
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

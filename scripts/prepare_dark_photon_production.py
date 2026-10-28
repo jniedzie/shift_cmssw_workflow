@@ -249,17 +249,13 @@ def declared_source_namespaces(previous):
     return runs, seeds
 
 
-def check_gen(plan, inventory, publication, prior_inventories):
-    """Bind exact audited full GEN populations and reject reused identities."""
-    names = {row['point'] for row in plan['points']}
-    published = {row['point']: row for row in publication['inputs']}
-    if (inventory.get('complete') is not True or publication.get('complete') is not True or
-            set(inventory['points']) != names or set(published) != names or
-            len(publication['inputs']) != len(names)):
-        raise ValueError('Complete GEN inventory/publication must cover exactly the new points')
-    identities, runs, seeds, previous_ids, previous_runs, previous_seeds = set(), set(), set(), set(), set(), set()
+def prior_gen_identities(prior_inventories):
+    """Validate prior exposure/namespace records before starting new GEN work."""
+    previous_ids, previous_runs, previous_seeds = set(), set(), set()
     for path in prior_inventories:
         previous = read(path)
+        if not isinstance(previous.get('points'), dict):
+            raise ValueError('Prior GEN points must map audited populations or explicit source reservations')
         if (previous.get('schema') == 'shift-declared-source-namespace-reservation-v1'
                 or any('declared_source_namespace_only' in row for row in previous['points'].values())):
             reserved_runs, reserved_seeds = declared_source_namespaces(previous)
@@ -273,6 +269,19 @@ def check_gen(plan, inventory, publication, prior_inventories):
             previous_runs.update(event[0] for event in row['event_ids'])
             if 'seed' in row:
                 previous_seeds.add(row['seed'])
+    return previous_ids, previous_runs, previous_seeds
+
+
+def check_gen(plan, inventory, publication, prior_inventories):
+    """Bind exact audited full GEN populations and reject reused identities."""
+    names = {row['point'] for row in plan['points']}
+    published = {row['point']: row for row in publication['inputs']}
+    if (inventory.get('complete') is not True or publication.get('complete') is not True or
+            set(inventory['points']) != names or set(published) != names or
+            len(publication['inputs']) != len(names)):
+        raise ValueError('Complete GEN inventory/publication must cover exactly the new points')
+    previous_ids, previous_runs, previous_seeds = prior_gen_identities(prior_inventories)
+    identities, runs, seeds = set(), set(), set()
     for row in plan['points']:
         point, count = row['point'], row.get('full_gen_events', row['events'])
         parent, payload = inventory['points'][point], published[point]
