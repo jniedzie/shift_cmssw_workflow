@@ -163,6 +163,55 @@ class ReferenceAdmissionTest(unittest.TestCase):
             self.assertEqual(len(selected), 5)
             self.assertEqual(sum(b['operational_canary'] for b in selected), 1)
 
+    def test_retained_metadata_can_reject_a_bank_even_when_nano_fits(self):
+        point = self.points[0]
+        self.responses[point].update(selected_events=80,
+            maximum_retained_metadata_bytes_per_job=1000000)
+        for batch in self.config['batches']:
+            batch['events_per_job'] = 8
+        # Nano alone costs6.05MB, within12MB. Ten retained metadata bundles
+        # raise the actual bank forecast above12MB, so bulk must stay closed.
+        gate = self.gate()
+        selected = [batch for batch in self.config['batches']
+                    if batch['point'] == point and not batch['operational_canary']
+                    and batch['batch'] in gate['allowed_batches']]
+        self.assertEqual(selected, [])
+        response = next(row for row in gate['response_allocations'] if row['point'] == point)
+        self.assertGreater(response['reserved_bytes_per_bank'], 12000000)
+
+    def test_exact_batch_iwd_keeps_its_future_write_claim_until_producer_exits(self):
+        import sys
+        from datetime import datetime, timezone
+        sys.path.insert(0, str(SCRIPT.parent))
+        import run_dark_photon_meson_production as production
+        point = self.points[0]
+        batch = dict(batch='bank0', point=point, operational_canary=False)
+        config = dict(self.config, batches=[batch], minimum_eos_free_bytes=50,
+                      minimum_eos_free_files=1)
+        gate = dict(complete=True, all_requested_mass_GEN_audits_passed=True,
+            model_card_sha256=admission.sha(config['model_card']),
+            worklist_sha256=admission.sha(self.directory/'config.json'),
+            per_batch_forecast_bytes={'bank0':12000000}, total_meson_forecast_bytes=12000000,
+            allowed_batches=['bank0'])
+        Path(config['bulk_storage_gate']).write_text(json.dumps(gate))
+        state = dict(batches={'bank0':dict(primitive_histograms={'verified':'receipt'})})
+        observed = dict(observed_utc=datetime.now(timezone.utc).isoformat(),
+                        free_bytes=1000000000, free_files=100)
+        live = [{'Iwd':str(self.directory/'batches/bank0'), 'JobStatus':2}]
+        with patch.object(production, 'adaptive_reservation', return_value=0), \
+             patch.object(production, 'additional_reservations', return_value=(0, [])), \
+             patch.object(production, 'aggregation_reservation', return_value=0), \
+             patch.object(production, 'source_mechanism', return_value=production.REFERENCE_MECHANISMS[0]), \
+             patch.object(production.durable, 'jobs', return_value=live) as jobs, \
+             patch.object(production.durable, 'meson_published_batch', return_value=True) as closed:
+            _, evidence = production.storage_gate(config, observed, bulk=True, state=state)
+            self.assertEqual(evidence['meson_forecast_bytes'], 12000000)
+            closed.assert_not_called()
+            jobs.return_value = []
+            _, evidence = production.storage_gate(config, observed, bulk=True, state=state)
+            self.assertEqual(evidence['meson_forecast_bytes'], 0)
+            closed.assert_called_once()
+
     def test_underforecast_banks_are_not_admitted_from_a_looser_point_budget(self):
         # The total point cap fits, but the actual per-bank storage gate would
         # otherwise reserve less than this measured, margin-included cost.
