@@ -90,6 +90,63 @@ def download(source, target, checksum=None):
         raise ValueError('Input SHA-256 changed: ' + str(source))
 
 
+def native_class_rate(sources):
+    """Pool the same accepted MPI class with native Pythia trial weights.
+
+    The accepted originals remain the histogram denominator. The internal
+    trials determine the class cross-section estimate, as in the established
+    SoftQCD/MPI partition audit; they never replace accepted-event exposure.
+    """
+    common, rates, errors, trials = None, [], [], []
+    for source in sources:
+        authority = source.get('native_class_normalization')
+        if not isinstance(authority, dict) or authority.get('schema') != 'shift-native-MPI-class-rate-v1':
+            raise ValueError('Exact native Pythia trial/model authority required for accepted-class pooling')
+        count, rate = source['full_source_events'], source['native_cross_section_pb']
+        tried, selected, accepted = (authority.get(key) for key in
+                                     ('pythia_tried', 'pythia_selected', 'pythia_accepted'))
+        if (any(type(value) is not int for value in (tried, selected, accepted))
+                or not tried >= selected >= accepted > 0 or accepted != count):
+            raise ValueError('Native accepted-class trial counters differ from full source exposure')
+        for key in ('mpi_model_settings_sha256', 'audit_sha256'):
+            value = authority.get(key)
+            if not isinstance(value, str) or len(value) != 64 or any(c not in '0123456789abcdef' for c in value):
+                raise ValueError('Missing accepted-class native model/audit digest')
+        event_class = 'direct_jpsi' if source['stratum'].startswith('jpsi_') else 'qcd'
+        bounds = authority.get('bounds')
+        if (not isinstance(bounds, (list, tuple)) or len(bounds) != 2
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in bounds)
+                or bounds[0] < 0 or (bounds[1] != -1 and bounds[1] <= bounds[0])):
+            raise ValueError('Missing accepted-class native bin authority')
+        if (authority.get('event_class') != event_class or authority.get('bounds') != source.get('bounds')
+                or authority.get('mpi_model_contract') != 'pythia8-softqcd-nd-cp5-processlevel3-v1'
+                or authority.get('partition_contract') != 'direct-hard-jpsi-status23or33-v1'):
+            raise ValueError('Accepted-class native model/class/bin authority differs')
+        sigma_nd = authority.get('sigma_nd_pb')
+        if (not isinstance(sigma_nd, (int, float)) or isinstance(sigma_nd, bool)
+                or not math.isfinite(sigma_nd) or sigma_nd <= 0
+                or not math.isclose(rate * tried / count, sigma_nd, rel_tol=2e-10)):
+            raise ValueError('Native class rate does not close against its ND cross section and trials')
+        model = tuple(authority[key] for key in ('mpi_model_settings_sha256',
+                      'mpi_model_contract', 'partition_contract', 'event_class')) + (tuple(authority['bounds']),)
+        if common is None:
+            common = model, sigma_nd
+        elif model != common[0] or not math.isclose(sigma_nd, common[1], rel_tol=2e-10):
+            raise ValueError('Accepted-class sources have incompatible native model or ND cross section')
+        error = source.get('native_cross_section_error_pb')
+        if (not isinstance(error, (int, float)) or isinstance(error, bool)
+                or not math.isfinite(error) or error < 0):
+            raise ValueError('Missing accepted-class native cross-section uncertainty')
+        trials.append(tried)
+        rates.append(tried * rate)
+        errors.append((tried * error) ** 2)
+    total = sum(trials)
+    return dict(cross_section_pb=math.fsum(rates) / total,
+                cross_section_error_pb=math.sqrt(math.fsum(errors)) / total,
+                native_pythia_trials=total,
+                native_class_pooling='native-Pythia-trial-weighted-class-rate-v1')
+
+
 def exposure(sources, stratum):
     """Preserve the declared native estimator; never add a branching factor."""
     seen = set()
@@ -123,10 +180,16 @@ def exposure(sources, stratum):
         raise ValueError('Incompatible source estimators cannot be pooled')
     if kinds == {'conditional_signal_events'} and len(rates) != 1:
         raise ValueError('Combine independent signal source banks with their source-aware aggregator before postprocessing')
+    class_sources = [s for s in sources if s['stratum'].startswith(('qcd_', 'jpsi_'))]
+    class_rate = {}
     if kinds == {'fixed_source_trials'}:
         if any(not math.isclose(r, rates[0][0], rel_tol=1e-12) for r, n in rates):
             raise ValueError('Fixed-trial sources have different ND cross sections')
         rate = rates[0][0]
+    elif kinds == {'accepted_gen_events'} and class_sources and (
+            len(sources) > 1 or sources[0].get('native_class_normalization') is not None):
+        class_rate = native_class_rate(sources)
+        rate = class_rate['cross_section_pb']
     else:
         rate = math.fsum(r * n for r, n in rates) / denominator
     return dict(schema='shift-preserved-full-GEN-histogram-v1', stratum=stratum,
@@ -136,7 +199,8 @@ def exposure(sources, stratum):
                 no_second_filter_efficiency=True, partial_production=True,
                 physics_normalization_ready=all(s.get('physics_normalization_ready', False) for s in sources),
                 forced_decay_branching_convention_ready=all(
-                    s.get('forced_decay_branching_convention_ready', False) for s in sources))
+                    s.get('forced_decay_branching_convention_ready', False) for s in sources),
+                **{key: value for key, value in class_rate.items() if key != 'cross_section_pb'})
 
 
 def selected_rows(source):

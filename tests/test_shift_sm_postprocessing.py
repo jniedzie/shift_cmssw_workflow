@@ -5,12 +5,15 @@ import unittest
 import tempfile
 import json
 import errno
+import copy
+import math
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command, validate_dimuon_histograms
 from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update
 from run_shift_smart_sm_controller import postprocessing_charge
+from run_shift_smart_sm_source import accepted_class_authority
 import run_shift_smart_sm_controller as main_controller
 
 
@@ -64,6 +67,72 @@ class PostprocessingTest(unittest.TestCase):
         result = exposure(sources, 'dy_1to2')
         self.assertEqual(result['full_source_sumw'], 8)
         self.assertEqual(result['cross_section_pb'], 25.)
+
+    def accepted_class_source(self, key, count, trials):
+        sigma_nd = 1200.
+        rate, error = sigma_nd*count/trials, sigma_nd*math.sqrt(count)/trials
+        source = dict(source_id=key, gen_sha256=key*64, stratum='jpsi_0to1',
+            source_family='jpsi', bounds=[0., 1.], denominator_kind='accepted_gen_events',
+            full_source_events=count, native_cross_section_pb=rate,
+            native_cross_section_error_pb=error)
+        audit = dict(events=count, accepted_events=count, framework_requested_events=count,
+            generator_failed_framework_slots=0, sum_weights=count, sum_weights_squared=count,
+            generated_filter_efficiency=1., hard_process_codes={'101': count},
+            event_class='direct_jpsi', configured_pthat_bounds=[0., 1.],
+            input_sha256=key*64, mpi_model_settings_sha256='c'*64,
+            mpi_model_contract='pythia8-softqcd-nd-cp5-processlevel3-v1',
+            partition_contract='direct-hard-jpsi-status23or33-v1',
+            pythia_process_statistics=dict(tried=trials, selected=trials, accepted=count,
+                sigma_pb=rate, error_pb=error),
+            runs=[dict(internal_xsec_pb=rate, error_pb=error)])
+        source['native_class_normalization'] = accepted_class_authority(source, audit, 'd'*64)
+        return source, audit
+
+    def test_accepted_class_pools_native_trials_keeps_accepted_denominator(self):
+        first, _ = self.accepted_class_source('a', 2, 100)
+        second, _ = self.accepted_class_source('b', 6, 600)
+        result = exposure([first, second], 'jpsi_0to1')
+        self.assertEqual(result['full_source_sumw'], 8)
+        self.assertAlmostEqual(result['cross_section_pb'], 1200.*8/700)
+        self.assertNotAlmostEqual(result['cross_section_pb'], (2*24.+6*12.)/8)
+        self.assertEqual(result['native_pythia_trials'], 700)
+        regrouped, _ = self.accepted_class_source('e', 8, 700)
+        combined = exposure([regrouped], 'jpsi_0to1')
+        self.assertAlmostEqual(result['cross_section_pb'], combined['cross_section_pb'])
+        self.assertAlmostEqual(result['cross_section_error_pb'], combined['cross_section_error_pb'])
+
+    def test_accepted_class_rejects_missing_or_incompatible_native_authority(self):
+        first, _ = self.accepted_class_source('a', 2, 100)
+        second, _ = self.accepted_class_source('b', 6, 600)
+        for change in [dict(pythia_tried=6), dict(pythia_accepted=5),
+                       dict(mpi_model_settings_sha256='e'*64), dict(sigma_nd_pb=1300.),
+                       dict(event_class='qcd'), dict(bounds=[1., 2.])]:
+            changed = copy.deepcopy(second)
+            changed['native_class_normalization'].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                exposure([first, changed], 'jpsi_0to1')
+        legacy = copy.deepcopy(second)
+        del legacy['native_class_normalization']
+        with self.assertRaisesRegex(ValueError, 'Exact native Pythia'):
+            exposure([first, legacy], 'jpsi_0to1')
+        # One legacy source needs no pooling: retain its exact native authority.
+        self.assertEqual(exposure([legacy], 'jpsi_0to1')['cross_section_pb'],
+                         legacy['native_cross_section_pb'])
+        incompatible = copy.deepcopy(second)
+        incompatible['native_cross_section_pb'] *= 2.
+        incompatible['native_class_normalization']['sigma_nd_pb'] *= 2.
+        with self.assertRaisesRegex(ValueError, 'incompatible native model or ND'):
+            exposure([first, incompatible], 'jpsi_0to1')
+
+    def test_native_class_authority_requires_the_exact_complete_unit_source_audit(self):
+        source, audit = self.accepted_class_source('a', 5, 142017)
+        for change in [dict(input_sha256='f'*64), dict(generator_failed_framework_slots=1),
+                       dict(sum_weights=4.), dict(generated_filter_efficiency=.8),
+                       dict(framework_requested_events=6)]:
+            changed = copy.deepcopy(audit)
+            changed.update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                accepted_class_authority(source, changed, 'd'*64)
 
     def test_signal_histograms_keep_conditional_gen_denominator_and_physical_rate(self):
         source=dict(source_id='signal',gen_sha256='a',stratum='darkphoton_m0p7_lab_100m',

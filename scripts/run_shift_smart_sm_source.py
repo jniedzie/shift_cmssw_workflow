@@ -9,6 +9,7 @@ GEN exposure, source proposal weights and detector sampling stay separate.
 import gzip
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import shutil
@@ -174,7 +175,51 @@ def inspect_source(row, directory, audit, config, weighted):
             native_cross_section_error_pb=rate['internal_error_pb'])
         if len(identities) != count or weights != [1.]*count:
             raise ValueError('Accepted-event source count or unit weights differ')
+        if family in ('qcd', 'jpsi'):
+            source['native_class_normalization'] = accepted_class_authority(
+                source, audit, sha(directory/'validation.json'))
     return source, identities, weights, audit, config
+
+
+def accepted_class_authority(source, audit, audit_sha256):
+    """Retain the audited class-rate counters before worker scratch is retired."""
+    count = source['full_source_events']
+    statistics = audit.get('pythia_process_statistics', {})
+    tried, selected, accepted = (statistics.get(key) for key in ('tried', 'selected', 'accepted'))
+    if (any(type(value) is not int for value in (tried, selected, accepted))
+            or not tried >= selected >= accepted > 0 or accepted != count
+            or audit.get('events') != count or audit.get('accepted_events') != count
+            or audit.get('framework_requested_events') != count
+            or audit.get('generator_failed_framework_slots') != 0
+            or audit.get('sum_weights') != count or audit.get('sum_weights_squared') != count
+            or audit.get('generated_filter_efficiency') != 1.
+            or audit.get('hard_process_codes') != {'101': count}):
+        raise ValueError('Native MPI class audit does not cover the complete unit-weight accepted source')
+    event_class = 'direct_jpsi' if source['source_family'] == 'jpsi' else 'qcd'
+    if (audit.get('event_class') != event_class
+            or audit.get('input_sha256') != source.get('gen_sha256')
+            or audit.get('configured_pthat_bounds') != source['bounds']
+            or audit.get('mpi_model_contract') != 'pythia8-softqcd-nd-cp5-processlevel3-v1'
+            or audit.get('partition_contract') != 'direct-hard-jpsi-status23or33-v1'):
+        raise ValueError('Native MPI class audit model/class/bin differs from the source')
+    model = audit.get('mpi_model_settings_sha256')
+    if any(not isinstance(value, str) or len(value) != 64
+           or any(c not in '0123456789abcdef' for c in value)
+           for value in (model, audit_sha256)):
+        raise ValueError('Missing native MPI model/audit digest')
+    rate, error = source['native_cross_section_pb'], source['native_cross_section_error_pb']
+    runs = audit.get('runs', [])
+    if (not math.isfinite(rate) or rate <= 0 or not math.isfinite(error) or error < 0
+            or len(runs) != 1 or runs[0].get('internal_xsec_pb') != rate
+            or runs[0].get('error_pb') != error
+            or not math.isclose(statistics.get('sigma_pb', 0.), rate, rel_tol=.001)):
+        raise ValueError('Native MPI class cross-section authority differs from the run product')
+    return dict(schema='shift-native-MPI-class-rate-v1', event_class=event_class,
+                bounds=source['bounds'], mpi_model_settings_sha256=model,
+                mpi_model_contract=audit['mpi_model_contract'],
+                partition_contract=audit['partition_contract'],
+                pythia_tried=tried, pythia_selected=selected, pythia_accepted=accepted,
+                sigma_nd_pb=rate*tried/count, audit_sha256=audit_sha256)
 
 
 def resume_source(request, directory):
