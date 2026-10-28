@@ -130,8 +130,24 @@ def read_stock_geometry(path,source_pins):
         active_layer_surface_footprints_not_measured_reco_efficiency=True)
 
 
+def configure_geometry_variant(process,variant,cms):
+    """Change only the explicitly requested CSC geometry diagnostic settings."""
+    if variant not in ('reference','unaligned_conditions','unaligned_dd4hep'):
+        raise ValueError('Unknown CSC geometry_variant '+repr(variant))
+    csc=process.CSCGeometryESModule
+    original=csc.dumpPython()
+    if variant!='reference':
+        csc.applyAlignment=cms.bool(False)
+    if variant=='unaligned_dd4hep':
+        csc.fromDDD=cms.bool(False)
+        csc.fromDD4hep=cms.bool(True)
+    return dict(geometry_variant=variant,original_CSCGeometryESModule=original,
+        export_CSCGeometryESModule=csc.dumpPython(),
+        geometry_conditions_preserved=variant=='reference')
+
+
 def dump_worker(request):
-    """Use the exact retained process geometry, running no physics modules."""
+    """Export a named diagnostic from the retained process, without physics."""
     tools=Path(__file__).resolve().parents[1];pin=request['reference_config'];reference=Path(pin['path'])
     if not reference.is_absolute():reference=tools/reference
     if sha(reference)!=pin['sha256']:raise ValueError('Frozen reference Step4 configuration changed')
@@ -140,6 +156,7 @@ def dump_worker(request):
     import FWCore.ParameterSet.Config as cms
     process=runpy.run_path(str(reference))['process']
     global_tag=process.GlobalTag.dumpPython() if hasattr(process,'GlobalTag') else None
+    variant=configure_geometry_variant(process,request.get('geometry_variant','reference'),cms)
     process.source=cms.Source('EmptySource',firstRun=cms.untracked.uint32(600500001))
     process.maxEvents=cms.untracked.PSet(input=cms.untracked.int32(1))
     process.activeCscGeometry=cms.ESProducer('FWRecoGeometryESProducer',
@@ -158,7 +175,8 @@ def dump_worker(request):
     pins=dict(reference_config=pin,runtime_sha256=request['runtime_sha256'],
         export_config_sha256=sha(config),original_GlobalTag=global_tag,first_run=600500001,
         stock_producer='FWRecoGeometryESProducer',stock_analyzer='DumpFWRecoGeometry',
-        physics_processing_performed=False,original_geometry_conditions_preserved=True)
+        physics_processing_performed=False,
+        original_geometry_conditions_preserved=variant['geometry_conditions_preserved'],**variant)
     geometry=read_stock_geometry('csc_geometry.root',pins)
     output=Path(request.get('output_map','csc_active_layers.json.gz'))
     data=json.dumps(geometry,sort_keys=True,separators=(',',':'),allow_nan=False).encode()

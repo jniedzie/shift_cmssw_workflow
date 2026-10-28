@@ -1,10 +1,11 @@
 # Code style: AI-code. AI-generated exact CSC polygon-ray regression checks.
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import unittest
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
-from shift_csc_active_geometry import local_to_global,ray_intersections
+from shift_csc_active_geometry import configure_geometry_variant,local_to_global,ray_intersections
 
 
 class ActiveGeometryTest(unittest.TestCase):
@@ -54,6 +55,42 @@ class ActiveGeometryTest(unittest.TestCase):
         self.assertEqual(ray_intersections(dict(layers=[first]),[0.,0.,10.],[1.,0.,0.])['hits'],[])
         with self.assertRaisesRegex(ValueError,'Zero momentum'):
             ray_intersections(dict(layers=[first]),[0.,0.,10.],[0.,0.,0.])
+
+
+class GeometryVariantTest(unittest.TestCase):
+    def configure(self,variant):
+        class Geometry(SimpleNamespace):
+            def dumpPython(self):return repr(vars(self))
+        geometry=Geometry(applyAlignment=True,fromDDD=False,fromDD4hep=False,
+            alignmentsLabel='',appendToDataLabel='',useRealWireGeometry=True)
+        process=SimpleNamespace(CSCGeometryESModule=geometry,GlobalTag='pinned-GT')
+        original=vars(geometry).copy()
+        pins=configure_geometry_variant(process,variant,SimpleNamespace(bool=bool))
+        self.assertEqual(process.GlobalTag,'pinned-GT')
+        self.assertEqual(pins['original_CSCGeometryESModule'],repr(original))
+        self.assertEqual(pins['export_CSCGeometryESModule'],geometry.dumpPython())
+        return geometry,original,pins
+
+    def test_reference_keeps_every_setting(self):
+        geometry,original,pins=self.configure('reference')
+        self.assertEqual(vars(geometry),original)
+        self.assertTrue(pins['geometry_conditions_preserved'])
+
+    def test_unaligned_conditions_changes_only_alignment(self):
+        geometry,original,pins=self.configure('unaligned_conditions')
+        self.assertEqual(vars(geometry),dict(original,applyAlignment=False))
+        self.assertFalse(pins['geometry_conditions_preserved'])
+
+    def test_unaligned_dd4hep_changes_only_alignment_and_source(self):
+        geometry,original,pins=self.configure('unaligned_dd4hep')
+        self.assertEqual(vars(geometry),dict(original,applyAlignment=False,fromDDD=False,fromDD4hep=True))
+        self.assertFalse(pins['geometry_conditions_preserved'])
+
+    def test_unknown_variant_is_rejected_before_mutation(self):
+        process=SimpleNamespace(CSCGeometryESModule=SimpleNamespace(applyAlignment=True))
+        with self.assertRaisesRegex(ValueError,'Unknown CSC geometry_variant'):
+            configure_geometry_variant(process,'almost_ideal',SimpleNamespace(bool=bool))
+        self.assertEqual(vars(process.CSCGeometryESModule),dict(applyAlignment=True))
 
 
 if __name__=='__main__':unittest.main()
