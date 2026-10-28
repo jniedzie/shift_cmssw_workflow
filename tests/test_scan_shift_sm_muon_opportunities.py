@@ -68,6 +68,30 @@ def write_pin(path, value, compressed=False):
 
 
 class OpportunityTest(unittest.TestCase):
+    def test_old_hadronization_flags_use_shared_exact_node_predicate_and_keep_originals(self):
+        for pdg, status in ((2101, 72), (2103, 73), (2203, 72), (9900015, 72), (2101, 2)):
+            with self.subTest(pdg=pdg, status=status):
+                original = event()
+                original['unknown_transport_ancestor_barcodes'] = [99]
+                original['ancestor_nodes'] = [dict(barcode=99, pdg=pdg, status=status, immediate_parent_barcodes=[])]
+                for m in original['muons']:
+                    m.update(ancestor_barcodes=[99], first_non_muon_parent_barcodes=[99])
+                saved = copy.deepcopy(original)
+                counts, result = describe_event(original, geometry(), 1.)
+                self.assertEqual(original, saved)
+                if pdg == 9900015 or status == 2:
+                    self.assertIsNone(result)
+                    self.assertEqual(counts['remaining_unknown_transport_ancestor_nodes'], 1)
+                    self.assertEqual(counts['pointing_OS_pairs_with_unknown_transport_ancestry'], 1)
+                else:
+                    self.assertEqual(counts['ignored_generator_bookkeeping_ancestor_nodes'], 1)
+                    self.assertEqual(result['original_unknown_transport_ancestor_barcodes'], [99])
+                    self.assertEqual(result['original_unknown_transport_ancestor_count'], 1)
+                    self.assertFalse(result['pairs'][0]['ancestry_unknown'])
+                    union = result['pairs'][0]['transport_parent_union']
+                    self.assertEqual(union['known_union_depth'], 0.)
+                    self.assertEqual(union['ignored_generator_bookkeeping_ancestor_nodes'], original['ancestor_nodes'])
+
     def parent_event(self, depth=1.):
         original = event()
         original['parent_flights'] = [dict(barcode=7, pdg=223, birth_cm=[250., 0., 14800.],

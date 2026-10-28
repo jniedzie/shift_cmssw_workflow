@@ -39,7 +39,9 @@ def hadron(pdg):
 def generator_bookkeeping_diquark(pdg, status):
     """Recognize Pythia remnant/string diquarks, not new transport states."""
     value = abs(int(pdg))
-    return (status in (63, 71) and 1000 <= value < 7000
+    # Native Pythia 8.317 documents 72/73 as hadronization preparation too.
+    # Keep the diquark pattern restrictive and physical status-1/2 states out.
+    return (status in (63, 71, 72, 73) and 1000 <= value < 7000
             and 1 <= (value // 1000) <= 6 and 1 <= (value // 100) % 10 <= 6
             and value % 100 in (1, 3))
 

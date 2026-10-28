@@ -29,6 +29,7 @@ import tempfile
 
 from run_shift_sm_postprocessing import digest, download, save
 from shift_csc_active_geometry import ray_intersections
+from shift_gen_material_features import generator_bookkeeping_diquark
 from shift_sm_response_features import SHALLOW_PARENT_DEPTH_MAX, _station_misses
 
 
@@ -116,6 +117,16 @@ def validate_census(source, authority, features):
             raise ValueError('Complete unique GEN muon inventory differs')
 
 
+def classified_unknown_ancestors(original_unknown, nodes):
+    """Reclassify old flags only from exact saved SM bookkeeping identities."""
+    if not isinstance(original_unknown, list):
+        return None, []
+    ignored = [nodes[n] for n in original_unknown if n in nodes
+               and generator_bookkeeping_diquark(nodes[n]['pdg'], nodes[n]['status'])]
+    ignored_ids = {row['barcode'] for row in ignored}
+    return [n for n in original_unknown if n not in ignored_ids], ignored
+
+
 def ancestry_description(event, muon, nodes):
     """Describe known ancestry and preserve missing or unclassified links."""
     ancestors = muon.get('ancestor_barcodes')
@@ -127,7 +138,8 @@ def ancestry_description(event, muon, nodes):
     missing = sorted(numbers-set(nodes))
     if missing:
         reasons.append('ancestor nodes missing')
-    unknown = event.get('unknown_transport_ancestor_barcodes')
+    original_unknown = event.get('unknown_transport_ancestor_barcodes')
+    unknown, ignored = classified_unknown_ancestors(original_unknown, nodes)
     if not isinstance(unknown, list):
         reasons.append('missing unknown-transport inventory')
     unclassified = sorted(numbers.intersection(unknown or []))
@@ -135,6 +147,8 @@ def ancestry_description(event, muon, nodes):
         reasons.append('unclassified transport ancestry')
     return dict(reasons=reasons, missing_ancestor_barcodes=missing,
         unknown_transport_ancestor_barcodes=unclassified,
+        original_unknown_transport_ancestor_barcodes=sorted(numbers.intersection(original_unknown or [])),
+        ignored_generator_bookkeeping_ancestor_nodes=[row for row in ignored if row['barcode'] in numbers],
         first_non_muon_ancestors=[nodes[n] for n in first or [] if n in nodes],
         ancestor_nodes=[nodes[n] for n in sorted(numbers) if n in nodes],
         no_listed_transport_parent_is_not_proof_of_prompt_origin=True)
@@ -151,16 +165,17 @@ def compact_crossings(geometry, muon):
         two_stations_each_endcap=result['two_stations_each_endcap'])
 
 
-def parent_union_description(pair, parents, unknown_ancestors):
+def parent_union_description(pair, parents, unknown_ancestors, ancestor_nodes=None):
     """Count distinct saved flights once; missing/incomplete paths stay unknown."""
     numbers = sorted(set(pair[0]['transport_parent_barcodes']) | set(pair[1]['transport_parent_barcodes']))
     records = [parents[n] for n in numbers if n in parents]
+    classified, ignored = classified_unknown_ancestors(unknown_ancestors, ancestor_nodes or {})
     reasons = set()
     if len(records) != len(numbers):
         reasons.add('missing parent flight')
-    if not isinstance(unknown_ancestors, list) or any(
+    if not isinstance(classified, list) or any(
             not isinstance(muon.get('ancestor_barcodes'), list)
-            or set(muon['ancestor_barcodes']).intersection(unknown_ancestors) for muon in pair):
+            or set(muon['ancestor_barcodes']).intersection(classified) for muon in pair):
         reasons.add('unknown transport ancestry')
     values = []
     for parent in records:
@@ -175,6 +190,9 @@ def parent_union_description(pair, parents, unknown_ancestors):
             reasons.add('incomplete parent path coverage')
     return dict(barcodes=numbers, known_union_depth=math.fsum(values) if not reasons else None,
         all_parent_paths_known_and_fully_covered=not reasons, unknown_reasons=sorted(reasons),
+        original_unknown_transport_ancestor_barcodes=unknown_ancestors,
+        original_unknown_transport_ancestor_count=len(unknown_ancestors) if isinstance(unknown_ancestors, list) else None,
+        ignored_generator_bookkeeping_ancestor_nodes=ignored,
         parent_records=records)
 
 
@@ -206,6 +224,14 @@ def describe_event(event, geometry, maximum_known_parent_depth=None):
     nodes = {row['barcode']: row for row in event.get('ancestor_nodes', [])}
     if len(nodes) != len(event.get('ancestor_nodes', [])):
         raise ValueError('Duplicate ancestor node barcode')
+    original_unknown = event.get('unknown_transport_ancestor_barcodes')
+    classified, ignored = classified_unknown_ancestors(original_unknown, nodes)
+    if isinstance(original_unknown, list):
+        counts['original_unknown_transport_ancestor_nodes'] = len(original_unknown)
+        counts['ignored_generator_bookkeeping_ancestor_nodes'] = len(ignored)
+        counts['remaining_unknown_transport_ancestor_nodes'] = len(classified)
+    else:
+        counts['events_with_missing_unknown_ancestry_inventory'] = 1
     pairs, omitted, records = [], [], {}
     rays = {muon['barcode']: _station_misses(muon) for muon in available}
     for left, right in itertools.combinations(available, 2):
@@ -228,7 +254,7 @@ def describe_event(event, geometry, maximum_known_parent_depth=None):
             if any(not isinstance(m.get('transport_parent_barcodes'), list) for m in pair):
                 counts['pointing_OS_pairs_unknown_transport_parent_inventory'] += 1
                 continue
-            parent_paths = parent_union_description(pair, parents, event.get('unknown_transport_ancestor_barcodes'))
+            parent_paths = parent_union_description(pair, parents, original_unknown, nodes)
             if not parent_paths['all_parent_paths_known_and_fully_covered']:
                 counts['omitted_unknown_parent_path_OS_pairs'] += 1
                 for reason in parent_paths['unknown_reasons']:
@@ -268,6 +294,9 @@ def describe_event(event, geometry, maximum_known_parent_depth=None):
     if pairs or omitted:
         detail = dict(event_id=event['event_id'], native_weight=event['native_weight'],
             graph_sha256=event.get('graph_sha256'), candidate_muons=list(records.values()),
+            original_unknown_transport_ancestor_barcodes=original_unknown,
+            original_unknown_transport_ancestor_count=len(original_unknown) if isinstance(original_unknown, list) else None,
+            ignored_generator_bookkeeping_ancestor_nodes=ignored,
             pairs=pairs, unranked_pairs=omitted)
     return counts, detail
 
@@ -297,6 +326,8 @@ def scan(request):
         no_listed_transport_parent_is_not_proof_of_prompt_origin=True,
         geometry_is_straight_active_layer_footprints_not_measured_reco_efficiency=True,
         scattering_field_losses_electronics_and_reconstruction_not_predicted=True,
+        saved_ancestry_flags_reclassified_only_by_shared_bookkeeping_predicate=True,
+        bookkeeping_classifier_file_sha256=digest(generator_bookkeeping_diquark.__code__.co_filename),
         material_is_saved_external_path_description_not_survival_weight=True)
     if parent_limit is not None:
         report.update(maximum_known_parent_depth=parent_limit,
