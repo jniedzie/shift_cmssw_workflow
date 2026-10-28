@@ -11,7 +11,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from scan_shift_sm_muon_opportunities import describe_event, load_pin, scan, validate_census
+from scan_shift_sm_muon_opportunities import describe_event, load_pin, parent_union_description, scan, validate_census
 
 
 def geometry():
@@ -68,6 +68,70 @@ def write_pin(path, value, compressed=False):
 
 
 class OpportunityTest(unittest.TestCase):
+    def parent_event(self, depth=1.):
+        original = event()
+        original['parent_flights'] = [dict(barcode=7, pdg=223, birth_cm=[250., 0., 14800.],
+            material=dict(complete=True, full_saved_chord_coverage=True, interaction_depth_proxy=depth))]
+        original['ancestor_nodes'] = [dict(barcode=7, pdg=223, status=2, immediate_parent_barcodes=[])]
+        for muon in original['muons']:
+            muon.update(transport_parent_barcodes=[7], ancestor_barcodes=[7], first_non_muon_parent_barcodes=[7])
+        return original
+
+    def test_optional_union_depth_counts_shared_parent_once_and_preserves_default(self):
+        original = self.parent_event()
+        self.assertIsNone(describe_event(original, geometry())[1])
+        counts, result = describe_event(original, geometry(), 1.)
+        self.assertEqual(counts['no_listed_transport_parent_OS_pairs'], 0)
+        self.assertEqual(counts['known_shallow_parent_OS_pairs'], 1)
+        pair = result['pairs'][0]
+        self.assertEqual(pair['transport_parent_union']['known_union_depth'], 1.)
+        self.assertEqual(pair['transport_parent_union']['barcodes'], [7])
+        self.assertEqual(len(pair['transport_parent_union']['parent_records']), 1)
+        self.assertEqual(pair['pt_GeV'], 0.)
+        self.assertTrue(pair['both_muons_cross_two_stations_each_endcap'])
+        self.assertEqual(describe_event(self.parent_event(1.0001), geometry(), 1.)[0][
+            'omitted_above_known_parent_depth_OS_pairs'], 1)
+
+    def test_unknown_parent_depth_and_coverage_are_never_replaced_by_zero(self):
+        for change in [dict(complete=False), dict(full_saved_chord_coverage=False),
+                       dict(interaction_depth_proxy=None)]:
+            with self.subTest(change=change):
+                original = self.parent_event(0.)
+                original['parent_flights'][0]['material'].update(change)
+                description = parent_union_description(original['muons'], {7: original['parent_flights'][0]}, [])
+                self.assertIsNone(description['known_union_depth'])
+                self.assertFalse(description['all_parent_paths_known_and_fully_covered'])
+                counts, result = describe_event(original, geometry(), 1.)
+                self.assertEqual(counts['omitted_unknown_parent_path_OS_pairs'], 1)
+                self.assertIsNone(result)
+        original = self.parent_event()
+        original['parent_flights'] = []
+        self.assertEqual(describe_event(original, geometry(), 1.)[0]['pointing_OS_pairs_with_missing_parent_flight'], 1)
+        original = self.parent_event()
+        original['unknown_transport_ancestor_barcodes'] = [7]
+        self.assertEqual(describe_event(original, geometry(), 1.)[0]['pointing_OS_pairs_with_unknown_transport_ancestry'], 1)
+
+    def test_geometry_is_checked_before_unknown_parent_paths_or_inventory(self):
+        original = self.parent_event()
+        original['parent_flights'][0]['material']['full_saved_chord_coverage'] = False
+        original['muons'][0]['momentum_GeV'] = [0., 0., 100.]
+        counts, result = describe_event(original, geometry(), 1.)
+        self.assertEqual(counts['all_OS_pairs'], 1)
+        self.assertEqual(counts['omitted_unknown_or_no_two_forward_stations'], 1)
+        self.assertEqual(counts.get('omitted_unknown_parent_path_OS_pairs', 0), 0)
+        self.assertIsNone(result)
+        original['muons'][0].pop('transport_parent_barcodes')
+        counts, result = describe_event(original, geometry(), 1.)
+        self.assertEqual(counts['OS_pairs_unknown_transport_parent_inventory'], 1)
+        self.assertEqual(counts.get('pointing_OS_pairs_unknown_transport_parent_inventory', 0), 0)
+
+    def test_shallow_option_preserves_no_parent_pair_and_separate_original_scope_count(self):
+        counts, result = describe_event(event(), geometry(), 1.)
+        self.assertEqual(counts['no_listed_transport_parent_OS_pairs'], 1)
+        self.assertEqual(result['pairs'][0]['transport_parent_union']['known_union_depth'], 0.)
+        self.assertEqual(result['pairs'][0]['transport_parent_union']['parent_records'], [])
+        self.assertTrue(result['pairs'][0]['transport_parent_union']['all_parent_paths_known_and_fully_covered'])
+
     def test_same_pair_exact_geometry_low_pt_and_unknown_material_are_descriptive(self):
         counts, result = describe_event(event(), geometry())
         self.assertEqual(counts['reported_pairs'], 1)
@@ -93,6 +157,12 @@ class OpportunityTest(unittest.TestCase):
         self.assertEqual(ancestry['missing_ancestor_barcodes'], [99])
         self.assertEqual(ancestry['unknown_transport_ancestor_barcodes'], [99])
         self.assertTrue(ancestry['no_listed_transport_parent_is_not_proof_of_prompt_origin'])
+        union = parent_union_description(original['muons'], {}, [99])
+        self.assertIsNone(union['known_union_depth'])
+        self.assertFalse(union['all_parent_paths_known_and_fully_covered'])
+        counts, result = describe_event(original, geometry(), 1.)
+        self.assertEqual(counts['pointing_OS_pairs_with_unknown_transport_ancestry'], 1)
+        self.assertIsNone(result)
 
     def test_transport_inventory_and_nonpointing_omissions_are_counted(self):
         original = event()

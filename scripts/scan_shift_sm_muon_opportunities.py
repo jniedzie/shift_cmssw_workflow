@@ -13,6 +13,9 @@ Unknown ancestry is retained explicitly. A broad two-station radial miss <=500
 cm only limits this descriptive report; omitted pairs are counted. Exact layer
 footprints rank that same pair. Neither geometry predicts measured efficiency,
 nor do mass, pT, energy or material quantities impose physics cuts here.
+Optional maximum_known_parent_depth also describes pairs with fully covered,
+known union-parent paths (the existing shallow reference is depth <=1). Unknown
+paths never supply zero depth, and the default no-parent scope is unchanged.
 """
 import argparse
 from collections import Counter
@@ -26,7 +29,7 @@ import tempfile
 
 from run_shift_sm_postprocessing import digest, download, save
 from shift_csc_active_geometry import ray_intersections
-from shift_sm_response_features import _station_misses
+from shift_sm_response_features import SHALLOW_PARENT_DEPTH_MAX, _station_misses
 
 
 def load_pin(pin, scratch, maximum_bytes, maximum_json_bytes):
@@ -148,7 +151,34 @@ def compact_crossings(geometry, muon):
         two_stations_each_endcap=result['two_stations_each_endcap'])
 
 
-def describe_event(event, geometry):
+def parent_union_description(pair, parents, unknown_ancestors):
+    """Count distinct saved flights once; missing/incomplete paths stay unknown."""
+    numbers = sorted(set(pair[0]['transport_parent_barcodes']) | set(pair[1]['transport_parent_barcodes']))
+    records = [parents[n] for n in numbers if n in parents]
+    reasons = set()
+    if len(records) != len(numbers):
+        reasons.add('missing parent flight')
+    if not isinstance(unknown_ancestors, list) or any(
+            not isinstance(muon.get('ancestor_barcodes'), list)
+            or set(muon['ancestor_barcodes']).intersection(unknown_ancestors) for muon in pair):
+        reasons.add('unknown transport ancestry')
+    values = []
+    for parent in records:
+        material = parent.get('material', {})
+        depth = material.get('interaction_depth_proxy')
+        if (isinstance(depth, bool) or not isinstance(depth, (int, float))
+                or not math.isfinite(depth) or depth < 0):
+            reasons.add('unknown parent depth')
+        else:
+            values.append(depth)
+        if material.get('complete') is not True or material.get('full_saved_chord_coverage') is not True:
+            reasons.add('incomplete parent path coverage')
+    return dict(barcodes=numbers, known_union_depth=math.fsum(values) if not reasons else None,
+        all_parent_paths_known_and_fully_covered=not reasons, unknown_reasons=sorted(reasons),
+        parent_records=records)
+
+
+def describe_event(event, geometry, maximum_known_parent_depth=None):
     """Keep full candidate-muon records once per event and compact pair links."""
     muons = event['muons']
     counts = Counter(events=1, GEN_muons=len(muons), zero_muon_events=int(not muons))
@@ -163,6 +193,16 @@ def describe_event(event, geometry):
         else:
             counts['muons_unknown_transport_parent_inventory'] += 1
     counts['muons_without_listed_transport_parents'] = len(available)
+    counts['no_listed_transport_parent_OS_pairs'] = (
+        sum(m['pdg'] == 13 for m in available)*sum(m['pdg'] == -13 for m in available))
+    if maximum_known_parent_depth is not None:
+        known_inventory = [m for m in muons if isinstance(m.get('transport_parent_barcodes'), list)]
+        counts['OS_pairs_unknown_transport_parent_inventory'] = counts['all_OS_pairs']-(
+            sum(m['pdg'] == 13 for m in known_inventory)*sum(m['pdg'] == -13 for m in known_inventory))
+        available = muons
+    parents = {row['barcode']: row for row in event.get('parent_flights', [])}
+    if len(parents) != len(event.get('parent_flights', [])):
+        raise ValueError('Duplicate parent flight barcode')
     nodes = {row['barcode']: row for row in event.get('ancestor_nodes', [])}
     if len(nodes) != len(event.get('ancestor_nodes', [])):
         raise ValueError('Duplicate ancestor node barcode')
@@ -171,17 +211,33 @@ def describe_event(event, geometry):
     for left, right in itertools.combinations(available, 2):
         if left['pdg']*right['pdg'] >= 0:
             continue
-        counts['no_listed_transport_parent_OS_pairs'] += 1
         pair = [left, right]
         misses = [rays[m['barcode']] for m in pair]
         if any(row is None or row['two_station_miss'] is None for row in misses):
             counts['omitted_unknown_or_no_two_forward_stations'] += 1
-            omitted.append(dict(barcodes=[m['barcode'] for m in pair], reason='unknown or no two forward stations'))
+            if maximum_known_parent_depth is None:
+                omitted.append(dict(barcodes=[m['barcode'] for m in pair], reason='unknown or no two forward stations'))
             continue
         miss = max(row['two_station_miss'] for row in misses)
         if miss > 500.:
             counts['omitted_outside_broad_500cm_support'] += 1
             continue
+        counts['broad_pointing_OS_pairs'] += 1
+        parent_paths = None
+        if maximum_known_parent_depth is not None:
+            if any(not isinstance(m.get('transport_parent_barcodes'), list) for m in pair):
+                counts['pointing_OS_pairs_unknown_transport_parent_inventory'] += 1
+                continue
+            parent_paths = parent_union_description(pair, parents, event.get('unknown_transport_ancestor_barcodes'))
+            if not parent_paths['all_parent_paths_known_and_fully_covered']:
+                counts['omitted_unknown_parent_path_OS_pairs'] += 1
+                for reason in parent_paths['unknown_reasons']:
+                    counts['pointing_OS_pairs_with_'+reason.replace(' ', '_')] += 1
+                continue
+            if parent_paths['known_union_depth'] > maximum_known_parent_depth:
+                counts['omitted_above_known_parent_depth_OS_pairs'] += 1
+                continue
+            counts['known_shallow_parent_OS_pairs'] += 1
         for muon, broad in zip(pair, misses):
             if muon['barcode'] not in records:
                 if (not math.isfinite(muon['energy_GeV']) or muon['energy_GeV'] < 0
@@ -202,6 +258,8 @@ def describe_event(event, geometry):
             descriptive_rank_min_stations_then_layers=rank,
             both_muons_cross_two_stations_each_endcap=all(row['two_stations_each_endcap'] for row in crossings),
             ancestry_unknown=any(records[m['barcode']]['ancestry']['reasons'] for m in pair)))
+        if parent_paths is not None:
+            pairs[-1]['transport_parent_union'] = parent_paths
     counts['reported_pairs'] = len(pairs)
     counts['events_with_reported_pairs'] = int(bool(pairs))
     counts['reported_pairs_with_unknown_ancestry'] = sum(row['ancestry_unknown'] for row in pairs)
@@ -228,6 +286,10 @@ def scan(request):
     maximum = request.get('maximum_feature_bytes', 32*1048576)
     expanded = request.get('maximum_feature_json_bytes', 256*1048576)
     output_bound = request.get('maximum_report_bytes', 16*1048576)
+    parent_limit = request.get('maximum_known_parent_depth')
+    if parent_limit is not None and (isinstance(parent_limit, bool) or not isinstance(parent_limit, (int, float))
+                                    or not math.isfinite(parent_limit) or parent_limit < 0):
+        raise ValueError('maximum_known_parent_depth must be finite and nonnegative')
     report = dict(schema='shift-existing-GEN-muon-opportunities-v1', complete=False,
         diagnostic_only=True, map_pin=request['map_pin'], sources=[], totals={},
         no_admission_or_weight_changes=True, no_muon_pt_or_mass_cut=True,
@@ -236,6 +298,13 @@ def scan(request):
         geometry_is_straight_active_layer_footprints_not_measured_reco_efficiency=True,
         scattering_field_losses_electronics_and_reconstruction_not_predicted=True,
         material_is_saved_external_path_description_not_survival_weight=True)
+    if parent_limit is not None:
+        report.update(maximum_known_parent_depth=parent_limit,
+            reference_shallow_parent_depth=SHALLOW_PARENT_DEPTH_MAX,
+            unknown_parent_paths_never_assigned_zero=True,
+            parent_path_counters_apply_after_same_pair_broad_pointing=True,
+            parent_unknown_reason_counts_can_overlap=True,
+            optional_geometric_omissions_counted_without_large_pairwise_records=True)
     total = Counter()
     with tempfile.TemporaryDirectory(prefix='shift-muon-opportunities-') as scratch:
         geometry = load_pin(request['map_pin'], scratch, 2*1048576, 32*1048576)
@@ -248,7 +317,7 @@ def scan(request):
             validate_census(source, authority, features)
             counts, details = Counter(), []
             for event in features['events']:
-                values, detail = describe_event(event, geometry)
+                values, detail = describe_event(event, geometry, parent_limit)
                 counts.update(values)
                 if detail is not None:
                     details.append(detail)
