@@ -70,12 +70,18 @@ def checked_digest(path, expected):
 
 class EosRpc:
     """Small native EOS adapter for workers without a mounted /eos directory."""
-    def __init__(self, host, cache_directory):
+    def __init__(self, host, cache_directory, eos_executable="/usr/bin/eos"):
+        self.eos_executable = str(eos_executable)
+        if not Path(self.eos_executable).is_absolute():
+            raise ValueError("EOS executable must be an absolute qualified path")
         self.host = host
         self.cache_directory = Path(cache_directory)
         self.cache_directory.mkdir(parents=True, exist_ok=True)
 
     def command(self, arguments, *, missing_ok=False):
+        arguments = list(arguments)
+        if arguments and arguments[0] == "/usr/bin/eos":
+            arguments[0] = self.eos_executable
         environment = native_env()
         for name in ('X509_USER_PROXY', 'KRB5CCNAME'):
             if os.environ.get(name):

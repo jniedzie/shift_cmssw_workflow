@@ -578,7 +578,7 @@ def supplement_canaries(config, policy, policy_hash):
     if cache.is_file() and read(cache) == expected:
         return True
     with tempfile.TemporaryDirectory(prefix='dp-supplement-canaries-',dir=os.environ.get('_CONDOR_SCRATCH_DIR','/tmp')) as scratch:
-        transport = EosRpc('root://eosuser.cern.ch',Path(scratch))
+        transport = EosRpc('root://eosuser.cern.ch',Path(scratch),config.get('eos_executable','/usr/bin/eos'))
         for candidate in candidates:
             if completed_histogram(candidate,transport) is None:
                 return False
@@ -1231,7 +1231,7 @@ def published_canary(config, state):
                     or any(sha(item['point_receipt_path']) != item['point_receipt_sha256'] for item in saved['points'])):
                 raise ValueError('Qualified canary evidence changed')
             return True
-        transport=EosRpc('root://eosuser.cern.ch',Path(config['directory'])/'readbacks')
+        transport=EosRpc('root://eosuser.cern.ch',Path(config['directory'])/'readbacks',config.get('eos_executable','/usr/bin/eos'))
         points=[]
         for point in names:
             row,=[row for row in plan['points'] if row['point']==point]
@@ -1281,7 +1281,7 @@ def publish_ready_baselines(config, state):
     # aggregate, and each baseline remains exactly one primitive population.
     records = state.setdefault('baseline_publications', {})
     with tempfile.TemporaryDirectory(prefix='dp-ready-baselines-', dir=os.environ.get('_CONDOR_SCRATCH_DIR', '/tmp')) as scratch:
-        transport = EosRpc('root://eosuser.cern.ch', Path(scratch))
+        transport = EosRpc('root://eosuser.cern.ch', Path(scratch), config.get('eos_executable','/usr/bin/eos'))
         for point, authority in sources.items():
             if point in state.get('published', {}):
                 continue  # Never move an aggregate alias back to its pilot.
@@ -1335,7 +1335,7 @@ def publish_ready_baselines(config, state):
 
 def publish(config, state):
     from watch_dark_photon_production import EosRpc, completed_histogram
-    transport = EosRpc('root://eosuser.cern.ch', Path(config['directory']) / 'readbacks')
+    transport = EosRpc('root://eosuser.cern.ch', Path(config['directory']) / 'readbacks', config.get('eos_executable','/usr/bin/eos'))
     sources = available_sources(config)
     adaptive_prefix = str(Path(config['directory']) / 'waves') + '/'
     recovery_plans={str(Path(source['directory'])/'plan.json')

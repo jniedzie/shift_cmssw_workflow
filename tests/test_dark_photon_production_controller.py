@@ -12,6 +12,20 @@ import watch_dark_photon_production as controller
 from dark_photon_sample_names import physical_point_name
 
 
+class QualifiedEosExecutable(unittest.TestCase):
+    def test_metadata_routes_only_eos_through_the_pinned_executable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            transport = controller.EosRpc('root://example', temporary, '/qualified/eos')
+            result = type('Result', (), dict(returncode=0, stderr='', stdout='mode=42755'))()
+            with patch.object(controller.subprocess, 'run', return_value=result) as command:
+                self.assertEqual(transport.metadata('/eos/sample')['mode'], '42755')
+                self.assertEqual(command.call_args.args[0][0], '/qualified/eos')
+                transport.command(['/usr/bin/xrdfs', 'root://example', 'ls', '/eos/sample'])
+                self.assertEqual(command.call_args.args[0][0], '/usr/bin/xrdfs')
+            with self.assertRaisesRegex(ValueError, 'absolute qualified path'):
+                controller.EosRpc('root://example', temporary, 'eos')
+
+
 class DurableControllerRecords(unittest.TestCase):
     def test_transient_afs_timeout_retries_but_permission_failure_stops(self):
         with tempfile.TemporaryDirectory() as temporary:

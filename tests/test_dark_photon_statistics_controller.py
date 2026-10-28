@@ -685,7 +685,7 @@ class AggregateSubmission(unittest.TestCase):
             pass
 
         class Transport:
-            def __init__(self, host, cache_directory):
+            def __init__(self, host, cache_directory, eos_executable="/usr/bin/eos"):
                 self.cache_directory = Path(cache_directory)
                 self.cache_directory.mkdir(exist_ok=True)
 
@@ -745,7 +745,7 @@ class AggregateSubmission(unittest.TestCase):
 
     def test_committed_warning_and_lost_controller_state_recover_v1_without_resubmitting(self):
         class Transport:
-            def __init__(self, host, cache_directory):
+            def __init__(self, host, cache_directory, eos_executable="/usr/bin/eos"):
                 self.cache_directory = Path(cache_directory)
                 self.cache_directory.mkdir(exist_ok=True)
 
