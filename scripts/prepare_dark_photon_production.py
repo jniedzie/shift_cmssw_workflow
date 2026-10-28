@@ -124,7 +124,8 @@ def prepare_main_histograms(args):
             '\ngetenv = False\nshould_transfer_files = NO\nrequest_cpus = 1\nrequest_memory = 4000MB\n'
             'request_disk = 8000MB\n+MaxRuntime = '+str(settings.get('worker_runtime_seconds',43200))+
             '\n+SendCredential = True\n+WantIOProxy = True\n'
-            '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n+JobBatchName = "SHIFT_DP_main_histograms"\n'
+            '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n+JobBatchName = '+
+            json.dumps('SHIFT_DP_'+plan['campaign']+'_'+action)+'\n'
             'output = '+str(output/'logs')+'/'+action+'.$(ClusterId).$(ProcId).out\n'
             'error = '+str(output/'logs')+'/'+action+'.$(ClusterId).$(ProcId).err\nlog = '+str(output/'events.log')+
             '\non_exit_hold = (ExitBySignal == True) || (ExitCode != 0)\nperiodic_release = False\nqueue\n')

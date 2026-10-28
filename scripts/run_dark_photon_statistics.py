@@ -225,7 +225,10 @@ def submit_dag(config, directory, cap):
     gates = directory / 'point_preflights/manifest.json'
     gate_attribute = ('+ShiftDPPointPreflightManifestSHA256 = ' + json.dumps(sha(gates))) if gates.is_file() else None
     if not submit_file.is_file():
+        plan = directory / 'plan.json'
+        campaign = read(plan)['campaign'] if plan.is_file() else config.get('campaign_prefix', directory.name)
         command = ['/usr/bin/condor_submit_dag', '-no_submit', '-maxjobs', str(cap),
+            '-batch-name', 'SHIFT_DP_' + campaign + '_reco_histograms',
             '-maxidle', str(max_idle), '-append', 'initialdir = ' + str(directory),
             '-append', '+MaxRuntime = 604800',
             '-append', '+ShiftDPStatisticsTask = ' + json.dumps(str(directory))]

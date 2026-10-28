@@ -934,12 +934,15 @@ class DagQueueLimits(unittest.TestCase):
     def test_separate_ready_queue_limit_reaches_dagman(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            (directory / 'plan.json').write_text(json.dumps(dict(campaign='20261028_DP_m0p7_lab5m')))
             with patch.object(controller, 'run_condor') as native, \
                  patch.object(controller, 'submission', return_value={'cluster': 1}):
                 controller.submit_dag({'dag_max_idle': 5}, directory, 12)
             arguments = native.call_args.args[0]
             self.assertEqual(arguments[arguments.index('-maxjobs') + 1], '12')
             self.assertEqual(arguments[arguments.index('-maxidle') + 1], '5')
+            self.assertEqual(arguments[arguments.index('-batch-name') + 1],
+                             'SHIFT_DP_20261028_DP_m0p7_lab5m_reco_histograms')
             self.assertEqual(native.call_args.kwargs['cwd'], directory)
 
     def test_invalid_ready_queue_limit_cannot_submit(self):
