@@ -22,6 +22,21 @@ spec.loader.exec_module(module)
 
 
 class HandoffTests(unittest.TestCase):
+    def test_required_prepared_sidecar_cannot_be_silently_published_as_identity(self):
+        from test_shift_production_selection import native_proposal_fixture
+        from shift_production_selection import bind_source
+        sidecar = dict(path='/eos/prepared/weight_authority.json', sha256='a'*64,
+                       required_for_downstream_weights=True, diagnostic_only=True)
+        conditional = dict(prepared_weight_authority=sidecar)
+        self.assertIsNone(worker.prepare_decay_annotation(conditional, [0], publish=False))
+        with self.assertRaisesRegex(ValueError, 'full-census decay_proposal'):
+            worker.prepare_decay_annotation(conditional, [0], publish=True)
+        source, ledger = native_proposal_fixture()
+        source['prepared_weight_authority'] = sidecar
+        bound = bind_source(source, ledger)
+        rows, _ = worker.prepare_decay_annotation(bound, [1], publish=True)
+        self.assertEqual(rows[0]['proposal_gen_weight'], source['weights'][1]/.4/1.6)
+
     def test_optional_proposal_is_validated_before_detector_processing(self):
         from test_shift_production_selection import native_proposal_fixture
         from shift_production_selection import bind_source

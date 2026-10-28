@@ -207,6 +207,8 @@ def selected_rows(source):
     if source.get('decay_proposal') is not None:
         from shift_production_selection import selected_decay_proposals
         return selected_decay_proposals(source)[0]
+    if source.get('prepared_weight_authority') is not None:
+        raise ValueError('Prepared decay weights require an audited full-census decay_proposal before ordinary postprocessing')
     indices, probabilities = source['selected_indices'], source['sampling_probabilities']
     if len(indices) != len(probabilities) or len(set(indices)) != len(indices):
         raise ValueError('Invalid frozen selected indices')

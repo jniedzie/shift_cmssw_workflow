@@ -498,9 +498,11 @@ def add_sampling_fields(path, source_rows, probabilities):
         file.Close()
 
 
-def prepare_decay_annotation(descriptor, indices):
+def prepare_decay_annotation(descriptor, indices, *, publish=False):
     """Reject incomplete proposal authority/dependencies before expensive SIM."""
     if descriptor.get('decay_proposal') is None:
+        if publish and descriptor.get('prepared_weight_authority') is not None:
+            raise ValueError('Prepared decay weights require an audited full-census decay_proposal before ordinary publication')
         return None
     from shift_production_selection import selected_decay_proposals
     from shift_event_weights import validate_proposal_rows
@@ -586,7 +588,7 @@ def main():
         raise ValueError('Invalid selected source indices')
     probabilities = (None if population_indices is None else
                      descriptor['sampling_probabilities'][args.skip:args.skip + args.count])
-    proposal = prepare_decay_annotation(descriptor, indices)
+    proposal = prepare_decay_annotation(descriptor, indices, publish=args.publish)
     work = Path.cwd()
     report = {'schema': 'shift-gen-to-nano-receipt-v1', 'complete': False,
               'job': args.job, 'source_descriptor_sha256': sha(args.source),
@@ -614,6 +616,8 @@ def main():
         report['decay_proposal_authority_sha256'] = descriptor['decay_proposal']['authority_sha256']
         report['histogram_weight_branch'] = 'shiftProposalGenWeight'
         report['proposal_weight_convention'] = 'Native W and reconstruction p unchanged; histogram weight is W/p times the separate native-bank correction once.'
+    elif descriptor.get('prepared_weight_authority') is not None:
+        report.update(diagnostic_only=True, unapplied_prepared_weight_authority=descriptor['prepared_weight_authority'])
     started = time.monotonic()
     published_receipt = False
     try:

@@ -24,6 +24,20 @@ from run_shift_sm_postprocessing_controller import compact_source
 
 
 class PostprocessingTest(unittest.TestCase):
+    def test_prepared_sidecar_requires_full_census_contract_before_identity_compaction(self):
+        sidecar = dict(path='/eos/prepared/weight_authority.json', sha256='a'*64,
+                       required_for_downstream_weights=True, diagnostic_only=True)
+        conditional = dict(event_ids=[[1, 1, 1]], weights=[3.], selected_indices=[0],
+                           sampling_probabilities=[1.], prepared_weight_authority=sidecar)
+        for consumer in (selected_rows, compact_source):
+            with self.subTest(consumer=consumer), self.assertRaisesRegex(ValueError, 'full-census decay_proposal'):
+                consumer(conditional)
+        source, ledger = native_proposal_fixture()
+        source['prepared_weight_authority'] = sidecar
+        bound = bind_source(source, ledger)
+        self.assertEqual(selected_rows(bound), selected_rows(compact_source(bound)))
+        self.assertEqual(post.histogram_weight_branch([bound]), 'shiftProposalGenWeight')
+
     def test_optional_source_survives_controller_without_changing_legacy_compaction(self):
         source, ledger = native_proposal_fixture()
         bound = bind_source(source, ledger)
