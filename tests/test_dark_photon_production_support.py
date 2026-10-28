@@ -35,7 +35,7 @@ def write(path, value):
 class MainHistogramHandoff(unittest.TestCase):
     def stage(self,root,*,converted=2):
         (root/'primary_preflight').mkdir();(root/'statuses').mkdir()
-        write(root/'plan.json',dict(points=[dict(point='m0p7_lab_100m',events=1,chunks=[dict(job=5,count=1)])],
+        write(root/'plan.json',dict(points=[dict(point='m0p7_lab_100m',events=1,chunks=[dict(job=5,count=1,skip=0)])],
                                    detector_runtime=dict(runtime_sha256='runtime')))
         write(root/'gen_inventory.json',dict(points={'m0p7_lab_100m':dict(events=2,gen_sha256='gen')}))
         write(root/'source.json',{})
@@ -51,6 +51,41 @@ class MainHistogramHandoff(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'complete original GEN'):
                 main_histogram_stage(root,'detector',0)
             self.assertEqual(list((root/'statuses').iterdir()),[])
+
+    def test_detector_binds_the_exact_runtime_and_original_gen_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root)
+            plan=json.loads((root/'plan.json').read_text())
+            from dark_photon_stage_budget import PRIMARY_AUTHORITY_ENV
+            authority=dict(zip(PRIMARY_AUTHORITY_ENV,('capsule-authority','authority-sha','gen')))
+            class ReachedPayload(Exception):pass
+            with patch('dark_photon_stage_budget.recorded_primary_environment',return_value=authority) as bind, \
+                    patch('dark_photon_production_support.subprocess.run',side_effect=ReachedPayload) as run:
+                with self.assertRaises(ReachedPayload):main_histogram_stage(root,'detector',0)
+            bind.assert_called_once_with(plan['detector_runtime'],'gen')
+            self.assertEqual({key:run.call_args.kwargs['env'][key] for key in PRIMARY_AUTHORITY_ENV},authority)
+
+    def test_invalid_primary_authority_stops_before_payload_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root)
+            with patch('dark_photon_stage_budget.recorded_primary_environment',side_effect=ValueError('changed authority')), \
+                    patch('dark_photon_production_support.subprocess.run') as run:
+                with self.assertRaisesRegex(ValueError,'changed authority'):main_histogram_stage(root,'detector',0)
+            run.assert_not_called()
+
+    def test_failed_payload_keeps_the_actual_stage_error_after_scratch_cleanup(self):
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);self.stage(root)
+            def fail(*args,**kwargs):
+                Path('step1_cmsRun.log').write_text('native converter failure')
+                return subprocess.CompletedProcess(args[0],66)
+            with patch('dark_photon_stage_budget.recorded_primary_environment',return_value={}), \
+                    patch('dark_photon_production_support.subprocess.run',side_effect=fail):
+                with self.assertRaises(subprocess.CalledProcessError):main_histogram_stage(root,'detector',0)
+            receipt=json.loads((root/'statuses/chunk_0.json').read_text())
+            self.assertEqual(receipt['stage_failure_logs']['step1_cmsRun.log'],'native converter failure')
+            self.assertFalse(receipt['complete'])
 
     def test_a_failed_or_missing_response_cannot_reach_histogramming(self):
         with tempfile.TemporaryDirectory() as tmp:

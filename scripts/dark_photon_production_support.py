@@ -95,16 +95,22 @@ def main_histogram_stage(directory,action,chunk_index=None):
                 if type(chunk_index) is not int or not 0<=chunk_index<len(row['chunks']):
                     raise ValueError('Unknown selected detector slice')
                 chunk=row['chunks'][chunk_index]
+                from dark_photon_stage_budget import PRIMARY_AUTHORITY_ENV,recorded_primary_environment
+                environment={key:value for key,value in os.environ.items() if key not in PRIMARY_AUTHORITY_ENV}
+                environment.update(recorded_primary_environment(
+                    plan['detector_runtime'],parent['gen_sha256']))
                 with (scratch/'worker.log').open('x') as log:
                     result=subprocess.run([sys.executable,str(tools/'run_shift_gen_to_nano.py'),str(directory/'source.json'),
                         '--skip',str(chunk['skip']),'--count',str(chunk['count']),'--job',str(chunk['job']),
                         '--templates',str(directory/'frozen/templates'),'--publish','--remove-consumed-intermediates',
                         '--absolute-stage-timeouts','--stage-timeouts','7200,3600,5400,7200',
                         '--first-event-stall-timeout','7200','--event-stall-timeout','3600'],
-                        stdout=log,stderr=subprocess.STDOUT,check=False,timeout=43200)
+                    stdout=log,stderr=subprocess.STDOUT,check=False,timeout=43200,env=environment)
                 if (scratch/'report.json').is_file():report['payload']=read(scratch/'report.json')
                 if result.returncode:
                     report['failure_log']=(scratch/'worker.log').read_text(errors='replace')[-20000:]
+                    report['stage_failure_logs']={path.name:path.read_text(errors='replace')[-12000:]
+                        for path in sorted(scratch.glob('step[1-4]*.log'))}
                 result.check_returncode()
                 payload=report['payload']
                 validate_main_detector_payload(payload,directory/'source.json',chunk)

@@ -68,7 +68,8 @@ def prepare_main_histograms(args):
             if category=='sources':freeze_detector_source(record['frozen_copy'],target,profile)
             else:shutil.copy2(record['frozen_copy'],target)
             files[str(target)]=sha256(target)
-    for name in ('dark_photon_production_support.py','run_shift_sm_postprocessing.py'):
+    for name in ('dark_photon_production_support.py','dark_photon_stage_budget.py',
+                 'run_shift_sm_postprocessing.py'):
         target=frozen/'sources'/name;shutil.copy2(Path(__file__).with_name(name),target);files[str(target)]=sha256(target)
     integrity=settings['nano_integrity']
     if sha256(integrity['path'])!=integrity['sha256']:raise ValueError('Nano branch-integrity helper changed')
