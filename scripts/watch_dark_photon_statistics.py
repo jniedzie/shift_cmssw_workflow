@@ -674,7 +674,7 @@ def reviewed_terminal_failures(config):
         record = proof['aggregate_record']
         held = proof.get('original_held_native_ad', {})
         removed_failure = (native.get('JobStatus') == 3
-            and proof.get('failure_kind') == 'GEN_ledger_log_path_relocation'
+            and proof.get('failure_kind') in ('GEN_ledger_log_path_relocation', 'missing_main_histogram_helper')
             and held.get('JobStatus') == 5 and held.get('ExitCode') == 1
             and held.get('ExitBySignal') is False
             and all(held.get(key) == native.get(key) for key in
@@ -696,6 +696,10 @@ def reviewed_terminal_failures(config):
                 raise ValueError('Reviewed failed aggregate changed')
         if any(sha(name) != digest for name, digest in evidence.items()):
             raise ValueError('Reviewed failure evidence changed')
+        if proof.get('failure_kind') == 'missing_main_histogram_helper' and not any(
+                "ModuleNotFoundError: No module named 'run_shift_sm_postprocessing'" in Path(name).read_text(errors='replace')
+                for name in evidence):
+            raise ValueError('Reviewed missing-helper failure has a different error signature')
         result[native['ClusterId']] = dict(authority=authority, native=native)
     for authority in config.get('reviewed_gen_handoffs', []):
         path = Path(authority['path'])

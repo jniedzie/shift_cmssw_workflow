@@ -588,6 +588,25 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'evidence changed'):
             WATCH.reviewed_terminal_failures(self.config)
 
+    def test_removed_missing_main_helper_requires_the_exact_preserved_error(self):
+        self.reviewed_failure()
+        path=self.root/'reviewed_failure.json';proof=json.loads(path.read_text())
+        native=dict(proof['terminal_native_ad'],JobStatus=3,ExitCode=1)
+        proof.update(terminal_native_ad=native,failure_kind='missing_main_histogram_helper',
+                     original_held_native_ad=dict(native,JobStatus=5))
+        log=self.directory/'failure.err'
+        log.write_text("ModuleNotFoundError: No module named 'run_shift_sm_postprocessing'")
+        proof['failure_evidence_sha256']={str(log):WATCH.sha(log)}
+        path.write_text(json.dumps(proof));pin=dict(path=str(path),sha256=WATCH.sha(path))
+        self.config.update(retired_aggregate_attempts=[pin],dependencies={str(path):pin['sha256']})
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native']['ExitCode'],1)
+        log.write_text('A different scientific failure')
+        proof['failure_evidence_sha256']={str(log):WATCH.sha(log)}
+        path.write_text(json.dumps(proof));pin=dict(path=str(path),sha256=WATCH.sha(path))
+        self.config.update(retired_aggregate_attempts=[pin],dependencies={str(path):pin['sha256']})
+        with self.assertRaisesRegex(ValueError,'different error signature'):
+            WATCH.reviewed_terminal_failures(self.config)
+
     def test_removed_held_aggregate_requires_exact_reviewed_original_failure(self):
         self.reviewed_failure()
         path = self.root / 'reviewed_failure.json'
