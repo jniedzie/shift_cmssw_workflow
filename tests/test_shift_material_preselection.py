@@ -72,7 +72,123 @@ def birth_pointing():
     return config
 
 
+def scoped_unknown_policy():
+    config = policy()
+    geometry = birth_pointing()
+    geometry['station_envelopes'].append(dict(station=2, z_abs_cm=70.,
+                                             radial_min_cm=5., radial_max_cm=9.))
+    config.update(require_opposite_sign=True, rank_partial_parent_paths=True,
+                  two_endcap_pointing=geometry, unknown_material_pointing=dict(
+                      schema='shift-unknown-material-pointing-scope-v1',
+                      minimum_stations_per_endcap=2, margin_cm=500.))
+    return config
+
+
+def unknown_material_event(number=1, radius=7.):
+    row = event(number)
+    row['muons'][1]['pdg'] = -13
+    row['parent_flights'][0]['material']['full_saved_chord_coverage'] = False
+    for muon in row['muons']:
+        muon.update(birth_cm=[radius, 0., 200.], momentum_GeV=[0., 0., -40.])
+        muon['material_to_CMS_entry'].update(complete=False, unknown_reason='navigation timeout')
+    return row
+
+
 class MaterialAdmissionTests(unittest.TestCase):
+    def test_opt_in_unknown_material_scope_demotes_known_far_miss_and_keeps_controls(self):
+        config = scoped_unknown_policy()
+        far = unknown_material_event(radius=5200.)
+        features, authority = inputs([far])
+        scoped = admission.prepare_selection(features, authority, config)['events'][0]
+        self.assertFalse(scoped['material_priority']['unknown_potential_pair'])
+        self.assertEqual(scoped['material_priority']['unknown_material_pointing_scope'],
+                         dict(could_point=0, outside=1, unknown_direction=0))
+        self.assertGreaterEqual(scoped['conditional_sampling_probability'], .1)
+        self.assertLess(scoped['conditional_sampling_probability'], .1000001)
+        self.assertEqual(scoped['proposal_gen_weight'],
+                         scoped['native_weight']/scoped['sampling_probability'])
+        legacy = copy.deepcopy(config)
+        del legacy['unknown_material_pointing']
+        old = admission.prepare_selection(features, authority, legacy)['events'][0]
+        self.assertTrue(old['material_priority']['unknown_potential_pair'])
+        self.assertEqual(old['conditional_sampling_probability'], 1.)
+        self.assertNotIn('unknown_material_pointing_scope', old['material_priority'])
+
+    def test_scope_keeps_pointing_unknown_material_and_missing_directions_protected(self):
+        config = scoped_unknown_policy()
+        for field in ('none', 'birth_cm', 'momentum_GeV'):
+            row = unknown_material_event()
+            if field != 'none':
+                row['muons'][0][field] = None
+                row['muons'][0]['straight_line_towards_CMS_entry'] = False
+            features, authority = inputs([row])
+            result = admission.prepare_selection(features, authority, config)['events'][0]
+            with self.subTest(field=field):
+                self.assertTrue(result['material_priority']['unknown_potential_pair'])
+                self.assertEqual(result['conditional_sampling_probability'], 1.)
+
+    def test_scope_never_removes_unknown_transport_model_protection(self):
+        config = scoped_unknown_policy()
+        for with_muons in (True, False):
+            row = unknown_material_event(radius=5200.)
+            row['unknown_transport_ancestor_barcodes'] = [99001]
+            if not with_muons:
+                row['muons'] = []
+            features, authority = inputs([row])
+            result = admission.prepare_selection(features, authority, config)['events'][0]
+            with self.subTest(with_muons=with_muons):
+                self.assertTrue(result['material_priority']['unknown_potential_pair'])
+                self.assertEqual(result['conditional_sampling_probability'], 1.)
+
+    def test_unknown_material_scope_uses_the_same_opposite_sign_pair(self):
+        config = scoped_unknown_policy()
+        row = unknown_material_event()
+        row['muons'][1]['pdg'] = 13
+        for number in (12, 13):
+            muon = copy.deepcopy(row['muons'][0])
+            muon.update(barcode=number, pdg=-13, birth_cm=[5200., 0., 200.])
+            row['muons'].append(muon)
+        features, authority = inputs([row])
+        result = admission.prepare_selection(features, authority, config)['events'][0]
+        self.assertFalse(result['material_priority']['unknown_potential_pair'])
+        self.assertEqual(result['material_priority']['unknown_material_pointing_scope']['outside'], 4)
+        close_opposite = copy.deepcopy(row['muons'][0])
+        close_opposite.update(barcode=14, pdg=-13)
+        row['muons'].append(close_opposite)
+        features, authority = inputs([row])
+        self.assertEqual(admission.prepare_selection(features, authority, config)['events'][0][
+                         'conditional_sampling_probability'], 1.)
+
+    def test_unknown_column_fallback_obeys_scope_and_requires_two_forward_stations(self):
+        config = scoped_unknown_policy()
+        config['muon_column_priority'] = column_policy()
+        for radius, birth_z in ((5200., 200.), (7., 75.)):
+            row = unknown_material_event(radius=radius)
+            row['parent_flights'][0]['material']['full_saved_chord_coverage'] = True
+            for muon in row['muons']:
+                muon['birth_cm'][2] = birth_z
+                muon['material_to_CMS_entry']['complete'] = True
+                muon['material_to_CMS_entry']['column_density_g_cm2'] = None
+            features, authority = inputs([row])
+            result = admission.prepare_selection(features, authority, config)['events'][0]
+            with self.subTest(radius=radius, birth_z=birth_z):
+                self.assertFalse(result['material_priority']['unknown_potential_pair'])
+                self.assertLess(result['conditional_sampling_probability'], 1.)
+
+    def test_unknown_material_scope_requires_explicit_valid_pair_and_station_geometry(self):
+        for field, value in (('minimum_stations_per_endcap', True),
+                             ('minimum_stations_per_endcap', 3), ('margin_cm', -1.),
+                             ('margin_cm', math.inf), ('schema', 'unknown')):
+            config = scoped_unknown_policy()
+            config['unknown_material_pointing'][field] = value
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                admission.validate_policy(config)
+        for field, value in (('require_opposite_sign', False), ('two_endcap_pointing', pointing())):
+            config = scoped_unknown_policy()
+            config[field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                admission.validate_policy(config)
+
     def test_v3_endcap_birth_uses_forward_stations_and_mirrors_exactly(self):
         # Small analogues of the census births between a station and the
         # external reference plane: the near station remains ahead.

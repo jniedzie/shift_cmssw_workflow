@@ -66,6 +66,11 @@ def validate_policy(policy):
         validate_pointing(policy['two_endcap_pointing'])
     if policy.get('muon_column_priority') is not None:
         validate_muon_column(policy['muon_column_priority'])
+    if policy.get('unknown_material_pointing') is not None:
+        if not policy.get('require_opposite_sign', False):
+            raise ValueError('Unknown-material pointing scope needs opposite-sign pair priority')
+        validate_unknown_material_pointing(policy['unknown_material_pointing'],
+                                           policy.get('two_endcap_pointing'))
 
 
 def validate_pointing(config):
@@ -109,6 +114,47 @@ def quartic_priority(ratio):
     # Invert first for large offsets to avoid overflowing the quartic.
     return ((1./ratio)**4/(1.+(1./ratio)**4) if ratio > 1.
             else 1./(1.+ratio**4))
+
+
+def validate_unknown_material_pointing(config, pointing):
+    """Declare which known directions still warrant unknown-material protection."""
+    if not isinstance(config, dict) or config.get('schema') != 'shift-unknown-material-pointing-scope-v1':
+        raise ValueError('Unsupported unknown-material pointing scope')
+    count = config.get('minimum_stations_per_endcap')
+    margin = config.get('margin_cm')
+    if type(count) is not int or not 1 <= count <= 4:
+        raise ValueError('Unknown-material scope needs a positive CSC station count')
+    if (isinstance(margin, bool) or not isinstance(margin, (int, float))
+            or not math.isfinite(margin) or margin < 0):
+        raise ValueError('Unknown-material scope needs a finite nonnegative pointing margin')
+    if not isinstance(pointing, dict) or pointing.get('schema') not in (
+            'shift-two-endcap-pointing-v2', 'shift-two-endcap-pointing-v3'):
+        raise ValueError('Unknown-material scope needs declared CSC station envelopes')
+    validate_pointing(pointing)
+    if count > len(pointing['station_envelopes']):
+        raise ValueError('Unknown-material scope requests more stations than its geometry provides')
+
+
+def unknown_material_pair_could_point(ray, pointing, config):
+    """Use the same pair's existing projections, retaining missing directions.
+
+    A broad margin scopes only a material-unknown fallback. It is not detector
+    acceptance, a hard event veto, or a material-survival probability.
+    """
+    if ray['unknown']:
+        return None
+    margin = config['margin_cm']
+    count = config['minimum_stations_per_endcap']
+    for muon in ray['station_pointing']:
+        for side in muon['projected_stations']:
+            close = 0
+            for row, station in zip(side, pointing['station_envelopes']):
+                if row is not None and (station['radial_min_cm']-margin <=
+                        row['radius_cm'] <= station['radial_max_cm']+margin):
+                    close += 1
+            if close < count:
+                return False
+    return True
 
 
 def station_pointing(birth, momentum, config):
@@ -260,12 +306,17 @@ def grid_probability(value):
 
 
 def pair_priority(event, momentum_scale, require_opposite_sign=False,
-                  rank_partial_parent_paths=False, pointing=None, muon_column=None):
+                  rank_partial_parent_paths=False, pointing=None, muon_column=None,
+                  unknown_material_pointing=None):
     """Rank incoming pairs by total momentum and shared parent material paths.
 
     Opposite-sign priority is opt-in for new cohorts. Other events still keep
     the positive reconstruction control probability assigned by the ledger.
     """
+    if unknown_material_pointing is not None:
+        if not require_opposite_sign:
+            raise ValueError('Unknown-material pointing scope needs opposite-sign pair priority')
+        validate_unknown_material_pointing(unknown_material_pointing, pointing)
     flights = {x['barcode']: x for x in event['parent_flights']}
     if len(flights) != len(event['parent_flights']):
         raise ValueError('Repeated ancestor flight barcode')
@@ -277,11 +328,14 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
         material = muon['material_to_CMS_entry']
         unknown_direction = material.get('unknown_reason') in (
             'missing muon production vertex', 'muon born inside unmodelled central CMS region')
-        if muon['straight_line_towards_CMS_entry'] or unknown_direction:
+        missing_direction = unknown_material_pointing is not None and (
+            muon.get('birth_cm') is None or muon.get('momentum_GeV') is None)
+        if muon['straight_line_towards_CMS_entry'] or unknown_direction or missing_direction:
             candidates.append(muon)
     best, best_pair, unknown_pair, best_incomplete = (
         0., None, bool(event.get('unknown_transport_ancestor_barcodes')), False)
     best_pointing, best_column = None, None
+    scope_counts = dict(could_point=0, outside=0, unknown_direction=0)
     for left, right in itertools.combinations(candidates, 2):
         if require_opposite_sign:
             if abs(left['pdg']) != 13 or abs(right['pdg']) != 13:
@@ -292,11 +346,18 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
         if any(number not in flights for number in parent_numbers):
             raise ValueError('Muon references an absent ancestor flight')
         parents = [flights[number]['material'] for number in parent_numbers]
+        ray, could_point = None, None
+        if unknown_material_pointing is not None:
+            ray = two_endcap_pointing((left, right), pointing)
+            could_point = unknown_material_pair_could_point(ray, pointing, unknown_material_pointing)
+            scope_counts['unknown_direction' if could_point is None else
+                         'could_point' if could_point else 'outside'] += 1
         known = all(x['full_saved_chord_coverage'] for x in parents)
         known = known and all(x['straight_line_towards_CMS_entry']
                               and x['material_to_CMS_entry']['complete'] for x in (left, right))
         if not known:
-            unknown_pair = True
+            if could_point is not False:
+                unknown_pair = True
             if not rank_partial_parent_paths:
                 continue
         # A known external prefix remains useful for ranking when the decay
@@ -310,7 +371,8 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
         energy = math.prod((x['p_GeV']/math.hypot(x['p_GeV'], momentum_scale))**2
                            for x in (left, right))
         score = math.exp(-math.fsum(depths))*energy
-        ray = two_endcap_pointing((left, right), pointing) if pointing is not None else None
+        if ray is None and pointing is not None:
+            ray = two_endcap_pointing((left, right), pointing)
         if ray is not None:
             if ray['unknown']:
                 unknown_pair = True
@@ -319,7 +381,8 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
         column = muon_column_priority((left, right), muon_column) if muon_column is not None else None
         if column is not None:
             if column['unknown']:
-                unknown_pair = True
+                if could_point is not False:
+                    unknown_pair = True
             else:
                 score *= column['priority']
         if score > best:
@@ -334,6 +397,8 @@ def pair_priority(event, momentum_scale, require_opposite_sign=False,
         result['two_endcap_pointing'] = best_pointing
     if muon_column is not None:
         result['muon_column_priority'] = best_column
+    if unknown_material_pointing is not None:
+        result['unknown_material_pointing_scope'] = scope_counts
     return result
 
 
@@ -441,7 +506,8 @@ def prepare_selection(features, authority, policy=None):
                                 policy.get('require_opposite_sign', False),
                                 policy.get('rank_partial_parent_paths', False),
                                 policy.get('two_endcap_pointing'),
-                                policy.get('muon_column_priority'))
+                                policy.get('muon_column_priority'),
+                                policy.get('unknown_material_pointing'))
         records.append(dict(row, ranking=ranking, pre_admission_weight=before))
     if authorities:
         raise ValueError('Authority includes events absent from this complete feature census')
