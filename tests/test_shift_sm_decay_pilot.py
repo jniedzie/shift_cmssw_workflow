@@ -183,6 +183,29 @@ class FiniteDecayBankTest(unittest.TestCase):
         self.assertEqual(choose_bank([0.,1.,100.],.1,17),choose_bank([0.,1.,100.],.1,17))
         with self.assertRaises(ValueError):bank_probabilities([0.,1.],0.)
 
+    def test_native_ordinary_bank_closes_with_shared_original_nuisance_and_no_branching_weight(self):
+        import itertools
+        p_pair=.01;size=3;floor=.1;p_prompt=.4
+        corrected=[0.,0.,0.];native=[1.,p_prompt,p_pair+p_prompt+2.*p_pair*p_prompt]
+        # The prompt pair belongs to the fixed original and is shared by all
+        # bank members. Only the ordinary native decay outcome is redrawn.
+        for prompt in (False,True):
+            nuisance_density=p_prompt if prompt else 1.-p_prompt
+            for bank in itertools.product((0,1),repeat=size):
+                bank_density=nuisance_density
+                for pair in bank:
+                    bank_density*=p_pair if pair else 1.-p_pair
+                choice=bank_probabilities(bank,floor)
+                for index,pair in enumerate(bank):
+                    correction=1./(size*choice[index])
+                    self.assertLessEqual(correction,1./floor)
+                    # All OS combinations retain cross-parent/unrelated pairs.
+                    observables=[1.,int(prompt),(pair+int(prompt))**2]
+                    for i,value in enumerate(observables):
+                        corrected[i]+=bank_density*choice[index]*correction*value
+        for expected,actual in zip(native,corrected):
+            self.assertAlmostEqual(actual,expected,places=14)
+
     def test_lifetime_source_and_bank_corrections_remain_separate(self):
         request=dict(event_id=[1,1,2],original_source=dict(source_id='synthetic',gen_sha256='a'*64),
                      native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')
