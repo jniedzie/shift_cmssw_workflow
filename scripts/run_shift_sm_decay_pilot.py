@@ -323,7 +323,39 @@ def truth_diagnostics(path):
         file.Close()
 
 
-def run(request,prepare_only=False):
+def prepared_outputs(audit):
+    outputs=[(Path('placed.root'),'gen.root'),(Path('gen_audit.json'),'gen_audit.json')]
+    if 'decay_bank' in audit:
+        outputs.append((Path('decay_bank.json'),'decay_bank.json'))
+        for index in range(audit['decay_bank']['size']):
+            for local,name in [('gen_audit.json','audit.json'),('material_features.json','material_features.json')]:
+                path=Path(f'bank_{index:02d}')/local
+                compressed=path.with_suffix(path.suffix+'.gz')
+                compressed.write_bytes(gzip.compress(path.read_bytes(),mtime=0))
+                outputs.append((compressed,f'bank_{index:02d}_'+name+'.gz'))
+    return outputs
+
+
+def publish_prepared_source(request,audit,descriptor,authority):
+    """Retain one exact decay draw and its separate weights before any SIM."""
+    outputs=prepared_outputs(audit)
+    base=request['publication_directory']+'/prepared'
+    descriptor=copy.deepcopy(descriptor)
+    descriptor['gen']=base+'/gen.root'
+    dump('weight_authority.json',[authority])
+    descriptor['prepared_weight_authority']=dict(path=base+'/weight_authority.json',sha256=sha('weight_authority.json'),
+        required_for_downstream_weights=True,diagnostic_only=True)
+    dump('prepared_source.json',descriptor)
+    outputs.extend((Path(name),name) for name in
+                   ['prepared_source.json','weight_authority.json','pilot_admission_authority.json'])
+    require(sum(path.stat().st_size for path,_ in outputs)<request['reservation_bytes'],
+            'Prepared GEN, authority and evidence exceed their declared publication bound')
+    require(sha('placed.root')==descriptor['gen_sha256'],'Prepared GEN changed before publication')
+    return publish(outputs,base),descriptor
+
+
+def run(request,prepare_only=False,publish_prepared=False):
+    require(not publish_prepared or prepare_only,'--publish-prepared requires --prepare-only')
     validate(request);started=time.monotonic()
     report=dict(complete=False,diagnostic_only=True,new_GEN_exposure=0,case_id=request['case_id'],
                 arm=request['arm'],original_event_id=request['event_id'])
@@ -352,17 +384,17 @@ def run(request,prepare_only=False):
         report['prepared_GEN_sha256']=descriptor['gen_sha256']
         report['weight_authority']=weight_authority(request,audit)
         if prepare_only:
+            if publish_prepared:
+                publications,saved=publish_prepared_source(request,audit,descriptor,report['weight_authority'])
+                pins={p['name']:p for p in publications}
+                report.update(GEN_publications=publications,prepared_source=saved,
+                    prepared_source_receipt=pins['prepared_source.json'],
+                    prepared_weight_authority=pins['weight_authority.json'],
+                    published_prepared_state=True,prepared_state_must_not_be_redrawn=True)
             report.update(complete=True,detector_run=False,wall_seconds=time.monotonic()-started)
             dump('pilot_report.json',report);return
-        gen_outputs=[(Path('placed.root'),'gen.root'),(Path('gen_audit.json'),'gen_audit.json')]
+        gen_outputs=prepared_outputs(audit)
         if 'decay_bank' in audit:
-            gen_outputs.append((Path('decay_bank.json'),'decay_bank.json'))
-            for index in range(audit['decay_bank']['size']):
-                for local,name in [('gen_audit.json','audit.json'),('material_features.json','material_features.json')]:
-                    path=Path(f'bank_{index:02d}')/local
-                    compressed=path.with_suffix(path.suffix+'.gz')
-                    compressed.write_bytes(gzip.compress(path.read_bytes(),mtime=0))
-                    gen_outputs.append((compressed,f'bank_{index:02d}_'+name+'.gz'))
             require(sum(path.stat().st_size for path,_ in gen_outputs)<request['reservation_bytes']//2,
                     'GEN bank exceeds its half of the publication reservation')
         gen_publications=publish(gen_outputs,request['publication_directory']+'/prepared')
@@ -404,4 +436,5 @@ def run(request,prepare_only=False):
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('request',type=Path);parser.add_argument('--prepare-only',action='store_true')
-    args=parser.parse_args();run(json.loads(args.request.read_text()),args.prepare_only)
+    parser.add_argument('--publish-prepared',action='store_true')
+    args=parser.parse_args();run(json.loads(args.request.read_text()),args.prepare_only,args.publish_prepared)

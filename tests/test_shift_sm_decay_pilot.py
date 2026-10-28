@@ -352,6 +352,53 @@ class FiniteDecayBankTest(unittest.TestCase):
             weight_authority(request,audit)
 
 
+class PreparedPublicationTest(unittest.TestCase):
+    def test_opt_in_publishes_exact_prepared_state_and_authority_without_SIM(self):
+        import run_shift_sm_decay_pilot as pilot
+        request=dict(case_id='synthetic',arm='ordinary',event_id=[1,1,2],native_weight=3.e-9,
+            original_source=dict(source_id='synthetic',gen_sha256='a'*64),decay_seed=17,
+            detector_source=dict(production_selection={},sampling={}),
+            publication_directory='/eos/user/j/jniedzie/shift_cmssw_support/synthetic',reservation_bytes=4096)
+        def prepare(request):
+            audit=dict(proposal_density_ratio=1.,proposal_correction=1.)
+            Path('placed.root').write_bytes(b'exact frozen state')
+            pilot.dump('gen_audit.json',audit)
+            return audit
+        published=[]
+        def publish(outputs,base):
+            published.extend(name for _,name in outputs)
+            return [dict(name=name,path=base+'/'+name,sha256=pilot.sha(path),bytes=path.stat().st_size)
+                    for path,name in outputs]
+        previous=Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch.object(pilot,'validate'),patch.object(pilot,'prepare',side_effect=prepare), \
+                     patch.object(pilot,'preflight',return_value=dict(complete=True)), \
+                     patch.object(pilot,'publish',side_effect=publish) as publisher, \
+                     patch.object(pilot,'command',side_effect=AssertionError('SIM must not run')):
+                    pilot.run(request,prepare_only=True)
+                    self.assertFalse(publisher.called)
+                    pilot.run(request,prepare_only=True,publish_prepared=True)
+                    report=json.loads(Path('pilot_report.json').read_text())
+                    self.assertTrue(report['complete']);self.assertFalse(report['detector_run'])
+                    self.assertTrue(report['prepared_state_must_not_be_redrawn'])
+                    self.assertEqual(set(published),{'gen.root','gen_audit.json','prepared_source.json',
+                        'weight_authority.json','pilot_admission_authority.json'})
+                    descriptor=json.loads(Path('prepared_source.json').read_text())
+                    self.assertEqual(descriptor['gen_sha256'],pilot.sha('placed.root'))
+                    self.assertEqual(descriptor['prepared_weight_authority']['sha256'],pilot.sha('weight_authority.json'))
+                    self.assertEqual(json.loads(Path('weight_authority.json').read_text())[0],report['weight_authority'])
+                    publisher.reset_mock();request['reservation_bytes']=1
+                    with self.assertRaisesRegex(ValueError,'publication bound'):
+                        pilot.run(request,prepare_only=True,publish_prepared=True)
+                    self.assertFalse(publisher.called)
+                    with self.assertRaisesRegex(ValueError,'requires --prepare-only'):
+                        pilot.run(request,publish_prepared=True)
+            finally:
+                os.chdir(previous)
+
+
 @unittest.skipUnless(importlib.util.find_spec('ROOT') and importlib.util.find_spec('uproot'),
                      'Requires native ROOT and uproot')
 class AnnotationMergeTest(unittest.TestCase):
