@@ -548,9 +548,89 @@ def stage_counts(directory):
     return counts
 
 
+def reviewed_main_cleanup_failures(config):
+    """Recognize only exact completed cleanup recoveries, retaining native failure."""
+    root = Path(config['production_directory'])
+    controller = read(root/'state.json') if (root/'state.json').is_file() else {}
+    records = controller.get('reviewed_main_cleanup_records', {})
+    authorities = dict(config.get('reviewed_main_cleanup_recoveries', {}))
+    guarded = {}
+    guard_pin = config.get('main_cleanup_recovery_guard')
+    if guard_pin:
+        for pin in guard_pin.values():
+            if config.get('dependencies', {}).get(pin['path']) != pin['sha256'] or sha(pin['path']) != pin['sha256']:
+                raise ValueError('Cleanup guard is outside frozen watchdog authority')
+        guard = read(guard_pin['configuration']['path']); seal = read(guard_pin['seal']['path'])
+        if (guard.get('no_GEN_or_detector_rerun') is not True or guard.get('maximum_recovery_attempts_per_target') != 1
+                or seal.get('no_science_rerun') is not True
+                or seal.get('files', {}).get(guard_pin['configuration']['path']) != guard_pin['configuration']['sha256']
+                or any(sha(path) != digest for path, digest in seal['files'].items())):
+            raise ValueError('Cleanup guard changed its exact read-only science scope')
+        for target in guard['targets']:
+            key = target['batch']; record = records.get(key)
+            if record is None:
+                continue
+            pin = record['authority']
+            expected = Path(guard['directory'])/'records'/key/'recovery.json'
+            if pin['path'] != str(expected) or sha(expected) != pin['sha256']:
+                raise ValueError('Cleanup receipt leaves its frozen guard allowlist')
+            authorities[key] = pin; guarded[key] = target
+    result = {}
+    for key, pin in authorities.items():
+        key = str(key); record = records.get(key)
+        if record is None:
+            continue  # The controller must adopt the audited receipt first.
+        if key not in guarded and (config.get('dependencies', {}).get(pin['path']) != pin['sha256']):
+            raise ValueError('Cleanup recovery is outside frozen watchdog authority')
+        if sha(pin['path']) != pin['sha256'] or record.get('authority') != pin:
+            raise ValueError('Cleanup recovery changed its reviewed authority')
+        proof = read(pin['path']); directory = Path(proof['directory'])
+        expected = (root/'waves'/f'w{int(proof["wave_index"]):03d}'/'production'
+                    if 'wave_index' in proof else root/'batches'/proof['batch']/'production')
+        old_path = Path(pin['path']).parent/'original_finalizer.json'
+        published_path = Path(pin['path']).parent/'original_published_receipt.json'
+        old = read(old_path); old_published = read(published_path)
+        plan = read(directory/'plan.json'); row, = plan['points']
+        completed = directory/'completed_points'/(row['point']+'.json')
+        current = read(completed); native = record['terminal_native_ad']
+        if (proof.get('schema') != 'shift-reviewed-main-cleanup-recovery-v1' or proof.get('complete') is not True
+                or proof.get('failure_kind') != 'postpublication_cleanup_scheduler_query'
+                or proof.get('GEN_or_SIM_rerun') is not False or directory != expected or directory.resolve() != directory
+                or old.get('complete') is not False or 'Collector has no record' not in old.get('error', '')
+                or sha(old_path) != proof['original_failure_sha256']
+                or sha(published_path) != proof['original_published_receipt_sha256']
+                or old_published.get('complete') is not True or current.get('complete') is not True
+                or native.get('ClusterId') != proof['original_manager'] or native.get('ProcId') != 0
+                or native.get('Iwd') != str(directory) or native.get('JobStatus') not in (3,4)
+                or native.get('ExitCode') != 1 or native.get('ExitBySignal') is not False
+                or read(directory/'submission.json')['cluster'] != proof['original_manager']):
+            raise ValueError('Cleanup recovery lost its exact published source or failed native manager')
+        for filename, field in [('plan.json','plan_sha256'), ('seal.json','seal_sha256'),
+                ('statuses/finalizer.json','status_sha256'), ('primitive_nano_retirement.json','retirement_receipt_sha256')]:
+            if sha(directory/filename) != proof[field]:
+                raise ValueError('Cleanup recovery changed its completed publication evidence')
+        if (sha(completed) != proof['completed_point_sha256']
+                or read(directory/'primitive_nano_retirement.json').get('complete') is not True
+                or any(current['main_histograms'].get(name) != value for name, value in old_published.items()
+                       if name != 'original_nano_retired')):
+            raise ValueError('Cleanup recovery changed its original scientific publication')
+        expected_statuses = {str(directory/'statuses'/f'chunk_{i}.json') for i in range(len(row['chunks']))}
+        if (set(proof['payload_status_hashes']) != expected_statuses or any(
+                sha(path) != digest or read(path).get('complete') is not True
+                for path, digest in proof['payload_status_hashes'].items())):
+            raise ValueError('Cleanup recovery cannot accept a missing or failed detector response')
+        target = guarded.get(key)
+        if target and any(proof[name] != target[name] for name in ('directory','plan_sha256','seal_sha256','original_manager')):
+            raise ValueError('Cleanup recovery changes its guarded source population')
+        result[proof['original_manager']] = dict(authority=pin,native=native,kind='main_cleanup_recovery',
+            original_directory=str(directory),original_finalizer=proof['original_finalizer'])
+    return result
+
+
 def reviewed_terminal_failures(config):
     """Keep reviewed failed attempts visible without treating them as active failures."""
     result = operational_recoveries(config)
+    result.update(reviewed_main_cleanup_failures(config))
     for authority in config.get('reviewed_meson_coverage_recoveries', []):
         path = Path(authority['path'])
         if config.get('dependencies', {}).get(str(path)) != authority['sha256'] or sha(path) != authority['sha256']:
@@ -849,6 +929,11 @@ def assess(config, previous, rows, history, receipts, now):
             if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery','detector_stage_recovery'):
                 issue('reviewed_orchestration_failure_'+str(cluster),'warning',
                       'Original orchestration failure is retained; its exact replacement is monitored separately',job=cluster)
+            if reviewed[cluster].get('kind') == 'main_cleanup_recovery':
+                issue('reviewed_cleanup_failure_' + str(cluster), 'warning',
+                      'Original manager failed after publication; exact cleanup-only recovery preserved its source and outputs',
+                      job=cluster, original_exit=expected['ExitCode'],
+                      original_finalizer=reviewed[cluster]['original_finalizer'])
             if reviewed[cluster].get('kind') == 'meson_finalizer_recovery':
                 issue('reviewed_meson_failure_' + str(cluster), 'warning',
                       'Original runtime download failed; its reviewed finalizer recovery is tracked separately',

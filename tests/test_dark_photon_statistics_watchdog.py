@@ -948,6 +948,72 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertIsNone(report['actual_planned_progress']['authorized_new_events'])
         self.assertFalse(any(item['code'].startswith('no_children') for item in report['issues']))
 
+    def cleanup_recovery(self, guarded=False):
+        key = 'b0' if guarded else '0'
+        directory = self.root/('batches/b0/production' if guarded else 'waves/w000/production')
+        (directory/'statuses').mkdir(parents=True); (directory/'completed_points').mkdir()
+        evidence = self.root/'cleanup_guard/records/b0' if guarded else self.root/'cleanup_review'
+        evidence.mkdir(parents=True)
+        def write(path, value):
+            path.write_text(json.dumps(value)); return WATCH.sha(path)
+        plan_hash = write(directory/'plan.json',dict(points=[dict(point='p',chunks=[{}])]))
+        seal_hash = write(directory/'seal.json',{})
+        write(directory/'submission.json',dict(cluster=100))
+        old_published = dict(complete=True,events=1,original_nano_retired=False,published={'hash':'preserved'})
+        original_pub_hash = write(evidence/'original_published_receipt.json',old_published)
+        old_hash = write(evidence/'original_finalizer.json',dict(complete=False,error='Collector has no record of schedd/submitter'))
+        current = dict(complete=True,main_histograms=dict(old_published,original_nano_retired=True,
+                                                       primitive_nano_retirement={'complete':True}))
+        completed_hash = write(directory/'completed_points/p.json',current)
+        status_hash = write(directory/'statuses/finalizer.json',current)
+        retirement_hash = write(directory/'primitive_nano_retirement.json',dict(complete=True))
+        payload_hash = write(directory/'statuses/chunk_0.json',dict(complete=True))
+        proof = dict(schema='shift-reviewed-main-cleanup-recovery-v1',complete=True,
+            failure_kind='postpublication_cleanup_scheduler_query',GEN_or_SIM_rerun=False,
+            directory=str(directory),original_manager=100,original_finalizer=101,
+            original_failure_sha256=old_hash,original_published_receipt_sha256=original_pub_hash,
+            plan_sha256=plan_hash,seal_sha256=seal_hash,completed_point_sha256=completed_hash,
+            status_sha256=status_hash,retirement_receipt_sha256=retirement_hash,
+            payload_status_hashes={str(directory/'statuses/chunk_0.json'):payload_hash})
+        proof.update(batch=key) if guarded else proof.update(wave_index=0)
+        path=evidence/'recovery.json';write(path,proof);pin=dict(path=str(path),sha256=WATCH.sha(path))
+        native=dict(ClusterId=100,ProcId=0,JobStatus=4,ExitCode=1,ExitBySignal=False,Iwd=str(directory))
+        state=dict(checked_epoch=self.now,reviewed_main_cleanup_records={key:dict(authority=pin,terminal_native_ad=native)})
+        write(self.root/'state.json',state)
+        if not guarded:
+            self.config.update(reviewed_main_cleanup_recoveries={key:pin},dependencies={str(path):pin['sha256']})
+        else:
+            guard_root=self.root/'cleanup_guard';script=guard_root/'guard.py';script.write_text('# frozen guard')
+            guard=dict(directory=str(guard_root),targets=[dict(batch=key,directory=str(directory),
+                plan_sha256=plan_hash,seal_sha256=seal_hash,original_manager=100)],
+                no_GEN_or_detector_rerun=True,maximum_recovery_attempts_per_target=1)
+            config_path=guard_root/'config.json';write(config_path,guard)
+            seal_path=guard_root/'seal.json';write(seal_path,dict(no_science_rerun=True,
+                files={str(config_path):WATCH.sha(config_path),str(script):WATCH.sha(script)}))
+            authority=dict(configuration=dict(path=str(config_path),sha256=WATCH.sha(config_path)),
+                           seal=dict(path=str(seal_path),sha256=WATCH.sha(seal_path)))
+            self.config.update(main_cleanup_recovery_guard=authority,
+                dependencies={row['path']:row['sha256'] for row in authority.values()})
+        return directory,native,path
+
+    def test_exact_cleanup_recovery_keeps_native_failure_and_rejects_changed_science(self):
+        directory,native,path = self.cleanup_recovery()
+        reviewed=WATCH.reviewed_terminal_failures(self.config)
+        self.assertEqual(reviewed[100]['native']['ExitCode'],1)
+        self.assertEqual(reviewed[100]['kind'],'main_cleanup_recovery')
+        (directory/'statuses/chunk_0.json').write_text('{"complete":false}')
+        with self.assertRaisesRegex(ValueError,'detector response'):
+            WATCH.reviewed_terminal_failures(self.config)
+
+    def test_guarded_cleanup_accepts_only_its_frozen_target(self):
+        directory,native,path = self.cleanup_recovery(guarded=True)
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native'],native)
+        state=json.loads((self.root/'state.json').read_text())
+        state['reviewed_main_cleanup_records']['b0']['authority']['path']=str(self.root/'unreviewed.json')
+        (self.root/'state.json').write_text(json.dumps(state))
+        with self.assertRaisesRegex(ValueError,'allowlist'):
+            WATCH.reviewed_terminal_failures(self.config)
+
     def test_pending_reference_gate_does_not_admit_the_frozen_bank_ceiling(self):
         Path(self.config['worklist']).write_text(json.dumps(dict(
             schema='shift-dp-meson-production-v1',
