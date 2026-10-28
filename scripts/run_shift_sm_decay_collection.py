@@ -4,6 +4,7 @@
 import argparse
 from collections import defaultdict
 import gzip
+import itertools
 import json
 import math
 import os
@@ -331,6 +332,143 @@ def comparison_groups(plan):
     return groups
 
 
+def prepared_kinematics(features,frozen):
+    """GEN diagnostics before physical parent/muon transport; never reco labels."""
+    parents={p['barcode'] for entry in frozen['original_source']['deferred_charm_frontiers']
+             if entry['event_id']==frozen['event_id'] for p in entry['parents']}
+    muons=[]
+    for muon in features['muons']:
+        muons.append(dict(barcode=muon['barcode'],pdg=muon['pdg'],momentum_GeV=muon['momentum_GeV'],
+            energy_GeV=muon['energy_GeV'],birth_cm=muon['birth_cm'],
+            direct_from_deferred_D=bool(parents.intersection(muon['first_non_muon_parent_barcodes'])),
+            descendant_of_deferred_D=bool(parents.intersection(muon['ancestor_barcodes']))))
+    pairs=[]
+    for a,b in itertools.combinations(muons,2):
+        if a['pdg']*b['pdg']>=0:continue
+        p=[x+y for x,y in zip(a['momentum_GeV'],b['momentum_GeV'])]
+        energy=a['energy_GeV']+b['energy_GeV']
+        pairs.append(dict(muon_barcodes=[a['barcode'],b['barcode']],
+            mass_GeV=math.sqrt(max(0.,energy*energy-sum(x*x for x in p))),
+            pt_GeV=math.hypot(*p[:2]),total_momentum_GeV=math.sqrt(sum(x*x for x in p)),energy_GeV=energy,
+            both_direct_from_deferred_D=a['direct_from_deferred_D'] and b['direct_from_deferred_D']))
+    pairs.sort(key=lambda p:(p['mass_GeV'],p['pt_GeV']),reverse=True)
+    return dict(stable_muons=len(muons),OS_pairs=len(pairs),
+        direct_D_muons=sum(m['direct_from_deferred_D'] for m in muons),
+        direct_D_OS_pairs=sum(p['both_direct_from_deferred_D'] for p in pairs),
+        maximum_mass_GeV=max((p['mass_GeV'] for p in pairs),default=None),
+        maximum_pt_GeV=max((p['pt_GeV'] for p in pairs),default=None),
+        muon_rows=muons[:128],OS_pair_rows=pairs[:64],
+        muon_rows_truncated=len(muons)>128,OS_pair_rows_truncated=len(pairs)>64,
+        before_G4_survival_and_reconstruction=True)
+
+
+def read_prepared_GEN(path,frozen):
+    from DataFormats.FWLite import Events
+    from audit_shift_material_scout import identity
+    from shift_gen_material_features import read_hepmc,event_features
+    events=Events(str(path))
+    if int(events.size())!=1:raise ValueError('Prepared GEN must contain exactly one frozen original')
+    event=next(iter(events));event_id=list(identity(event))
+    rows,weight,weights,units=read_hepmc(event,'shiftEventTime')
+    if (event_id!=frozen['event_id'] or weight!=frozen['native_weight']
+            or not weights or weights[0]!=weight):
+        raise ValueError('Prepared GEN identity/native W changed; proposal weights must stay separate')
+    expected={p['barcode']:p for entry in frozen['original_source']['deferred_charm_frontiers']
+              if entry['event_id']==event_id for p in entry['parents']}
+    actual={p['barcode']:p for p in rows if abs(p['pdg']) in (411,421)}
+    if set(actual)!=set(expected):raise ValueError('Retained GEN introduced or lost a frozen D root')
+    for barcode,old in expected.items():
+        new=actual[barcode]
+        if (new['status']!=2 or new['end_cm'] is None or new['pdg']!=old['pdg']
+                or new['momentum_GeV']!=old['momentum'][:3] or new['energy_GeV']!=old['momentum'][3]):
+            raise ValueError('Retained GEN changed or failed to complete the original D frontier')
+    features=event_features(rows,event_id,weight,weights)
+    return dict(event_id=event_id,native_weight=weight,hepmc_weights=weights,
+                graph_sha256=features['graph_sha256'],original_units=units,
+                kinematics=prepared_kinematics(features,frozen))
+
+
+def collect_prepared(request,plan,report,started):
+    """Independently read every retained GEN draw; publish no new EOS payload."""
+    from run_shift_sm_decay_pilot import weight_authority
+    from shift_sm_decay_bank import audit_native_member
+    if request.get('reservation_bytes')!=0 or request.get('publication_directory'):
+        raise ValueError('GEN-only collection must write compact local receipts, not EOS')
+    cases=[dict(case, path=case.get('path') or case['request_path']) for case in plan['cases']]
+    wait_for_case_results(dict(cases=cases),request.get('wait_for_case_results_seconds',0))
+    collected=[]
+    for case in cases:
+        path=Path(case['path']);frozen=json.loads(path.read_text())
+        expected=case.get('sha256') or case['request_sha256']
+        if digest(path)!=expected:raise ValueError('Prepared case request changed')
+        result=json.loads(path.with_name('result.json').read_text())
+        if (result.get('complete') is not True or result.get('exit_code')!=0
+                or result.get('request_sha256')!=expected or result.get('detector_run') is not False
+                or result.get('published_prepared_state') is not True
+                or result.get('original_event_id')!=frozen['event_id']):
+            raise ValueError('Missing/failed prepared response is not a rejected physics event')
+        if frozen['arm']!=case['arm']:raise ValueError('Prepared comparison arm changed')
+        pins={p['name']:p for p in result['GEN_publications']}
+        if len(pins)!=len(result['GEN_publications']):raise ValueError('Repeated prepared publication name')
+        required=['gen.root','gen_audit.json','prepared_source.json','weight_authority.json','pilot_admission_authority.json']
+        local={}
+        for name in required:
+            pin=pins[name];target=Path(case['case_id']+'_'+name)
+            download(pin['path'],target,pin['sha256']);local[name]=target
+        audit=json.loads(local['gen_audit.json'].read_text());audit_native_member(audit)
+        if (audit!=result['GEN_audit'] or audit['original_full_source']!=frozen['original_source']
+                or audit['prepared_GEN_sha256']!=pins['gen.root']['sha256']):
+            raise ValueError('Published native completion audit changed')
+        authority=json.loads(local['weight_authority.json'].read_text())
+        if authority!=[weight_authority(frozen,audit)] or authority!=[result['weight_authority']]:
+            raise ValueError('Prepared weight sidecar differs from the exact source/bank authority')
+        descriptor=json.loads(local['prepared_source.json'].read_text())
+        admission=json.loads(local['pilot_admission_authority.json'].read_text())
+        sidecar=descriptor.get('prepared_weight_authority',{})
+        if (descriptor['gen']!=pins['gen.root']['path'] or descriptor['gen_sha256']!=pins['gen.root']['sha256']
+                or descriptor['event_ids']!=[frozen['event_id']] or descriptor['weights']!=[frozen['native_weight']]
+                or descriptor['normalization_record']!=frozen['original_source']
+                or sidecar.get('path')!=pins['weight_authority.json']['path']
+                or sidecar.get('sha256')!=pins['weight_authority.json']['sha256']
+                or sidecar.get('required_for_downstream_weights') is not True
+                or descriptor['sampling']['plan_sha256']!=pins['pilot_admission_authority.json']['sha256']
+                or admission.get('event_id')!=frozen['event_id']
+                or admission.get('original_source_sha256')!=frozen['original_source']['gen_sha256']
+                or admission.get('prepared_GEN_sha256')!=pins['gen.root']['sha256']
+                or admission.get('sampling_probability')!=authority[0]['sampling_probability']):
+            raise ValueError('Prepared descriptor dropped the exact draw or its required weight sidecar')
+        if sum(p['bytes'] for p in pins.values())>=frozen['reservation_bytes']:
+            raise ValueError('Prepared publication exceeds its frozen case reservation')
+        native=read_prepared_GEN(local['gen.root'],frozen)
+        if frozen.get('decay_bank'):
+            audit_bank_result(result,frozen,case['case_id'])
+            bank_path=Path(case['case_id']+'_bank.json');bank=json.loads(bank_path.read_text())
+            member=bank['members'][bank['selection']['index']]
+            if member['graph_sha256']!=native['graph_sha256']:
+                raise ValueError('Selected retained GEN graph differs from its native bank member')
+        collected.append(dict(case_id=case['case_id'],arm=frozen['arm'],
+            original_event_id=frozen['event_id'],GEN_sha256=pins['gen.root']['sha256'],
+            graph_sha256=native['graph_sha256'],authority=authority[0],kinematics=native['kinematics'],
+            published_bytes=sum(p['bytes'] for p in pins.values())))
+    groups={arm:[r for r in collected if r['arm']==arm] for arm in comparison_groups(plan)}
+    identities=[{tuple(r['original_event_id']) for r in rows} for rows in groups.values()]
+    if (any(len(rows)!=plan['independent_originals'] for rows in groups.values())
+            or any(len(ids)!=plan['independent_originals'] or ids!=identities[0] for ids in identities)):
+        raise ValueError('GEN-only collection lacks the complete paired original cohort')
+    published=sum(r['published_bytes'] for r in collected)
+    if (published>plan['maximum_new_prepared_publication_bytes']
+            or published+plan['existing_verified_source_publication_bytes']>plan['maximum_total_component_bytes']):
+        raise ValueError('Prepared cohort exceeds its unchanged registered allocation')
+    summary=dict(report,complete=True,complete_frozen_draw_collected=True,prepared_GEN_only=True,
+        detector_run=False,new_GEN_exposure=0,cases=collected,wall_seconds=time.monotonic()-started,
+        observed_prepared_publication_bytes=published,
+        physics_normalization_ready=False,production_policy_qualified=False,
+        note='Conditional GEN diagnostic before G4 survival. Ordinary/bank copies are not extra source exposure; no tail gain or physical rate is established.')
+    raw=json.dumps(summary,indent=2,allow_nan=False)+'\n'
+    if len(raw.encode())>4*1048576:raise ValueError('GEN-only collector report exceeds its compact4MiB limit')
+    Path('report.json').write_text(raw)
+
+
 def run(path):
     request=json.loads(Path(path).read_text());plan_path=Path(request['plan_path'])
     if digest(plan_path)!=request['plan_sha256']:raise ValueError('Pilot plan changed')
@@ -339,6 +477,8 @@ def run(path):
         diagnostic_only=True,physics_normalization_ready=False,production_policy_qualified=False)
     Path('report.json').write_text(json.dumps(report)+'\n')
     try:
+        if request.get('prepared_GEN_only') is True:
+            collect_prepared(request,plan,report,started);return
         groups=comparison_groups(plan)
         wait_for_case_results(plan,request.get('wait_for_case_results_seconds',0))
         grouped=defaultdict(list)

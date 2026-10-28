@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -353,6 +354,23 @@ class FiniteDecayBankTest(unittest.TestCase):
 
 
 class PreparedPublicationTest(unittest.TestCase):
+    def test_failed_produced_GEN_has_a_bounded_return_archive_without_hiding_the_first_error(self):
+        import tarfile
+        import run_shift_sm_decay_pilot as pilot
+        previous=Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory);Path('bank_00').mkdir()
+                Path('bank_00/placed.root').write_bytes(b'minimal failed GEN')
+                Path('bank_00/prepare.log').write_text('first native error')
+                saved=pilot.preserve_failed_prepared(dict(failure_GEN_return_bound_bytes=4096))
+                self.assertLessEqual(saved['archive']['bytes'],4096)
+                with tarfile.open(saved['archive']['path']) as archive:
+                    self.assertEqual(archive.extractfile('placed.root').read(),b'minimal failed GEN')
+                self.assertTrue(Path('bank_00/placed.root').exists())
+                self.assertIsNone(pilot.preserve_failed_prepared({}))
+            finally:os.chdir(previous)
+
     def test_opt_in_publishes_exact_prepared_state_and_authority_without_SIM(self):
         import run_shift_sm_decay_pilot as pilot
         request=dict(case_id='synthetic',arm='ordinary',event_id=[1,1,2],native_weight=3.e-9,
@@ -397,6 +415,76 @@ class PreparedPublicationTest(unittest.TestCase):
                         pilot.run(request,publish_prepared=True)
             finally:
                 os.chdir(previous)
+
+
+class PreparedCollectionTest(unittest.TestCase):
+    def test_GEN_pair_report_keeps_unrelated_pairs_and_labels_pretransport_truth(self):
+        frozen=dict(event_id=[1,1,2],original_source=dict(deferred_charm_frontiers=[
+            dict(event_id=[1,1,2],parents=[dict(barcode=7),dict(barcode=8)])]))
+        energy=math.sqrt(4.+.105658**2)
+        features=dict(muons=[dict(barcode=i,pdg=pdg,momentum_GeV=p,energy_GeV=energy,birth_cm=[0.,0.,1.],
+            first_non_muon_parent_barcodes=parents,ancestor_barcodes=parents)
+            for i,pdg,p,parents in [(1,13,[2.,0.,0.],[7]),(2,-13,[-2.,0.,0.],[8]),(3,-13,[0.,2.,0.],[9])]])
+        result=collection.prepared_kinematics(features,frozen)
+        self.assertEqual(result['stable_muons'],3);self.assertEqual(result['OS_pairs'],2)
+        self.assertEqual(result['direct_D_muons'],2);self.assertEqual(result['direct_D_OS_pairs'],1)
+        self.assertTrue(result['before_G4_survival_and_reconstruction'])
+        self.assertAlmostEqual(result['maximum_mass_GeV'],2.*energy)
+
+    def test_GEN_only_collector_rereads_exact_sidecar_and_writes_watchdog_completion_fields(self):
+        import shutil
+        import run_shift_sm_decay_pilot as pilot
+        previous=Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory);root=Path(directory);case=root/'case';case.mkdir();pub=root/'published';pub.mkdir()
+                audit=FiniteDecayBankTest().native_audit()
+                frozen=dict(arm='ordinary',event_id=[1,1,2],native_weight=3.e-9,decay_seed=17,
+                    original_source=audit['original_full_source'],reservation_bytes=4096)
+                pilot.dump(case/'request.json',frozen)
+                (pub/'gen.root').write_bytes(b'prepared GEN')
+                audit['prepared_GEN_sha256']=pilot.sha(pub/'gen.root')
+                pilot.dump(pub/'gen_audit.json',audit)
+                authority=pilot.weight_authority(frozen,audit);pilot.dump(pub/'weight_authority.json',[authority])
+                pilot.dump(pub/'pilot_admission_authority.json',dict(event_id=[1,1,2],
+                    original_source_sha256='a'*64,prepared_GEN_sha256=audit['prepared_GEN_sha256'],sampling_probability=1.))
+                descriptor=dict(gen=str(pub/'gen.root'),gen_sha256=pilot.sha(pub/'gen.root'),event_ids=[[1,1,2]],
+                    weights=[3.e-9],normalization_record=frozen['original_source'],
+                    sampling=dict(plan_sha256=pilot.sha(pub/'pilot_admission_authority.json')),
+                    prepared_weight_authority=dict(path=str(pub/'weight_authority.json'),
+                        sha256=pilot.sha(pub/'weight_authority.json'),required_for_downstream_weights=True))
+                pilot.dump(pub/'prepared_source.json',descriptor)
+                pins=[dict(name=p.name,path=str(p),sha256=pilot.sha(p),bytes=p.stat().st_size) for p in pub.iterdir()]
+                result=dict(complete=True,exit_code=0,request_sha256=pilot.sha(case/'request.json'),detector_run=False,
+                    published_prepared_state=True,original_event_id=[1,1,2],GEN_publications=pins,GEN_audit=audit,weight_authority=authority)
+                pilot.dump(case/'result.json',result)
+                plan=dict(cases=[dict(case_id='synthetic',arm='ordinary',request_path=str(case/'request.json'),
+                    request_sha256=pilot.sha(case/'request.json'))],independent_originals=1,
+                    comparison_groups=['ordinary'],conditional_original_choice=True,
+                    maximum_new_prepared_publication_bytes=4096,existing_verified_source_publication_bytes=0,maximum_total_component_bytes=4096)
+                pilot.dump(root/'plan.json',plan)
+                request=dict(plan_path=str(root/'plan.json'),plan_sha256=pilot.sha(root/'plan.json'),
+                    prepared_GEN_only=True,reservation_bytes=0)
+                pilot.dump('collector_request.json',request)
+                def download(source,target,expected):
+                    self.assertEqual(pilot.sha(source),expected);shutil.copyfile(source,target)
+                with patch.object(collection,'download',side_effect=download), \
+                     patch.object(collection,'read_prepared_GEN',return_value=dict(graph_sha256='b'*64,kinematics=dict(stable_muons=0,OS_pairs=0))), \
+                     patch.object(collection,'publish',side_effect=AssertionError('GEN-only collection must not write EOS')):
+                    collection.run(Path('collector_request.json'))
+                    report=json.loads(Path('report.json').read_text())
+                    self.assertTrue(report['complete']);self.assertTrue(report['complete_frozen_draw_collected'])
+                    self.assertEqual(report['benchmark_plan_sha256'],request['plan_sha256'])
+                    self.assertFalse(report['detector_run'])
+                    changed=[dict(authority,proposal_correction=.5)]
+                    pilot.dump(pub/'weight_authority.json',changed)
+                    for pin in result['GEN_publications']:
+                        if pin['name']=='weight_authority.json':pin['sha256']=pilot.sha(pub/'weight_authority.json')
+                    pilot.dump(case/'result.json',result)
+                    with self.assertRaisesRegex(ValueError,'sidecar differs'):
+                        collection.run(Path('collector_request.json'))
+                    self.assertFalse(json.loads(Path('report.json').read_text())['complete'])
+            finally:os.chdir(previous)
 
 
 @unittest.skipUnless(importlib.util.find_spec('ROOT') and importlib.util.find_spec('uproot'),

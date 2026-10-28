@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import tarfile
 import time
 
 from run_shift_gen_to_nano import command
@@ -354,6 +355,33 @@ def publish_prepared_source(request,audit,descriptor,authority):
     return publish(outputs,base),descriptor
 
 
+def preserve_failed_prepared(request):
+    """Return one bounded produced GEN failure through the existing dispatcher."""
+    bound=request.get('failure_GEN_return_bound_bytes',0)
+    if not bound:return None
+    require(type(bound) is int and 0<bound<=1048576,'Failed GEN return archive must be bounded to at most1MiB')
+    candidates=[Path('placed.root')]+sorted(Path('.').glob('bank_*/placed.root'),reverse=True)
+    original=next((p for p in candidates if p.is_file() and not p.is_symlink()),None)
+    if original is None:return dict(produced_GEN_available=False)
+    receipt=dict(produced_GEN_available=True,path=str(original),bytes=original.stat().st_size,sha256=sha(original))
+    archive=Path('failed_prepared_evidence.tar.gz')
+    if original.stat().st_size>8*bound:
+        receipt['archive_omitted']='Produced GEN exceeds the bounded diagnostic compression input'
+    else:
+        retained_bytes=0
+        with tarfile.open(archive,'w:gz') as output:
+            for name in ['placed.root','gen_audit.json','prepare_cfg.py','prepare.log']:
+                path=original.with_name(name)
+                if (path.is_file() and not path.is_symlink()
+                        and retained_bytes+path.stat().st_size<=8*bound):
+                    output.add(path,arcname=name);retained_bytes+=path.stat().st_size
+        if archive.stat().st_size>bound:
+            archive.unlink();receipt['archive_omitted']='Compressed GEN failure exceeds the declared return bound'
+        else:receipt['archive']=dict(path=str(archive),bytes=archive.stat().st_size,sha256=sha(archive))
+    dump('failed_prepared_receipt.json',receipt)
+    return receipt
+
+
 def run(request,prepare_only=False,publish_prepared=False):
     require(not publish_prepared or prepare_only,'--publish-prepared requires --prepare-only')
     validate(request);started=time.monotonic()
@@ -430,6 +458,8 @@ def run(request,prepare_only=False,publish_prepared=False):
         dump('pilot_report.json',report)
     except Exception as error:
         report.update(error=repr(error),wall_seconds=time.monotonic()-started)
+        try:report['failed_prepared_evidence']=preserve_failed_prepared(request)
+        except Exception as preservation_error:report['failed_prepared_preservation_error']=repr(preservation_error)
         dump('pilot_report.json',report);raise
 
 
