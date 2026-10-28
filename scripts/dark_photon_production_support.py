@@ -98,7 +98,9 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
             or any(not valid_artifact(item, path) for item, path in zip(candidates, expected))):
         raise ValueError('Nano retirement candidates differ from the exact frozen detector jobs')
     schedd = settings.get('cleanup_condor_schedd')
-    pool = settings.get('cleanup_condor_pool')
+    # Existing sealed CERN profiles predate this field. Bind the verified CERN
+    # collector explicitly instead of using a batch host's default discovery.
+    pool = settings.get('cleanup_condor_pool','tweetybird04.cern.ch')
     if any(not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch',name)
            for name in (schedd,pool)):
         raise ValueError('Nano retirement requires its explicit native scheduler and collector pool')
@@ -123,7 +125,8 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
         source_sha256=sha256(directory/'source.json'),request_sha256=result['request_sha256'],
         replacement=merged, retained_histogram=result['published']['merged_histogram'],
         integrity_sha256=hashlib.sha256(json.dumps(result['merged_nano_integrity'],sort_keys=True).encode()).hexdigest(),
-        scheduler_checked_utc=datetime.now(timezone.utc).isoformat(),scheduler_jobs=jobs,
+        scheduler_checked_utc=datetime.now(timezone.utc).isoformat(),scheduler_schedd=schedd,
+        scheduler_pool=pool,scheduler_jobs=jobs,
         candidates=candidates,removed=[],removed_bytes=0)
     save(receipt_path,receipt)
     env = transfer_env()

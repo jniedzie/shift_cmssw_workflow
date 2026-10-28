@@ -222,9 +222,12 @@ class MainNanoRetirement(unittest.TestCase):
         self.assertFalse(self.removed)
 
     def test_cleanup_binds_the_collector_instead_of_worker_default_discovery(self):
+        self.settings.pop('cleanup_condor_pool')  # Older sealed CERN profiles.
         self.run_cleanup()
         self.assertFalse(self.removed==[])
-        self.settings.pop('cleanup_condor_pool')
+        receipt=json.loads((self.root/'primitive_nano_retirement.json').read_text())
+        self.assertEqual(receipt['scheduler_pool'],'tweetybird04.cern.ch')
+        self.settings['cleanup_condor_pool']=''
         with self.assertRaisesRegex(ValueError,'collector pool'):
             retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
 
