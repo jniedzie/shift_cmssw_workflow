@@ -382,7 +382,7 @@ def submission_cluster(directory):
         path = directory / filename
         if path.is_file():
             record = read(path)
-            for key in ('manager_cluster', 'dagman_cluster'):
+            for key in ('manager_cluster', 'dagman_cluster', 'cluster'):
                 value = record.get(key)
                 if type(value) is int and value > 0:
                     return value

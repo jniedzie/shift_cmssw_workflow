@@ -310,6 +310,18 @@ class ProductionControllerTest(unittest.TestCase):
 
 
 class SchedulerStatusTest(unittest.TestCase):
+    def test_durable_dag_receipt_keeps_held_children_visible(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary)
+            (directory/'submission.json').write_text('{"cluster":123}')
+            held=dict(ClusterId=124,ProcId=0,JobStatus=5,DAGManJobId=123)
+            with patch.object(controller,'query',return_value=[
+                    dict(ClusterId=123,ProcId=0,JobStatus=2),held]) as query:
+                state=controller.scheduler_snapshot(dict(directory=directory,campaign='test'))
+            self.assertEqual(state['manager_cluster'],123)
+            self.assertEqual(state['held_jobs'],[held])
+            self.assertIn('DAGManJobId == 123',query.call_args.args[0])
+
     def test_only_exact_metrics_can_establish_terminal_failure(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
