@@ -81,5 +81,97 @@ class AutomaticAdmissionTest(unittest.TestCase):
             admission.maybe_create_bulk_gate(self.config, self.state)
 
 
+class ReferenceAdmissionTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        (self.directory / 'config.json').write_text('{"frozen": true}')
+        (self.directory / 'model.json').write_text('{"model": "reference"}')
+        self.points = ['m0p25_lab_0p01m', 'm0p7_lab_0p01m']
+        batches = [dict(batch=f'p{point}_b{bank}', point=name,
+                        source_collisions=50000, operational_canary=bank == 0)
+                   for bank in range(6) for point, name in enumerate(self.points)]
+        self.config = dict(directory=str(self.directory), model_card=str(self.directory / 'model.json'),
+            bulk_storage_gate=str(self.directory / 'gate.json'), batches=batches,
+            maximum_meson_forecast_bytes=200000000,
+            automatic_bulk_admission=dict(schema='shift-dp-reference-response-admission-v1',
+                target_effective_events=500, cost_margin=1.25,
+                qualified_controls=[dict(point=name) for name in self.points],
+                point_budget_bytes={name:100000000 for name in self.points},
+                per_batch_forecast_bytes={batch['batch']:12000000 for batch in batches}))
+        self.responses = {name:dict(point=name, source_collisions=50000,
+            effective_passing_events=100., passing_sumw=100., passing_sumw2=100.,
+            output_bytes=4000000, point_receipt_path='/qualified/'+name,
+            point_receipt_sha256='a'*64, histogram_sha256='b'*64) for name in self.points}
+
+    def gate(self):
+        with patch.object(admission, 'reference_response', side_effect=lambda config, authority:
+                          self.responses[authority['point']]):
+            return admission.maybe_create_bulk_gate(self.config, {})
+
+    def test_five_hundred_goal_selects_only_a_finite_frozen_subset(self):
+        gate = self.gate()
+        self.assertEqual(gate['target_effective_events'], 500)
+        self.assertEqual(len(gate['allowed_batches']), 10)
+        self.assertTrue(set(gate['allowed_batches']) <= {b['batch'] for b in self.config['batches']})
+        self.assertTrue(gate['unsubmitted_banks_have_zero_exposure'])
+        self.assertTrue(all(row['required_banks'] == 5 for row in gate['response_allocations']))
+
+    def test_no_observed_passes_do_not_authorize_unbounded_production(self):
+        self.responses[self.points[1]]['effective_passing_events'] = 0.
+        self.responses[self.points[1]]['passing_sumw'] = 0.
+        self.responses[self.points[1]]['passing_sumw2'] = 0.
+        gate = self.gate()
+        allowed = [b for b in self.config['batches'] if b['batch'] in gate['allowed_batches']
+                   and b['point'] == self.points[1]]
+        self.assertEqual(len(allowed), 1)
+        self.assertTrue(allowed[0]['operational_canary'])
+        row = next(r for r in gate['response_allocations'] if r['point'] == self.points[1])
+        self.assertIsNone(row['required_banks'])
+        self.assertFalse(row['admitted'])
+
+    def test_point_cost_cap_keeps_only_bounded_controls(self):
+        self.responses[self.points[0]]['output_bytes'] = 50000000
+        gate = self.gate()
+        allowed = [b for b in self.config['batches'] if b['batch'] in gate['allowed_batches']
+                   and b['point'] == self.points[0]]
+        self.assertEqual(len(allowed), 1)
+        self.assertTrue(allowed[0]['operational_canary'])
+        self.assertFalse(gate['response_allocations'][0]['admitted'])
+
+    def test_repeated_gate_uses_the_identical_frozen_decision(self):
+        first = self.gate()
+        before = Path(self.config['bulk_storage_gate']).read_bytes()
+        with patch.object(admission, 'reference_response', side_effect=RuntimeError('Do not redraw')) as evaluate:
+            again = admission.maybe_create_bulk_gate(self.config, {})
+        evaluate.assert_not_called()
+        self.assertEqual(again, first)
+        self.assertEqual(Path(self.config['bulk_storage_gate']).read_bytes(), before)
+
+    def test_unfinished_control_leaves_gate_unwritten(self):
+        self.responses[self.points[1]] = None
+        self.assertIsNone(self.gate())
+        self.assertFalse(Path(self.config['bulk_storage_gate']).exists())
+
+    def test_canary_is_counted_inside_target_even_when_it_is_last(self):
+        self.config['batches'] = self.config['batches'][2:] + self.config['batches'][:2]
+        gate = self.gate()
+        for point in self.points:
+            selected = [b for b in self.config['batches'] if b['point'] == point
+                        and b['batch'] in gate['allowed_batches']]
+            self.assertEqual(len(selected), 5)
+            self.assertEqual(sum(b['operational_canary'] for b in selected), 1)
+
+    def test_underforecast_banks_are_not_admitted_from_a_looser_point_budget(self):
+        # The total point cap fits, but the actual per-bank storage gate would
+        # otherwise reserve less than this measured, margin-included cost.
+        self.responses[self.points[0]]['output_bytes'] = 10000000
+        gate = self.gate()
+        selected = [b for b in self.config['batches'] if b['point'] == self.points[0]
+                    and b['batch'] in gate['allowed_batches'] and not b['operational_canary']]
+        self.assertEqual(selected, [])
+
+
 if __name__ == '__main__':
     unittest.main()
