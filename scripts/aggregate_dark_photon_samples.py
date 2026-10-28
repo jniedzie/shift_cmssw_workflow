@@ -23,6 +23,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tarfile
 
 from export_dark_photon_cross_sections import rate_record
 from pythia_generation_ledger import read_pythia_generation_ledger, same_ledger_content
@@ -655,6 +656,83 @@ def execute_histogram_only(plan, row, populations, rate, identities,
 
 
 
+def legacy_main_histograms(plan, population, work):
+    """Rebook a legacy source with the qualified main config, retaining its Nano.
+
+    Old scoring must have applied no selection. Validate every original and
+    frozen W/p before histogramming; no detector replay or extra exposure.
+    """
+    from run_shift_sm_postprocessing import download, read as read_retry, transfer_env, hadd_command, validate_dimuon_histograms
+    import ROOT
+    marker = population['report'].get('score_histograms', {}).get('marker', {})
+    if (plan.get('rehistogram_legacy_sources') is not True or marker.get('complete') is not True
+            or marker.get('selection_applied') is not False):
+        raise ValueError('Legacy source needs explicit regeneration and complete unselected scoring evidence')
+    profile = plan['main_histogrammer_profile']
+    settings = read(checked(profile['path'], profile['sha256']))
+    proof = settings['qualification']
+    qualification = read(checked(proof['path'], proof['sha256']))
+    control = qualification.get('histogram_positive_control', {})
+    if (qualification.get('complete') is not True or qualification.get('histogram_runtime') != settings['runtime']
+            or not control.get('all_seven_logmass_categories_present') or not control.get('positive_logmass_filled')):
+        raise ValueError('Legacy regeneration needs the qualified positive-mass main histogram runtime')
+    work = Path(work); work.mkdir()
+    capsule = work / 'runtime.tar.gz'
+    download(settings['runtime']['path'], capsule, settings['runtime']['sha256'])
+    with tarfile.open(capsule) as archive:
+        if any(m.name.startswith('/') or '..' in Path(m.name).parts for m in archive.getmembers()):
+            raise ValueError('Unsafe main histogram runtime member')
+        archive.extractall(work)
+    capsule.unlink()
+    payload = work / 'payload'
+    for name, record in read_retry(payload / 'manifest.json').items():
+        checked(payload / name, record['sha256'])
+    environment = transfer_env()
+    environment.update(PYTHONHOME=str(payload / 'runtime'), ROOTSYS=str(payload / 'runtime'),
+        PYTHONPATH=str(payload / 'configs') + ':' + str(payload / 'bin'),
+        LD_LIBRARY_PATH=str(payload / 'runtime/lib64') + ':' + str(payload / 'runtime/lib64/root'),
+        PYTHONDONTWRITEBYTECODE='1', OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1')
+    overlay = work / 'histogram_config.py'
+    overlay.write_text("from shift_histogrammer_config import *\nenableBdtDiagnostics = False\nweightsBranchName = 'shiftSamplingGenWeight'\n")
+    histograms = []; seen = []
+    for index, item in enumerate(population['inputs']):
+        nano = work / f'nano_{index}.root'; hist = work / f'hist_{index}.root'
+        download(item['path'], nano, item['sha256'])
+        if nano.stat().st_size != item['bytes']:
+            raise ValueError('Legacy Nano size changed')
+        ids, weights = event_rows(nano)
+        validate_event_rows(ids, weights, item['event_ids'])
+        validate_nano(nano, ids, item['sampling_probabilities'])
+        seen.extend(ids)
+        with (work / f'histogram_{index}.log').open('x') as log:
+            subprocess.run([str(payload / 'bin/shift_histogrammer'), '--config', str(overlay),
+                '--input_path', str(nano), '--output_hists_path', str(hist)], env=environment,
+                stdout=log, stderr=subprocess.STDOUT, check=True, timeout=3600)
+        nano.unlink(); histograms.append(hist)
+    if seen != population['selected_event_ids'] or len({tuple(i) for i in seen}) != len(seen):
+        raise ValueError('Legacy histogram inputs changed their complete selected population')
+    histogram = work / 'ntuple_0.root'
+    with (work / 'merge.log').open('x') as log:
+        subprocess.run(hadd_command(histogram, histograms), stdout=log, stderr=subprocess.STDOUT, check=True, timeout=1800)
+    root = ROOT.TFile.Open(str(histogram))
+    try:
+        validate_dimuon_histograms(root)
+        events = root.Get('rawEventsCutFlow')
+        counts = root.Get('event/Event_nShiftMuon')
+        if (not events or events.GetBinContent(1) != len(seen) or not counts
+                or not math.isclose(counts.Integral(0, counts.GetNbinsX()+1),
+                    math.fsum(1./p for p in population['sampling_probabilities']), rel_tol=1.e-9)):
+            raise ValueError('Legacy main histograms changed the complete event count or W/p')
+    finally:
+        root.Close()
+    original = dict(stratum='darkphoton_'+population['source']['point'],
+        source_id=population['source']['plan_path'], gen_sha256=population['parent']['gen_sha256'],
+        denominator_kind='conditional_signal_events', full_source_events=population['parent']['events'],
+        physical_dimuon_cross_section_pb=population['rate']['physical_selected_cross_sections_pb'][0]['value_pb'],
+        signal_rate_record=population['rate'])
+    return histogram, original
+
+
 def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,scratch,results_directory):
     """Merge compatible main histograms; keep each complete grouped Nano in place.
 
@@ -676,7 +754,10 @@ def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,sc
                 signal_rate_record=population['rate']))
             continue
         marker=population['report'].get('main_histograms')
-        if marker is None:raise ValueError('Main aggregation cannot mix main and BDT-scored histogram recipes')
+        if marker is None:
+            histogram, original = legacy_main_histograms(plan, population, work / ('legacy_'+str(i)))
+            histograms.append(histogram); originals.append(original); nanos.extend(population['inputs'])
+            continue
         item=marker['published']['merged_histogram'];path=work/('source_'+str(i)+'.root')
         download(item['path'],path,item['sha256'])
         if path.stat().st_size!=item['bytes']:raise ValueError('Source main histogram size differs')
@@ -695,7 +776,7 @@ def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,sc
         full_source_sumw=rate['full_gen']['sum_weights'],
         cross_section_pb=rate['physical_selected_cross_sections_pb'][0]['value_pb'],
         denominator_kind='conditional_signal_events',original_sources=originals,
-        source_rate_combination=rate['combination'],full_source_collisions=rate['full_gen']['source_collisions'],
+        source_rate_combination=rate['combination'],full_source_collisions=rate['full_gen'].get('source_collisions'),
         histogram_weight='native_gen_weight/reco_inclusion_probability',no_second_filter_efficiency=True,
         partial_production=True,physics_normalization_ready=False,forced_decay_branching_convention_ready=True)
     histogram=work/'ntuple_0.root'

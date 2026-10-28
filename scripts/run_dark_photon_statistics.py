@@ -760,6 +760,8 @@ def handoff(config, index):
                     str(config['detector_worker_redistribution']['future_category_ceiling'])])
             if config.get('independent_point_preflights'):
                 command.append('--independent-point-preflights')
+            if config.get('main_histogrammer') is not None:
+                command.extend(['--main-histogrammer', config['main_histogrammer']['path']])
             budgets=config.get('absolute_stage_timeouts')
             if budgets is not None:
                 if (not isinstance(budgets,list) or len(budgets)!=4
@@ -861,7 +863,9 @@ def available_sources(config):
         for row in read(directory / 'plan.json')['points']:
             point = row['point']
             report = directory / 'completed_points' / (point + '.json')
-            if point in result and report.is_file() and read(report).get('complete') is True:
+            already_listed = any(source['plan_path'] == str(directory / 'plan.json')
+                                 for source in result.get(point, []))
+            if point in result and not already_listed and report.is_file() and read(report).get('complete') is True:
                 result[point].append(authority(directory, point, condition))
     return result
 
@@ -916,7 +920,8 @@ def main_histogram_aggregate_plan(config,point,sources,directory):
         checked=Path(source['plan_path'])
         if sha(checked)!=source['plan_sha256']:raise ValueError('Changed main aggregate source plan')
         plan=read(checked)
-        if plan.get('main_histogrammer') is not True:raise ValueError('Main aggregate requires main-histogram source stages')
+        if plan.get('main_histogrammer') is not True and not config.get('rehistogram_legacy_sources', False):
+            raise ValueError('Legacy sources require explicit main-histogram regeneration from their complete Nanos')
         rows.append(next(row for row in plan['points'] if row['point']==point))
     model={key:rows[0][key] for key in ('mass_gev','epsilon','proper_ctau_mm','sampling_epsilon')}
     if any(any(row[key]!=value for key,value in model.items()) for row in rows):
@@ -935,6 +940,10 @@ def main_histogram_aggregate_plan(config,point,sources,directory):
         campaign=campaign,points=[row],events=row['events'],conditions=config['conditions'],dependencies=dependencies,
         group_events=4000,source_groups_retained_in_place=True,electronics_or_trigger_changes=False,
         maximum_publication_bytes=read(config['main_histogrammer']['path'])['maximum_publication_bytes'])
+    if config.get('rehistogram_legacy_sources', False):
+        profile = config['main_histogrammer']
+        dependencies[profile['path']] = profile['sha256']
+        plan.update(rehistogram_legacy_sources=True, main_histogrammer_profile=profile)
     new(directory/'plan.json',plan);plan_hash=sha(directory/'plan.json')
     entry=directory/'aggregate_dark_photon_samples.py'
     argv=['python3',str(entry),'--plan',str(directory/'plan.json'),'--plan-sha256',plan_hash,
@@ -947,9 +956,14 @@ def main_histogram_aggregate_plan(config,point,sources,directory):
         'set -u\n'
         'exec '+shlex.join(argv)+' --seal-sha256 "$2" --runtime-cache "$_CONDOR_SCRATCH_DIR/runtime_cache" --scratch "$_CONDOR_SCRATCH_DIR"\n')
     script.chmod(0o700);subprocess.run(['bash','-n',str(script)],check=True)
-    guard=Path(sources[0]['plan_path']).parent
+    guard=next((Path(source['plan_path']).parent for source in sources
+                if (Path(source['plan_path']).parent/'finalize.sub').is_file()), None)
+    if guard is None:
+        raise ValueError('Main aggregate requires a qualified main-histogram finalizer description')
     submit=(guard/'finalize.sub').read_text().replace(str(guard),str(directory)).replace('finalize_worker.sh','aggregate_worker.sh')
     submit=re.sub(r'^arguments = .*$', 'arguments = '+point+' SEAL_DIGEST',submit,flags=re.MULTILINE)
+    submit=re.sub(r'^\+JobBatchName = .*$', '+JobBatchName = '+json.dumps(
+        'SHIFT_DP_'+point+'_'+config['campaign_prefix']+'_histogram_merge'),submit,flags=re.MULTILINE)
     (directory/'aggregate.sub.in').write_text(submit)
     new(directory/'seal.json',dict(schema='shift-additive-signal-production-seal-v1',
         files={str(p):sha(p) for p in directory.iterdir() if p.is_file()}))

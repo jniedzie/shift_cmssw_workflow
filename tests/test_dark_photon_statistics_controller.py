@@ -1256,7 +1256,8 @@ class FutureDirectDetectorGate(unittest.TestCase):
                 controller.new(wave/'preparation_receipt.json',dict(preparation=str(source)))
                 controller.new(wave/'rates.json',dict(complete=True))
                 config=dict(directory=str(root),handoff_operations=str(root/'operations'),tools='/frozen',
-                    qualified_template='/qualified',prior_inventories=[],failure_base='/eos/failures',publication_canary='/qualified/canary',future_detector_runtime={})
+                    qualified_template='/qualified',prior_inventories=[],failure_base='/eos/failures',publication_canary='/qualified/canary',future_detector_runtime={},
+                    main_histogrammer=dict(path='/qualified/main_histogrammer.json',sha256='qualified'))
                 order=[];commands=[]
                 def prepare(argv,*args,**kwargs):
                     order.append('prepare');commands.append(list(map(str,argv)));production=wave/'production';production.mkdir();controller.new(production/'plan.json',replacement)
@@ -1275,4 +1276,5 @@ class FutureDirectDetectorGate(unittest.TestCase):
                 self.assertEqual(order,['prepare','preflight']+([] if failed else ['detector']))
                 self.assertEqual(dag.call_count,0 if failed else 1)
                 self.assertEqual(commands[0][commands[0].index('--preparation')+1],str(prepared))
+                self.assertEqual(commands[0][commands[0].index('--main-histogrammer')+1],'/qualified/main_histogrammer.json')
                 self.assertEqual(controller.read(source),original)

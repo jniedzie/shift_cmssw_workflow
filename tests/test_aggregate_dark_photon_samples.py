@@ -40,6 +40,14 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
 
 
 class MainHistogramAggregation(unittest.TestCase):
+    def test_legacy_refresh_requires_explicit_optin_and_no_classifier_selection(self):
+        from aggregate_dark_photon_samples import legacy_main_histograms
+        for flag, selection in [(False,False),(True,True),(True,None)]:
+            with self.subTest(flag=flag,selection=selection), tempfile.TemporaryDirectory() as tmp:
+                source=dict(report=dict(score_histograms=dict(marker=dict(complete=True,selection_applied=selection))))
+                with self.assertRaisesRegex(ValueError,'explicit regeneration'):
+                    legacy_main_histograms(dict(rehistogram_legacy_sources=flag),source,Path(tmp)/'work')
+
     def test_real_ROOT_merge_keeps_W_over_p_and_uses_source_collisions_for_the_rate(self):
         import ROOT
         from aggregate_dark_photon_samples import execute_main_histograms
