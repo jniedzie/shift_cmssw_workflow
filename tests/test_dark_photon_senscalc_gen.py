@@ -18,6 +18,59 @@ from dark_photon_meson import MUON_MASS_GEV
 
 
 class SourceToGen(unittest.TestCase):
+    def test_source_invariant_rounding_does_not_move_muons_off_shell(self):
+        cases=[(.7,[1.1997162141804003,-.3688090380961767,-.7582806668419327,-.4881693540979676]),
+               (.25,[44.65566272043899,.17600257873885927,-.2035493638763745,-44.654152144570894])]
+        for mass,parent in cases:
+            for seed in range(50):
+                muon,anti,flight=decay_momenta(parent,mass,300.,random.Random(seed))
+                for child in (muon,anti):
+                    on_shell=math.hypot(MUON_MASS_GEV,*child[1:])
+                    bound=128*sys.float_info.epsilon*max(1.,parent[0])**2/(on_shell+child[0])
+                    self.assertLessEqual(abs(on_shell-child[0]),bound)
+                for i in range(4):self.assertAlmostEqual(muon[i]+anti[i],parent[i],delta=1.e-12*max(1.,parent[0]))
+                rng=random.Random(seed);rng.random();rng.random();length=rng.expovariate(1/300.)
+                self.assertEqual(flight,[length*x/mass for x in parent[1:]]+[length*parent[0]/mass])
+        with self.assertRaisesRegex(ValueError,'narrow support'):
+            decay_momenta([1.,0.,0.,0.],.7,300.,random.Random(1))
+
+    def test_combined_bank_requires_ISR_off_and_preserves_the_original_collision_ledger(self):
+        from dark_photon_bremsstrahlung import sampling_profile,TABLE_HASHES
+        import shutil
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);bank=root/'source_bank';model=self.bank(bank)
+            original=json.loads((bank/'manifest.json').read_text());original['seed']=123
+            original['coefficient_weights_over_epsilon_squared']={str(pdg):0. for pdg in adapter.CHANNELS}
+            original['coefficient_weights_over_epsilon_squared'].update({'4900331':.4441015902010675,'4900113':4.})
+            write_json(bank/'manifest.json',original)
+            p=sampling_profile(.7);tables=Path(p['table_directory']);target=root/'bremsstrahlung_inputs';target.mkdir()
+            for name in TABLE_HASHES:shutil.copy2(tables/name,target/name)
+            p['table_directory']='bremsstrahlung_inputs';write_json(root/'bremsstrahlung.json',p)
+            with self.assertRaisesRegex(ValueError,'explicit ISR off'):
+                adapter.source_bank(bank,'pointlike',model)
+            with (bank/'source_settings.cmnd').open('a') as stream:stream.write('PartonLevel:ISR=off\n')
+            original['settings_sha256']=digest(bank/'source_settings.cmnd');write_json(bank/'manifest.json',original)
+            _,rows,summary=adapter.source_bank(bank,'pointlike',model,write_bremsstrahlung_proposals=True)
+            self.assertEqual(summary['source_collisions'],4)
+            self.assertEqual(summary['bremsstrahlung_proposals'],4)
+            self.assertEqual(summary['channels']['proton-bremsstrahlung']['candidates'],4)
+            self.assertEqual(digest(bank/'source_ledger.jsonl'),original['ledger_sha256'])
+            self.assertEqual(rows,adapter.source_bank(bank,'pointlike',model)[1])
+            from dark_photon_bremsstrahlung import SourceSampler
+            native=SourceSampler.candidate
+            def other_math_runtime(sampler,*args):
+                value=native(sampler,*args)
+                value['p4'][0]=math.nextafter(value['p4'][0],math.inf)
+                value['weight_over_epsilon_squared']=math.nextafter(value['weight_over_epsilon_squared'],math.inf)
+                return value
+            with patch.object(SourceSampler,'candidate',other_math_runtime):
+                self.assertEqual(rows,adapter.source_bank(bank,'pointlike',model)[1])
+            (target/next(iter(TABLE_HASHES))).write_text('changed authoritative input')
+            with self.assertRaisesRegex(ValueError,'Changed pinned'):
+                # Clear the table cache to emulate a fresh audit process.
+                import dark_photon_bremsstrahlung as brem
+                brem.form_factor_table.cache_clear();adapter.source_bank(bank,'pointlike',model)
+
     def test_grid_freezes_every_imported_reference_gen_helper(self):
         from prepare_dark_photon_grid import SOURCES
         self.assertFalse(set(adapter.SOURCES)-set(SOURCES))
@@ -65,7 +118,7 @@ class SourceToGen(unittest.TestCase):
                 accepted_signal_events=len(selected),unit_output_gen_weights=True,raw_source_summary=summary)
             write_json(directory/'source_exposure.json',exposure)
             epsilon=1.e-6;factor=epsilon**2*.4
-            contract=dict(mass_gev=.7,rate_profile='pointlike',seed=711,requested_events=len(selected),epsilon=epsilon,
+            contract=dict(production_mechanism=adapter.MECHANISM,mass_gev=.7,rate_profile='pointlike',seed=711,requested_events=len(selected),epsilon=epsilon,
                 physical_width_table=width,width_authority=width,source_exposure=exposure,proposal_ledger=ledger,
                 target_cross_section=dict(value_pb=summary['sigma_over_epsilon_squared_pb']*factor,
                     error_pb=summary['sigma_statistical_error_over_epsilon_squared_pb']*factor))

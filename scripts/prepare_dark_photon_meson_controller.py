@@ -9,19 +9,20 @@ import shlex
 import shutil
 
 import run_dark_photon_meson_production as production
-from prepare_dark_photon_meson_production import source_execution_limits, detector_point_limit
-from prepare_dark_photon_grid import RUNTIME_HELPER_SOURCES
+from prepare_dark_photon_meson_production import source_execution_limits, detector_point_limit, MATERIAL_SOURCES
+from prepare_dark_photon_grid import RUNTIME_HELPER_SOURCES, MATERIAL_SELECTION_SOURCES
+from run_dark_photon_senscalc_gen import SOURCES as REFERENCE_SOURCES
 
 
 REPLACEMENT_TOOLS = ('run_dark_photon_meson_production.py', 'run_dark_photon_statistics.py', 'prepare_dark_photon_production.py',
                      'prepare_dark_photon_grid.py',
                      'prepare_dark_photon_meson_production.py', 'aggregate_dark_photon_samples.py',
-                     'dark_photon_detector_runtime.py') + RUNTIME_HELPER_SOURCES
+                     'dark_photon_detector_runtime.py', 'watch_dark_photon_production.py') + RUNTIME_HELPER_SOURCES
 
 
 def replacement_tool_names(original):
     # Legacy science keeps its qualified detector runner and AST telemetry guard.
-    names = REPLACEMENT_TOOLS
+    names = tuple(dict.fromkeys(REPLACEMENT_TOOLS + REFERENCE_SOURCES + MATERIAL_SELECTION_SOURCES + MATERIAL_SOURCES))
     if original.get('detector_runtime') is not None:
         names += ('run_shift_gen_to_nano.py',)
     if original.get('automatic_bulk_admission') is not None:
@@ -66,7 +67,10 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         descriptor = (template/'controller.sub.in').read_text()
         if (template/'controller.sub').read_text() != descriptor.replace('OPERATIONS_SEAL_DIGEST', template_seal):
             raise ValueError('Template submit description differs from its sealed template')
-    for required in ('+SendCredential = True', '+MaxRuntime = 604800',
+    runtime = original.get('controller_runtime_seconds', 604800)
+    if type(runtime) is not int or not 7200 <= runtime <= 604800:
+        raise ValueError('Invalid frozen controller lifetime')
+    for required in ('+SendCredential = True', '+MaxRuntime = '+str(runtime),
                      'on_exit_hold =', 'periodic_release = False'):
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)

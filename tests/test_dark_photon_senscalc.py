@@ -75,6 +75,16 @@ class SensCalcBenchmark(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'mass differs'):
             model.source_summary(rows,30.,mass=.4)
 
+    def test_native_threshold_roundoff_uses_the_existing_frozen_GEN_mass_support(self):
+        c=dict(id=4900113,weight_over_epsilon_squared=1.,
+            p4=[92.55666457401239,-.14361024122829152,.17390699612242702,-92.55612831963005])
+        rows=[dict(trial=1,generator_success=True,native_weight=1.,candidates=[c]),
+              dict(trial=2,generator_success=True,native_weight=1.,candidates=[])]
+        model.source_summary(rows,26.,mass=.22)
+        # A displacement beyond the unchanged +/-1 ppm GEN mass support fails.
+        with self.assertRaisesRegex(ValueError,'mass differs'):
+            model.source_summary(rows,26.,mass=.22*(1+3.e-6))
+
     def test_runtime_tampering_or_escape_is_rejected_before_execution(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory=Path(tmp);binary=directory/'source';binary.write_bytes(b'synthetic runtime')

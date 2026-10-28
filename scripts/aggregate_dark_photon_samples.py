@@ -174,7 +174,7 @@ def combined_rate(populations, *, point, campaign):
     populations = unique_populations(populations)
     first = populations[0]['rate']
     meson = first.get('mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
-    reference = first.get('mechanism') == 'senscalc-meson-fragmentation'
+    reference = first.get('mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
               'sampling_epsilon', 'beam_energy_GeV', 'source_model',
               'generated_mass_support_gev')
@@ -396,7 +396,7 @@ def load_source(source, expected_model, conditions_digest):
     contract, audit, manifest = [contracts[name] for name in ('contract.json', 'validation.json', 'manifest.json')]
     meson = contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     native_count = contract['source_exposure']['source_collisions'] if meson else row.get('full_gen_events', row['events'])
-    reference=contract.get('production_mechanism')=='senscalc-meson-fragmentation'
+    reference=contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
     if reference:
         from run_dark_photon_senscalc_gen import accounting
         fresh_ledger=accounting(gen,contract)['proposal_ledger']
@@ -423,6 +423,28 @@ def load_source(source, expected_model, conditions_digest):
             or report.get('seal_sha256') != source['seal_sha256']
             or report.get('final_output_base') != row['final_output_base']):
         raise ValueError('Source point completion does not match its sealed production')
+    if 'main_histograms' in report:
+        selected_ids,probabilities=admitted_population(row,parent)
+        descriptor=directory/'source.json';checked(descriptor,source_seal['files'].get(str(descriptor)))
+        selected=read(descriptor);marker=report['main_histograms']
+        request=directory/'postprocessing_request.json';checked(request,marker['request_sha256'])
+        metadata=marker['full_original_exposure'];estimate=rate['physical_selected_cross_sections_pb'][0]
+        if (marker.get('complete') is not True or marker['events']!=len(selected_ids) or
+                metadata['full_source_sumw']!=parent['events'] or not math.isclose(
+                    metadata['cross_section_pb'],estimate['value_pb'],rel_tol=1.e-12,abs_tol=0.) or
+                len(metadata['original_sources'])!=1 or metadata['original_sources'][0]['gen_sha256']!=parent['gen_sha256'] or
+                selected['gen_sha256']!=parent['gen_sha256'] or selected['event_ids']!=parent['event_ids'] or
+                read(request)['selected_sources']!=[selected] or
+                read(request)['normalization_sources']!=metadata['original_sources'] or
+                marker['merged_nano_integrity'].get('complete') is not True):
+            raise ValueError('Main histogram source changed its original GEN, admission or publication')
+        item=marker['published']['merged_nano']
+        if Path(item['path']).parent!=Path(row['final_output_base'])/'nanoAOD_merged':
+            raise ValueError('Main histogram source lost its grouped Nano publication')
+        return dict(source=dict(source,completed_point_path=str(report_path),completed_point_sha256=sha(report_path)),
+            parent=parent,rate=rate,contract=contract,report=report,main_source=selected,
+            inputs=[dict(item,events=len(selected_ids),event_ids=selected_ids,sampling_probabilities=probabilities)],
+            selected_event_ids=selected_ids,sampling_probabilities=probabilities,material_selected=True,rate_only=False)
     union = report['union']
     selected_ids, probabilities = admitted_population(row, parent)
     if (union.get('complete') is not True or union.get('parent_gen_ledger_count') != 1
@@ -493,6 +515,10 @@ def load_plan(path, digest):
     checked(condition['path'], condition['sha256'])
     for path, checksum in plan.get('dependencies', {}).items():
         checked(path, checksum)
+    if plan.get('main_histogrammer') is True:
+        if plan.get('histogram_only') is not True:
+            raise ValueError('Main aggregation retains already grouped source Nanos and merges their histograms')
+        return plan
     deployment = Path(plan['scoring_deployment']['path'])
     checked(deployment / 'seal.json', plan['scoring_deployment']['seal_sha256'])
     seal = read(deployment / 'seal.json')
@@ -629,6 +655,84 @@ def execute_histogram_only(plan, row, populations, rate, identities,
 
 
 
+def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,scratch,results_directory):
+    """Merge compatible main histograms; keep each complete grouped Nano in place.
+
+    Conditional GEN has one common unweighting envelope. Pool its raw W/p
+    histograms, retain all original GEN denominators once, and use the existing
+    source-collision-weighted rate combination. No BDT or extra efficiency.
+    """
+    from run_shift_sm_postprocessing import download,publish,hadd_command,validate_dimuon_histograms
+    from dark_photon_production_support import validate_histogram_merge
+    import ROOT
+    work=Path(scratch)/'main_histogram_aggregate';work.mkdir(exist_ok=False)
+    histograms=[];originals=[];nanos=[]
+    for i,population in enumerate(populations):
+        if population.get('rate_only'):
+            originals.append(dict(stratum='darkphoton_'+row['point'],source_id=population['source']['plan_path'],
+                gen_sha256=population['parent']['gen_sha256'],denominator_kind='conditional_signal_events',
+                full_source_events=population['parent']['events'],
+                physical_dimuon_cross_section_pb=population['rate']['physical_selected_cross_sections_pb'][0]['value_pb'],
+                signal_rate_record=population['rate']))
+            continue
+        marker=population['report'].get('main_histograms')
+        if marker is None:raise ValueError('Main aggregation cannot mix main and BDT-scored histogram recipes')
+        item=marker['published']['merged_histogram'];path=work/('source_'+str(i)+'.root')
+        download(item['path'],path,item['sha256'])
+        if path.stat().st_size!=item['bytes']:raise ValueError('Source main histogram size differs')
+        root=ROOT.TFile.Open(str(path))
+        try:
+            embedded=json.loads(root.Get('ShiftFullGenNormalization').GetString().Data())
+            if embedded!=marker['full_original_exposure']:
+                raise ValueError('Embedded source histogram normalization differs from its completed receipt')
+            validate_dimuon_histograms(root)
+        finally:root.Close()
+        originals.extend(embedded['original_sources']);histograms.append(path)
+        nanos.extend(population['inputs'])
+    if len({s['gen_sha256'] for s in originals})!=len(populations):
+        raise ValueError('Cumulative main histogram repeats an original GEN denominator')
+    metadata=dict(schema='shift-preserved-full-GEN-histogram-v1',stratum='darkphoton_'+row['point'],
+        full_source_sumw=rate['full_gen']['sum_weights'],
+        cross_section_pb=rate['physical_selected_cross_sections_pb'][0]['value_pb'],
+        denominator_kind='conditional_signal_events',original_sources=originals,
+        source_rate_combination=rate['combination'],full_source_collisions=rate['full_gen']['source_collisions'],
+        histogram_weight='native_gen_weight/reco_inclusion_probability',no_second_filter_efficiency=True,
+        partial_production=True,physics_normalization_ready=False,forced_decay_branching_convention_ready=True)
+    histogram=work/'ntuple_0.root'
+    with (work/'merge.log').open('x') as log:
+        subprocess.run(hadd_command(histogram,histograms),stdout=log,stderr=subprocess.STDOUT,check=True,timeout=1800)
+    audit=validate_histogram_merge(histograms,histogram)
+    root=ROOT.TFile.Open(str(histogram),'UPDATE')
+    try:
+        validate_dimuon_histograms(root)
+        ROOT.TObjString(json.dumps(metadata,sort_keys=True)).Write('ShiftFullGenNormalization',ROOT.TObject.kOverwrite)
+    finally:root.Close()
+    if histogram.stat().st_size*2+1048576>plan['maximum_publication_bytes']:
+        raise ValueError('Cumulative main histograms exceed the registered publication budget')
+    published=dict(histogram=publish(histogram,row['final_output_base']+'/histograms'))
+    write(work/'cross_sections.json',rate)
+    cross_sections=publish(work/'cross_sections.json',row['final_output_base'])
+    parameters=dict(schema='shift-dark-photon-sample-v1',point=row['point'],mass_gev=row['mass_gev'],
+        epsilon=row['epsilon'],sampling_epsilon=row['sampling_epsilon'],proper_ctau_mm=row['proper_ctau_mm'],
+        selector_kind='mean_lab_flight',mean_lab_flight_m=row.get('target_mean_lab_flight_m'),
+        target_mean_lab_flight_m=row.get('target_mean_lab_flight_m'),mean_lab_flight_is_estimate=True,
+        production_mechanism=rate['mechanism'],each_original_GEN_counted_once=True)
+    write(work/'sample_parameters.json',parameters)
+    parameter_record=publish(work/'sample_parameters.json',row['final_output_base'])
+    published['merged_histogram']=publish(histogram,row['final_output_base']+'/histograms_merged')
+    marker=dict(complete=True,events=row['events'],published=published,full_original_exposure=metadata,
+        retained_nano_groups=nanos,source_ids=[s['source_id'] for s in originals],
+        source_groups_retained_in_place=True,new_nano_files_created=False)
+    report=dict(complete=True,point=row['point'],events=row['events'],full_gen_events=row['full_gen_events'],
+        final_output_base=row['final_output_base'],main_histograms=marker,histogram_merge=audit,
+        cross_sections=cross_sections,sample_parameters=parameter_record,plan_sha256=plan_digest,seal_sha256=seal_digest,
+        sources=[p['source'] for p in populations],each_original_GEN_counted_once=True)
+    write(work/'point_complete.json',report)
+    publish(work/'point_complete.json',row['final_output_base']+'/metadata/aggregation')
+    write(Path(results_directory)/'completed_points'/(row['point']+'.json'),report)
+    return report
+
+
 def validate_aggregate_population_count(plan, row, populations):
     single = plan.get('single_source_regrouping_canary', False)
     if type(single) is not bool:
@@ -679,6 +783,8 @@ def execute(plan_path, plan_digest, seal_digest, point, cache, scratch, results_
             plan_sha256=plan_digest,seal_sha256=seal_digest)
         write(Path(results_directory)/'completed_points'/(point+'.json'),report)
         return report
+    if plan.get('main_histogrammer') is True:
+        return execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,scratch,results_directory)
     if plan.get('histogram_only') is True:
         return execute_histogram_only(plan, row, populations, rate, identities,
             plan_digest, seal_digest, scratch, results_directory)

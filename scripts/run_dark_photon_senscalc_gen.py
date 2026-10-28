@@ -18,20 +18,53 @@ import re
 import shutil
 import subprocess
 import sys
+import gzip
 
-from dark_photon_senscalc import CHANNELS,digest,ledger_digest,source_ledger,source_summary,write_json
+from dark_photon_senscalc import (CHANNELS,MASS_SUPPORT_RELATIVE_TOLERANCE,
+    digest,ledger_digest,source_ledger,source_summary,write_json)
 from dark_photon_meson import MUON_MASS_GEV,transition_form_factor_abs2
 from run_dark_photon_spectral_gen import freeze_spectral_inputs,physical_width_table
 
 MECHANISM='senscalc-meson-fragmentation'
+INCLUSIVE_MECHANISM='senscalc-meson-fragmentation-bremsstrahlung'
+MECHANISMS=(MECHANISM,INCLUSIVE_MECHANISM)
 SOURCES=('run_dark_photon_senscalc_gen.py','dark_photon_senscalc.py','dark_photon_meson.py',
+         'dark_photon_bremsstrahlung.py',
          'run_dark_photon_spectral_gen.py','dark_photon_model.py','fixed_target_generation.py',
          'dark_photon_meson_gen_cfg.py','audit_dark_photon_gen.py','export_dark_photon_cross_sections.py',
          'pythia_generation_ledger.py','dark_photon_source_placement.py','shift_source_placement.py',
          'shift_jaw_source.py','shift_material_preselection.py','dark_photon_detector_runtime.py')
 
 
-def source_bank(directory,profile,model):
+def bremsstrahlung_sampler(directory):
+    path=Path(directory)/'bremsstrahlung.json'
+    if not path.is_file():return None
+    from dark_photon_bremsstrahlung import SourceSampler
+    return SourceSampler(json.loads(path.read_text()),path.parent)
+
+
+def equivalent_numbers(first,second):
+    """Keep discrete contracts exact; allow only roundoff in derived doubles.
+
+    The proposal uses fewer than 128 scalar arithmetic/libm operations per
+    coordinate. Audits across CMS and LCG Python must not require identical
+    last bits from their different math implementations. Saved values own GEN.
+    """
+    if isinstance(first,dict) and isinstance(second,dict):
+        return first.keys()==second.keys() and all(equivalent_numbers(first[k],second[k]) for k in first)
+    if isinstance(first,list) and isinstance(second,list):
+        return len(first)==len(second) and all(equivalent_numbers(a,b) for a,b in zip(first,second))
+    if type(first) is float and type(second) in (float,int):
+        return math.isfinite(first) and math.isfinite(second) and abs(first-second)<=128*math.ulp(max(abs(first),abs(second)))
+    return type(first) is type(second) and first==second
+
+
+def bremsstrahlung_proposal_file(directory):
+    path=Path(directory)/'source_bank/bremsstrahlung_proposals.jsonl'
+    return path if path.is_file() else path.with_suffix('.jsonl.gz')
+
+
+def source_bank(directory,profile,model,*,write_bremsstrahlung_proposals=False):
     directory=Path(directory);manifest=json.loads((directory/'manifest.json').read_text())
     ledger,opener=source_ledger(directory)
     if (manifest.get('schema')!='shift-senscalc-source-sample-v1' or manifest.get('complete') is not True or
@@ -78,17 +111,43 @@ def source_bank(directory,profile,model):
             item['profile_factor']=factor;item['weight_over_epsilon_squared']*=factor
             candidates.append(item)
         rows.append(dict(row,candidates=candidates))
-    return manifest,rows,source_summary(rows,native['sigma_source_mb'],mass=mass)
+    brem=bremsstrahlung_sampler(directory.parent)
+    if brem is not None:
+        if brem.mass!=mass or parameters.get('PartonLevel:ISR','on')!='off':
+            raise ValueError('Combined reference flux requires matching mass and explicit ISR off in the original bank')
+        path=bremsstrahlung_proposal_file(directory.parent)
+        if write_bremsstrahlung_proposals:
+            path=directory/'bremsstrahlung_proposals.jsonl'
+            with path.open('x') as stream:
+                for row in rows:
+                    candidate=brem.candidate(row['trial'],manifest['seed'],native['sigma_source_mb'])
+                    stream.write(json.dumps(dict(trial=row['trial'],candidate=candidate),allow_nan=False)+'\n')
+        opener=gzip.open if path.suffix=='.gz' else open
+        with opener(path,'rt') as stream:proposals=[json.loads(line) for line in stream]
+        if len(proposals)!=len(rows):raise ValueError('Incomplete frozen bremsstrahlung proposal ledger')
+        for row,saved in zip(rows,proposals):
+            expected=brem.candidate(row['trial'],manifest['seed'],native['sigma_source_mb'])
+            if saved['trial']!=row['trial'] or not equivalent_numbers(expected,saved['candidate']):
+                raise ValueError('Frozen bremsstrahlung proposal differs from its original seed and kernel')
+            row['candidates'].append(saved['candidate'])
+    summary=source_summary(rows,native['sigma_source_mb'],mass=mass,include_bremsstrahlung=brem is not None)
+    if brem is not None:
+        summary.update(bremsstrahlung_proposals=len(rows),
+            bremsstrahlung_profile_sha256=digest(directory.parent/'bremsstrahlung.json'),
+            scope='Pinned ND meson/fragmentation plus primary-beam FR ISR; auxiliary draws add no collision exposure')
+    return manifest,rows,summary
 
 
-def unweighting_envelope(manifest,profile,model):
+def unweighting_envelope(manifest,profile,model,bremsstrahlung=None):
     """Use all physical channels, including those absent from a small bank.
 
     A common envelope lets independent banks share one conditional GEN
     estimator. Historical controls without this field keep their original draw.
     """
     coefficients=manifest.get('coefficient_weights_over_epsilon_squared')
-    if coefficients is None:return None
+    if coefficients is None:
+        if bremsstrahlung is not None:raise ValueError('Combined source requires all native channel coefficients')
+        return None
     weights=dict(coefficients)
     if profile=='measured-form-factor':
         parents={row['pdg_id']:row for row in model['parents']};mass=manifest['mass_gev']
@@ -98,7 +157,7 @@ def unweighting_envelope(manifest,profile,model):
             weights[str(signal)]=(2*parent['br_gamma_gamma']*phase*
                 transition_form_factor_abs2(mass,parent['transition_form_factor'])/manifest['proposal_probability']
                 if phase>0 else 0.)
-    return max(weights.values())
+    return max([*weights.values()]+([bremsstrahlung.coefficient_envelope] if bremsstrahlung is not None else []))
 
 
 def boost_reference(rows,mass):
@@ -136,13 +195,21 @@ def unweight(rows,seed,envelope=None):
 def decay_momenta(parent,mass,ctau,rng):
     """Isotropic reference decay, using a boost stable at large gamma."""
     energy,*momentum=parent
+    # Use an on-shell boost, rather than transferring PYTHIA's small recorded
+    # invariant error to both muons. Keep the source p4 and sampled flight;
+    # its tiny energy-conservation residual remains explicitly auditable.
+    boost_energy=math.hypot(mass,*momentum)
+    support=((1+MASS_SUPPORT_RELATIVE_TOLERANCE)**2-1)*mass**2
+    roundoff=64*math.ulp(1.)*(energy**2+sum(p*p for p in momentum))
+    if abs(boost_energy-energy)>(support+roundoff)/(boost_energy+energy):
+        raise ValueError('Reference invariant mass leaves its frozen narrow support')
     cosine=2*rng.random()-1;phi=2*math.pi*rng.random()
     radius=math.sqrt(mass**2/4-MUON_MASS_GEV**2);sine=math.sqrt(1-cosine*cosine)
     rest=[radius*sine*math.cos(phi),radius*sine*math.sin(phi),radius*cosine]
     def boost(vector):
         product=math.fsum(a*b for a,b in zip(momentum,vector))
-        lab_energy=energy/2+product/mass
-        scale=.5+product/(mass*(energy+mass))
+        lab_energy=boost_energy/2+product/mass
+        scale=.5+product/(mass*(boost_energy+mass))
         return [lab_energy]+[a+b*scale for a,b in zip(vector,momentum)]
     length=rng.expovariate(1/ctau)
     return boost(rest),boost([-x for x in rest]),[length*x/mass for x in momentum]+[length*energy/mass]
@@ -208,7 +275,21 @@ def accounting(directory,contract):
     manifest,rows,summary=source_bank(source,contract['rate_profile'],model)
     if contract['mass_gev']!=manifest['mass_gev']:
         raise ValueError('Declared signal mass differs from its reference source bank')
-    selected,ledger=unweight(rows,contract['seed'],unweighting_envelope(manifest,contract['rate_profile'],model))
+    brem=bremsstrahlung_sampler(directory)
+    if (brem is not None)!=(contract['production_mechanism']==INCLUSIVE_MECHANISM):
+        raise ValueError('Reference mechanism differs from its actual source components')
+    if brem is not None and digest(directory/'bremsstrahlung.json')!=contract['bremsstrahlung_profile_sha256']:
+        raise ValueError('Changed frozen bremsstrahlung prescription')
+    if brem is not None and digest(directory/'dark_photon_bremsstrahlung.py')!=contract['bremsstrahlung_sampler_sha256']:
+        raise ValueError('Changed frozen bremsstrahlung sampler')
+    envelope=unweighting_envelope(manifest,contract['rate_profile'],model,brem)
+    if brem is not None:
+        if ledger_digest(bremsstrahlung_proposal_file(directory))!=contract['bremsstrahlung_proposals_sha256']:
+            raise ValueError('Changed frozen bremsstrahlung proposal ledger')
+        if not equivalent_numbers(envelope,contract['proposal_ledger']['envelope']):
+            raise ValueError('Changed physical unweighting envelope')
+        envelope=contract['proposal_ledger']['envelope']
+    selected,ledger=unweight(rows,contract['seed'],envelope)
     saved=json.loads((directory/'selected_signals.json').read_text())
     if (saved!=selected or len(selected)!=contract['requested_events'] or ledger!=contract['proposal_ledger'] or
             digest(source/'manifest.json')!=contract['source_manifest_sha256'] or
@@ -218,7 +299,7 @@ def accounting(directory,contract):
     expected_exposure=dict(schema='shift-senscalc-source-exposure-v1',source_collisions=summary['source_collisions'],
         fixed_source_collisions=summary['source_collisions'],accepted_signal_events=len(selected),
         unit_output_gen_weights=True,raw_source_summary=summary)
-    if exposure!=contract['source_exposure'] or exposure!=expected_exposure:
+    if exposure!=contract['source_exposure'] or not equivalent_numbers(exposure,expected_exposure):
         raise ValueError('Changed original source exposure')
     authority=contract['physical_width_table']['spectral_source']
     inputs=directory/'width_inputs'
@@ -233,9 +314,10 @@ def accounting(directory,contract):
     factor=contract['epsilon']**2*contract['physical_width_table']['br_mumu']
     rate=dict(value_pb=summary['sigma_over_epsilon_squared_pb']*factor,
               error_pb=summary['sigma_statistical_error_over_epsilon_squared_pb']*factor)
-    if rate!=contract['target_cross_section']:raise ValueError('SensCalc rate correction must be applied once')
+    if not equivalent_numbers(rate,contract['target_cross_section']):raise ValueError('SensCalc rate correction must be applied once')
+    rate=contract['target_cross_section']
     return dict(proposal_ledger=ledger,source_exposure=exposure,target_cross_sections=[rate],
-        source_rate_uncertainty=summary,physical_width=contract['physical_width_table'])
+        source_rate_uncertainty=exposure['raw_source_summary'],physical_width=contract['physical_width_table'])
 
 
 def rate_record(contract,audit,*,point,campaign,source_hashes,gen_path,gen_sha256,source_directory):
@@ -272,12 +354,15 @@ def rate_record(contract,audit,*,point,campaign,source_hashes,gen_path,gen_sha25
             full_gen_denominator=audit['full_gen_denominator'],
             interpretation='Unit-weight conditional signal events; source-bank sampling draws are not Pythia internal counters or additional collisions'),
         proposal_ledger=fresh['proposal_ledger'],physical_width_authority=contract['physical_width_table'],
-        mechanism=MECHANISM,model=contract['model'],rate_profile=contract['rate_profile'],
+        mechanism=contract['production_mechanism'],model=contract['model'],rate_profile=contract['rate_profile'],
         radiative_model_sha256=contract['radiative_model_sha256'],
         source_seed=source_manifest['seed'],
         source_sampling=dict(proposal_probability=source_manifest['proposal_probability'],
             settings_sha256=source_manifest['settings_sha256'],runtime_receipt_sha256=source_manifest['runtime_receipt_sha256'],
-            unweighting_envelope=fresh['proposal_ledger']['envelope']),
+            unweighting_envelope=fresh['proposal_ledger']['envelope'],
+            **(dict(bremsstrahlung_profile_sha256=contract['bremsstrahlung_profile_sha256'],
+                    bremsstrahlung_sampler_sha256=contract['bremsstrahlung_sampler_sha256'])
+               if 'bremsstrahlung_profile_sha256' in contract else {})),
         generated_mass_support_gev=contract['generated_mass_support_gev'],beam_energy_GeV=contract['beam_energy_GeV'],
         source_model=contract['source_model'],source_graph_scope=contract['source_graph_scope'],
         source_vertex_approximation=contract.get('source_vertex_approximation',
@@ -319,8 +404,20 @@ def run(args):
         with opener(ledger,'rb') as incoming,(output/'source_ledger.jsonl').open('xb') as outgoing:
             shutil.copyfileobj(incoming,outgoing)
         model=json.loads((output/'radiative_model.json').read_text())
-        sample,rows,summary=source_bank(source,args.rate_profile,model)
-        selected,ledger=unweight(rows,args.seed,unweighting_envelope(sample,args.rate_profile,model))
+        if getattr(args,'bremsstrahlung_profile',None) is not None:
+            from dark_photon_bremsstrahlung import SourceSampler,TABLE_HASHES
+            profile=json.loads(args.bremsstrahlung_profile.read_text())
+            SourceSampler(profile,args.bremsstrahlung_profile.parent)
+            source_tables=Path(profile['table_directory'])
+            if not source_tables.is_absolute():source_tables=args.bremsstrahlung_profile.parent/source_tables
+            target=output/'bremsstrahlung_inputs';target.mkdir()
+            for name in TABLE_HASHES:shutil.copy2(source_tables/name,target/name)
+            profile['table_directory']='bremsstrahlung_inputs';write_json(output/'bremsstrahlung.json',profile)
+        sample,rows,summary=source_bank(source,args.rate_profile,model,
+            write_bremsstrahlung_proposals=getattr(args,'bremsstrahlung_profile',None) is not None)
+        brem=bremsstrahlung_sampler(output)
+        mechanism=INCLUSIVE_MECHANISM if brem is not None else MECHANISM
+        selected,ledger=unweight(rows,args.seed,unweighting_envelope(sample,args.rate_profile,model,brem))
         if not selected:raise ValueError('No unweighted signals; preserve the source rate and increase source statistics')
         mass=sample['mass_gev'];authority=freeze_spectral_inputs(args.darkcast_path,args.darkcast_source_receipt,output)
         sys.path.insert(0,str(output/'width_inputs'));import darkcast
@@ -333,14 +430,15 @@ def run(args):
         factor=args.epsilon**2*width['br_mumu']
         mean_boost,boost_error=boost_reference(rows,mass)
         contract=dict(schema='shift-dark-photon-gen-v1',model='BC1-SensCalc-source-DarkCast-visible-widths',
-            production_mechanism=MECHANISM,mechanism=MECHANISM,mass_gev=mass,epsilon=args.epsilon,
+            production_mechanism=mechanism,mechanism=mechanism,mass_gev=mass,epsilon=args.epsilon,
             seed=args.seed,run_number=args.run_number,requested_events=len(selected),maximum_framework_events=len(selected),
-            generated_mass_support_gev=[mass*(1-1.e-6),mass*(1+1.e-6)],decay_mode='mumu',filtering='none',selection_applied=False,
+            generated_mass_support_gev=[mass*(1-MASS_SUPPORT_RELATIVE_TOLERANCE),mass*(1+MASS_SUPPORT_RELATIVE_TOLERANCE)],decay_mode='mumu',filtering='none',selection_applied=False,
             source_z_mm=148000.,source_sigma_z_mm=500.,source_model='Pinned reference ND pp meson decays and fragmentation',
             source_graph_scope='Isolated signal graphs; accompanying collision activity omitted',
             source_vertex_approximation='Reference LLP flux placed at the collision; source-parent flight and material transport omitted',
             polarization_model='Isotropic two-body reference decay; no source polarization density supplied',
             decay_radiation_model='Born dimuon decay; no generator-level final-state photon radiation',
+            decay_kinematics='On-shell boost energy from pole mass and source momentum; original source p4 and sampled flight retained',
             beam_energy_GeV=6800.,rate_profile=args.rate_profile,
             mean_beta_gamma_reference=mean_boost,mean_beta_gamma_reference_standard_error=boost_error,
             mean_lab_flight_reference_estimate_m=mean_boost*width['ctau_mm']/1000.,
@@ -351,6 +449,12 @@ def run(args):
                 error_pb=summary['sigma_statistical_error_over_epsilon_squared_pb']*factor),
             cross_section_convention='Reference ND sigma times full-source weighted mean, epsilon squared and physical dimuon BR once; saved conditional GEN has unit weights',
             physics_valid=False,normalization_ready=False)
+        if brem is not None:
+            contract.update(bremsstrahlung_profile_sha256=digest(output/'bremsstrahlung.json'),
+                bremsstrahlung_proposals_sha256=ledger_digest(bremsstrahlung_proposal_file(output)),
+                bremsstrahlung_sampler_sha256=digest(output/'dark_photon_bremsstrahlung.py'),
+                source_model='Pinned ISR-off ND meson/fragmentation plus primary-beam FR proton bremsstrahlung')
+            result['backend']=mechanism
         write_hepmc(output/'signal.hepmc',selected,mass,width['ctau_mm'],args.seed)
         contract['signal_ascii_sha256']=digest(output/'signal.hepmc')
         if args.jaw_profile is not None:
@@ -399,6 +503,8 @@ def main():
     parser.add_argument('--epsilon',type=float,required=True)
     parser.add_argument('--seed',type=int,required=True);parser.add_argument('--run-number',type=int,required=True)
     parser.add_argument('--rate-profile',choices=('pointlike','measured-form-factor'),default='pointlike')
+    parser.add_argument('--bremsstrahlung-profile',type=Path,
+                        help='Pinned FR source and form-factor inputs; requires an original ISR-off bank')
     parser.add_argument('--jaw-profile',type=Path);parser.add_argument('--timeout',type=int,default=600)
     parser.add_argument('--detector-runtime-profile',type=Path)
     args=parser.parse_args()

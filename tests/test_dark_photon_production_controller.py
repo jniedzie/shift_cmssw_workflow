@@ -435,12 +435,15 @@ class RpcSafetyTest(unittest.TestCase):
             def copy(arguments):
                 Path(arguments[-1]).write_bytes(payload)
                 return ''
-            with patch.object(rpc, 'metadata', return_value=dict(size=len(payload))), \
+            with patch.object(rpc, 'metadata', side_effect=RuntimeError('fileinfo unavailable')), \
                     patch.object(rpc, 'command', side_effect=copy):
                 rpc.verify_file('/eos/user/file.root', len(payload), expected)
                 payload = b'corruptd file'
                 with self.assertRaisesRegex(ValueError, 'input changed'):
                     rpc.verify_file('/eos/user/file.root', len(payload), expected)
+                payload = b'reviewed file'
+                with self.assertRaisesRegex(ValueError, 'changed during download'):
+                    rpc.verify_file('/eos/user/file.root', len(payload)+1, expected)
 
 
 if __name__ == '__main__':

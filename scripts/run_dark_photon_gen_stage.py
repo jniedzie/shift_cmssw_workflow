@@ -146,7 +146,7 @@ def validate_population(row, config=None):
         raise ValueError('GEN has not passed the complete runtime audit: ' + row['point'])
     count = row['events']
     native_count = count
-    if contract.get('production_mechanism')=='senscalc-meson-fragmentation':
+    if contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         from run_dark_photon_senscalc_gen import accounting
         fresh=accounting(gen,contract)
         if fresh['proposal_ledger']!=audit['proposal_ledger'] or fresh['target_cross_sections']!=audit['target_cross_sections']:

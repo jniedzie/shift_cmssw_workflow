@@ -39,6 +39,58 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
         inputs=[dict(path='nano_' + str(run), events=events, event_ids=identities)])
 
 
+class MainHistogramAggregation(unittest.TestCase):
+    def test_real_ROOT_merge_keeps_W_over_p_and_uses_source_collisions_for_the_rate(self):
+        import ROOT
+        from aggregate_dark_photon_samples import execute_main_histograms
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);(root/'results/completed_points').mkdir(parents=True)
+            samples=[PopulationAccounting().reference(10,100,999,2.),
+                     PopulationAccounting().reference(20,300,3,6.)]
+            for i,pop in enumerate(samples):
+                path=root/('source_'+str(i)+'.root');f=ROOT.TFile(str(path),'RECREATE')
+                weights=(2.,3.) if i==0 else (1.,1.)
+                raw=ROOT.TH1D('rawEventsCutFlow','',1,0,1)
+                for _ in weights:raw.Fill(.5)
+                raw.Write();event=f.mkdir('event');event.cd()
+                h=ROOT.TH1D('Event_nShiftMuon','',5,0,5);h.Sumw2()
+                for w in weights:h.Fill(2,w)
+                h.Write();d=f.mkdir('dimuon');d.cd()
+                for category in ('','Good','Near-Both','Near-Far','Both-Both','Both-Far','Other'):
+                    for variable in ('mass','pt','logMass'):
+                        h=ROOT.TH1D('ShiftDimuonVertex'+category+'_'+variable,'',10,0,100);h.Sumw2()
+                        for w in weights:h.Fill(15,w)
+                        h.Write()
+                original=dict(source_id=str(i),gen_sha256=pop['parent']['gen_sha256'])
+                metadata=dict(full_source_sumw=2,cross_section_pb=pop['rate']['physical_selected_cross_sections_pb'][0]['value_pb'],original_sources=[original])
+                f.cd();ROOT.TObjString(json.dumps(metadata)).Write('ShiftFullGenNormalization');f.Close()
+                item=dict(path=str(path),sha256=sha(path),bytes=path.stat().st_size)
+                pop['report']=dict(main_histograms=dict(published=dict(merged_histogram=item),full_original_exposure=metadata))
+            rate=combined_rate(samples,point='m15_prompt',campaign='test')
+            destinations={}
+            def download(source,target,checksum):
+                self.assertEqual(sha(source),checksum);shutil.copy2(source,target)
+            def publish(source,directory):
+                destination=directory+'/'+Path(source).name;copy=root/('published_'+str(len(destinations))+Path(source).suffix)
+                shutil.copy2(source,copy);self.assertEqual(sha(source),sha(copy));destinations[destination]=copy
+                return dict(path=destination,sha256=sha(copy),bytes=copy.stat().st_size)
+            row=dict(point='m15_prompt',events=4,full_gen_events=4,mass_gev=15.,epsilon=1.e-7,
+                sampling_epsilon=.005,proper_ctau_mm=100.,target_mean_lab_flight_m=None,
+                final_output_base='/eos/user/j/jniedzie/shift_cmssw/darkphoton_m15_prompt/test')
+            with patch('run_shift_sm_postprocessing.download',download),patch('run_shift_sm_postprocessing.publish',publish):
+                report=execute_main_histograms(dict(maximum_publication_bytes=10000000),row,samples,rate,'p','s',root,root/'results')
+            path=destinations[report['main_histograms']['published']['merged_histogram']['path']]
+            f=ROOT.TFile.Open(str(path));metadata=json.loads(f.Get('ShiftFullGenNormalization').GetString().Data())
+            self.assertEqual(metadata['full_source_sumw'],4)
+            self.assertEqual(metadata['full_source_collisions'],400)
+            self.assertEqual(metadata['cross_section_pb'],5.)
+            self.assertEqual(f.Get('rawEventsCutFlow').GetBinContent(1),4.)
+            h=f.Get('dimuon/ShiftDimuonVertexBoth-Both_logMass')
+            self.assertEqual(h.Integral(),7.)
+            self.assertAlmostEqual(h.GetBinError(h.FindBin(15.))**2,15.)
+            f.Close()
+
+
 class SingleSourceRegroupingCanary(unittest.TestCase):
     def test_explicit_nano_only_canary_keeps_one_actual_parent_denominator(self):
         from aggregate_dark_photon_samples import validate_aggregate_population_count
@@ -183,6 +235,17 @@ class PopulationAccounting(unittest.TestCase):
     def test_reference_rate_profiles_must_never_be_pooled_as_extra_exposure(self):
         a=self.reference(10,100,999,2.);b=self.reference(20,300,3,6.)
         b['rate']['rate_profile']='measured-form-factor'
+        with self.assertRaisesRegex(ValueError,'identical physics'):
+            combined_rate([a,b],point='test',campaign='test')
+
+    def test_combined_sources_require_the_same_frozen_bremsstrahlung_prescription(self):
+        a=self.reference(10,100,999,2.);b=self.reference(20,300,3,6.)
+        for p in (a,b):
+            p['rate']['mechanism']='senscalc-meson-fragmentation-bremsstrahlung'
+            p['rate']['source_sampling'].update(bremsstrahlung_profile_sha256='b'*64,
+                bremsstrahlung_sampler_sha256='c'*64)
+        self.assertEqual(combined_rate([a,b],point='test',campaign='test')['full_gen']['source_collisions'],400)
+        b['rate']['source_sampling']['bremsstrahlung_profile_sha256']='d'*64
         with self.assertRaisesRegex(ValueError,'identical physics'):
             combined_rate([a,b],point='test',campaign='test')
 

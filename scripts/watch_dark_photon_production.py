@@ -86,7 +86,7 @@ class EosRpc:
             message = result.stderr + result.stdout
             if missing_ok and ('No such file' in message or '[3011]' in message):
                 return None
-            raise RuntimeError('EOS RPC failed: ' + message.strip()[-1500:])
+            raise RuntimeError('EOS RPC failed (' + ' '.join(map(str, arguments)) + '): ' + message.strip()[-1500:])
         if result.stderr.strip():
             raise RuntimeError('EOS RPC state unknown: ' + result.stderr.strip()[-1500:])
         return result.stdout
@@ -104,9 +104,8 @@ class EosRpc:
         return sorted(Path(line.strip()) for line in output.splitlines() if line.strip().endswith('.root'))
 
     def verify_file(self, path, expected_bytes, expected_digest):
-        info = self.metadata(path)
-        if info is None or int(info.get('size', -1)) != expected_bytes:
-            raise ValueError('Remote file size differs from reviewed publication: ' + str(path))
+        # Download and check the actual bytes. An extra fileinfo RPC adds no
+        # integrity guarantee and can fail while XRootD readback is healthy.
         target = self.cache_directory / (expected_digest + '_' + Path(path).name)
         # Fetch on every pass: a retained cache must not hide a changed source.
         if target.exists():

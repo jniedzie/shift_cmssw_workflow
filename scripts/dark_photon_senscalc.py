@@ -20,6 +20,9 @@ import shutil
 import subprocess
 import tarfile
 
+REFERENCE_MECHANISMS=('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
+MASS_SUPPORT_RELATIVE_TOLERANCE=1.e-6
+
 PYTHIA_COMMIT = '805f5bd0223dfe8d218481c82ad6bc2f03868bb8'
 ARCHIVE_SHA256 = '3b6255e81e3130dcfc974d971470dd57ca34aef0d3eaac93a98257f63125f69a'
 SENSCALC_COMMIT = 'ca588864742ee83ae8fd3a987b9698ea75c19251'
@@ -57,6 +60,8 @@ def shift_source_settings(model_card,output):
     resolved=source_settings(card)
     commands=[command.replace('HadronLevel:QED','ParticleDecays:allowPhotonRadiation')
               for command in resolved['source_settings']]
+    # The published mixing prescription separates ISR into proton bremsstrahlung.
+    commands.append('PartonLevel:ISR=off')
     output=Path(output).resolve()
     with output.open('x') as stream:stream.write('\n'.join(commands)+'\n')
     return dict(model_card_sha256=digest(model_card),settings_sha256=digest(output),
@@ -165,7 +170,7 @@ def source_ledger(directory):
     return path,opener
 
 
-def source_summary(rows,sigma_mb,*,mass=None):
+def source_summary(rows,sigma_mb,*,mass=None,include_bremsstrahlung=False):
     """Count independent source collisions, including zero-candidate trials.
 
     Several candidates from one collision share one exposure. The error on
@@ -185,7 +190,9 @@ def source_summary(rows,sigma_mb,*,mass=None):
         if row.get('native_weight')!=1.:raise ValueError('Expected unit-weight source collisions')
         weights=[]
         for candidate in candidates:
-            channel=CHANNELS.get(candidate['id']);weight=candidate['weight_over_epsilon_squared']
+            channel=CHANNELS.get(candidate['id'])
+            if include_bremsstrahlung and candidate['id']==32:channel='proton-bremsstrahlung'
+            weight=candidate['weight_over_epsilon_squared']
             p4=candidate['p4']
             if (channel is None or not math.isfinite(weight) or weight<0 or len(p4)!=4 or
                     not all(math.isfinite(value) for value in p4) or p4[0]<=0):
@@ -193,7 +200,11 @@ def source_summary(rows,sigma_mb,*,mass=None):
             momentum=math.hypot(*p4[1:]);mass2=(p4[0]-momentum)*(p4[0]+momentum)
             if mass2<=0:raise ValueError('Non-timelike reference signal')
             if mass is not None:
-                tolerance=64*math.ulp(1.)*(p4[0]**2+momentum**2)+1.e-9*mass**2
+                # Match the existing narrow GEN mass support, plus propagated
+                # floating-point error in E^2-p^2. PYTHIA's stored momenta can
+                # differ from its bookkept mass far below that physical support.
+                tolerance=64*math.ulp(1.)*(p4[0]**2+momentum**2)
+                tolerance+=((1+MASS_SUPPORT_RELATIVE_TOLERANCE)**2-1)*mass**2
                 if abs(mass2-mass**2)>tolerance:raise ValueError('Reference signal mass differs from requested point')
             weights.append(weight);sum_squares+=weight**2
             boost_sum+=weight*momentum/(mass if mass is not None else math.sqrt(mass2));count+=1

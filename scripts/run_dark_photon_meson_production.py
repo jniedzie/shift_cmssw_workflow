@@ -16,6 +16,7 @@ import json
 import math
 import os
 from pathlib import Path
+from dark_photon_senscalc import REFERENCE_MECHANISMS
 import re
 import shlex
 import shutil
@@ -29,7 +30,7 @@ import traceback
 import run_dark_photon_statistics as durable
 
 
-MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative', 'senscalc-meson-fragmentation')
+MECHANISMS = ('eta-etaprime-radiative', 'meson-radiative', *REFERENCE_MECHANISMS)
 
 
 class MesonJobFailure(RuntimeError):
@@ -75,7 +76,7 @@ def source_mechanism(config):
 
 def reference_source(config):
     """Check the reference backend's independent source and GEN authorities."""
-    if source_mechanism(config)!='senscalc-meson-fragmentation':
+    if source_mechanism(config) not in REFERENCE_MECHANISMS:
         return None
     if config.get('jaw_source_profile') is None:
         raise ValueError('Reference detector production requires the pinned jaw-placement profile before GEN')
@@ -90,6 +91,12 @@ def reference_source(config):
             type(settings.get('proposal_probability')) not in (int,float) or
             not 1.e-6<=settings['proposal_probability']<=.01):
         raise ValueError('Require the explicit qualified source capsule, rate profile and proposal')
+    if source_mechanism(config)==REFERENCE_MECHANISMS[1]:
+        from dark_photon_bremsstrahlung import SourceSampler
+        if not settings.get('bremsstrahlung_profiles'):
+            raise ValueError('Combined reference source requires frozen bremsstrahlung profiles')
+        for authority in settings['bremsstrahlung_profiles'].values():
+            path=pinned_path(authority);SourceSampler(read(path),path.parent)
     return dict(settings=settings,profile=profile,source_settings=str(source_settings))
 
 
@@ -1071,7 +1078,7 @@ def adopted_row(batch, gen, config=None):
                 or not math.isclose(contract['physical_width_table']['ctau_mm'],
                                     point['proper_ctau_mm'], rel_tol=1.e-12, abs_tol=0.)):
             raise ValueError('Unified source changed its qualified card or reference lifetime')
-    if mechanism=='senscalc-meson-fragmentation':
+    if mechanism in REFERENCE_MECHANISMS:
         reference=reference_source(config)
         source_manifest=read(gen/'source_manifest.json')
         if (source_manifest.get('seed')!=batch['source_seed'] or
@@ -1081,6 +1088,11 @@ def adopted_row(batch, gen, config=None):
                 contract.get('rate_profile')!=reference['settings']['rate_profile'] or
                 contract.get('radiative_model_sha256')!=durable.sha(config['model_card'])):
             raise ValueError('Reference source differs from its frozen bank prescription')
+        if mechanism==REFERENCE_MECHANISMS[1]:
+            path=pinned_path(reference['settings']['bremsstrahlung_profiles'][str(batch['mass_gev'])])
+            expected=read(path);expected['table_directory']='bremsstrahlung_inputs'
+            if read(gen/'bremsstrahlung.json')!=expected:
+                raise ValueError('Reference source changed its frozen bremsstrahlung component')
     return dict(point=batch['point'], mass_gev=batch['mass_gev'], epsilon=batch['epsilon'],
         seed=batch['seed'], run_number=batch['run_number'], events=count,
         production_mechanism=mechanism,
@@ -1114,6 +1126,34 @@ def compact_files(gen):
     if sum(path.stat().st_size for path in result) > 64000000:
         raise ValueError('Compact GEN metadata exceeds its reviewed AFS allowance')
     return result
+
+
+def retain_source_failure(config,batch,gen,directory):
+    """Keep the actual failed scientific inputs before worker scratch is removed."""
+    from export_dark_photon_cross_sections import publish_file_rpc
+    gen=Path(gen);directory=Path(directory)
+    archive=gen.parent/'failed_GEN.tar.gz'
+    with tarfile.open(archive,'w:gz') as target:
+        for path in sorted(gen.rglob('*')):
+            if path.is_file() and '__pycache__' not in path.parts and path.suffix!='.pyc':
+                target.add(path,arcname=str(path.relative_to(gen)),recursive=False)
+    receipt=dict(archive_sha256=durable.sha(archive),bytes=archive.stat().st_size,
+        source_collisions_redrawn=0,point=batch['point'],original_run_number=batch['run_number'],
+        gen_sha256=durable.sha(gen/'gen.root') if (gen/'gen.root').is_file() else None)
+    try:
+        namespace=hashlib.sha256(config['directory'].encode()).hexdigest()[:12]
+        destination=config['failure_base'].rstrip('/')+'/'+namespace+'/'+batch['batch']+'/failed_GEN.tar.gz'
+        receipt['publication']=publish_file_rpc(archive,destination)
+    except Exception as error:
+        receipt['publication_error']=repr(error)
+        # A rare EOS outage must not discard the sole failing event with the
+        # TemporaryDirectory. Keep it persistently until reviewed and migrated.
+        fallback=directory/'failed_GEN.tar.gz';shutil.copy2(archive,fallback)
+        if durable.sha(fallback)!=receipt['archive_sha256']:
+            raise ValueError('Failed GEN fallback changed while copying') from error
+        receipt.update(retained_local_archive=str(fallback),
+            cleanup_condition='Review the failure, then upload and independently verify the archive before deleting this fallback')
+    durable.save(directory/'GEN_failure_retention.json',receipt)
 
 
 def source(config, seal_digest, batch):
@@ -1186,6 +1226,9 @@ def source(config, seal_digest, batch):
                     '--darkcast-source-receipt',config['darkcast_source_receipt'],
                     '--detector-runtime-profile',str(profile_path),'--output',str(gen),
                     '--timeout',str(config['gen_timeout_seconds'])]
+                if source_mechanism(config)==REFERENCE_MECHANISMS[1]:
+                    authority=reference['settings']['bremsstrahlung_profiles'][str(batch['mass_gev'])]
+                    argv.extend(['--bremsstrahlung-profile',str(pinned_path(authority))])
                 if config.get('jaw_source_profile') is not None:
                     argv.extend(['--jaw-profile',str(pinned_path(config['jaw_source_profile']))])
             rename = ''
@@ -1203,17 +1246,20 @@ def source(config, seal_digest, batch):
                 result = subprocess.run(['/bin/bash', '-c', shell], cwd=directory,
                     env=stage.native_env(), stdout=log, stderr=subprocess.STDOUT,
                     timeout=config['gen_timeout_seconds'] + 900, check=False)
-            if reference and (gen/'source_bank/source_ledger.jsonl').is_file():
-                # One compressed authoritative ledger suffices for all later
-                # audits. Avoid two uncompressed AFS copies per source cohort.
-                ledger=gen/'source_bank/source_ledger.jsonl'
-                with ledger.open('rb') as incoming, (ledger.with_suffix('.jsonl.gz')).open('xb') as raw:
-                    with gzip.GzipFile(fileobj=raw,mode='wb',mtime=0) as outgoing:
-                        shutil.copyfileobj(incoming,outgoing,1048576)
+            if reference:
+                # Preserve the original bytes of native and auxiliary proposals;
+                # later runtimes audit these inputs instead of replacing them.
                 from dark_photon_senscalc import ledger_digest
-                if ledger_digest(ledger.with_suffix('.jsonl.gz'))!=durable.sha(ledger):
-                    raise ValueError('Reference source ledger compression changed original exposure')
-                ledger.unlink()
+                for name in ('source_ledger.jsonl','bremsstrahlung_proposals.jsonl'):
+                    ledger=gen/'source_bank'/name
+                    if not ledger.is_file():continue
+                    compressed=ledger.with_suffix('.jsonl.gz')
+                    with ledger.open('rb') as incoming,compressed.open('xb') as raw:
+                        with gzip.GzipFile(fileobj=raw,mode='wb',mtime=0) as outgoing:
+                            shutil.copyfileobj(incoming,outgoing,1048576)
+                    if ledger_digest(compressed)!=durable.sha(ledger):
+                        raise ValueError('Source-ledger compression changed original proposal bytes')
+                    ledger.unlink()
                 duplicate=gen/'source_ledger.jsonl'
                 if duplicate.is_file():duplicate.unlink()
             # Keep the complete source accounting even if a fixed exposure
@@ -1248,12 +1294,16 @@ def source(config, seal_digest, batch):
                 status['metadata_archive'] = publish_file_rpc(archive,
                     batch['final_output_base'] + '/metadata/GEN/gen_metadata.tar.gz')
                 durable.save(status_path, status)
-            result.check_returncode()
-            row = adopted_row(batch, gen, config)
-            probe['phase']='GEN_publication'
-            row['gen_argv'] = ['python3', str(runner)]
-            publication, parent = stage.publish_gen(row, dict(config, scratch_base=str(scratch),
-                retain_local_gen_root=False, eos_quota_space='/eos/user/j/jniedzie/'))
+            try:
+                result.check_returncode()
+                row = adopted_row(batch, gen, config)
+                probe['phase']='GEN_publication'
+                row['gen_argv'] = ['python3', str(runner)]
+                publication, parent = stage.publish_gen(row, dict(config, scratch_base=str(scratch),
+                    retain_local_gen_root=False, eos_quota_space='/eos/user/j/jniedzie/'))
+            except Exception:
+                if gen.is_dir():retain_source_failure(config,batch,gen,directory)
+                raise
             final_gen = directory / 'gen'
             pending_gen = directory / 'gen.next'
             pending_gen.mkdir()
@@ -1389,7 +1439,7 @@ def adopt(config, batch):
         raise ValueError('Actual N needs a separately reviewed larger detector namespace; do not truncate it')
     physical = dict(points=[row], production_mechanism=source_mechanism(config),
         physical_width_preflight_passed=True)
-    if source_mechanism(config)=='senscalc-meson-fragmentation':
+    if source_mechanism(config) in REFERENCE_MECHANISMS:
         physical['senscalc_width_qualification']=grid.senscalc_width_qualification([row])
     else:
         physical['meson_width_qualification']=grid.meson_width_qualification([row])
@@ -1403,7 +1453,7 @@ def adopt(config, batch):
     from run_dark_photon_meson_gen import SOURCES as MESON_SOURCES
     from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
     sources=set(grid.SOURCES)|set(MESON_SOURCES)|set(MATERIAL_SOURCES)
-    if source_mechanism(config)=='senscalc-meson-fragmentation':
+    if source_mechanism(config) in REFERENCE_MECHANISMS:
         from run_dark_photon_senscalc_gen import SOURCES as REFERENCE_SOURCES
         sources.update(REFERENCE_SOURCES)
     preparation = directory / 'preparation.json'
@@ -1414,7 +1464,7 @@ def adopt(config, batch):
             for path in sorted((Path(config['directory'])/'templates').glob('step*.py')) for name in [path.name]})
     # Generic downstream workers consume the real audited GEN source directly.
     row = plan['points'][0]
-    entry='run_dark_photon_senscalc_gen.py' if source_mechanism(config)=='senscalc-meson-fragmentation' else 'run_dark_photon_meson_gen.py'
+    entry='run_dark_photon_senscalc_gen.py' if source_mechanism(config) in REFERENCE_MECHANISMS else 'run_dark_photon_meson_gen.py'
     row['gen_argv'] = ['python3', str(Path(config.get('physics_tools',config['tools']))/entry)]
     if preparation.exists():
         if read(preparation) != plan:
@@ -1494,6 +1544,37 @@ def detector_gate_arguments(config, batch):
     return ['--qualified-global-canary', str(path)]
 
 
+def handoff_prior_inventories(config, batch):
+    """Adopt reviewed inventory corrections without editing frozen science.
+
+    Corrected rows must be exact copies of pinned audited GEN inventories and
+    protect every previously reserved run and seed. They cannot add exposure.
+    """
+    result = list(config['prior_inventories'])
+    authority = config.get('operational_handoffs', {}).get('reviewed_failures', {}).get(batch['batch'])
+    proof = read_pinned(authority) if authority else {}
+    for correction in proof.get('prior_inventory_corrections', []):
+        old_path = pinned_path(correction['original'])
+        new_path = pinned_path(correction['replacement'])
+        if str(old_path) not in result:
+            raise ValueError('Inventory correction does not belong to this handoff')
+        old = read(old_path)['points']
+        old_rows = list(old.values()) if isinstance(old, dict) else old
+        new_rows = list(read(new_path)['points'].values())
+        identity = lambda row: (row['seed'], row['run_number'])
+        expected = [row for pin in correction['audited_inventories'] for row in read_pinned(pin)['points'].values()]
+        if (not expected or len({identity(row) for row in expected}) != len(expected)
+                or {identity(row) for row in old_rows} != {identity(row) for row in new_rows}
+                or sorted(new_rows, key=identity) != sorted(expected, key=identity)
+                or any('event_ids' not in row or not row['event_ids']
+                       or any(event[0] != row['run_number'] for event in row['event_ids']) for row in new_rows)
+                or any('event_ids' in old_row and old_row['event_ids'] != next(
+                    row['event_ids'] for row in new_rows if identity(row) == identity(old_row)) for old_row in old_rows)):
+            raise ValueError('Inventory correction changes reserved identities or audited GEN rows')
+        result[result.index(str(old_path))] = str(new_path)
+    return result
+
+
 def handoff(config, batch):
     directory = batch_directory(config, batch)
     plan = adopt(config, batch)
@@ -1525,7 +1606,7 @@ def handoff(config, batch):
             '--preparation', preparation, '--template', config['qualified_template'],
             '--gen-inventory', directory/'gen_inventory.json', '--gen-publication', directory/'gen_publication.json',
             '--storage-budget', directory/'storage_budget.json', '--output', production,
-            '--prior-inventories', *config['prior_inventories'], *detector_gate_arguments(config, batch),
+            '--prior-inventories', *handoff_prior_inventories(config, batch), *detector_gate_arguments(config, batch),
             '--failure-base', config['failure_base'], '--detector-workers',
             str(config.get('detector_workers_per_point', 100)), '--finalizers', '2',
             '--publication-profile', 'nano-metadata-v1', '--publication-canary', config['publication_canary'],
@@ -2576,7 +2657,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
             return False, dict(reason='waiting_for_reviewed_bulk_storage_and_seven_mass_GEN_gates')
         gate = read(path)
         audit_flag = ('all_requested_mass_GEN_audits_passed'
-                      if source_mechanism(config) in ('meson-radiative','senscalc-meson-fragmentation') else 'all_seven_mass_GEN_audits_passed')
+                      if source_mechanism(config) in ('meson-radiative',*REFERENCE_MECHANISMS) else 'all_seven_mass_GEN_audits_passed')
         if (gate.get('complete') is not True or gate.get(audit_flag) is not True
                 or gate.get('model_card_sha256') != durable.sha(config['model_card'])
                 or gate.get('worklist_sha256') != durable.sha(Path(config['directory'])/'config.json')
@@ -2924,7 +3005,7 @@ def publish_batch(config, state, batch):
         result=cumulative_result(config,state,batch,transport,result)
         if result is None:
             return None
-        unified = source_mechanism(config) in ('meson-radiative','senscalc-meson-fragmentation')
+        unified = source_mechanism(config) in ('meson-radiative',*REFERENCE_MECHANISMS)
         prior_campaigns = []
         private_canary = (unified and batch['operational_canary']
                           and config.get('publish_canary_aliases', False) is False)
@@ -2959,7 +3040,11 @@ def publish_batch(config, state, batch):
             durable.new(sample_path,sample)
         anchor = None
         if unified and not private_canary and not deferred_alias:
-            anchor = common_sample_anchor(config, batch, sample, sample_path, transport)
+            if source_mechanism(config) in REFERENCE_MECHANISMS:
+                anchor = dict(scope='Per-campaign sample_parameters.json owns epsilon, proper lifetime and calibration; the LAB directory is a selector',
+                              campaign_parameters_authoritative=True)
+            else:
+                anchor = common_sample_anchor(config, batch, sample, sample_path, transport)
         elif not unified and not deferred_alias:
             publish_file_rpc(sample_path,config['eos_base']+'/darkphoton_'+batch['point']+'/sample.json')
         parameters=dict(sample,mean_lab_flight_reference_estimate_m=contract['mean_lab_flight_reference_estimate_m'],

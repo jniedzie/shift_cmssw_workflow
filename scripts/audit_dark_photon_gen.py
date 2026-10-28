@@ -152,7 +152,7 @@ def validate_lifetime_sample(lengths, expected_mean_mm, rejection_probability_bo
 def generation_accounting(directory, contract):
     """Keep the unfiltered hadronic source distinct from conditional signals."""
     directory = Path(directory)
-    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+    if contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         from run_dark_photon_senscalc_gen import accounting
         return accounting(directory, contract)
     if contract.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
@@ -434,7 +434,7 @@ def audit(directory):
     proposal_ledger = accounting['proposal_ledger']
     meson_slots = None
     flux_slots = None
-    if contract.get('production_mechanism') == 'senscalc-meson-fragmentation':
+    if contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         flux_slots = {row['event_slot']: row for row in json.loads((out/'selected_signals.json').read_text())}
     elif 'source_exposure' in accounting:
         from export_dark_photon_cross_sections import resolve_meson_ledger
@@ -612,7 +612,8 @@ def audit(directory):
             source_collisions=accounting['source_exposure']['source_collisions'],
             interpretation='Accepted GEN counts conditional unit-weight signals; fixed unfiltered source collisions determine the physical production rate')
     if flux_slots is not None:
-        report['rate_scope'] = 'Pinned SensCalc-associated ND meson/fragmentation prescription, '+contract['rate_profile']+'; isolated signal with isotropic dimuon decay; no bremsstrahlung or DY'
+        report['rate_scope'] = ('Pinned SensCalc-associated '+contract['source_model']+', '+contract['rate_profile']+
+            '; isolated signal with isotropic dimuon decay; no DY')
     (out / 'validation.json').write_text(json.dumps(report,indent=2,allow_nan=False)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k!='event_rows'},indent=2))
     return report

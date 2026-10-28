@@ -867,6 +867,9 @@ def aggregate_helper_names(config):
     """Freeze the model's closure from its own physics tools, including imports."""
     helpers = ['aggregate_dark_photon_samples.py', 'dark_photon_production_support.py',
                'export_dark_photon_cross_sections.py', 'pythia_generation_ledger.py']
+    if config.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
+        from run_dark_photon_senscalc_gen import SOURCES
+        helpers=list(dict.fromkeys([*helpers,*SOURCES,'run_shift_sm_postprocessing.py']))
     if config.get('production_mechanism') in ('eta-etaprime-radiative', 'meson-radiative'):
         helpers += ['dark_photon_meson.py', 'dark_photon_meson_source.py']
         if config.get('model_card'):
@@ -901,7 +904,59 @@ def aggregate_helper_names(config):
     return tuple(helpers)
 
 
+def main_histogram_aggregate_plan(config,point,sources,directory):
+    """Freeze a cumulative main-histogram merge without a scoring deployment."""
+    directory=Path(directory)
+    if len(sources)<2:raise ValueError('Cumulative main histograms require independent source populations')
+    rows=[]
+    for source in sources:
+        checked=Path(source['plan_path'])
+        if sha(checked)!=source['plan_sha256']:raise ValueError('Changed main aggregate source plan')
+        plan=read(checked)
+        if plan.get('main_histogrammer') is not True:raise ValueError('Main aggregate requires main-histogram source stages')
+        rows.append(next(row for row in plan['points'] if row['point']==point))
+    model={key:rows[0][key] for key in ('mass_gev','epsilon','proper_ctau_mm','sampling_epsilon')}
+    if any(any(row[key]!=value for key,value in model.items()) for row in rows):
+        raise ValueError('Cumulative main histograms change the physical point')
+    directory.mkdir(parents=True)
+    for name in ('logs','completed_points','failures'):(directory/name).mkdir()
+    dependencies={}
+    for name in aggregate_helper_names(config):
+        target=directory/name;shutil.copy2(Path(config['tools'])/name,target);dependencies[str(target)]=sha(target)
+    campaign=config['campaign_prefix']+'-'+point+'-v'+directory.name[1:]
+    prefix=config['eos_base']+'/darkphoton_'+point+'/'+campaign
+    row=dict(point=point,**model,events=sum(r['events'] for r in rows),
+        full_gen_events=sum(r.get('full_gen_events',r['events']) for r in rows),
+        target_mean_lab_flight_m=rows[0].get('target_mean_lab_flight_m'),sources=sources,final_output_base=prefix)
+    plan=dict(schema='shift-dark-photon-additive-plan-v1',main_histogrammer=True,histogram_only=True,
+        campaign=campaign,points=[row],events=row['events'],conditions=config['conditions'],dependencies=dependencies,
+        group_events=4000,source_groups_retained_in_place=True,electronics_or_trigger_changes=False,
+        maximum_publication_bytes=read(config['main_histogrammer']['path'])['maximum_publication_bytes'])
+    new(directory/'plan.json',plan);plan_hash=sha(directory/'plan.json')
+    entry=directory/'aggregate_dark_photon_samples.py'
+    argv=['python3',str(entry),'--plan',str(directory/'plan.json'),'--plan-sha256',plan_hash,
+          '--point',point,'--results-directory',str(directory)]
+    script=directory/'aggregate_worker.sh'
+    script.write_text('#!/bin/bash\n# Code style: AI-code. Frozen cumulative main-histogram entry.\n'
+        'set -eo pipefail\ncd '+shlex.quote(str(directory))+'\n'
+        'unset PYTHONHOME PYTHONPATH LD_LIBRARY_PATH LD_PRELOAD ROOTSYS\n'
+        'source /cvmfs/sft.cern.ch/lcg/views/LCG_107/x86_64-el9-gcc14-opt/setup.sh\n'
+        'set -u\n'
+        'exec '+shlex.join(argv)+' --seal-sha256 "$2" --runtime-cache "$_CONDOR_SCRATCH_DIR/runtime_cache" --scratch "$_CONDOR_SCRATCH_DIR"\n')
+    script.chmod(0o700);subprocess.run(['bash','-n',str(script)],check=True)
+    guard=Path(sources[0]['plan_path']).parent
+    submit=(guard/'finalize.sub').read_text().replace(str(guard),str(directory)).replace('finalize_worker.sh','aggregate_worker.sh')
+    submit=re.sub(r'^arguments = .*$', 'arguments = '+point+' SEAL_DIGEST',submit,flags=re.MULTILINE)
+    (directory/'aggregate.sub.in').write_text(submit)
+    new(directory/'seal.json',dict(schema='shift-additive-signal-production-seal-v1',
+        files={str(p):sha(p) for p in directory.iterdir() if p.is_file()}))
+    (directory/'aggregate.sub').write_text(submit.replace('SEAL_DIGEST',sha(directory/'seal.json')))
+    return row
+
+
 def aggregate_plan(config, point, sources, directory):
+    if config.get('main_histogrammer') is not None:
+        return main_histogram_aggregate_plan(config,point,sources,directory)
     histogram_only = config.get('merge_source_histograms', True)
     group_events = config.get('aggregate_group_events', 2000)
     single_canary = config.get('single_source_regrouping_canary', False)

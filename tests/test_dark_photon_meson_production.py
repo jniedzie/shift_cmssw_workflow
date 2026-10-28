@@ -16,6 +16,47 @@ import audit_dark_photon_meson_coverage as coverage_audit
 
 
 class FixedExposure(unittest.TestCase):
+    def test_handoff_inventory_correction_preserves_reserved_runs_and_exact_audits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            original=root/'original.json';corrected=root/'corrected.json';audit=root/'audited.json';proof=root/'review.json'
+            row=dict(seed=123,run_number=456,event_ids=[[456,1,1]],events=1)
+            original.write_text(json.dumps(dict(points=[dict(seed=123,run_number=456)])))
+            audit.write_text(json.dumps(dict(points=dict(point=row))))
+            pin=lambda path:dict(path=str(path),sha256=production.durable.sha(path))
+            config=dict(prior_inventories=[str(original)],operational_handoffs=dict(reviewed_failures={}))
+            for change in ('none','seed','events','missing'):
+                changed=dict(row)
+                if change=='seed':changed['seed']=124
+                if change=='events':changed['event_ids']=[[456,1,2]]
+                corrected.write_text(json.dumps(dict(points={} if change=='missing' else dict(point=changed))))
+                proof.write_text(json.dumps(dict(prior_inventory_corrections=[dict(original=pin(original),
+                    replacement=pin(corrected),audited_inventories=[pin(audit)])])))
+                config['operational_handoffs']['reviewed_failures']['canary']=pin(proof)
+                if change=='none':
+                    self.assertEqual(production.handoff_prior_inventories(config,dict(batch='canary')),[str(corrected)])
+                else:
+                    with self.assertRaisesRegex(ValueError,'reserved identities'):
+                        production.handoff_prior_inventories(config,dict(batch='canary'))
+
+    def test_failed_gen_survives_scratch_cleanup_when_eos_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);persistent=root/'persistent';persistent.mkdir()
+            with tempfile.TemporaryDirectory(dir=root) as scratch:
+                gen=Path(scratch)/'gen';gen.mkdir()
+                (gen/'gen.root').write_bytes(b'original failed GEN')
+                (gen/'contract.json').write_text('{"seed":123}')
+                config=dict(directory=str(persistent),failure_base='/eos/user/test/failures')
+                batch=dict(batch='canary',point='m0p7_lab_100m',run_number=123)
+                with patch('export_dark_photon_cross_sections.publish_file_rpc',side_effect=RuntimeError('EOS unavailable')):
+                    production.retain_source_failure(config,batch,gen,persistent)
+            receipt=json.loads((persistent/'GEN_failure_retention.json').read_text())
+            retained=Path(receipt['retained_local_archive'])
+            self.assertEqual(production.durable.sha(retained),receipt['archive_sha256'])
+            with tarfile.open(retained) as archive:
+                self.assertEqual(archive.extractfile('gen.root').read(),b'original failed GEN')
+            self.assertEqual(receipt['source_collisions_redrawn'],0)
+
     def test_native_monitor_accepts_only_the_exact_sealed_converter_child(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);preflight=root/'primary_preflight';preflight.mkdir()

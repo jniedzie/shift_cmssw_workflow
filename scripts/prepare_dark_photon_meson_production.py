@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import json
 import math
 from pathlib import Path
+from dark_photon_senscalc import REFERENCE_MECHANISMS
 import re
 import shutil
 
@@ -100,8 +101,8 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
             old_runs.update(item[0] for item in row.get('event_ids', []))
     result, identifiers, seeds, runs = [], set(), set(), set()
     endpoint=.958  # Historical callers without a card retain their original scope.
-    if mechanism=='senscalc-meson-fragmentation':
-        endpoint=1.
+    if mechanism in REFERENCE_MECHANISMS:
+        endpoint=2.
     elif model_card is not None:
         from dark_photon_meson_source import recoil_threshold
         parents=model_card.get('parents',[])
@@ -120,7 +121,7 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
         maximum = limits['maximum_canary_source_collisions'] if row.get('operational_canary', False) else limits['maximum_source_collisions_per_batch']
         if type(count) is not int or not 2 <= count <= maximum:
             raise ValueError('Fixed source exposure exceeds the frozen per-batch limit')
-        if mechanism=='senscalc-meson-fragmentation':
+        if mechanism in REFERENCE_MECHANISMS:
             if count>100000:
                 raise ValueError('Split reference source exposure into independent banks of at most100000 collisions')
             source_seed=row.get('source_seed')
@@ -160,9 +161,9 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
     if mechanism == 'meson-radiative' and (len(canaries) != 2
             or len({row['point'] for row in canaries}) != 2):
         raise ValueError('Require two distinct declared unified-source full-chain canaries')
-    if mechanism=='senscalc-meson-fragmentation' and (len(canaries)!=2 or len({row['point'] for row in canaries})!=2):
+    if mechanism in REFERENCE_MECHANISMS and (len(canaries)!=2 or len({row['point'] for row in canaries})!=2):
         raise ValueError('Require two independent reference-source full-chain canaries')
-    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative','senscalc-meson-fragmentation'):
+    if mechanism not in ('eta-etaprime-radiative', 'meson-radiative',*REFERENCE_MECHANISMS):
         raise ValueError('Unsupported meson source mechanism')
     return result
 
@@ -181,7 +182,7 @@ def prepare(configuration, output, scripts=None):
         raise ValueError('Parallel handoffs require an explicit boolean')
     mechanism = source_mechanism(config)
     requirements = ''
-    if mechanism in ('meson-radiative','senscalc-meson-fragmentation'):
+    if mechanism in ('meson-radiative',*REFERENCE_MECHANISMS):
         hosts = config.get('excluded_hosts', [])
         if (not isinstance(hosts, list) or any(not isinstance(host, str)
                 or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch', host) for host in hosts)):
@@ -197,7 +198,7 @@ def prepare(configuration, output, scripts=None):
         config.get('detector_job_base',5500000), mechanism, execution_limits,
         model_card=json.loads(Path(config['model_card']).read_text()))
     campaign_pattern = (r'[A-Za-z0-9_-]*20[0-9]{6}[A-Za-z0-9_-]*'
-                        if mechanism in ('meson-radiative','senscalc-meson-fragmentation') else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
+                        if mechanism in ('meson-radiative',*REFERENCE_MECHANISMS) else r'[A-Za-z0-9_-]*20261016[A-Za-z0-9_-]*')
     if (not re.fullmatch(campaign_pattern, config['campaign_prefix']) or
             config['eos_base'] != '/eos/user/j/jniedzie/shift_cmssw' or
             type(config.get('simultaneous_sources', 2)) is not int or
@@ -237,7 +238,9 @@ def prepare(configuration, output, scripts=None):
             raise ValueError('Unified source requires bounded workers and at most five ready nodes')
         config.setdefault('detector_workers_per_point', 10)
         config.setdefault('dag_max_idle', 5)
-    if mechanism=='senscalc-meson-fragmentation':
+    if mechanism in REFERENCE_MECHANISMS:
+        from prepare_dark_photon_production import prior_gen_identities
+        prior_gen_identities(config['prior_inventories'])
         from run_dark_photon_meson_production import reference_source
         if fresh_production_authority(config) is None:
             raise ValueError('The reference benchmark requires a fresh production and storage authority')
@@ -346,13 +349,27 @@ def prepare(configuration, output, scripts=None):
         settings=json.loads(target.read_text())
         for key in ('qualification','nano_integrity'):
             authority=settings[key];files[str(pinned_path(authority))]=authority['sha256']
-    if mechanism=='senscalc-meson-fragmentation':
+    if mechanism in REFERENCE_MECHANISMS:
         for key in ('runtime_profile','settings'):
             source=pinned_path(config['reference_source'][key])
             target=output/('reference_'+key+source.suffix)
             shutil.copy2(source,target)
             config['reference_source'][key]=dict(path=str(target),sha256=sha(target))
             files[str(target)]=sha(target)
+        profiles=config['reference_source'].get('bremsstrahlung_profiles',{})
+        if profiles:
+            from dark_photon_bremsstrahlung import TABLE_HASHES,SourceSampler
+            for mass,authority in list(profiles.items()):
+                original=pinned_path(authority);profile=json.loads(original.read_text())
+                SourceSampler(profile,original.parent)
+                parent=output/'bremsstrahlung'/mass;parent.mkdir(parents=True)
+                tables=Path(profile['table_directory'])
+                if not tables.is_absolute():tables=original.parent/tables
+                inputs=parent/'tables';inputs.mkdir()
+                for name in TABLE_HASHES:
+                    target=inputs/name;shutil.copy2(tables/name,target);files[str(target)]=sha(target)
+                profile['table_directory']='tables';target=parent/'profile.json';new(target,profile)
+                profiles[mass]=dict(path=str(target),sha256=sha(target));files[str(target)]=sha(target)
         authority=config['detector_runtime']['manifest']
         files[str(pinned_path(authority))]=authority['sha256']
         for bank in config['reference_source'].get('saved_banks',{}).values():
@@ -442,6 +459,9 @@ queue
         worker_runtime=config.get('source_worker_runtime_seconds',86400)
         if type(worker_runtime) is not int or not config['gen_timeout_seconds']+900<=worker_runtime<=86400:
             raise ValueError('Source worker lifetime must cover GEN and deployment, at most one day')
+        worker_disk=config.get('source_worker_disk_mb',64000)
+        if type(worker_disk) is not int or not 4000<=worker_disk<=64000:
+            raise ValueError('Source disk reservation must cover the qualified runtime and bounded source bank')
         text = f'''# Code style: AI-code. AI-generated fixed-M meson GEN worker.
 universe = vanilla
 executable = /usr/bin/python3
@@ -452,7 +472,7 @@ environment = "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1"
 should_transfer_files = NO
 request_cpus = 1
 request_memory = 4000MB
-request_disk = 64000MB
+request_disk = {worker_disk}MB
 {requirements}+JobFlavour = "tomorrow"
 +MaxRuntime = {worker_runtime}
 +SendCredential = True
@@ -501,6 +521,10 @@ exec python3 {tools}/run_dark_photon_meson_production.py --directory {output} --
     if mechanism == 'meson-radiative':
         path = output / 'coverage'
         (path / 'coverage.sub').write_text((path / 'coverage.sub.in').read_text().replace('SEAL_DIGEST', seal))
+    controller_runtime=config.get('controller_runtime_seconds',604800)
+    if type(controller_runtime) is not int or not 7200<=controller_runtime<=604800:
+        raise ValueError('Controller lifetime must cover a bounded handoff or the declared production')
+    controller_flavour='tomorrow' if controller_runtime<=86400 else 'nextweek'
     (output / 'controller.sub').write_text(f'''# Code style: AI-code. AI-generated persistent meson supervisor.
 universe = vanilla
 executable = {wrapper}
@@ -511,8 +535,8 @@ should_transfer_files = NO
 request_cpus = 1
 request_memory = 2000MB
 request_disk = 4000MB
-{requirements}+JobFlavour = "nextweek"
-+MaxRuntime = 604800
+{requirements}+JobFlavour = "{controller_flavour}"
++MaxRuntime = {controller_runtime}
 +SendCredential = True
 +ShiftDPStatisticsTask = "{output}"
 +JobBatchName = "SHIFT_DP_meson_supervisor"
