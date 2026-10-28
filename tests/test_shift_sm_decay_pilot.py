@@ -193,6 +193,7 @@ class FiniteDecayBankTest(unittest.TestCase):
     def test_native_bank_choice_record_and_final_weight_apply_only_one_exact_choice_factor(self):
         selection=choose_bank([0.,1.],.1,17)
         members=[dict(index=i,seed=71+i,score=dict(score=score),GEN_sha256=str(i)*64,
+            graph_sha256=str(i)*64,
             base_kernel='native_ordinary',lifetime_density_ratio=1.,lifetime_correction=1.)
             for i,score in enumerate([0.,1.])]
         record=dict(size=2,base_kernel='native_ordinary',same_original_event_id=[1,1,2],members=members,
@@ -201,6 +202,11 @@ class FiniteDecayBankTest(unittest.TestCase):
         self.assertEqual(audit_record(record,[1,1,2]),selection)
         changed=copy.deepcopy(record);changed['members'][0]['lifetime_correction']=.5
         with self.assertRaisesRegex(ValueError,'nonunit'):audit_record(changed,[1,1,2])
+        changed=copy.deepcopy(record);changed['members'][0].pop('graph_sha256')
+        with self.assertRaisesRegex(ValueError,'graph hash'):audit_record(changed,[1,1,2])
+        legacy=copy.deepcopy(record);legacy.pop('base_kernel')
+        for member in legacy['members']:member.pop('graph_sha256')
+        self.assertEqual(audit_record(legacy,[1,1,2]),selection)
         audit=self.native_audit()
         request=dict(event_id=[1,1,2],original_source=copy.deepcopy(audit['original_full_source']),
             native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')
@@ -232,7 +238,8 @@ class FiniteDecayBankTest(unittest.TestCase):
                     proposal_draw_seed=variant['decay_seed'],prepared_GEN_sha256=pilot.sha('placed.root'))
                 pilot.dump('gen_audit.json',audit);return audit
             def features(*args):
-                return dict(event_id=[1,1,2],muons=[dict(score=float(Path.cwd().name[-1]))],parent_flights=[])
+                return dict(event_id=[1,1,2],graph_sha256=pilot.sha('placed.root'),
+                    muons=[dict(score=float(Path.cwd().name[-1]))],parent_flights=[])
             def score(muons,parents):return dict(score=muons[0]['score'],pair=None)
             manager=types.SimpleNamespace(LockDefaultUnits=lambda x:None,SetDefaultUnits=lambda x:None,
                 kRootUnits=1,Import=lambda path:object())
@@ -252,6 +259,9 @@ class FiniteDecayBankTest(unittest.TestCase):
                     self.assertEqual(calls,['ordinary','ordinary'])
                     record=json.loads(Path('decay_bank.json').read_text())
                     self.assertEqual(record['base_kernel'],'native_ordinary')
+                    for index,member in enumerate(record['members']):
+                        self.assertEqual(member['graph_sha256'],json.loads(
+                            (root/f'bank_{index:02d}/material_features.json').read_text())['graph_sha256'])
                     pins=[dict(name='decay_bank.json',path=str(root/'decay_bank.json'),sha256=pilot.sha('decay_bank.json')),
                           dict(name='gen.root',sha256=pilot.sha('placed.root'))]
                     for index in range(2):
@@ -264,6 +274,12 @@ class FiniteDecayBankTest(unittest.TestCase):
                     result=dict(GEN_publications=pins,GEN_audit=audit,weight_authority=pilot.weight_authority(request,audit))
                     with patch.object(collection,'download',side_effect=lambda source,target,checksum:shutil.copyfile(source,target)):
                         readback=collection.audit_bank_result(result,request,'synthetic')
+                        record['members'][0]['graph_sha256']='f'*64
+                        pilot.dump('decay_bank.json',record)
+                        pins[0]['sha256']=pilot.sha('decay_bank.json')
+                        audit['decay_bank']['sha256']=pins[0]['sha256']
+                        with self.assertRaisesRegex(ValueError,'graph differs'):
+                            collection.audit_bank_result(result,request,'changed_graph')
                     self.assertEqual(readback['members'],2)
             finally:
                 os.chdir(previous)

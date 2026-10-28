@@ -88,6 +88,9 @@ def audit_record(record,event_id):
         if any(r.get('base_kernel')!=kernel or r['lifetime_density_ratio']!=1.
                or r['lifetime_correction']!=1. for r in record['members']):
             raise ValueError('Native ordinary bank contains a nonunit base decay likelihood')
+        if any(not isinstance(r.get('graph_sha256'),str) or len(r['graph_sha256'])!=64
+               or any(c not in '0123456789abcdef' for c in r['graph_sha256']) for r in record['members']):
+            raise ValueError('Native ordinary bank lacks an exact completed GEN graph hash')
         if record.get('material_survival_correction_applied') is not False:
             raise ValueError('A native ordinary bank must not apply a physical survival correction')
     return reference

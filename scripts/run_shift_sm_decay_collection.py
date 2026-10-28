@@ -284,6 +284,8 @@ def audit_bank_result(result,frozen,case_id):
                 or hashlib.sha256(audit_bytes).hexdigest()!=member['audit_sha256']):
             raise ValueError('Bank compressed member changed its audited contents')
         features=json.loads(feature_bytes);audit=json.loads(audit_bytes)
+        if 'graph_sha256' in member and member['graph_sha256']!=features.get('graph_sha256'):
+            raise ValueError('Bank member graph differs from its complete GEN feature graph')
         if features['event_id']!=frozen['event_id'] or audit['original_event_id']!=frozen['event_id']:
             raise ValueError('Bank member has another original identity')
         if (member['seed']!=frozen['decay_seed']+index or audit['proposal_draw_seed']!=member['seed']

@@ -217,6 +217,7 @@ def prepare_bank(request):
         records.append(dict(index=index,seed=variant['decay_seed'],score=score,
             GEN_sha256=audit['prepared_GEN_sha256'],audit_sha256=sha(directory/'gen_audit.json'),
             material_features_sha256=sha(directory/'material_features.json'),
+            graph_sha256=features['graph_sha256'],
             lifetime_density_ratio=audit['proposal_density_ratio'],
             lifetime_correction=audit['proposal_correction']))
         if kernel=='native_ordinary':records[-1]['base_kernel']=kernel
