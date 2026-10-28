@@ -930,6 +930,15 @@ def assess(config, previous, rows, history, receipts, now):
     if failed_batches:
         issue('meson_batch_failure_records','warning','Independent meson batches need reviewed recovery',
               records=sorted(failed_batches))
+    admission = controller.get('automatic_bulk_admission') or {}
+    allocations = admission.get('response_allocations', [])
+    targets_not_admitted = [dict(point=row['point'], reason=row.get('reason'),
+        required_banks=row.get('required_banks'), budget_bytes=row.get('budget_bytes'))
+        for row in allocations if row.get('admitted') is False]
+    for row in targets_not_admitted:
+        issue('target_not_fully_admitted_' + row['point'], 'warning',
+              'The requested passing-event target was not fully admitted for ' + row['point'],
+              **row, target_effective_events=admission.get('target_effective_events'))
     worklist = read(config['worklist'])
     published = {point: row.get('events', 0) for point, row in controller.get('published', {}).items()}
     meson = worklist.get('schema') == 'shift-dp-meson-production-v1'
@@ -1014,11 +1023,14 @@ def assess(config, previous, rows, history, receipts, now):
                       detector_completed_events=sum(row['counts']['completed_events'] for row in stages.values()
                           if row['kind'] == 'production' and not row.get('external_prerequisite')),
                       published_total_events_by_point=published,
-                      canary_published=controller.get('canary_published', False)),
+                      canary_published=controller.get('canary_published', False),
+                      target_effective_passing_events=admission.get('target_effective_events'),
+                      target_fully_admitted=(not targets_not_admitted if allocations else None),
+                      points_not_fully_admitted=targets_not_admitted),
                   supervisor_heartbeat=(datetime.fromtimestamp(controller_epoch, timezone.utc).isoformat()
                                          if controller_epoch is not None else None),
                   supervisor_finished=supervisor_finished, operations=operations, controller_finished=finished,
-                  observed_state=('finished' if finished else 'payload_execution_verified'
+                  observed_state=('finished_with_unadmitted_targets' if finished and targets_not_admitted else 'finished' if finished else 'payload_execution_verified'
                       if any(row['execution_verified'] for row in stages.values()
                              if row['kind'] in ('gen_stage', 'meson_source', 'production')
                              and not row.get('external_prerequisite')) else 'awaiting_payload_execution'),
@@ -1028,13 +1040,18 @@ def assess(config, previous, rows, history, receipts, now):
         name: value for name, value in controller.get('failures', {}).items()
         if value.get('cluster') in reviewed}
     if meson:
-        expected_rows=[row for row in worklist['batches']
+        allowed = set(admission['allowed_batches']) if 'allowed_batches' in admission else None
+        admitted_rows = [row for row in worklist['batches'] if allowed is None or row['batch'] in allowed]
+        expected_rows=[row for row in admitted_rows
                        if not row.get('gen_qualification_only') and not row.get('operational_canary')]
         expectations=[row.get('expected_signal_events') for row in expected_rows]
         expected_signal_events=(sum(expectations) if expectations and all(
             type(value) in (int,float) and math.isfinite(value) and value >= 0 for value in expectations) else None)
         report['actual_planned_progress'].update(
-            authorized_source_collisions=sum(row['source_collisions'] for row in worklist['batches']),
+            authorized_source_collisions=sum(row['source_collisions'] for row in admitted_rows),
+            frozen_source_collision_ceiling=sum(row['source_collisions'] for row in worklist['batches']),
+            admitted_source_banks=len(admitted_rows),
+            not_admitted_source_banks=len(worklist['batches'])-len(admitted_rows),
             expected_signal_events=expected_signal_events)
     return report
 

@@ -948,6 +948,50 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertIsNone(report['actual_planned_progress']['authorized_new_events'])
         self.assertFalse(any(item['code'].startswith('no_children') for item in report['issues']))
 
+    def test_budget_gated_response_point_is_visible_while_other_work_continues(self):
+        worklist = Path(self.config['worklist'])
+        worklist.write_text(json.dumps(dict(schema='shift-dp-meson-production-v1', batches=[
+            dict(batch='a_control', point='a', source_collisions=50000, operational_canary=True),
+            dict(batch='a_bulk', point='a', source_collisions=50000, expected_signal_events=25),
+            dict(batch='b_bulk', point='b', source_collisions=50000, expected_signal_events=30)])))
+        gate = dict(target_effective_events=500, allowed_batches=['a_control', 'b_bulk'],
+            response_allocations=[dict(point='a', admitted=False, required_banks=50,
+                                      budget_bytes=100, reason='Measured cost exceeds budget'),
+                                  dict(point='b', admitted=True, required_banks=5)])
+        state = dict(checked_epoch=self.now, complete=False, automatic_bulk_admission=gate,
+                     batches={'a_bulk':dict(not_admitted=True), 'b_bulk':dict(stage='detector')})
+        (self.root/'state.json').write_text(json.dumps(state))
+        self.receipts[100]['kind'] = 'meson_source'
+        self.counts.update(completed_events=23, complete_receipts=1)
+        report = self.assess([])
+        issue = next(row for row in report['issues'] if row['code'] == 'target_not_fully_admitted_a')
+        self.assertEqual(issue['severity'], 'warning')
+        self.assertEqual(issue['reason'], 'Measured cost exceeds budget')
+        progress = report['actual_planned_progress']
+        self.assertEqual(progress['gen_completed_events'], 23)
+        self.assertEqual(progress['detector_completed_events'], 0)
+        self.assertEqual(progress['target_effective_passing_events'], 500)
+        self.assertFalse(progress['target_fully_admitted'])
+        self.assertEqual(progress['authorized_source_collisions'], 100000)
+        self.assertEqual(progress['frozen_source_collision_ceiling'], 150000)
+        self.assertEqual(progress['admitted_source_banks'], 2)
+        self.assertEqual(progress['not_admitted_source_banks'], 1)
+        self.assertEqual(progress['expected_signal_events'], 30)
+        self.assertFalse(report['controller_finished'])
+
+    def test_controller_completion_does_not_hide_an_unadmitted_target(self):
+        (self.root/'state.json').write_text(json.dumps(dict(checked_epoch=self.now,
+            complete=True, automatic_bulk_admission=dict(target_effective_events=500,
+                response_allocations=[dict(point='a', admitted=False, required_banks=None,
+                    reason='No observed passing events')]))))
+        self.counts.update(complete_receipts=1)
+        report = self.assess([])
+        self.assertTrue(report['controller_finished'])
+        self.assertEqual(report['observed_state'], 'finished_with_unadmitted_targets')
+        self.assertNotEqual(report['health'], 'ok')
+        self.assertFalse(report['actual_planned_progress']['target_fully_admitted'])
+        self.assertTrue(any(row['code']=='target_not_fully_admitted_a' for row in report['issues']))
+
     def test_fresh_source_heartbeat_does_not_hide_stalled_physics(self):
         self.receipts[100]['kind'] = 'meson_source'
         self.counts.update(started_receipts=1, source_ledger_bytes=1000,
