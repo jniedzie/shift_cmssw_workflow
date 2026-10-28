@@ -25,6 +25,8 @@ ALGORITHM = 'independent-geometric-full-support-tail-channel-retry-rb-v4'
 # abort guard are excluded. This also rejects extra physics settings and
 # reordered Tune commands, whose order changes Pythia's effective model.
 SOURCE_MODEL_SHA256 = 'a6bb0fd762c5805f1cb2e08c50e713d53ae41a20399adb9c748ea91fb7f8e50e'
+DEFERRED_CHARM_PROFILE = 'shift-qcd-deferred-d411-d421-v1'
+DEFERRED_CHARM_COMMANDS = [['411:mayDecay', 'off'], ['421:mayDecay', 'off']]
 # Resolved CP5 settings from the unchanged frozen source used by the ordinary
 # reference. Later process blocks must not silently override this model.
 CP5_SETTINGS = {
@@ -135,7 +137,7 @@ def _strings(node):
     return values
 
 
-def validate_config(source, ledger):
+def validate_config(source, ledger, generator_profile='ordinary'):
     """Read resolved configuration without importing/executing arbitrary code."""
     modules = {}
     for node in ast.parse(source).body:
@@ -208,9 +210,52 @@ def validate_config(source, ledger):
         raise ValueError('Normalization producer reads a different ledger')
     model = [row for row in parameters if not row[0].startswith('443:') and row[0] != 'Check:abortIfVeto']
     model_digest = hashlib.sha256(json.dumps(model, separators=(',', ':')).encode()).hexdigest()
-    if model_digest != SOURCE_MODEL_SHA256:
+    hard_model = model
+    if generator_profile == DEFERRED_CHARM_PROFILE:
+        if ledger['sample'] != 'qcd' or model[-2:] != DEFERRED_CHARM_COMMANDS:
+            raise ValueError('Deferred charm profile requires QCD and its exact final D411/D421 commands')
+        hard_model = model[:-2]
+    elif generator_profile != 'ordinary':
+        raise ValueError('Unsupported declared source profile')
+    hard_digest = hashlib.sha256(json.dumps(hard_model, separators=(',', ':')).encode()).hexdigest()
+    if hard_digest != SOURCE_MODEL_SHA256:
         raise ValueError('Ordered source model differs from the frozen ordinary reference')
     return model_digest
+
+
+def deferred_charm_frontier(particles):
+    """Audit fresh undecayed D roots; never prune/rewrite an existing decay tree."""
+    result = []
+    for particle in particles:
+        if abs(particle['pdg']) not in (411, 421):
+            continue
+        barcode = particle['barcode']
+        if (type(barcode) is not int or barcode <= 0 or any(p['barcode'] == barcode for p in result)
+                or particle['status'] != 1 or particle['end_vertex'] is not None
+                or particle['production_vertex'] is None
+                or len(particle['momentum']) != 4
+                or any(not math.isfinite(x) for x in particle['momentum'])
+                or not math.isfinite(particle['generated_mass']) or particle['generated_mass'] <= 0):
+            raise ValueError('Deferred charm input is not a complete fresh undecayed D frontier')
+        result.append(dict(particle))
+    return sorted(result, key=lambda p:p['barcode'])
+
+
+def audit_deferred_charm_completion(before, after):
+    frontier = deferred_charm_frontier(before['particles'])
+    expected = {p['barcode']:p for p in frontier}
+    completed = {p['barcode']:p for p in after['particles'] if abs(p['pdg']) in (411, 421)}
+    if set(expected) != set(completed):
+        raise ValueError('Completion introduced a nested D outside the frozen original frontier')
+    for barcode, old in expected.items():
+        new = completed[barcode]
+        if (new['pdg'] != old['pdg'] or new['momentum'] != old['momentum']
+                or new['generated_mass'] != old['generated_mass']
+                or new['status'] != 2 or new['end_vertex'] is None):
+            raise ValueError('Native completion did not preserve and decay every frozen D root')
+    return dict(parent_barcodes=sorted(expected), parent_pdg_ids=[expected[b]['pdg'] for b in sorted(expected)],
+                all_original_D_roots_completed=True, no_nested_new_D=True,
+                original_D_momenta_and_masses_preserved=True)
 
 
 def validate_snapshot(ledger, embedded_ledger, records, weighted_run_info):
@@ -259,7 +304,7 @@ def validate_snapshot(ledger, embedded_ledger, records, weighted_run_info):
                 effective_events=sumw*sumw/sumw2 if sumw2 else 0.)
 
 
-def read_edm(path, expected_events, require_muon=False, weighted=True):
+def read_edm(path, expected_events, require_muon=False, weighted=True, deferred_charm=False):
     import ROOT
     from DataFormats.FWLite import Events, Handle, Runs
 
@@ -305,10 +350,18 @@ def read_edm(path, expected_events, require_muon=False, weighted=True):
                      projectile_pz_GeV=float(b.pz()))
         direct = []
         eligible_muons = 0
+        charm_particles = []
         particle, end = hepmc.particles_begin(), hepmc.particles_end()
         while particle != end:
             item = particle.__deref__()
             particle.__preinc__()
+            if deferred_charm and abs(item.pdg_id()) in (411, 421):
+                momentum = item.momentum()
+                charm_particles.append(dict(barcode=int(item.barcode()), pdg=int(item.pdg_id()), status=int(item.status()),
+                    production_vertex=int(item.production_vertex().barcode()) if item.production_vertex() else None,
+                    end_vertex=int(item.end_vertex().barcode()) if item.end_vertex() else None,
+                    generated_mass=float(item.generated_mass()),
+                    momentum=[float(momentum.px()),float(momentum.py()),float(momentum.pz()),float(momentum.e())]))
             if abs(item.pdg_id()) in DIRECT_JPSI_IDS and abs(item.status()) in (23, 33):
                 direct.append(float(item.momentum().perp()))
             if require_muon and abs(item.pdg_id()) == 13 and item.status() == 1 and item.production_vertex():
@@ -327,6 +380,8 @@ def read_edm(path, expected_events, require_muon=False, weighted=True):
                             weight=float(info.weight()), hepmc_weight=float(nominal[0]),
                             process=int(info.signalProcessID()), pthat=float(bins[0]), direct_scales=direct,
                             charged=charged))
+        if deferred_charm:
+            records[-1]['deferred_charm_frontier'] = deferred_charm_frontier(charm_particles)
     runs = []
     for run in Runs(str(path)):
         if not weighted:
@@ -354,9 +409,15 @@ def audit(input_path, ledger_path, config_path, generator_profile='ordinary'):
     ledger_bytes, config_bytes = inputs[1].read_bytes(), inputs[2].read_bytes()
     ledger = json.loads(ledger_bytes)
     validate_ledger(ledger)
-    if generator_profile == 'ordinary':
-        model_digest = validate_config(config_bytes.decode(), ledger)
-        records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], ledger['accepted'])
+    if generator_profile in ('ordinary', DEFERRED_CHARM_PROFILE):
+        model_digest = validate_config(config_bytes.decode(), ledger, generator_profile)
+        if generator_profile == DEFERRED_CHARM_PROFILE:
+            from shift_first_mpi_source_proposal import validate_uncensored_config
+            validate_uncensored_config(config_bytes.decode(), ledger, generator_profile)
+        if generator_profile == DEFERRED_CHARM_PROFILE:
+            records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], ledger['accepted'], deferred_charm=True)
+        else:
+            records, embedded, weighted_run, native_run, beams = read_edm(inputs[0], ledger['accepted'])
         report = validate_snapshot(ledger, embedded, records, weighted_run)
     else:
         from qcd_mu_enrichment import PROFILE, filtered_snapshot, ordinary_source_config
@@ -397,6 +458,11 @@ def audit(input_path, ledger_path, config_path, generator_profile='ordinary'):
                   forced_decay=('443 -> 13 -13; branching convention remains an independent gate'
                                 if ledger['sample'] == 'direct_jpsi' else 'none'))
     report['generator_profile'] = generator_profile
+    if generator_profile == DEFERRED_CHARM_PROFILE:
+        report.update(deferred_charm_frontiers=[dict(event_id=r['event_id'], parents=r['deferred_charm_frontier']) for r in records],
+            unchanged_hard_model_settings_sha256=SOURCE_MODEL_SHA256,
+            raw_decay_commands=DEFERRED_CHARM_COMMANDS,
+            native_source_weight_closure_qualified=False, native_decay_bank_qualified=False)
     after = [(path.stat().st_ino, path.stat().st_size, path.stat().st_mtime_ns) for path in inputs]
     if before != after:
         raise ValueError('GEN audit inputs changed while being inspected')

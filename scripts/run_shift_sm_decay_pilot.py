@@ -26,12 +26,24 @@ from run_shift_weighted_gen import publish
 TOOLS = Path(__file__).resolve().parents[1]
 
 
+def native_ordinary(request):
+    from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+    from shift_sm_decay_bank import validate_settings
+    deferred=request['original_source']['generator_profile']==DEFERRED_CHARM_PROFILE
+    if request.get('decay_bank'):
+        native=validate_settings(request['decay_bank'])=='native_ordinary'
+        require(native==deferred,'Native ordinary banks require the declared fresh D411/D421 source profile')
+        return native
+    return deferred
+
+
 def validate(request):
     require(request['diagnostic_only'] is True and request['new_GEN_exposure']==0,
             'A decay pilot is not production exposure')
     require(request['arm'] in ('ordinary','mixture'),'Unknown paired-test arm')
     source=request['original_source']
-    require(source['generator_profile']=='ordinary' and source['decay_dependent_filter'] is False,
+    native=native_ordinary(request)
+    require((native or source['generator_profile']=='ordinary') and source['decay_dependent_filter'] is False,
             'Redraw before the decay-dependent muon filter')
     require(source['full_source_trials']>0 and source['saved_events']>0,'Missing full original exposure')
     require(len(request['event_id'])==3 and request['native_weight']>0,'Invalid original authority')
@@ -41,10 +53,20 @@ def validate(request):
     scale=request.get('proposal_scale_multiplier',1.)
     require(not isinstance(scale,bool) and math.isfinite(scale) and scale>0.,
             'Lifetime proposal scale must be finite and positive')
-    require(len(request['parent_barcodes'])==len(set(request['parent_barcodes']))==2
-            and len(request['first_depth_one_distances_cm'])==2
-            and all(math.isfinite(x) and x>0 for x in request['first_depth_one_distances_cm']),
-            'Require two distinct original parents and positive measured material scales')
+    if not native:
+        require(len(request['parent_barcodes'])==len(set(request['parent_barcodes']))==2
+                and len(request['first_depth_one_distances_cm'])==2
+                and all(math.isfinite(x) and x>0 for x in request['first_depth_one_distances_cm']),
+                'Require two distinct original parents and positive measured material scales')
+    else:
+        require(request['arm']=='ordinary' or bool(request.get('decay_bank')),
+                'A deferred-D mixture requires the explicit native ordinary bank')
+        census=source.get('deferred_charm_frontiers')
+        require(isinstance(census,list) and len(census)==source['saved_events'],
+                'Native bank source lacks its complete frozen original D-frontier census')
+        count=request.get('decay_bank',{}).get('size',1)
+        require(type(request['decay_seed']) is int and 1<=request['decay_seed']<=899999922-count+1,
+                'Native bank seeds need room for every member and the fixed completion offset')
     require(request['publication_directory'].startswith('/eos/user/j/jniedzie/shift_cmssw_support/'),
             'Conditional pilot outputs must not become ordinary plotter inputs')
 
@@ -79,19 +101,26 @@ def prepare(request,raw_input=None):
     before=graph(event,'generatorSmeared');_,info=product(event,'generator','GenEventInfoProduct')
     require(float(info.weight())==request['native_weight'],'Wrong native original weight')
     parents={p['barcode']:p for p in before['particles']}
+    native=native_ordinary(request)
     scales=[]
-    for barcode,distance in zip(request['parent_barcodes'],request['first_depth_one_distances_cm']):
+    numbers=[] if native else request['parent_barcodes']
+    for barcode,distance in zip(numbers,[] if native else request['first_depth_one_distances_cm']):
         p=parents[barcode];require(abs(p['pdg'])==211 and p['status']==1 and p['end_vertex'] is None,
                                   'Proposal parent is not an original undecayed charged pion')
         momentum=math.sqrt(sum(x*x for x in p['momentum'][:3]))
         require(momentum>0 and p['generated_mass']>0,'Parent momentum/mass unavailable')
         scales.append(request.get('proposal_scale_multiplier',1.)*distance*10.*p['generated_mass']/momentum)
-    numbers=request['parent_barcodes']
     definition=dict(ordinary_fraction=.1,components=[
         dict(probability=.2,parent_barcodes=numbers[:1],mean_proper_lifetime_mm=scales[:1]),
         dict(probability=.2,parent_barcodes=numbers[1:],mean_proper_lifetime_mm=scales[1:]),
         dict(probability=.5,parent_barcodes=numbers,mean_proper_lifetime_mm=scales)])
-    if request['arm']=='ordinary':definition=dict(ordinary_fraction=1.,components=[])
+    if request['arm']=='ordinary' or native:definition=dict(ordinary_fraction=1.,components=[])
+    if native:
+        from audit_shift_weighted_gen import deferred_charm_frontier
+        expected=source['deferred_charm_frontiers'][request['original_index']]
+        require(expected['event_id']==request['event_id']
+                and expected['parents']==deferred_charm_frontier(before['particles']),
+                'Native bank input differs from the complete original D-frontier census')
     unit=dict(input_label='generatorSmeared',event_ids=[request['event_id']],seed=request['decay_seed'],
               positions=[dict(event_id=request['event_id'],target_position_cm=request['target_position_cm'])])
     config=source_configuration(unit,dict(test_scope='assumed-jaw-depth-canary'))
@@ -110,6 +139,9 @@ def prepare(request,raw_input=None):
     placement=compare_graphs(before,placed,target,0.)
     complete=graph(event,'shiftFullMuonDecays')
     audit=audit_completion(event,placed,complete,definition if request['arm']=='mixture' else None)
+    if native:
+        from audit_shift_weighted_gen import audit_deferred_charm_completion
+        audit['deferred_charm_completion']=audit_deferred_charm_completion(placed,complete)
     timed=graph(event,'shiftEventTime');timing=compare_graphs(complete,timed,target,-target[2])
     truth=audit_genparticles(event,timed)
     require(metadata(local)==metadata('placed.root'),'Full original Run/Lumi accounting changed')
@@ -123,7 +155,7 @@ def prepare(request,raw_input=None):
         daughters.append([particles[n] for n in vertex['outgoing']
                           if abs(particles[n]['pdg'])==13 and particles[n]['status']==1])
     pairs=[]
-    for a in daughters[0]:
+    for a in daughters[0] if daughters else []:
         for b in daughters[1]:
             if a['pdg']*b['pdg']>=0:continue
             p4=[x+y for x,y in zip(a['momentum'],b['momentum'])]
@@ -140,17 +172,22 @@ def prepare(request,raw_input=None):
             energy_GeV=p['momentum'][3],
             birth_cm=[x/10. for x in vertices[p['production_vertex']]['position'][:3]])
             for p in complete['particles'] if abs(p['pdg'])==13 and p['status']==1])
+    if native:
+        from shift_sm_decay_bank import audit_native_member
+        audit['base_kernel']='native_ordinary'
+        audit_native_member(audit)
     dump('gen_audit.json',audit)
     return audit
 
 
 def prepare_bank(request):
-    from shift_sm_decay_bank import choose, muon_score, audit_record
+    from shift_sm_decay_bank import choose, muon_score, audit_record, validate_settings
     from shift_gen_material_features import read_hepmc, bounded_event_features
     from DataFormats.FWLite import Events
     import ROOT
     settings=request['decay_bank'];size=settings['size'];floor=settings['control_fraction']
-    require(type(size) is int and 2<=size<=32 and request['arm']=='mixture',
+    kernel=validate_settings(settings)
+    require(request['arm']=='mixture',
             'Require a bounded mixture bank, not new source exposure')
     root=Path.cwd();raw=root/'bank_input.root'
     download(request['original_source']['url'],raw,request['original_source']['gen_sha256'])
@@ -165,6 +202,7 @@ def prepare_bank(request):
     for index in range(size):
         directory=root/f'bank_{index:02d}';directory.mkdir()
         variant=copy.deepcopy(request);variant['decay_seed']=request['decay_seed']+index
+        if kernel=='native_ordinary':variant['arm']='ordinary'
         try:
             os.chdir(directory);audit=prepare(variant,raw)
             event=next(iter(Events('placed.root')))
@@ -181,6 +219,7 @@ def prepare_bank(request):
             material_features_sha256=sha(directory/'material_features.json'),
             lifetime_density_ratio=audit['proposal_density_ratio'],
             lifetime_correction=audit['proposal_correction']))
+        if kernel=='native_ordinary':records[-1]['base_kernel']=kernel
     selection=choose([r['score']['score'] for r in records],floor,settings['selection_seed'])
     selected=selection['index'];directory=root/f'bank_{selected:02d}'
     for name in ['placed.root','gen_audit.json']:
@@ -194,11 +233,15 @@ def prepare_bank(request):
         unselected_GEN_are_auxiliary_reproducible_states=True,
         correction_kind='base_full_lifetime_f_over_q/(bank_size*conditional_choice_probability)',
         material_survival_correction_applied=False)
+    if kernel=='native_ordinary':
+        bank.update(base_kernel=kernel,correction_kind='1/(bank_size*conditional_choice_probability)',
+                    native_decay_bank_qualified=False)
     audit_record(bank,request['event_id'])
     dump('decay_bank.json',bank);audit=audits[selected]
     audit['decay_bank']=dict(path='decay_bank.json',sha256=sha('decay_bank.json'),
         size=size,selected_index=selected,selected_probability=selection['probabilities'][selected],
         selection_correction=selection['selection_correction'])
+    if kernel=='native_ordinary':audit['decay_bank']['base_kernel']=kernel
     dump('gen_audit.json',audit)
     return audit
 
@@ -236,6 +279,12 @@ def weight_authority(request,audit):
         proposal_gen_weight=weight/probability*audit['proposal_correction'],
         proposal_kind='ordinary' if request['arm']=='ordinary' else 'importance')
     if 'decay_bank' in audit:
+        if audit['decay_bank'].get('base_kernel')=='native_ordinary':
+            from shift_sm_decay_bank import audit_native_member
+            audit_native_member(audit)
+            require(audit['original_full_source']==request['original_source']
+                    and audit['original_event_id']==request['event_id'],
+                    'Native bank weight belongs to a different original source')
         bank=audit['decay_bank'];factor=bank['size']*bank['selected_probability']
         require(math.isclose(bank['selection_correction'],1./factor,rel_tol=2.e-15),
                 'Finite-bank selection correction differs from its recorded choice')

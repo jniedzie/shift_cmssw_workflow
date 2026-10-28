@@ -390,10 +390,10 @@ def audit_history(rows, ledger, semantic, proposal, prefilter, *, generator_prof
                 physics_valid=False, normalization_ready=False)
 
 
-def validate_uncensored_config(source, ledger):
+def validate_uncensored_config(source, ledger, generator_profile='ordinary'):
     """Bind the ordinary Pythia model and reject any extra GEN event filter."""
     from audit_shift_weighted_gen import validate_config, _keyword, _strings
-    validate_config(source, ledger)
+    validate_config(source, ledger, generator_profile)
     modules = {}
     for node in ast.parse(source).body:
         if isinstance(node, ast.Assign):

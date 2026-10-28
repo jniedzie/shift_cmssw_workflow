@@ -14,6 +14,44 @@ import random
 from shift_sm_response_features import _station_misses, MASS_STOPPING_POWER_GEV_CM2_G
 
 
+def validate_settings(settings):
+    kernel=settings.get('base_kernel','smooth_lifetime')
+    maximum=256 if kernel=='native_ordinary' else 32
+    if (kernel not in ('smooth_lifetime','native_ordinary') or type(settings['size']) is not int
+            or not 2<=settings['size']<=maximum
+            or type(settings['control_fraction']) not in (int,float)
+            or not 0.<settings['control_fraction']<=1.):
+        raise ValueError('Require a bounded declared decay kernel and positive bank support')
+    return kernel
+
+
+def audit_native_member(audit):
+    """Ordinary native draws need no channel BR or lifetime likelihood factor."""
+    from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+    source=audit['original_full_source']
+    if (audit.get('base_kernel')!='native_ordinary'
+            or source.get('generator_profile')!=DEFERRED_CHARM_PROFILE
+            or source.get('source_family')!='qcd_ordinary'
+            or source.get('decay_dependent_filter') is not False
+            or audit['proposal_definition']!=dict(ordinary_fraction=1.,components=[])
+            or any(type(audit[k]) not in (int,float) or audit[k]!=1. for k in
+                   ('ordinary_fraction','proposal_density_ratio','proposal_correction'))
+            or type(audit['proposal_component']) is not int or audit['proposal_component']!=0
+            or audit['selected_parent_barcodes']!=[]
+            or audit.get('deferred_charm_completion',{}).get('all_original_D_roots_completed') is not True
+            or audit.get('deferred_charm_completion',{}).get('no_nested_new_D') is not True):
+        raise ValueError('Native ordinary bank member lacks its unchanged unit-density decay audit')
+    census=source.get('deferred_charm_frontiers',[])
+    matches=[row for row in census if row['event_id']==audit['original_event_id']]
+    if len(census)!=source.get('saved_events') or len(matches)!=1:
+        raise ValueError('Native ordinary member lacks its complete original frontier census')
+    parents=sorted(matches[0]['parents'],key=lambda p:p['barcode'])
+    completed=audit['deferred_charm_completion']
+    if (completed['parent_barcodes']!=[p['barcode'] for p in parents]
+            or completed['parent_pdg_ids']!=[p['pdg'] for p in parents]):
+        raise ValueError('Native ordinary completion changed the frozen D frontier')
+
+
 def probabilities(scores, control_fraction):
     if (not scores or not 0.<control_fraction<=1.
             or any(not math.isfinite(x) or x<0. for x in scores)):
@@ -45,6 +83,13 @@ def audit_record(record,event_id):
         raise ValueError('Bank choice differs from its complete frozen score distribution')
     if record['selected_GEN_sha256']!=record['members'][reference['index']]['GEN_sha256']:
         raise ValueError('Chosen bank GEN is not the declared member')
+    kernel=validate_settings(record)
+    if kernel=='native_ordinary':
+        if any(r.get('base_kernel')!=kernel or r['lifetime_density_ratio']!=1.
+               or r['lifetime_correction']!=1. for r in record['members']):
+            raise ValueError('Native ordinary bank contains a nonunit base decay likelihood')
+        if record.get('material_survival_correction_applied') is not False:
+            raise ValueError('A native ordinary bank must not apply a physical survival correction')
     return reference
 
 

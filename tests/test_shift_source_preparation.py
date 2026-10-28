@@ -142,6 +142,149 @@ class SourceCensusTests(unittest.TestCase):
             self.assertFalse(audit['usable_as_physics_weight'])
 
 
+class DeferredCharmProfileTests(unittest.TestCase):
+    def configuration(self,sample='qcd'):
+        from test_shift_weighted_gen_audit import fixture,configuration
+        ledger,_,_=fixture(sample=sample)
+        source=configuration(ledger)
+        source=source.replace("'Check:abortIfVeto = on'", "'Check:abortIfVeto = on', '411:mayDecay = off', '421:mayDecay = off'")
+        return ledger,source
+
+    def particle(self,barcode=7,pdg=411):
+        return dict(barcode=barcode,pdg=pdg,status=1,momentum=[0.,0.,-10.,math.sqrt(100.+1.87**2)],
+            generated_mass=1.87,production_vertex=-1,end_vertex=None)
+
+    def test_declared_profile_changes_only_the_exact_ordered_D_frontier_suffix(self):
+        from audit_shift_weighted_gen import validate_config,DEFERRED_CHARM_PROFILE,SOURCE_MODEL_SHA256
+        ledger,source=self.configuration()
+        self.assertNotEqual(validate_config(source,ledger,DEFERRED_CHARM_PROFILE),SOURCE_MODEL_SHA256)
+        with self.assertRaises(ValueError):validate_config(source,ledger)
+        for old,new in [('421:mayDecay = off','431:mayDecay = off'),('411:mayDecay = off','411:mayDecay = on'),
+                        ("'411:mayDecay = off', '421:mayDecay = off'","'421:mayDecay = off', '411:mayDecay = off'"),
+                        ('Beams:eB = 6800.','Beams:eB = 6500.')]:
+            with self.subTest(old=old),self.assertRaises(ValueError):
+                validate_config(source.replace(old,new),ledger,DEFERRED_CHARM_PROFILE)
+        ledger,source=self.configuration('direct_jpsi')
+        with self.assertRaisesRegex(ValueError,'requires QCD'):validate_config(source,ledger,DEFERRED_CHARM_PROFILE)
+
+    def test_declared_source_still_rejects_an_added_decay_or_output_filter(self):
+        from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+        from shift_first_mpi_source_proposal import validate_uncensored_config
+        ledger,source=self.configuration()
+        source+='''
+process.ProductionFilterSequence=cms.Sequence(process.generator)
+process.generation_step=cms.Path(process.ProductionFilterSequence+process.pgen)
+process.FEVTDEBUGoutput=cms.OutputModule('PoolOutputModule',SelectEvents=cms.untracked.PSet(SelectEvents=cms.vstring('generation_step')))
+'''
+        validate_uncensored_config(source,ledger,DEFERRED_CHARM_PROFILE)
+        with self.assertRaisesRegex(ValueError,'additional filter'):
+            validate_uncensored_config(source.replace('cms.Sequence(process.generator)',
+                'cms.Sequence(process.generator+process.mugenfilter)'),ledger,DEFERRED_CHARM_PROFILE)
+
+    def test_fresh_frontier_and_completed_graph_reject_old_decays_and_nested_D(self):
+        from audit_shift_weighted_gen import deferred_charm_frontier,audit_deferred_charm_completion
+        before=dict(particles=[self.particle(),self.particle(8,-421)])
+        self.assertEqual(len(deferred_charm_frontier(before['particles'])),2)
+        after=copy.deepcopy(before)
+        for p in after['particles']:p.update(status=2,end_vertex=-2)
+        result=audit_deferred_charm_completion(before,after)
+        self.assertTrue(result['all_original_D_roots_completed'])
+        for mutation in ('already_decayed','nested','changed_mass','uncompleted'):
+            old,new=copy.deepcopy(before),copy.deepcopy(after)
+            if mutation=='already_decayed':old['particles'][0].update(status=2,end_vertex=-2)
+            if mutation=='nested':new['particles'].append(self.particle(9,-411))
+            if mutation=='changed_mass':new['particles'][0]['generated_mass']+=.1
+            if mutation=='uncompleted':new['particles'][0].update(status=1,end_vertex=None)
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):audit_deferred_charm_completion(old,new)
+
+    def test_native_bank_requires_the_complete_fresh_source_census_but_no_pion_scales(self):
+        from run_shift_sm_decay_pilot import validate
+        from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+        request=dict(diagnostic_only=True,new_GEN_exposure=0,arm='mixture',event_id=[1,1,1],native_weight=1.,decay_seed=71,
+            original_source=dict(generator_profile=DEFERRED_CHARM_PROFILE,decay_dependent_filter=False,
+                full_source_trials=10,saved_events=1,deferred_charm_frontiers=[dict(event_id=[1,1,1],parents=[])]),
+            decay_bank=dict(base_kernel='native_ordinary',size=128,control_fraction=.1),
+            publication_directory='/eos/user/j/jniedzie/shift_cmssw_support/synthetic')
+        validate(request)
+        ordinary=copy.deepcopy(request);ordinary.pop('decay_bank');ordinary['arm']='ordinary';validate(ordinary)
+        for mutation in ('missing_census','old_profile','implicit_native_bank','bank_seed_overflow'):
+            changed=copy.deepcopy(request)
+            if mutation=='missing_census':changed['original_source'].pop('deferred_charm_frontiers')
+            if mutation=='old_profile':changed['original_source']['generator_profile']='ordinary'
+            if mutation=='implicit_native_bank':changed['decay_bank'].pop('base_kernel')
+            if mutation=='bank_seed_overflow':changed['decay_seed']=899999922
+            with self.subTest(mutation=mutation),self.assertRaises(ValueError):validate(changed)
+
+    def test_raw_source_opt_in_appends_only_D411_D421_and_keeps_the_fragment_bytes(self):
+        import os
+        import run_shift_smart_sm_source as worker
+        from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+        fragment=Path(worker.TOOLS)/'fragments/QCD_SoftMpiPartition_FixedTarget_13p6TeV_pythia8_cff.py'
+        before=fragment.read_bytes()
+        row=dict(family='qcd',bounds=[20.,-1.],events_or_trials=10,seed=71,run=30000001,
+            generator_profile=DEFERRED_CHARM_PROFILE)
+        request=dict(source_request=row,generate_only=True)
+        calls=[]
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            def run(argv,log,**kwargs):
+                calls.append(argv);cwd=kwargs.get('cwd',root)
+                if argv[0]=='cmsDriver.py':(cwd/'gen_cfg.py').write_text('# native driver fixture\n')
+                if argv[0]=='edmConfigDump':Path(log).write_text((cwd/'gen_cfg.py').read_text())
+                if argv[0]=='python3':(cwd/'validation.json').write_text('{}')
+            with patch.dict(os.environ,{'CMSSW_BASE':str(root/'private_release')}), \
+                 patch.object(worker,'run',side_effect=run), \
+                 patch.object(worker,'inspect_source',return_value='inspected'):
+                self.assertEqual(worker.generate(request,root/'source'),'inspected')
+            config=(root/'source/gen_cfg.py').read_text()
+            self.assertEqual(config.count('411:mayDecay = off'),1)
+            self.assertEqual(config.count('421:mayDecay = off'),1)
+            self.assertNotIn('431:mayDecay',config)
+            self.assertIn(DEFERRED_CHARM_PROFILE,calls[-1])
+            for mutation in ('DY','zero_bin','production'):
+                changed=copy.deepcopy(request)
+                if mutation=='DY':changed['source_request']['family']='dy'
+                if mutation=='zero_bin':changed['source_request']['bounds']=[0.,1.]
+                if mutation=='production':changed['generate_only']=False
+                with self.subTest(mutation=mutation),self.assertRaisesRegex(ValueError,'GEN-only pilot'):
+                    worker.generate(changed,root/'rejected')
+            self.assertFalse((root/'rejected').exists())
+        self.assertEqual(fragment.read_bytes(),before)
+
+    def test_frozen_tools_include_and_import_the_matching_native_bank_dependencies(self):
+        import io
+        import subprocess
+        import tarfile
+        from prepare_shift_sm_decay_validation import freeze_tools
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);original=root/'base.tar.gz'
+            with tarfile.open(original,'w:gz') as archive:
+                for source in (Path(__file__).resolve().parents[1]/'scripts').glob('*.py'):
+                    archive.add(source,arcname='scripts/'+source.name)
+                # The existing pilot capsule installs the analysis weight
+                # helper in scripts; reproduce that qualified base layout.
+                weight_helper=Path(__file__).resolve().parents[2]/'tea_shift_cmssw/utils/shift_event_weights.py'
+                archive.add(weight_helper,arcname='scripts/shift_event_weights.py')
+            bootstrap=root/'bootstrap.sh';bootstrap.write_text('#!/bin/sh\n')
+            output=root/'frozen';output.mkdir()
+            config=dict(base_tools=dict(path=str(original),sha256=prep.sha(original)),
+                bootstrap=dict(path=str(bootstrap),sha256=prep.sha(bootstrap)))
+            receipt=freeze_tools(config,output)
+            with tarfile.open(receipt['capsule']) as archive:
+                for name in ['audit_shift_weighted_gen.py','shift_first_mpi_source_proposal.py',
+                             'run_shift_smart_sm_source.py','run_shift_sm_decay_pilot.py','shift_sm_decay_bank.py']:
+                    raw=archive.extractfile('scripts/'+name).read()
+                    self.assertEqual(raw,(Path(__file__).resolve().parents[1]/'scripts'/name).read_bytes())
+                archive.extractall(root/'extracted')
+            code=('import sys; sys.path.insert(0,'+repr(str(root/'extracted/scripts'))+'); '
+                  'import audit_shift_weighted_gen, shift_first_mpi_source_proposal, '
+                  'run_shift_sm_decay_pilot, run_shift_sm_decay_collection, '
+                  'shift_sm_decay_bank, run_shift_smart_sm_source; '
+                  'assert shift_sm_decay_bank.validate_settings(dict(size=128,control_fraction=.1,base_kernel="native_ordinary"))=="native_ordinary"')
+            imported=subprocess.run([sys.executable,'-I','-c',code],capture_output=True,text=True)
+            self.assertEqual(imported.returncode,0,imported.stderr)
+
+
 class PersistenceRoundoffTests(unittest.TestCase):
     def test_failed_photon_and_massive_signed_and_subnormal_cases(self):
         photon=[-.08279411007317763,-.27006711821923624,-.8492992675623033,.8950420989472605]

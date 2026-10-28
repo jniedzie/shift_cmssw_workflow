@@ -56,6 +56,12 @@ def generate(request, directory):
     row = request['source_request']
     family, low, high = row['family'], *row['bounds']
     count, seed, run_number = row['events_or_trials'], row['seed'], row['run']
+    from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE, DEFERRED_CHARM_COMMANDS
+    profile = row.get('generator_profile', 'ordinary')
+    if profile not in ('ordinary', DEFERRED_CHARM_PROFILE):
+        raise ValueError('Unsupported declared raw source profile')
+    if profile == DEFERRED_CHARM_PROFILE and (family != 'qcd' or low <= 0 or request.get('generate_only') is not True):
+        raise ValueError('Deferred D411/D421 profile is a QCD positive-bin GEN-only pilot pending native qualification')
     if family not in ('qcd', 'jpsi', 'dy') or not 1 <= count <= 1000:
         raise ValueError('Unsupported source family or chunk size')
     if not 30000000 <= run_number <= 4294967295:
@@ -113,6 +119,9 @@ process.weightedNormalization_step = cms.EndPath(process.shiftWeightedNormalizat
 process.schedule.insert(0, process.weightedNormalization_step)
 process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization_*_*')
 ''')
+            if profile == DEFERRED_CHARM_PROFILE:
+                for key, value in DEFERRED_CHARM_COMMANDS:
+                    target.write('process.generator.PythiaParameters.processParameters.append('+repr(key+' = '+value)+')\n')
         config = directory/'resolved_gen_cfg.py'
         run(['edmConfigDump', 'gen_cfg.py'], config, cwd=directory, timeout=600)
         environment = dict(os.environ)
@@ -123,7 +132,7 @@ process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization
         if weighted:
             argv = ['python3', str(scripts/'audit_shift_weighted_gen.py'), '--input', 'gen.root',
                     '--ledger', 'proposal_ledger.json', '--config', config.name,
-                    '--generator-profile', 'ordinary', '--output', 'validation.json']
+                    '--generator-profile', profile, '--output', 'validation.json']
         else:
             argv = ['python3', str(scripts/'audit_generation_chunk.py'), 'gen.root',
                     '--process', name, '--events', str(count), '--chunk', '0',
@@ -150,7 +159,7 @@ def inspect_source(row, directory, audit, config, weighted):
     exposure = metadata(gen)
     source = dict(source_id=row['id'], stratum=row['stratum'],
         source_family='qcd_ordinary' if family == 'qcd' else family,
-        gen_sha256=sha(gen), saved_events=len(identities), generator_profile='ordinary',
+        gen_sha256=sha(gen), saved_events=len(identities), generator_profile=row.get('generator_profile', 'ordinary'),
         timing_input_label='VtxSmeared' if family == 'dy' else 'generatorSmeared',
         decay_dependent_filter=False, saved_decays_unchanged=True,
         physics_normalization_ready=False, additional_branching_factor_applied=False,
@@ -165,6 +174,14 @@ def inspect_source(row, directory, audit, config, weighted):
                       sigma_nd_pb=ledger['sigma_nd_mb']*1.e9)
         if audit['event_ids'] != identities or audit['weights'] != weights:
             raise ValueError('Independent weighted census differs')
+        from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+        if source['generator_profile'] == DEFERRED_CHARM_PROFILE:
+            frontier = audit.get('deferred_charm_frontiers')
+            if (audit.get('generator_profile') != DEFERRED_CHARM_PROFILE or not isinstance(frontier, list)
+                    or [r['event_id'] for r in frontier] != identities):
+                raise ValueError('Missing complete native deferred-D frontier census')
+            source.update(deferred_charm_frontiers=frontier, native_source_weight_closure_qualified=False,
+                          native_decay_bank_qualified=False, diagnostic_only=True)
     else:
         # Preserve the native accepted-event denominator. Pythia trial counts
         # remain in the audit; they are never substituted for this denominator.

@@ -257,7 +257,7 @@ def wait_for_case_results(plan,seconds):
 
 
 def audit_bank_result(result,frozen,case_id):
-    from shift_sm_decay_bank import audit_record, muon_score
+    from shift_sm_decay_bank import audit_record, muon_score, audit_native_member, validate_settings
     from run_shift_source_preparation import audit_smooth_proposal
     pins={p['name']:p for p in result['GEN_publications']}
     local=Path(case_id+'_bank.json');pin=pins['decay_bank.json']
@@ -268,6 +268,8 @@ def audit_bank_result(result,frozen,case_id):
             or record['selection_seed']!=settings['selection_seed']
             or record['raw_original_GEN_sha256']!=frozen['original_source']['gen_sha256']):
         raise ValueError('Bank design differs from its frozen request')
+    if validate_settings(record)!=validate_settings(settings):
+        raise ValueError('Bank base kernel differs from its frozen request')
     if pin['sha256']!=result['GEN_audit']['decay_bank']['sha256']:
         raise ValueError('Bank record differs from its bound worker audit')
     for member in record['members']:
@@ -297,10 +299,13 @@ def audit_bank_result(result,frozen,case_id):
                           if isinstance(v,float) else v==reference[k] for k,v in actual.items())
         if (not same_pair or not math.isclose(scored['score'],member['score']['score'],rel_tol=2.e-12,abs_tol=0.)):
             raise ValueError('Bank scores differ from actual member material/muon features')
-        audit_smooth_proposal(audit['proposal_definition'],audit['parent_barcodes'],
-            audit['sampled_proper_lifetime_mm'],audit['nominal_proper_lifetime_mm'],
-            audit['ordinary_fraction'],audit['proposal_density_ratio'],audit['proposal_correction'],
-            audit['proposal_component'],audit['selected_parent_barcodes'])
+        if record.get('base_kernel')=='native_ordinary':
+            audit_native_member(audit)
+        else:
+            audit_smooth_proposal(audit['proposal_definition'],audit['parent_barcodes'],
+                audit['sampled_proper_lifetime_mm'],audit['nominal_proper_lifetime_mm'],
+                audit['ordinary_fraction'],audit['proposal_density_ratio'],audit['proposal_correction'],
+                audit['proposal_component'],audit['selected_parent_barcodes'])
         if (audit['proposal_density_ratio']!=member['lifetime_density_ratio']
                 or audit['proposal_correction']!=member['lifetime_correction']):
             raise ValueError('Bank lifetime density differs from its native audit')

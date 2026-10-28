@@ -6,6 +6,9 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
+import os
+import types
 
 ROOT_DIR=Path(__file__).resolve().parents[2]
 sys.path.insert(0,str(ROOT_DIR/'tea_shift_cmssw/utils'))
@@ -14,6 +17,7 @@ import run_shift_sm_decay_collection as collection
 from run_shift_sm_decay_pilot import weight_authority
 from prepare_shift_sm_decay_validation import frozen_draw, original_census
 from shift_sm_decay_bank import probabilities as bank_probabilities, choose as choose_bank, muon_score
+from shift_sm_decay_bank import audit_native_member, audit_record, validate_settings
 
 
 class GroupedStatisticsTest(unittest.TestCase):
@@ -151,6 +155,119 @@ class IndependentDrawTest(unittest.TestCase):
 
 
 class FiniteDecayBankTest(unittest.TestCase):
+    def native_audit(self):
+        from audit_shift_weighted_gen import DEFERRED_CHARM_PROFILE
+        return dict(base_kernel='native_ordinary',original_full_source=dict(
+            generator_profile=DEFERRED_CHARM_PROFILE,source_family='qcd_ordinary',decay_dependent_filter=False,
+            source_id='synthetic',gen_sha256='a'*64,saved_events=1,
+            deferred_charm_frontiers=[dict(event_id=[1,1,2],parents=[])]),original_event_id=[1,1,2],
+            proposal_definition=dict(ordinary_fraction=1.,components=[]),ordinary_fraction=1.,
+            proposal_density_ratio=1.,proposal_correction=1.,proposal_component=0,
+            selected_parent_barcodes=[],deferred_charm_completion=dict(
+                all_original_D_roots_completed=True,no_nested_new_D=True,parent_barcodes=[],parent_pdg_ids=[]))
+
+    def test_only_explicit_native_kernel_expands_bank_size_bound(self):
+        settings=dict(size=32,control_fraction=.1)
+        self.assertEqual(validate_settings(settings),'smooth_lifetime')
+        settings['size']=128
+        with self.assertRaises(ValueError):validate_settings(settings)
+        settings['base_kernel']='native_ordinary'
+        self.assertEqual(validate_settings(settings),'native_ordinary')
+        for key,value in [('size',257),('size',True),('base_kernel','forced_D'),('control_fraction',0.)]:
+            changed=dict(settings);changed[key]=value
+            with self.subTest(key=key,value=value),self.assertRaises(ValueError):validate_settings(changed)
+
+    def test_native_member_rejects_nonunit_lifetime_channel_and_missing_frontier_audits(self):
+        audit_native_member(self.native_audit())
+        for key,value in [('proposal_density_ratio',2.),('proposal_correction',.5),
+                          ('ordinary_fraction',.1),('proposal_density_ratio',True),
+                          ('selected_parent_barcodes',[7]),('proposal_component',1),
+                          ('deferred_charm_completion',dict(no_nested_new_D=False))]:
+            audit=self.native_audit();audit[key]=value
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'unit-density'):audit_native_member(audit)
+        audit=self.native_audit();audit['original_full_source']['generator_profile']='ordinary'
+        with self.assertRaises(ValueError):audit_native_member(audit)
+        audit=self.native_audit();audit['deferred_charm_completion']['parent_barcodes']=[7]
+        with self.assertRaisesRegex(ValueError,'frozen D frontier'):audit_native_member(audit)
+
+    def test_native_bank_choice_record_and_final_weight_apply_only_one_exact_choice_factor(self):
+        selection=choose_bank([0.,1.],.1,17)
+        members=[dict(index=i,seed=71+i,score=dict(score=score),GEN_sha256=str(i)*64,
+            base_kernel='native_ordinary',lifetime_density_ratio=1.,lifetime_correction=1.)
+            for i,score in enumerate([0.,1.])]
+        record=dict(size=2,base_kernel='native_ordinary',same_original_event_id=[1,1,2],members=members,
+            control_fraction=.1,selection_seed=17,selection=selection,
+            selected_GEN_sha256=members[selection['index']]['GEN_sha256'],material_survival_correction_applied=False)
+        self.assertEqual(audit_record(record,[1,1,2]),selection)
+        changed=copy.deepcopy(record);changed['members'][0]['lifetime_correction']=.5
+        with self.assertRaisesRegex(ValueError,'nonunit'):audit_record(changed,[1,1,2])
+        audit=self.native_audit()
+        request=dict(event_id=[1,1,2],original_source=copy.deepcopy(audit['original_full_source']),
+            native_weight=3.e-9,source_inclusion_probability=.125,decay_seed=17,arm='mixture')
+        probability=selection['probabilities'][selection['index']]
+        audit['decay_bank']=dict(size=2,base_kernel='native_ordinary',selected_probability=probability,
+            selection_correction=1./(2.*probability))
+        authority=weight_authority(request,audit)
+        self.assertAlmostEqual(authority['proposal_gen_weight'],3.e-9/.125/(2.*probability))
+        self.assertEqual(authority['lifetime_correction'],1.)
+
+    def test_native_bank_prepares_only_ordinary_members_and_collector_rereads_every_member(self):
+        import gzip
+        import shutil
+        import run_shift_sm_decay_pilot as pilot
+        import shift_gen_material_features as feature_reader
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);geometry=root/'geometry';geometry.write_bytes(b'synthetic')
+            request=dict(event_id=[1,1,2],arm='mixture',decay_seed=71,
+                original_source=self.native_audit()['original_full_source'],
+                decay_bank=dict(base_kernel='native_ordinary',size=2,control_fraction=.1,selection_seed=17,
+                    material=dict(geometry_path=str(geometry),geometry_sha256=pilot.sha(geometry),
+                        frame={},event_timeout_seconds=1.)))
+            request['original_source']['url']='synthetic'
+            calls=[]
+            def prepare(variant,raw):
+                calls.append(variant['arm']);self.assertEqual(variant['arm'],'ordinary')
+                Path('placed.root').write_bytes(str(variant['decay_seed']).encode())
+                audit=self.native_audit();audit.update(original_full_source=variant['original_source'],
+                    proposal_draw_seed=variant['decay_seed'],prepared_GEN_sha256=pilot.sha('placed.root'))
+                pilot.dump('gen_audit.json',audit);return audit
+            def features(*args):
+                return dict(event_id=[1,1,2],muons=[dict(score=float(Path.cwd().name[-1]))],parent_flights=[])
+            def score(muons,parents):return dict(score=muons[0]['score'],pair=None)
+            manager=types.SimpleNamespace(LockDefaultUnits=lambda x:None,SetDefaultUnits=lambda x:None,
+                kRootUnits=1,Import=lambda path:object())
+            fake_root=types.SimpleNamespace(TGeoManager=manager)
+            fwlite=types.SimpleNamespace(Events=lambda path:iter([object()]))
+            previous=Path.cwd()
+            try:
+                os.chdir(root)
+                with patch.dict(sys.modules,{'ROOT':fake_root,'DataFormats':types.ModuleType('DataFormats'),
+                                            'DataFormats.FWLite':fwlite}), \
+                     patch.object(pilot,'download',side_effect=lambda *args:Path(args[1]).write_bytes(b'raw')), \
+                     patch.object(pilot,'prepare',side_effect=prepare), \
+                     patch.object(feature_reader,'read_hepmc',return_value=([],1.,[1.],None)), \
+                     patch.object(feature_reader,'bounded_event_features',side_effect=features), \
+                     patch('shift_sm_decay_bank.muon_score',side_effect=score):
+                    audit=pilot.prepare_bank(request)
+                    self.assertEqual(calls,['ordinary','ordinary'])
+                    record=json.loads(Path('decay_bank.json').read_text())
+                    self.assertEqual(record['base_kernel'],'native_ordinary')
+                    pins=[dict(name='decay_bank.json',path=str(root/'decay_bank.json'),sha256=pilot.sha('decay_bank.json')),
+                          dict(name='gen.root',sha256=pilot.sha('placed.root'))]
+                    for index in range(2):
+                        for local,label in [('gen_audit.json','audit.json'),('material_features.json','material_features.json')]:
+                            original=root/f'bank_{index:02d}'/local
+                            compressed=original.with_suffix(original.suffix+'.gz')
+                            compressed.write_bytes(gzip.compress(original.read_bytes(),mtime=0))
+                            pins.append(dict(name=f'bank_{index:02d}_'+label+'.gz',path=str(compressed),sha256=pilot.sha(compressed)))
+                    request.update(native_weight=3.e-9,source_inclusion_probability=.125)
+                    result=dict(GEN_publications=pins,GEN_audit=audit,weight_authority=pilot.weight_authority(request,audit))
+                    with patch.object(collection,'download',side_effect=lambda source,target,checksum:shutil.copyfile(source,target)):
+                        readback=collection.audit_bank_result(result,request,'synthetic')
+                    self.assertEqual(readback['members'],2)
+            finally:
+                os.chdir(previous)
+
     def test_material_ranking_uses_the_same_pair_and_counts_shared_parent_once(self):
         import math
         muons=[dict(barcode=i,pdg=pdg,momentum_GeV=[px,0.,-500.],
