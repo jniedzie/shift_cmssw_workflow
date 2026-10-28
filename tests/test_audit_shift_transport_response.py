@@ -45,7 +45,7 @@ class TransportResponseTest(unittest.TestCase):
 
     def test_passive_exact_ID_bridges_an_unknown_native_barcode(self):
         native=self.native();native['events'][0]['tracks'][1]['GEN_barcode']=-1
-        logs=self.logs();logs['terminals']=[dict(g4_event=0,barcode=9,trackId=902,pdg=-13,step=1)]
+        logs=self.logs();logs['terminals']=[dict(g4_event=7,barcode=9,trackId=902,pdg=-13,step=1)]
         truth=dict(stored_fields=dict(ShiftMuon_hitSimTrackId=[902.]))
         muon=summarize_selected(native,logs,[9],[8],reco_truth=truth)['selected_muons'][0]
         self.assertEqual(len(muon['saved_tracks']),1)
@@ -59,7 +59,7 @@ class TransportResponseTest(unittest.TestCase):
     def test_repeated_ID_in_different_native_events_is_not_guessed(self):
         native=self.native();event=native['events'][0];event['tracks'][1]['GEN_barcode']=-1
         event['tracks'].append(dict(event['tracks'][1],eventId=7))
-        logs=self.logs();logs['terminals']=[dict(g4_event=0,barcode=9,trackId=902,pdg=-13,step=1)]
+        logs=self.logs();logs['terminals']=[dict(g4_event=7,barcode=9,trackId=902,pdg=-13,step=1)]
         muon=summarize_selected(native,logs,[9],[8])['selected_muons'][0]
         self.assertEqual(muon['saved_tracks'],[])
         self.assertEqual(len(muon['native_track_association_ambiguities'][0]['native_candidates']),2)
@@ -71,7 +71,7 @@ class TransportResponseTest(unittest.TestCase):
         self.assertTrue(muon['saved_tracks'][0]['reco_track_ID_is_ambiguous'])
 
     def test_known_stop_does_not_invent_a_decay(self):
-        logs=self.logs();logs['terminals']=[dict(g4_event=0,barcode=8,trackId=41,parentId=0,pdg=211,
+        logs=self.logs();logs['terminals']=[dict(g4_event=7,barcode=8,trackId=41,parentId=0,pdg=211,
             step=10,process_subtype=121,status_before_original_action=2,
             assigned_proper_time_ns=10.,proper_time_ns=1.)]
         native=self.native();native['events'][0]['tracks']=native['events'][0]['tracks'][:1]
@@ -86,7 +86,7 @@ class TransportResponseTest(unittest.TestCase):
 
     def test_a_saved_descendant_of_a_stopped_parent_is_reported_for_review(self):
         native=self.native();native['events'][0]['vertices'][1]['parent']=-1
-        logs=self.logs();logs['terminals']=[dict(g4_event=0,barcode=8,trackId=41,parentId=0,pdg=211,
+        logs=self.logs();logs['terminals']=[dict(g4_event=7,barcode=8,trackId=41,parentId=0,pdg=211,
             step=10,process_subtype=121,status_before_original_action=2,
             assigned_proper_time_ns=10.,proper_time_ns=1.)]
         parent=summarize_selected(native,logs,[9],[8])['selected_parents'][0]
@@ -96,7 +96,7 @@ class TransportResponseTest(unittest.TestCase):
         self.assertEqual(parent['selected_descendant_births_despite_early_termination'][0]['barcode'],9)
 
     def test_complete_rows_and_delegate_paths_are_preserved(self):
-        row=dict(g4_event=0,barcode=8,trackId=41,parent_entry_p4_GeV=[0.,0.,1.,2.],
+        row=dict(g4_event=7,barcode=8,trackId=41,parent_entry_p4_GeV=[0.,0.,1.,2.],
                  children=[dict(barcode=9,pdg=13,p4_GeV=[0.,0.,1.,2.])])
         log='[SHIFTParentLoggerDelegate] native_symbol=/frozen/native.so\n[SHIFTParentDecay] '+json.dumps(row)
         parsed=parse_logger(log)
@@ -106,6 +106,31 @@ class TransportResponseTest(unittest.TestCase):
         self.assertTrue(result['observed_decays_pass_diagnostic_conservation'])
         self.assertEqual(result['decay_conservation'][0]['residual_GeV'],0.)
         with self.assertRaises(json.JSONDecodeError):parse_logger('[SHIFTParentDecay] {truncated')
+
+    def test_G4_event_is_the_native_EDM_number_not_zero_based_position(self):
+        native=self.native();native['events'][0]['event_id']=[600500001,1,859]
+        logs=self.logs();logs['terminals']=[dict(g4_event=859,barcode=9,trackId=902,pdg=-13,step=1)]
+        result=summarize_selected(native,logs,[9],[8],expected_event_id=[600500001,1,859],
+                                  reco_labels=[dict(event_id=[600500001,1,859])])
+        self.assertEqual(result['event_identity_binding']['expected_g4_event_id'],859)
+        logs['terminals'][0]['g4_event']=0
+        with self.assertRaisesRegex(ValueError,'another original'):
+            summarize_selected(native,logs,[9],[8])
+
+    def test_signed_G4_conversion_preserves_full_ID_protection(self):
+        native=self.native();native['events'][0]['event_id']=[600500001,2,2**32+7]
+        logs=self.logs();logs['terminals']=[dict(g4_event=7,barcode=9,trackId=902,pdg=-13,step=1)]
+        expected=list(native['events'][0]['event_id'])
+        result=summarize_selected(native,logs,[9],[8],expected_event_id=expected)
+        self.assertEqual(result['event_id'],expected)
+        with self.assertRaisesRegex(ValueError,'complete event identity'):
+            summarize_selected(native,logs,[9],[8],expected_event_id=[600500001,2,7])
+        with self.assertRaisesRegex(ValueError,'complete original identity'):
+            summarize_selected(native,logs,[9],[8],reco_labels=dict(event_id=[600500001,1,2**32+7]))
+        native['events'][0]['event_id'][2]=2**31+7
+        logs['terminals'][0]['g4_event']=-2**31+7
+        result=summarize_selected(native,logs,[9],[8])
+        self.assertEqual(result['event_identity_binding']['expected_g4_event_id'],-2**31+7)
 
 
 if __name__=='__main__':unittest.main()

@@ -15,6 +15,7 @@ import math
 import os
 from pathlib import Path
 import sys
+import tarfile
 import time
 
 from run_shift_sm_postprocessing import download
@@ -152,7 +153,8 @@ def run(request,prepare_only=False):
             native_weight=original['native_weight'],sampling_probability=original.get('source_inclusion_probability',1.))
         labels=read_nano('nano.root',[expected],sha('nano.root'))
         summary=summarize_selected(native,logs,request['selected_muon_barcodes'],
-            original['parent_barcodes'],reco_labels=labels,reco_truth=fields)
+            original['parent_barcodes'],reco_labels=labels,reco_truth=fields,
+            expected_event_id=request['event_id'])
         dump('transport_summary.json',summary)
         report.update(complete=True,detector=detector,labels=labels,
             native_sim_canonical_sha256=hashlib.sha256(blob).hexdigest(),
@@ -167,9 +169,14 @@ def run(request,prepare_only=False):
         for name in ['step1_cfg.py','step2_cfg.py','step3_cfg.py','step4_cfg.py','report.json']:
             report.setdefault('config_and_chain_sha256',{})[name]=sha(name)
         dump('diagnostic_report.json',report)
-        if (Path('diagnostic_report.json').stat().st_size
-                +sum(Path(n).stat().st_size for n in request['return_files'] if Path(n).is_file())
-                >request['maximum_return_bytes']):
+        # AFS receives the compressed return archive, not ten megabytes of
+        # uncompressed resolved CMSSW configs. Measure that actual boundary.
+        probe=Path('compact_return_probe.tar.gz')
+        with tarfile.open(probe,'w:gz') as archive:
+            for name in request['return_files']:
+                if Path(name).is_file():archive.add(name,arcname=name)
+        compact_bytes=probe.stat().st_size;probe.unlink()
+        if compact_bytes+Path('diagnostic_report.json').stat().st_size>request['maximum_return_bytes']:
             raise ValueError('Compact diagnostic proof exceeds its registered AFS bound')
     except Exception as error:
         # Preserve the first failed transport attempt before worker retirement;
@@ -192,7 +199,7 @@ def run(request,prepare_only=False):
                     stream.seek(max(0,Path(name).stat().st_size-131072))
                     tails[name]=stream.read().decode(errors='replace')
         dump('failure_logs.json',tails)
-        report.update(error=repr(error),wall_seconds=time.monotonic()-started)
+        report.update(complete=False,error=repr(error),wall_seconds=time.monotonic()-started)
         dump('diagnostic_report.json',report)
         raise
 
@@ -232,8 +239,87 @@ def collect(request):
     dump('diagnostic_report.json',report)
 
 
+def recover_saved(request):
+    """Review known readout failures using retained output; never rerun physics."""
+    from audit_shift_transport_response import summarize_selected
+    from shift_sm_response_labels import read_nano
+    plan_path=Path(request['plan_path'])
+    if sha(plan_path)!=request['plan_sha256']:
+        raise ValueError('Original diagnostic plan changed')
+    plan=json.loads(plan_path.read_text());rows={};proof=[];native_hashes={};nano_hashes={}
+    known={"ValueError('Passive log contains another original event')",
+           "ValueError('Compact diagnostic proof exceeds its registered AFS bound')"}
+    for case in plan['cases']:
+        path=Path(case['path']);old=json.loads(path.with_name('result.json').read_text())
+        status=json.loads(path.with_name('status.json').read_text());payload=path.with_name('return_payload.tar.gz')
+        if (sha(path)!=case['sha256'] or old['request_sha256']!=case['sha256']
+                or old['exit_code']==0 or old.get('error') not in known
+                or sha(payload)!=status['return_payload_sha256']):
+            raise ValueError('Recovery is limited to the reviewed diagnostic readout failures')
+        frozen=json.loads(path.read_text());prior=Path(frozen['original_result']['path'])
+        original_path=Path(frozen['original_request']['path'])
+        if (sha(prior)!=frozen['original_result']['sha256']
+                or sha(original_path)!=frozen['original_request']['sha256']):
+            raise ValueError('Original successful detector response changed')
+        previous=json.loads(prior.read_text())
+        original=json.loads(original_path.read_text())
+        if (previous.get('complete') is not True or previous.get('exit_code')!=0
+                or previous.get('request_sha256')!=frozen['original_request']['sha256']
+                or original['event_id']!=frozen['event_id']
+                or previous['original_event_id']!=frozen['event_id']):
+            raise ValueError('Recovery requires the exact successful original response')
+        with tarfile.open(payload) as archive:
+            pipeline=json.load(archive.extractfile('report.json'))
+            native_blob=gzip.decompress(archive.extractfile('native_sim.json.gz').read())
+            native=json.loads(native_blob)
+            scout=json.loads(gzip.decompress(archive.extractfile('sim_audit.json.gz').read()))
+            logs=json.loads(gzip.decompress(archive.extractfile('transport_log.json.gz').read()))
+            fields_blob=archive.extractfile('nano_readback.json').read();fields=json.loads(fields_blob)
+        if (not pipeline['complete'] or not scout['passed']
+                or pipeline['source_gen_sha256']!=frozen['selected_GEN']['sha256']
+                or pipeline['seed']!=previous['detector']['seed']
+                or any(pipeline['validated_tier_events'].get(tier)!=1
+                       for tier in ['GEN','SIM','DIGIHLT','RECO','NANO'])):
+            raise ValueError('Failed physics, source drift or missing stages cannot be recovered as readout errors')
+        pin=next(p for p in old['first_failure_native_publications'] if p['name']=='nano.root')
+        if pin['sha256']!=pipeline['nano_sha256']:
+            raise ValueError('Retained Nano differs from the completed detector output')
+        local=Path(case['case_id']+'_nano.root');download(pin['path'],local,pin['sha256'])
+        expected=dict(event_id=frozen['event_id'],gen_sha256=original['original_source']['gen_sha256'],
+            native_weight=original['native_weight'],sampling_probability=original.get('source_inclusion_probability',1.))
+        labels=read_nano(local,[expected],pin['sha256']);current_fields=nano_readback(local)
+        if labels!=previous['labels'] or current_fields!=fields:
+            raise ValueError('Independent retained-Nano readback did not reproduce the original candidates')
+        summary=summarize_selected(native,logs,frozen['selected_muon_barcodes'],original['parent_barcodes'],
+            reco_labels=labels,reco_truth=fields,expected_event_id=frozen['event_id'])
+        rows[case['case_id']]=summary
+        native_hashes[case['case_id']]=hashlib.sha256(native_blob).hexdigest()
+        nano_hashes[case['case_id']]=hashlib.sha256(canonical(fields)).hexdigest()
+        proof.append(dict(case_id=case['case_id'],request_sha256=case['sha256'],
+            first_failure_result_sha256=sha(path.with_name('result.json')),
+            first_failure_retained=True,return_payload_sha256=sha(payload),
+            native_SIM_snapshot_sha256=native_hashes[case['case_id']],
+            independent_retained_Nano_SHA_readback=pin['sha256'],
+            original_candidates_exact=True,physics_rerun=False))
+        local.unlink()
+    plain,logged=plan['paired_logger_control']
+    if native_hashes[plain]!=native_hashes[logged] or nano_hashes[plain]!=nano_hashes[logged]:
+        raise ValueError('Passive logger changed the complete native or fitted control output')
+    result=dict(complete=True,diagnostic_only=True,new_GEN_exposure=0,physics_reruns=0,
+        original_plan_sha256=request['plan_sha256'],first_failures_preserved=True,
+        logger_native_truth_hits_metadata_and_fitted_control_exact=True,
+        every_retained_Nano_independently_reread=True,proof=proof,
+        events={name:row for name,row in rows.items() if name.endswith('_logged')},
+        normalization_ready=False,production_policy_qualified=False,
+        reader_sha256=sha(Path(__file__).with_name('audit_shift_transport_response.py')))
+    dump(request['output_path'],result)
+
+
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('request',type=Path)
     parser.add_argument('--collect',action='store_true');parser.add_argument('--prepare-only',action='store_true')
+    parser.add_argument('--recover-saved',action='store_true')
     args=parser.parse_args();request=json.loads(args.request.read_text())
-    collect(request) if args.collect else run(request,args.prepare_only)
+    if args.recover_saved:recover_saved(request)
+    elif args.collect:collect(request)
+    else:run(request,args.prepare_only)

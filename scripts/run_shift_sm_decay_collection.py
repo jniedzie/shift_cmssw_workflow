@@ -314,6 +314,16 @@ def audit_bank_result(result,frozen,case_id):
                 all_member_lifetime_densities_and_material_scores_reread=True)
 
 
+def comparison_groups(plan):
+    groups=plan.get('comparison_groups',['ordinary','mixture'])
+    if (len(groups) not in (1,2) or len(set(groups))!=len(groups)
+            or any(not re.fullmatch('[A-Za-z0-9_-]+',v) for v in groups)):
+        raise ValueError('Require one or two distinct safe diagnostic groups')
+    if len(groups)==1 and not plan.get('conditional_original_choice',False):
+        raise ValueError('Single-group collection is a conditional diagnostic, not a population comparison')
+    return groups
+
+
 def run(path):
     request=json.loads(Path(path).read_text());plan_path=Path(request['plan_path'])
     if digest(plan_path)!=request['plan_sha256']:raise ValueError('Pilot plan changed')
@@ -322,9 +332,7 @@ def run(path):
         diagnostic_only=True,physics_normalization_ready=False,production_policy_qualified=False)
     Path('report.json').write_text(json.dumps(report)+'\n')
     try:
-        groups=plan.get('comparison_groups',['ordinary','mixture'])
-        if len(groups)!=2 or len(set(groups))!=2 or any(not re.fullmatch('[A-Za-z0-9_-]+',v) for v in groups):
-            raise ValueError('Require exactly two distinct safe comparison groups')
+        groups=comparison_groups(plan)
         wait_for_case_results(plan,request.get('wait_for_case_results_seconds',0))
         grouped=defaultdict(list)
         for case in plan['cases']:
@@ -366,7 +374,8 @@ def run(path):
         if set(grouped)!=set(groups) or any(len(v)!=plan['independent_originals'] for v in grouped.values()):
             raise ValueError('Paired original population is incomplete')
         ids=[{tuple(r['labels']['event_id']) for r in grouped[arm]} for arm in groups]
-        if ids[0]!=ids[1] or len(ids[0])!=plan['independent_originals']:raise ValueError('Arms do not share exact originals')
+        if any(values!=ids[0] for values in ids) or len(ids[0])!=plan['independent_originals']:
+            raise ValueError('Arms do not share exact originals')
         capsule=Path('histogram_runtime.tar.gz');pin=request['histogram_runtime']
         download(pin['path'],capsule,pin['sha256'])
         with tarfile.open(capsule) as archive:

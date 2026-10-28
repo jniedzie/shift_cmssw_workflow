@@ -6,6 +6,7 @@ Track IDs are Geant4 IDs, not indices in the saved SimTrack vector. A missing
 saved track or log record is unknown; it is never evidence of absorption.
 """
 from collections import Counter
+import ctypes
 import json
 import math
 
@@ -122,7 +123,7 @@ def _conservation(row):
 
 
 def summarize_selected(native,logs,selected_muon_barcodes,parent_barcodes,
-                       reco_labels=None,reco_truth=None):
+                       reco_labels=None,reco_truth=None,expected_event_id=None):
     """Connect one exact original through actual transport, CSC hits and reco.
 
     A selected parent's planned GEN decay does not establish its actual fate.
@@ -132,12 +133,27 @@ def summarize_selected(native,logs,selected_muon_barcodes,parent_barcodes,
     if len(native['events'])!=1:
         raise ValueError('Selected response audit requires one exact original')
     event=native['events'][0];logs=parse_logger(logs) if isinstance(logs,str) else logs
+    identity=event['event_id']
+    if (len(identity)!=3 or any(type(v) is not int or not 0<=v<2**bits
+                               for v,bits in zip(identity,[32,32,64]))):
+        raise ValueError('Native snapshot has an invalid complete event identity')
+    if expected_event_id is not None and list(expected_event_id)!=identity:
+        raise ValueError('Native complete event identity differs from its frozen request')
+    label_rows=[] if reco_labels is None else [reco_labels] if isinstance(reco_labels,dict) else reco_labels
+    if any(row.get('event_id')!=identity for row in label_rows):
+        raise ValueError('Reco labels belong to another complete original identity')
+    # RunManagerMTWorker::generateEvent creates G4Event((G4int)inpevt.id().event()).
+    # G4Types.hh defines G4int=int; the frozen el9 x86_64/GCC runtime uses signed
+    # 32-bit int. This is the EDM event NUMBER, not an ordinal or SimTrack.eventId.
+    if ctypes.sizeof(ctypes.c_int)!=4:
+        raise ValueError('Native G4int event conversion is unqualified on this architecture')
+    expected_g4=ctypes.c_int(identity[2]).value
     tracks={(t.get('eventId',0),t['trackId']):t for t in event['tracks']}
     if len(tracks)!=len(event['tracks']):raise ValueError('Duplicate saved native track identity')
     vertices=event['vertices'];hits=event['tracking_hit_collections'].get('MuonCSCHits')
     observed_hits=hits is not None;hits=hits or []
     decays=logs['decays'];terminals=logs['terminals']
-    if any(d.get('g4_event',0)!=0 for d in decays+terminals):
+    if any(type(d.get('g4_event')) is not int or d['g4_event']!=expected_g4 for d in decays+terminals):
         raise ValueError('Passive log contains another original event')
     fields=(reco_truth or {}).get('stored_fields',reco_truth or {})
     reco_ids=fields.get('ShiftMuon_hitSimTrackId',[])
@@ -164,7 +180,7 @@ def summarize_selected(native,logs,selected_muon_barcodes,parent_barcodes,
                 continue
             matched[key]=track
             evidence.setdefault(key,[]).append(dict(kind='passive_barcode_and_exact_G4_track_ID',
-                barcode=barcode,g4_event=record.get('g4_event',0),trackId=record['trackId'],
+                barcode=barcode,g4_event=record['g4_event'],trackId=record['trackId'],
                 native_eventId=key[0],native_eventId_explicit_in_passive_record='eventId' in record,
                 passive_step=record['step']))
         matches=list(matched.values())
@@ -222,6 +238,11 @@ def summarize_selected(native,logs,selected_muon_barcodes,parent_barcodes,
             missing_record_is_not_absorption=not bool(stopped or actual)))
     checks=[_conservation(d) for d in decays]
     return dict(schema='shift-selected-transport-response-v1',event_id=event['event_id'],
+        event_identity_binding=dict(native_complete_event_id=identity,
+            expected_complete_event_id=list(expected_event_id) if expected_event_id is not None else None,
+            reco_complete_identities_checked=len(label_rows),expected_g4_event_id=expected_g4,
+            g4_event_mapping='CMSSW RunManagerMTWorker::generateEvent: signed32(EDM event number)',
+            g4_event_alone_does_not_encode_run_lumi_or_high_event_bits=True),
         selected_muons=muons,selected_parents=parents,decay_conservation=checks,
         native_CSC_hit_tracks_missing_from_saved_tracks=[dict(eventId=e,trackId=t)
             for e,t in sorted({(h.get('eventId',0),h['track']) for h in hits}-set(tracks))],

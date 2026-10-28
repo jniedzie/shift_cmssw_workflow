@@ -17,6 +17,16 @@ from shift_sm_decay_bank import probabilities as bank_probabilities, choose as c
 
 
 class GroupedStatisticsTest(unittest.TestCase):
+    def test_single_group_cannot_be_used_as_an_unqualified_population_comparison(self):
+        self.assertEqual(collection.comparison_groups({}),['ordinary','mixture'])
+        self.assertEqual(collection.comparison_groups(dict(comparison_groups=['ordinary'],
+            conditional_original_choice=True)),['ordinary'])
+        with self.assertRaisesRegex(ValueError,'conditional diagnostic'):
+            collection.comparison_groups(dict(comparison_groups=['ordinary']))
+        for groups in [[],['ordinary','ordinary'],['bad/path'],['a','b','c']]:
+            with self.subTest(groups=groups),self.assertRaises(ValueError):
+                collection.comparison_groups(dict(comparison_groups=groups,conditional_original_choice=True))
+
     def test_fixed_size_variance_matches_exact_enumeration_of_every_control_draw(self):
         import itertools
         observed=[];estimates=[];values=[0.,0.,1.,3.]
