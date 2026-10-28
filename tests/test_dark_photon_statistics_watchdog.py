@@ -948,6 +948,28 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertIsNone(report['actual_planned_progress']['authorized_new_events'])
         self.assertFalse(any(item['code'].startswith('no_children') for item in report['issues']))
 
+    def test_pending_reference_gate_does_not_admit_the_frozen_bank_ceiling(self):
+        Path(self.config['worklist']).write_text(json.dumps(dict(
+            schema='shift-dp-meson-production-v1',
+            automatic_bulk_admission=dict(schema='shift-dp-reference-response-admission-v1'),
+            batches=[dict(batch='control', point='a', source_collisions=50000, operational_canary=True),
+                     dict(batch='submitted', point='b', source_collisions=50000),
+                     dict(batch='waiting1', point='a', source_collisions=50000),
+                     dict(batch='waiting2', point='b', source_collisions=50000)])))
+        (self.root/'state.json').write_text(json.dumps(dict(checked_epoch=self.now,
+            complete=False, automatic_bulk_admission=None,
+            batches={'submitted':dict(source_cluster=123)})))
+        self.counts.update(complete_receipts=1)
+        report = self.assess([])
+        progress = report['actual_planned_progress']
+        self.assertTrue(progress['admission_gate_pending'])
+        self.assertEqual(progress['admitted_source_banks'], 2)
+        self.assertEqual(progress['submitted_source_banks'], 1)
+        self.assertEqual(progress['frozen_source_banks'], 4)
+        self.assertEqual(progress['authorized_source_collisions'], 100000)
+        self.assertEqual(progress['frozen_source_collision_ceiling'], 200000)
+        self.assertIsNone(progress['target_fully_admitted'])
+
     def test_budget_gated_response_point_is_visible_while_other_work_continues(self):
         worklist = Path(self.config['worklist'])
         worklist.write_text(json.dumps(dict(schema='shift-dp-meson-production-v1', batches=[

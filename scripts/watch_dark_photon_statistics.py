@@ -1041,7 +1041,14 @@ def assess(config, previous, rows, history, receipts, now):
         if value.get('cluster') in reviewed}
     if meson:
         allowed = set(admission['allowed_batches']) if 'allowed_batches' in admission else None
-        admitted_rows = [row for row in worklist['batches'] if allowed is None or row['batch'] in allowed]
+        reference_pending = (allowed is None and worklist.get('automatic_bulk_admission', {}).get('schema')
+                             == 'shift-dp-reference-response-admission-v1')
+        submitted = {name for name, entry in controller.get('batches', {}).items() if entry.get('source_cluster')}
+        if reference_pending:
+            admitted_rows = [row for row in worklist['batches']
+                             if row.get('operational_canary') or row['batch'] in submitted]
+        else:
+            admitted_rows = [row for row in worklist['batches'] if allowed is None or row['batch'] in allowed]
         expected_rows=[row for row in admitted_rows
                        if not row.get('gen_qualification_only') and not row.get('operational_canary')]
         expectations=[row.get('expected_signal_events') for row in expected_rows]
@@ -1051,6 +1058,9 @@ def assess(config, previous, rows, history, receipts, now):
             authorized_source_collisions=sum(row['source_collisions'] for row in admitted_rows),
             frozen_source_collision_ceiling=sum(row['source_collisions'] for row in worklist['batches']),
             admitted_source_banks=len(admitted_rows),
+            submitted_source_banks=sum(row['batch'] in submitted for row in worklist['batches']),
+            frozen_source_banks=len(worklist['batches']),
+            admission_gate_pending=reference_pending,
             not_admitted_source_banks=len(worklist['batches'])-len(admitted_rows),
             expected_signal_events=expected_signal_events)
     return report
