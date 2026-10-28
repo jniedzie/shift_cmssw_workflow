@@ -1,13 +1,20 @@
 # Code style: AI-code. AI-generated focused diagnostic classifier/count tests.
 import copy
 import json
+import gzip
+import hashlib
+import io
+import os
 from pathlib import Path
+import tarfile
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import sys
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 from dy_branching_control import primary_decay, mass_counts, compare, native_bounds
+from run_dy_branching_control import collect, retain_failure, finalize
 
 
 def event(channel=(-13,13)):
@@ -18,6 +25,32 @@ def event(channel=(-13,13)):
 
 
 class ControlTests(unittest.TestCase):
+    def test_failed_GEN_retention_requires_a_bound_and_never_uses_production_storage(self):
+        old=Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            try:
+                os.chdir(temporary)
+                request=dict(failure_publication_bound_bytes=0,
+                    failure_publication_directory='/eos/user/j/jniedzie/shift_cmssw_support/test_failed_GEN')
+                self.assertIsNone(retain_failure(request))
+                Path('gen.root').write_bytes(b'failed native GEN reference')
+                with self.assertRaisesRegex(ValueError,'registered retention'):
+                    retain_failure(request)
+                request['failure_publication_bound_bytes']=1024
+                request['failure_publication_directory']='/eos/user/j/jniedzie/shift_cmssw/production'
+                with self.assertRaisesRegex(ValueError,'registered support'):
+                    retain_failure(request)
+                request['failure_publication_directory']='/eos/user/j/jniedzie/shift_cmssw_support/test_failed_GEN'
+                with patch('run_shift_weighted_gen.publish',return_value=['preserved']) as publish:
+                    self.assertEqual(retain_failure(request),['preserved'])
+                    self.assertEqual(publish.call_args.args[0],[(Path('gen.root'),'gen.root')])
+                    request['failure_publication_bound_bytes']=1
+                    with self.assertRaisesRegex(ValueError,'retention allowance'):
+                        retain_failure(request)
+                    self.assertEqual(publish.call_count,1)
+            finally:
+                os.chdir(old)
+
     def test_threshold_floor_and_both_hard_mass_bounds_are_native_and_pinned(self):
         parameters=['23:mMin = 0.211317','PhaseSpace:mHatMin = 0.211317',
                     'PhaseSpace:mHatMax = 0.5','23:onMode = off','23:onIfMatch = 13 -13']
@@ -89,6 +122,84 @@ class ControlTests(unittest.TestCase):
             self.assertEqual(result['comparisons'][1]['natural']['accepted_exposure'],5000)
             self.assertGreater(result['comparisons'][1]['natural']['approximate_independent_standard_error_pb'],
                                result['comparisons'][1]['natural']['conditional_binomial_error_pb'])
+
+    def test_compact_collection_preserves_full_exposure_and_rejects_repeated_originals(self):
+        def prepare(base, duplicate=False):
+            plan=base/'plan.json';plan.write_text(json.dumps(dict(bounds_GeV=[20.,30.])))
+            plan_sha=hashlib.sha256(plan.read_bytes()).hexdigest()
+            requests={}
+            for arm in ['forced','natural']:
+                folder=base/arm;folder.mkdir()
+                request=folder/'request.json';request.write_text(json.dumps(dict(arm=arm)))
+                request_sha=hashlib.sha256(request.read_bytes()).hexdigest()
+                rows=[dict(event_id=[1 if arm=='forced' else 2,1,i],native_weight=1.,
+                    mass_GeV=mass,primary23_mumu=arm=='forced' or i==1)
+                    for i,mass in [(1,24.),(2,26.)]]
+                if duplicate:rows[1]['event_id']=rows[0]['event_id']
+                packed=gzip.compress(('\n'.join(json.dumps(r) for r in rows)+'\n').encode(),mtime=0)
+                audit=dict(complete=True,arm=arm,plan_sha256=plan_sha,accepted_gen_events=2,
+                    source_xsec_pb=1. if arm=='forced' else 2.,source_xsec_error_pb=.01,
+                    muonic_events=sum(r['primary23_mumu'] for r in rows),
+                    mass_slices=mass_counts(rows,[[20.,25.],[25.,30.]]),
+                    event_rows_sha256=hashlib.sha256(packed).hexdigest())
+                with tarfile.open(folder/'return_payload.tar.gz','w:gz') as archive:
+                    for name,raw in [('audit.json',json.dumps(audit).encode()),
+                                     ('primary23_events.jsonl.gz',packed)]:
+                        member=tarfile.TarInfo(name);member.size=len(raw);archive.addfile(member,io.BytesIO(raw))
+                (folder/'result.json').write_text(json.dumps(dict(complete=True,exit_code=0,
+                    request_sha256=request_sha,native_audit=audit)))
+                (folder/'status.json').write_text(json.dumps(dict(complete=True,exit_code=0,
+                    return_payload_sha256=hashlib.sha256((folder/'return_payload.tar.gz').read_bytes()).hexdigest())))
+                requests[arm]=dict(request_path=str(request),request_sha256=request_sha)
+            request=base/'collect.json';request.write_text(json.dumps(dict(arms=requests,
+                plan_path=str(plan),plan_sha256=plan_sha,minimum_natural_muonic_count=1)))
+            return request
+
+        old=Path.cwd()
+        with tempfile.TemporaryDirectory() as temporary:
+            base=Path(temporary);good=base/'good';good.mkdir();request=prepare(good)
+            try:
+                os.chdir(good);collect(request)
+                result=json.loads((good/'result.json').read_text())
+                self.assertEqual(result['accepted_rows_reread'],dict(forced=2,natural=2))
+                self.assertTrue(result['positive_count_target_met'])
+                self.assertEqual(result['comparisons'][0]['natural_over_forced'],1.)
+                self.assertFalse(result['normalization_ready'])
+                # A complete but statistically inconclusive bin must finish
+                # normally, without being promoted to production-ready.
+                cases=[]
+                for arm in ['forced','natural']:
+                    folder=good/arm;path=folder/'request.json'
+                    value=json.loads((folder/'result.json').read_text())
+                    value['full_native_second_readback']=dict(complete=True,
+                        every_accepted_identity_channel_weight_and_Run_Lumi_reread=True)
+                    (folder/'result.json').write_text(json.dumps(value))
+                    cases.append(dict(stratum='good',arm=arm,request_path=str(path),
+                        request_sha256=hashlib.sha256(path.read_bytes()).hexdigest()))
+                final=base/'final';final.mkdir();plan=good/'plan.json'
+                master=base/'master.json';master.write_text(json.dumps(dict(cases=cases,science_workers=2,
+                    accepted_GEN_events_per_worker=2,total_accepted_GEN_budget=4,
+                    all_native_subplans=[dict(path=str(plan),sha256=hashlib.sha256(plan.read_bytes()).hexdigest())])))
+                result['positive_count_target_met']=False
+                (good/'result.json').write_text(json.dumps(result))
+                final_request=final/'request.json';final_request.write_text(json.dumps(dict(plan_path=str(master),
+                    plan_sha256=hashlib.sha256(master.read_bytes()).hexdigest(),comparisons=[dict(stratum='good',
+                        request_path=str(good/'collect.json'),request_sha256=hashlib.sha256((good/'collect.json').read_bytes()).hexdigest())])))
+                os.chdir(final);finalize(final_request)
+                done=json.loads((final/'result.json').read_text())
+                self.assertTrue(done['complete_frozen_draw_collected'])
+                self.assertFalse(done['all_positive_count_targets_met'])
+                self.assertFalse(done['full_production_ready'])
+                value=json.loads(final_request.read_text());value['comparisons']=[]
+                final_request.write_text(json.dumps(value))
+                with self.assertRaisesRegex(ValueError,'comparison census'):
+                    finalize(final_request)
+                bad=base/'bad';bad.mkdir();request=prepare(bad,duplicate=True)
+                os.chdir(bad)
+                with self.assertRaisesRegex(ValueError,'Returned native rows'):
+                    collect(request)
+            finally:
+                os.chdir(old)
 
 
 if __name__=='__main__':unittest.main()
