@@ -52,6 +52,9 @@ class SourcePolicyTest(unittest.TestCase):
         self.assertNotIn('run_shift_gen_to_nano.py', controller.replacement_tool_names({}))
         self.assertIn('run_shift_gen_to_nano.py', controller.replacement_tool_names({'detector_runtime': {'profile': 'pinned'}}))
         self.assertIn('prepare_dark_photon_meson_production.py', controller.replacement_tool_names({}))
+        self.assertNotIn('dark_photon_production_support.py', controller.replacement_tool_names({}))
+        self.assertIn('dark_photon_production_support.py',
+                      controller.replacement_tool_names({'main_histogrammer': {'profile': 'pinned'}}))
 
     def test_parallel_handoff_flag_rejects_integer_truth_values(self):
         with tempfile.TemporaryDirectory() as temporary:
