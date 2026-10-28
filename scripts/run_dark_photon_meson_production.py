@@ -913,7 +913,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
     # seeds, worklist order, physics and storage claims remain frozen.
     operational={'tools','simultaneous_sources','simultaneous_detector_points',
                  'additional_reserved_worklists','additional_reserved_meson_forecasts',
-                 'prior_meson_controller_directory', 'meson_peer_controller_directories'}
+                 'prior_meson_controller_directory', 'meson_peer_controller_directories',
+                 'main_cleanup_recovery_guard'}
     immutable=set(original)-operational
     if any(config.get(key)!=original[key] for key in immutable):
         raise ValueError('Replacement controller changed frozen production settings')
@@ -937,7 +938,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_regrouping_canary_recovery', 'future_detector_runtime',
                                    'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
                                    'reviewed_unsubmitted_runtime_recoveries',
-                                   'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll'}:
+                                   'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
+                                   'main_cleanup_recovery_guard'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -3201,7 +3203,79 @@ def main_histogram_preflight_child(directory,child,cluster):
     return preparation.get('complete') is True
 
 
+def reviewed_main_cleanup_terminal(config, receipt):
+    """Accept one exact postpublication cleanup repair, never a detector retry."""
+    authority=config.get('main_cleanup_recovery_guard')
+    if authority is None:return None
+    guard=read_pinned(authority['configuration']);seal=read_pinned(authority['seal'])
+    root=Path(guard['directory'])
+    if (authority['configuration']['path']!=str(root/'config.json')
+            or authority['seal']['path']!=str(root/'seal.json')
+            or seal.get('files',{}).get(str(root/'config.json'))!=authority['configuration']['sha256']
+            or seal.get('exact_two_prepared_cohorts_only') is not True
+            or guard.get('no_GEN_or_detector_rerun') is not True or len(guard.get('targets',[]))!=2):
+        raise ValueError('Cleanup guard is not the exact frozen two-cohort recovery')
+    targets=[target for target in guard['targets'] if target['directory']==receipt['task']]
+    if not targets:return None
+    if len(targets)!=1:raise ValueError('Cleanup guard repeats a target')
+    target=targets[0];batch=target['batch'];directory=batch_directory(config,dict(batch=batch))/'production'
+    if target['directory']!=str(directory) or target['original_manager']!=receipt['cluster']:
+        raise ValueError('Cleanup guard changed its original detector owner')
+    proof_path=root/'records'/batch/'recovery.json'
+    if not proof_path.exists():return None
+    for name,digest in seal['files'].items():
+        if durable.sha(name)!=digest:raise ValueError('Frozen cleanup recovery tool changed')
+    proof=read(proof_path);pin=dict(path=str(proof_path),sha256=durable.sha(proof_path))
+    old_path=proof_path.parent/'original_finalizer.json';old=read(old_path)
+    plan=read(directory/'plan.json');row=plan['points'][0]
+    point_path=directory/'completed_points'/(row['point']+'.json');report=read(point_path)
+    retirement=directory/'primitive_nano_retirement.json';retired=read(retirement)
+    published=proof_path.parent/'original_published_receipt.json';original=read(published)
+    if (proof.get('schema')!='shift-reviewed-main-cleanup-recovery-v1' or proof.get('complete') is not True
+            or proof.get('failure_kind')!='postpublication_cleanup_scheduler_query'
+            or proof.get('GEN_or_SIM_rerun') is not False or proof.get('batch')!=batch
+            or proof.get('directory')!=str(directory) or proof.get('original_manager')!=receipt['cluster']
+            or old.get('complete') is not False or 'Collector has no record' not in old.get('error','')
+            or durable.sha(old_path)!=proof.get('original_failure_sha256')
+            or durable.sha(directory/'plan.json')!=proof.get('plan_sha256')
+            or proof['plan_sha256']!=target['plan_sha256']
+            or durable.sha(directory/'seal.json')!=proof.get('seal_sha256')
+            or proof['seal_sha256']!=target['seal_sha256']
+            or durable.sha(point_path)!=proof.get('completed_point_sha256')
+            or durable.sha(directory/'statuses/finalizer.json')!=proof.get('status_sha256')
+            or durable.sha(retirement)!=proof.get('retirement_receipt_sha256')
+            or durable.sha(published)!=proof.get('original_published_receipt_sha256')
+            or report.get('complete') is not True or report.get('point')!=target['point']
+            or report.get('events')!=row['events'] or report.get('full_gen_events')!=row['full_gen_events']
+            or original.get('complete') is not True
+            or original.get('request_sha256')!=durable.sha(directory/'postprocessing_request.json')
+            or retired.get('complete') is not True or retired.get('retained_readbacks_verified') is not True
+            or proof.get('replacement_helper_sha256')!=guard['helper_sha256']):
+        raise ValueError('Cleanup recovery changed its exact complete source or known failure')
+    expected={str(directory/'statuses'/('chunk_'+str(i)+'.json')) for i in range(len(row['chunks']))}
+    if (set(proof.get('payload_status_hashes',{}))!=expected or any(
+            durable.sha(path)!=digest or read(path).get('complete') is not True
+            for path,digest in proof['payload_status_hashes'].items())):
+        raise ValueError('Cleanup recovery cannot accept missing or failed detector responses')
+    live=durable.jobs(config,'ClusterId == '+str(receipt['cluster'])+' || DAGManJobId == '+str(receipt['cluster']))
+    if live:return None
+    cache=Path(config['directory'])/'cleanup_recovery_native_cache'/(str(receipt['cluster'])+'.json')
+    if cache.exists():
+        native=read(cache)
+        if native.get('authority')!=pin:raise ValueError('Cleanup recovery authority changed after native qualification')
+    else:
+        ads=durable.parse_ads(durable.run_condor(['/usr/bin/condor_history',*durable.scheduler_arguments(config),
+            str(receipt['cluster'])+'.0','-limit','1','-json'],timeout=45))
+        if (len(ads)!=1 or ads[0].get('ClusterId')!=receipt['cluster'] or ads[0].get('ProcId')!=0
+                or ads[0].get('Iwd')!=str(directory) or ads[0].get('ExitCode')!=1
+                or ads[0].get('ExitBySignal') is not False):
+            raise ValueError('Cleanup recovery lacks the exact native postpublication manager failure')
+        native=dict(authority=pin,terminal_native_ad=ads[0]);cache.parent.mkdir(exist_ok=True);durable.save(cache,native)
+    return native
+
+
 def native_status(config, receipt, queue_snapshot=None):
+    if reviewed_main_cleanup_terminal(config,receipt) is not None:return 'complete'
     payload_directory = receipt['task']
     for name, authority in config.get('reviewed_unsubmitted_runtime_recoveries', {}).items():
         proof = read_pinned(authority)
@@ -3372,6 +3446,19 @@ def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot
     No failed job is released, replaced or counted as completed here.
     """
     try:
+        if stage=='detector':
+            cleanup=reviewed_main_cleanup_terminal(config,receipt)
+            if cleanup is not None:
+                state.setdefault('reviewed_main_cleanup_records',{})[batch['batch']]=dict(
+                    cleanup,original_entry=copy.deepcopy(entry))
+                entry.update(detector_native_complete=True,cleanup_recovered=True,
+                             reviewed_main_cleanup_sha256=cleanup['authority']['sha256'])
+                failures=state.setdefault('failed_batches',{}).pop(batch['batch'],[])
+                if failures:
+                    state.setdefault('resolved_failed_batches',{}).setdefault(batch['batch'],[]).append(
+                        dict(failures=failures,cleanup_recovery=cleanup))
+                entry.pop('failure',None)
+                return 'complete'
         result=(native_status(config,receipt,queue_snapshot) if queue_snapshot is not None
                 else native_status(config,receipt))
         reconcile_runtime_failures(config,state,batch,entry,receipt,queue_snapshot)

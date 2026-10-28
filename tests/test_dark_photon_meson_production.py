@@ -16,6 +16,33 @@ import audit_dark_photon_meson_coverage as coverage_audit
 
 
 class FixedExposure(unittest.TestCase):
+    def test_cleanup_recovery_is_optin_and_unrelated_jobs_keep_native_checks(self):
+        self.assertIsNone(production.reviewed_main_cleanup_terminal({},dict(task='/other',cluster=10)))
+        guard=dict(directory='/guard',no_GEN_or_detector_rerun=True,
+            targets=[dict(directory='/one'),dict(directory='/two')])
+        seal=dict(exact_two_prepared_cohorts_only=True,files={'/guard/config.json':'config'})
+        config=dict(main_cleanup_recovery_guard=dict(configuration=dict(path='/guard/config.json',sha256='config'),
+                                                      seal=dict(path='/guard/seal.json',sha256='seal')))
+        with patch.object(production,'read_pinned',side_effect=[guard,seal]):
+            self.assertIsNone(production.reviewed_main_cleanup_terminal(config,dict(task='/other',cluster=10)))
+        with patch.object(production,'read_pinned',side_effect=[guard,dict(seal,exact_two_prepared_cohorts_only=False)]):
+            with self.assertRaisesRegex(ValueError,'exact frozen two-cohort'):
+                production.reviewed_main_cleanup_terminal(config,dict(task='/one',cluster=10))
+
+    def test_cleanup_adoption_preserves_failed_native_record_and_never_resubmits(self):
+        proof=dict(authority=dict(path='/guard/recovery.json',sha256='proof'),
+                   terminal_native_ad=dict(ClusterId=100,ExitCode=1,ExitBySignal=False))
+        entry=dict(stage='detector_failed',failure=dict(cluster=100,error='original cleanup failure'))
+        state=dict(failed_batches=dict(batch=[entry['failure']]))
+        with patch.object(production,'reviewed_main_cleanup_terminal',return_value=proof), \
+             patch.object(production.durable,'submission') as submit:
+            status=production.batch_job_status({},state,dict(batch='batch'),entry,dict(cluster=100), 'detector')
+        self.assertEqual(status,'complete');submit.assert_not_called()
+        self.assertTrue(entry['cleanup_recovered'])
+        self.assertEqual(state['reviewed_main_cleanup_records']['batch']['terminal_native_ad']['ExitCode'],1)
+        self.assertNotIn('batch',state['failed_batches'])
+        self.assertTrue(state['resolved_failed_batches']['batch'])
+
     def test_handoff_inventory_correction_preserves_reserved_runs_and_exact_audits(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp)
