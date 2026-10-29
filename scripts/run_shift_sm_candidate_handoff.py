@@ -7,6 +7,7 @@ weights stay unchanged; the additional candidate/control draw keeps q separate.
 Submission intents are durable: an uncertain submission is never repeated.
 """
 import argparse
+from contextlib import ExitStack
 import fcntl
 import hashlib
 import json
@@ -14,6 +15,7 @@ import os
 from pathlib import Path
 import pwd
 import re
+import shlex
 import shutil
 import subprocess
 import tarfile
@@ -30,6 +32,7 @@ from shift_condor_native import native_env, query, run_condor
 MIB = 1048576
 SCHEMA = 'shift-sm-candidate-handoff-v1'
 BUDGET_SCHEMA = 'shift-sm-candidate-global-admission-budget-v1'
+WAVE_SCHEMA = 'shift-sm-candidate-wave-handoff-v1'
 
 
 def pin(path):
@@ -367,6 +370,8 @@ def submit(config, manifest):
     verify_prepared(manifest, manifest['configuration_sha256'])
     validate_frozen(config)
     output = Path(manifest['working_directory'])
+    if (output/'shared_wave_ownership.json').exists():
+        raise ValueError('A shared wave owns this source; do not submit an individual DAG')
     manager = output/'response.dag.condor.sub'
     if not manager.exists():
         run_condor(['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','2000','-maxidle','2000',
@@ -397,6 +402,206 @@ def submit(config, manifest):
     return handoff
 
 
+def wave_sources(config):
+    """Authenticate already prepared sources; never redraw or reprepare them."""
+    pins = config['source_configurations']
+    maximum = config.get('maximum_sources', 32)
+    if type(maximum) is not int or not 1 <= maximum <= 128 or not 1 <= len(pins) <= maximum:
+        raise ValueError('Require a bounded nonempty source wave')
+    rows, seen = [], set()
+    for item in pins:
+        source_config = read(checked(item['path'], item['sha256']))
+        if source_config.get('schema') != SCHEMA:
+            raise ValueError('Wave input is not a source handoff configuration')
+        directory = persistent_directory(source_config['output_directory'])
+        manifest_path = directory/'prepared.json'
+        manifest = verify_prepared(read(manifest_path), item['sha256'])
+        if manifest['working_directory'] != str(directory):
+            raise ValueError('Source prepared manifest belongs to another directory')
+        sid = manifest['source_id']
+        if sid in seen:
+            raise ValueError('Duplicate original source in shared wave')
+        seen.add(sid)
+        rows.append(dict(source_id=sid, configuration=dict(item),
+            prepared_manifest=pin(manifest_path), working_directory=str(directory),
+            manifest=manifest, config=source_config))
+    return rows
+
+
+def source_wave_claim(row, output, config_sha256, wave_id):
+    return dict(schema=WAVE_SCHEMA, wave_id=wave_id, wave_directory=str(output),
+        configuration_sha256=config_sha256, source_id=row['source_id'],
+        source_prepared_manifest=row['prepared_manifest'])
+
+
+def check_source_owner(row, claim, allow_same_wave=False):
+    """Do not adopt a live, failed, complete or uncertain individual owner."""
+    directory = Path(row['working_directory'])
+    ownership = directory/'shared_wave_ownership.json'
+    if ownership.exists() and read(ownership) != claim:
+        raise ValueError('A different shared wave already owns source '+row['source_id'])
+    submission = directory/'submission.json'
+    if submission.exists():
+        prior = read(submission)
+        if (not allow_same_wave or prior.get('shared_wave') is not True
+                or prior.get('shared_wave_directory') != claim['wave_directory']
+                or prior.get('source_prepared_manifest') != row['prepared_manifest']):
+            raise ValueError('Source already has a submitted owner: '+row['source_id'])
+    for name in ('manager_intent.json', 'manager_submission.json'):
+        if (directory/name).exists():
+            raise ValueError('Individual source submission or uncertainty requires review: '+row['source_id'])
+
+
+def prefixed_dag(path, prefix, expected_jobs):
+    """Preserve every source dependency and job DIR; reject unsupported grammar."""
+    names = {row['node'] for row in expected_jobs}
+    mapping = {name: prefix+name for name in names}
+    lines, jobs = [], set()
+    for text in Path(path).read_text().splitlines():
+        if not text.strip() or text.lstrip().startswith('#'):
+            continue
+        words = shlex.split(text)
+        command = words[0]
+        if command == 'CONFIG' and len(words) == 2:
+            continue
+        if command == 'JOB' and len(words) == 5 and words[3] == 'DIR':
+            name = words[1]
+            if name not in names or name in jobs:
+                raise ValueError('Unexpected or duplicate source DAG job')
+            original = next(row for row in expected_jobs if row['node'] == name)
+            if (words[2] != str(Path(original['job_directory'])/'worker.sub')
+                    or words[4] != original['job_directory']):
+                raise ValueError('Source DAG changed an original job submit file or DIR')
+            jobs.add(name)
+            words[1] = mapping[name]
+        elif command == 'PRIORITY' and len(words) == 3:
+            words[1] = mapping[words[1]]
+            int(words[2])
+        elif command == 'PARENT' and words.count('CHILD') == 1:
+            boundary = words.index('CHILD')
+            if boundary < 2 or boundary == len(words)-1:
+                raise ValueError('Empty source DAG dependency')
+            words = ['PARENT']+[mapping[name] for name in words[1:boundary]]+['CHILD']+[
+                mapping[name] for name in words[boundary+1:]]
+        else:
+            raise ValueError('Unsupported source DAG command: '+command)
+        lines.append(' '.join(words))
+    if jobs != names:
+        raise ValueError('Shared wave would omit a source job')
+    return lines, mapping
+
+
+def prepare_wave(config, config_sha256):
+    """Group frozen source DAGs under one manager, preserving their ownership."""
+    if config.get('schema') != WAVE_SCHEMA:
+        raise ValueError('Unsupported candidate wave configuration')
+    output = persistent_directory(config['output_directory'])
+    wave_id, batch = config['wave_id'], config['job_batch_name']
+    if not all(re.fullmatch(r'[A-Za-z0-9_.-]+', value) for value in (wave_id, batch)):
+        raise ValueError('Use meaningful plain wave and batch names')
+    rows = wave_sources(config)
+    previous = output/'prepared.json'
+    if previous.exists():
+        manifest = verify_prepared(read(previous), config_sha256)
+        for row in rows:
+            check_source_owner(row, source_wave_claim(row, output, config_sha256, wave_id), True)
+        return manifest
+    if output.exists() and any(output.iterdir()):
+        raise ValueError('Partial wave preparation requires review; never repeat ownership mutations')
+    with ExitStack() as locks:
+        for row in sorted(rows, key=lambda value: value['working_directory']):
+            lock = locks.enter_context(Path(row['working_directory']).with_suffix('.handoff.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            check_source_owner(row, source_wave_claim(row, output, config_sha256, wave_id))
+        output.mkdir(parents=True)
+        intent = dict(schema=WAVE_SCHEMA, configuration_sha256=config_sha256,
+            wave_id=wave_id, sources=[dict(source_id=row['source_id'],
+                prepared_manifest=row['prepared_manifest']) for row in rows])
+        save(output/'preparation_intent.json', intent)
+        lines = ['# Code style: AI-code. Shared manager; frozen per-source jobs and gates unchanged.',
+            'CONFIG '+str(output/'dagman.config')]
+        sources, frozen = [], []
+        for index, row in enumerate(rows):
+            claim = source_wave_claim(row, output, config_sha256, wave_id)
+            owner_path = Path(row['working_directory'])/'shared_wave_ownership.json'
+            save(owner_path, claim)
+            source_lines, mapping = prefixed_dag(Path(row['working_directory'])/'response.dag',
+                'S'+str(index).zfill(3)+'_', row['manifest']['jobs'])
+            lines.extend(source_lines)
+            sources.append(dict(source_id=row['source_id'], configuration=row['configuration'],
+                prepared_manifest=row['prepared_manifest'], working_directory=row['working_directory'],
+                ownership=pin(owner_path), source_job_nodes=mapping,
+                collector=row['manifest']['collector'], detector_jobs=len(row['manifest']['detector_jobs'])))
+            frozen.extend([row['configuration'], row['prepared_manifest'], pin(owner_path)])
+            frozen.extend(row['manifest']['frozen_files'])
+        (output/'response.dag').write_text('\n'.join(lines)+'\n')
+        (output/'dagman.config').write_text('# Code style: AI-code. Independent source gates; pace starts.\n'
+            'DAGMAN_MAX_JOBS_SUBMITTED = 2000\nDAGMAN_MAX_JOBS_IDLE = 2000\n'
+            'DAGMAN_MAX_SUBMITS_PER_INTERVAL = 20\nDAGMAN_USER_LOG_SCAN_INTERVAL = 1\n'
+            'DAGMAN_SUBMIT_DELAY = 0\n')
+        frozen.extend(pin(output/name) for name in ('response.dag','dagman.config','preparation_intent.json'))
+        manifest = dict(schema=WAVE_SCHEMA, configuration_sha256=config_sha256,
+            wave_id=wave_id, working_directory=str(output), sources=sources,
+            detector_jobs=sum(row['detector_jobs'] for row in sources),
+            wave_manager_output=str(output/'response.dag.dagman.out'), frozen_files=frozen,
+            per_source_jobs_and_probabilities_unchanged=True, new_GEN_exposure=0,
+            per_source_watchdogs=False, jobs_submitted=False)
+        save(previous, manifest)
+        return manifest
+
+
+def submit_wave(config, manifest):
+    """Submit one manager; recover only source receipts from its known proof."""
+    verify_prepared(manifest, manifest['configuration_sha256'])
+    rows = wave_sources(config)
+    output = Path(manifest['working_directory'])
+    for row in rows:
+        check_source_owner(row, source_wave_claim(row, output, manifest['configuration_sha256'],
+            config['wave_id']), True)
+    launched_path = output/'manager_submission.json'
+    if not launched_path.exists():
+        # A source job can exist even if another submitter lost its receipt.
+        # This fresh account query must succeed before a new wave submission.
+        ads = query('Owner == '+json.dumps(pwd.getpwuid(os.getuid()).pw_name),
+            ['ClusterId','ProcId','Iwd','DAGManJobId','JobStatus'], timeout=45)
+        directories = [row['working_directory'] for row in rows]
+        if any(isinstance(ad.get('Iwd'), str) and any(ad['Iwd'] == directory
+                or ad['Iwd'].startswith(directory+'/') for directory in directories) for ad in ads):
+            raise ValueError('A native job already occupies a shared source; review its owner')
+    manager = output/'response.dag.condor.sub'
+    if not manager.exists():
+        run_condor(['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','2000','-maxidle','2000',
+            '-autorescue','0','-notification','Never','-batch-name',config['job_batch_name'],
+            '-append','+MaxRuntime = 86400','-append','initialdir = '+str(output),
+            '-append','+SendCredential = True',
+            '-append','on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
+            '-append','periodic_release = False',str(output/'response.dag')], cwd=output, timeout=60)
+    launched = submit_once(manager, config['job_batch_name'], output, 'manager',
+        manifest['configuration_sha256'])
+    # Pin the wave before changing any per-source submission receipt. A resumed
+    # call may repair only these records using the same durable native manager.
+    wave_pin = pin(output/'prepared.json')
+    handoff = dict(schema=WAVE_SCHEMA, shared_wave=True, wave_id=config['wave_id'],
+        manager=launched, sources=[row['source_id'] for row in manifest['sources']],
+        detector_jobs=manifest['detector_jobs'], per_source_watchdogs=False,
+        wave_prepared_manifest=wave_pin, wave_manager_output=manifest['wave_manager_output'],
+        queued_Iwd_verified=True, execution_verified=False, no_automatic_retry=True)
+    save(output/'submission.json', handoff)
+    for row in manifest['sources']:
+        record = dict(schema='shift-sm-candidate-wave-source-submission-v1', shared_wave=True,
+            source_id=row['source_id'], wave_id=config['wave_id'], shared_wave_directory=str(output),
+            manager=launched, wave_prepared_manifest=wave_pin,
+            source_prepared_manifest=row['prepared_manifest'], source_job_nodes=row['source_job_nodes'],
+            collector=row['collector'], detector_jobs=row['detector_jobs'],
+            wave_manager_output=manifest['wave_manager_output'],
+            queued_Iwd_verified=True, execution_verified=False, no_automatic_retry=True)
+        destination = Path(row['working_directory'])/'submission.json'
+        if destination.exists() and read(destination) != record:
+            raise ValueError('Source submission belongs to another manager; never overwrite it')
+        save(destination, record)
+    return handoff
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('configuration', type=Path)
@@ -408,11 +613,17 @@ def main():
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.with_suffix(output.suffix+'.handoff.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        manifest = prepare(config, args.config_sha256)
-        retire_returned_features(config, manifest)
-        answer = submit(config, manifest) if args.submit else dict(
-            working_directory=manifest['working_directory'], detector_jobs=len(manifest['detector_jobs']),
-            jobs_submitted=False)
+        if config.get('schema') == WAVE_SCHEMA:
+            manifest = prepare_wave(config, args.config_sha256)
+            answer = submit_wave(config, manifest) if args.submit else dict(
+                working_directory=manifest['working_directory'], detector_jobs=manifest['detector_jobs'],
+                sources=len(manifest['sources']), jobs_submitted=False)
+        else:
+            manifest = prepare(config, args.config_sha256)
+            retire_returned_features(config, manifest)
+            answer = submit(config, manifest) if args.submit else dict(
+                working_directory=manifest['working_directory'], detector_jobs=len(manifest['detector_jobs']),
+                jobs_submitted=False)
     print(json.dumps(answer, allow_nan=False))
 
 

@@ -207,6 +207,149 @@ class CandidateHandoffTest(unittest.TestCase):
                 handoff.submit_once(sub,'SM_test',self.root,'manager','a'*64)
         self.assertEqual(run.call_count, 1)
 
+    def wave_source(self, sid):
+        """Small frozen scheduler fixture with unchanged weighted requests."""
+        directory = self.root/sid
+        directory.mkdir()
+        jobs, files = [], []
+        for node in ('PREFLIGHT','DET_0000','COLLECT'):
+            job = directory/'jobs'/node.lower()
+            handoff.save(job/'request.json', dict(source_id=sid, node=node,
+                native_weight=.125, p=.25, q=.1, seed=123))
+            (job/'worker.sub').write_text('initialdir = '+str(job)+'\nqueue 1\n')
+            jobs.append(dict(node=node,job_directory=str(job),
+                request_sha256=handoff.sha(job/'request.json')))
+            files.extend([handoff.pin(job/'request.json'),handoff.pin(job/'worker.sub')])
+        dag = ['CONFIG '+str(directory/'dagman.config')]
+        dag.extend('JOB '+row['node']+' '+str(Path(row['job_directory'])/'worker.sub')
+            +' DIR '+row['job_directory'] for row in jobs)
+        dag.extend(['PRIORITY PREFLIGHT 100','PARENT PREFLIGHT CHILD DET_0000',
+            'PARENT DET_0000 CHILD COLLECT'])
+        (directory/'response.dag').write_text('\n'.join(dag)+'\n')
+        (directory/'dagman.config').write_text('DAGMAN_MAX_JOBS_SUBMITTED = 2000\n')
+        files.extend([handoff.pin(directory/'response.dag'),handoff.pin(directory/'dagman.config')])
+        config = self.root/(sid+'_config.json')
+        handoff.save(config,dict(schema=handoff.SCHEMA,output_directory=str(directory)))
+        manifest = dict(configuration_sha256=handoff.sha(config),source_id=sid,
+            working_directory=str(directory),jobs=jobs,detector_jobs=[jobs[1]],
+            collector=jobs[2],frozen_files=files)
+        handoff.save(directory/'prepared.json',manifest)
+        return handoff.pin(config)
+
+    def wave_config(self, sources):
+        return dict(schema=handoff.WAVE_SCHEMA, output_directory=str(self.root/'shared_wave'),
+            wave_id='qcd_w000',job_batch_name='SM_QCD_shared_wave_test',
+            source_configurations=sources)
+
+    def test_wave_keeps_all_jobs_dependencies_and_weighted_bytes(self):
+        sources = [self.wave_source('sourceA'),self.wave_source('sourceB')]
+        config = self.wave_config(sources)
+        original = {str(p):p.read_bytes() for sid in ('sourceA','sourceB')
+            for p in (self.root/sid/'jobs').rglob('*') if p.is_file()}
+        manifest = handoff.prepare_wave(config,'f'*64)
+        self.assertEqual(manifest['detector_jobs'],2)
+        self.assertFalse(manifest['per_source_watchdogs'])
+        text = (Path(config['output_directory'])/'response.dag').read_text()
+        self.assertEqual(text.count('CONFIG '),1)
+        self.assertEqual(text.count('JOB '),6)
+        for prefix in ('S000_','S001_'):
+            self.assertIn('PARENT '+prefix+'PREFLIGHT CHILD '+prefix+'DET_0000',text)
+            self.assertIn('PARENT '+prefix+'DET_0000 CHILD '+prefix+'COLLECT',text)
+        self.assertEqual(original,{name:Path(name).read_bytes() for name in original})
+        self.assertEqual(handoff.prepare_wave(config,'f'*64),manifest)
+        self.assertTrue(all((self.root/sid/'shared_wave_ownership.json').exists()
+            for sid in ('sourceA','sourceB')))
+
+    def test_wave_refuses_individual_owner_or_uncertain_submit(self):
+        source = self.wave_source('owned')
+        config = self.wave_config([source])
+        for name in ('submission.json','manager_intent.json','manager_submission.json'):
+            path = self.root/'owned'/name
+            handoff.save(path,dict(manager='existing'))
+            with self.assertRaisesRegex(ValueError,'owner|uncertainty'):
+                handoff.prepare_wave(config,'f'*64)
+            path.unlink()
+        self.assertFalse(Path(config['output_directory']).exists())
+
+    def test_wave_rejects_duplicate_or_tampered_source_before_ownership(self):
+        source = self.wave_source('sourceA')
+        with self.assertRaisesRegex(ValueError,'Duplicate original source'):
+            handoff.prepare_wave(self.wave_config([source,source]),'f'*64)
+        path = self.root/'sourceA/jobs/det_0000/request.json'
+        path.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'Frozen input changed'):
+            handoff.prepare_wave(self.wave_config([source]),'f'*64)
+        self.assertFalse((self.root/'sourceA/shared_wave_ownership.json').exists())
+
+    def test_wave_rejects_different_owner_and_interrupted_mutations(self):
+        source = self.wave_source('sourceA')
+        config = self.wave_config([source])
+        owner = self.root/'sourceA/shared_wave_ownership.json'
+        handoff.save(owner,dict(wave='another'))
+        with self.assertRaisesRegex(ValueError,'different shared wave'):
+            handoff.prepare_wave(config,'f'*64)
+        owner.unlink()
+        output = Path(config['output_directory'])
+        handoff.save(output/'preparation_intent.json',dict(partial=True))
+        with self.assertRaisesRegex(ValueError,'Partial wave preparation'):
+            handoff.prepare_wave(config,'f'*64)
+
+    def test_wave_dag_parser_rejects_omissions_or_new_commands(self):
+        source = self.wave_source('sourceA')
+        root = self.root/'sourceA'
+        manifest = handoff.read(root/'prepared.json')
+        (root/'response.dag').write_text('RETRY DET_0000 10\n')
+        with self.assertRaisesRegex(ValueError,'Unsupported source DAG command'):
+            handoff.prefixed_dag(root/'response.dag','A_',manifest['jobs'])
+        (root/'response.dag').write_text('PARENT PREFLIGHT CHILD DET_0000\n')
+        with self.assertRaisesRegex(ValueError,'omit a source job'):
+            handoff.prefixed_dag(root/'response.dag','A_',manifest['jobs'])
+
+    def test_wave_submission_uses_one_manager_and_repairs_only_matching_receipts(self):
+        sources = [self.wave_source('sourceA'),self.wave_source('sourceB')]
+        config = self.wave_config(sources)
+        manifest = handoff.prepare_wave(config,'f'*64)
+        output = Path(config['output_directory'])
+        manager = output/'response.dag.condor.sub'
+        manager.write_text('initialdir = '+str(output)+'\nqueue 1\n')
+        ad = dict(ClusterId=123,ProcId=0,Iwd=str(output),JobBatchName=config['job_batch_name'],
+            GlobalJobId='schedd#123.0#1',JobStatus=1)
+        with patch.object(handoff,'query',side_effect=[[],[],[ad]]), \
+                patch.object(handoff,'run_condor',return_value='123.0 - 123.0\n') as run:
+            answer = handoff.submit_wave(config,manifest)
+            self.assertEqual(run.call_count,1)
+        self.assertEqual(answer['manager']['cluster_id'],123)
+        self.assertFalse(answer['per_source_watchdogs'])
+        for sid in ('sourceA','sourceB'):
+            record = handoff.read(self.root/sid/'submission.json')
+            self.assertTrue(record['shared_wave'])
+            self.assertEqual(record['manager']['binding']['working_directory'],str(output))
+            self.assertEqual(record['source_job_nodes']['COLLECT'],
+                ('S000_' if sid=='sourceA' else 'S001_')+'COLLECT')
+        (self.root/'sourceB/submission.json').unlink()
+        with patch.object(handoff,'query',side_effect=AssertionError('No new submission query')), \
+                patch.object(handoff,'run_condor',side_effect=AssertionError('Never resubmit')):
+            again = handoff.submit_wave(config,manifest)
+        self.assertEqual(again,answer)
+        self.assertTrue((self.root/'sourceB/submission.json').exists())
+
+    def test_wave_refuses_live_native_source_without_receipt(self):
+        source = self.wave_source('sourceA')
+        config = self.wave_config([source])
+        manifest = handoff.prepare_wave(config,'f'*64)
+        ad = dict(ClusterId=555,ProcId=0,Iwd=str(self.root/'sourceA/jobs/det_0000'),JobStatus=2)
+        with patch.object(handoff,'query',return_value=[ad]), \
+                patch.object(handoff,'run_condor',side_effect=AssertionError('Never duplicate')):
+            with self.assertRaisesRegex(ValueError,'native job already occupies'):
+                handoff.submit_wave(config,manifest)
+
+    def test_individual_submit_refuses_a_shared_owner(self):
+        manifest = handoff.prepare(self.config,'e'*64)
+        output = Path(manifest['working_directory'])
+        handoff.save(output/'shared_wave_ownership.json',dict(owner='wave'))
+        with self.assertRaisesRegex(ValueError,'shared wave owns'):
+            handoff.submit(self.config,manifest)
+
 
 if __name__ == '__main__':
     unittest.main()
