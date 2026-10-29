@@ -1343,3 +1343,51 @@ class FutureDirectDetectorGate(unittest.TestCase):
                 self.assertEqual(commands[0][commands[0].index('--preparation')+1],str(prepared))
                 self.assertEqual(commands[0][commands[0].index('--main-histogrammer')+1],'/qualified/main_histogrammer.json')
                 self.assertEqual(controller.read(source),original)
+
+
+class ReviewedMainPreflightReplacement(unittest.TestCase):
+    def fixture(self, root):
+        config=dict(directory=str(root),dependencies={})
+        original=controller.wave_directory(config,12)/'production'
+        replacement=original.with_name('production_precision')
+        for path in (original,replacement):path.mkdir(parents=True)
+        profile=dict(runtime_sha256='new-runtime')
+        for path,runtime in ((original,dict(runtime_sha256='old-runtime')),(replacement,profile)):
+            controller.save(path/'plan.json',dict(points=[dict(point='m5_prompt',events=1,chunks=[dict(job=11,count=1,skip=0)])],detector_runtime=runtime))
+            controller.save(path/'source.json',dict(event_ids=[[1,1,1]],selected_indices=[0],weights=[1.]))
+            controller.save(path/'gen_inventory.json',dict(points={'m5_prompt':dict(events=1,gen_sha256='gen')}))
+            controller.save(path/'gen_publication.json',dict(complete=True))
+            controller.save(path/'main_histogrammer.json',{} if path==original else dict(detector_event_stall_timeout_seconds=7200))
+            controller.save(path/'seal.json',dict(files={str(path/'plan.json'):controller.sha(path/'plan.json')}))
+        profile_path=root/'profile.json';controller.save(profile_path,profile)
+        pin=lambda p:dict(path=str(p),sha256=controller.sha(p))
+        scan=root/'scan.json';controller.save(scan,dict(complete=True,original_plan_sha256=controller.sha(original/'plan.json'),original_seal_sha256=controller.sha(original/'seal.json'),replacement_runtime_sha256='new-runtime',points={'m5_prompt':dict(gen_sha256='gen',full_count=1,converted_count=1)}))
+        controls=root/'controls.json';controller.save(controls,dict(complete=True,controls=[dict(returncode=0)]))
+        qualification=root/'qualification.json';controller.save(qualification,dict(complete=True,all_DSOs_and_CPP_sources_unchanged=True,profile=pin(profile_path),full_original_preflight=pin(scan),native_controls=pin(controls)))
+        proof=dict(schema='shift-reviewed-main-preflight-replacement-v1',complete=True,wave_index=12,failure_kind='exact_native_PYTHIA_hadron_precision_before_SIM',detector_payload_started=False,GEN_or_SIM_rerun=False,original_directory=str(original),replacement_directory=str(replacement),original_plan_sha256=controller.sha(original/'plan.json'),original_seal_sha256=controller.sha(original/'seal.json'),replacement_plan_sha256=controller.sha(replacement/'plan.json'),replacement_seal_sha256=controller.sha(replacement/'seal.json'),profile=pin(profile_path),qualification=pin(qualification))
+        review=root/'review.json';controller.save(review,proof)
+        authority=dict(directory=str(replacement),review=pin(review));config['dependencies'][str(review)]=controller.sha(review)
+        return config,authority,original,replacement
+
+    def test_same_source_cpu_only_replacement_is_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config,authority,original,replacement=self.fixture(Path(tmp))
+            _,old,new=controller.validate_main_preflight_replacement(config,'12',authority)
+            self.assertEqual((old,new),(original,replacement))
+
+    def test_changed_admission_is_rejected_even_with_unchanged_runtime_and_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config,authority,_,replacement=self.fixture(Path(tmp))
+            controller.save(replacement/'source.json',dict(event_ids=[[1,1,1]],selected_indices=[],weights=[1.]))
+            with self.assertRaisesRegex(ValueError,'GEN, admission'):
+                controller.validate_main_preflight_replacement(config,'12',authority)
+
+    def test_failed_native_control_cannot_qualify_the_replacement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config,authority,_,_=self.fixture(Path(tmp));root=Path(tmp)
+            controller.save(root/'controls.json',dict(complete=True,controls=[dict(returncode=1)]))
+            qualification=controller.read(root/'qualification.json');qualification['native_controls']['sha256']=controller.sha(root/'controls.json');controller.save(root/'qualification.json',qualification)
+            proof=controller.read(root/'review.json');proof['qualification']['sha256']=controller.sha(root/'qualification.json');controller.save(root/'review.json',proof)
+            authority['review']['sha256']=controller.sha(root/'review.json');config['dependencies'][str(root/'review.json')]=controller.sha(root/'review.json')
+            with self.assertRaisesRegex(ValueError,'native mismatch controls'):
+                controller.validate_main_preflight_replacement(config,'12',authority)

@@ -857,6 +857,7 @@ def available_sources(config):
     # Primitive source populations only: an aggregate must never be counted twice.
     directories = [Path(config['previous_statistics'])]
     directories.extend(path / 'production' for path in sorted((Path(config['directory']) / 'waves').glob('w[0-9]*')))
+    directories.extend(Path(row['directory']) for row in config.get('reviewed_main_preflight_replacements',{}).values())
     additional=config.get('additional_previous_statistics',[])
     if not isinstance(additional,list):
         raise ValueError('Additional previous statistics must be an explicit pinned list')
@@ -1824,6 +1825,81 @@ def redistribute_detector_workers(config, state, worklist):
                                                spare_workers=available)
 
 
+def validate_main_preflight_replacement(config, index, authority):
+    """Bind a pre-SIM replacement to the complete original selected population."""
+    pin=authority['review']
+    if config['dependencies'].get(pin['path'])!=pin['sha256']:
+        raise ValueError('Main preflight replacement is outside frozen controller authority')
+    proof=pinned_json(pin);original=wave_directory(config,int(index))/'production'
+    replacement=Path(authority['directory'])
+    if (proof.get('schema')!='shift-reviewed-main-preflight-replacement-v1'
+            or proof.get('complete') is not True or proof.get('wave_index')!=int(index)
+            or proof.get('failure_kind')!='exact_native_PYTHIA_hadron_precision_before_SIM'
+            or proof.get('detector_payload_started') is not False or proof.get('GEN_or_SIM_rerun') is not False
+            or proof.get('original_directory')!=str(original) or proof.get('replacement_directory')!=str(replacement)
+            or replacement.parent!=original.parent or replacement==original
+            or sha(original/'plan.json')!=proof['original_plan_sha256']
+            or sha(original/'seal.json')!=proof['original_seal_sha256']
+            or sha(replacement/'plan.json')!=proof['replacement_plan_sha256']
+            or sha(replacement/'seal.json')!=proof['replacement_seal_sha256']):
+        raise ValueError('Main preflight replacement changed its reviewed stage identity')
+    for directory in (original,replacement):
+        for path,digest in read(directory/'seal.json')['files'].items():
+            if sha(path)!=digest:raise ValueError('Main replacement sealed dependency changed: '+path)
+    before=read(original/'plan.json');after=read(replacement/'plan.json')
+    ignored={'detector_runtime','original_preparation_sha256'}
+    if ({k:v for k,v in before.items() if k not in ignored}!={k:v for k,v in after.items() if k not in ignored}
+            or read(original/'source.json')!=read(replacement/'source.json')
+            or read(original/'gen_inventory.json')!=read(replacement/'gen_inventory.json')
+            or read(original/'gen_publication.json')!=read(replacement/'gen_publication.json')):
+        raise ValueError('Main replacement changed original GEN, admission, selected IDs, weights or seeds')
+    old_settings=read(original/'main_histogrammer.json');new_settings=read(replacement/'main_histogrammer.json')
+    progress='detector_event_stall_timeout_seconds'
+    if ({k:v for k,v in old_settings.items() if k!=progress}!={k:v for k,v in new_settings.items() if k!=progress}
+            or new_settings.get(progress)!=7200):
+        raise ValueError('Main replacement may change only its reviewed CPU progress deadline')
+    qualified=pinned_json(proof['qualification']);scan=pinned_json(qualified['full_original_preflight'])
+    controls=pinned_json(qualified['native_controls']);row=before['points'][0]
+    parent=read(original/'gen_inventory.json')['points'][row['point']]
+    converted=scan.get('points',{}).get(row['point'],{})
+    if (qualified.get('complete') is not True or qualified.get('all_DSOs_and_CPP_sources_unchanged') is not True
+            or qualified.get('profile')!=proof['profile'] or read(proof['profile']['path'])!=after['detector_runtime']
+            or sha(proof['profile']['path'])!=proof['profile']['sha256']
+            or scan.get('complete') is not True or scan.get('original_plan_sha256')!=proof['original_plan_sha256']
+            or scan.get('original_seal_sha256')!=proof['original_seal_sha256']
+            or scan.get('replacement_runtime_sha256')!=after['detector_runtime']['runtime_sha256']
+            or converted.get('gen_sha256')!=parent['gen_sha256']
+            or converted.get('full_count')!=parent['events'] or converted.get('converted_count')!=parent['events']
+            or controls.get('complete') is not True or any(case.get('returncode')!=0 for case in controls['controls'])):
+        raise ValueError('Main replacement lacks its exact full-GEN converter and native mismatch controls')
+    return proof,original,replacement
+
+
+def adopt_reviewed_main_preflight_replacements(config,state):
+    """Replace one failed pre-SIM stage without regenerating its original source."""
+    for index,authority in config.get('reviewed_main_preflight_replacements',{}).items():
+        entry=state['waves'][index];digest=authority['review']['sha256']
+        if entry.get('reviewed_main_preflight_replacement_sha256')==digest:continue
+        proof,original,replacement=validate_main_preflight_replacement(config,index,authority)
+        cluster=proof['original_detector_manager'];native=proof['terminal_native_ad']
+        if read(original/'submission.json')['cluster']!=cluster:
+            raise ValueError('Main replacement differs from its original native owner')
+        if jobs(config,f'ClusterId == {cluster} || DAGManJobId == {cluster}'):
+            raise RuntimeError('Main replacement waits for the original preflight-only DAG to stop')
+        history=parse_ads(run_condor(['/usr/bin/condor_history',*scheduler_arguments(config),str(cluster)+'.0','-limit','1','-json'],timeout=45))
+        fields=('ClusterId','ProcId','Iwd','JobStatus','ExitCode','ExitBySignal')
+        if (len(history)!=1 or any(history[0].get(key)!=native.get(key) for key in fields)
+                or native.get('ClusterId')!=cluster or native.get('Iwd')!=str(original)
+                or native.get('JobStatus') not in (3,4) or native.get('JobStatus')==4 and native.get('ExitCode') in (None,0)):
+            raise ValueError('Main replacement lacks its exact reviewed terminal native owner')
+        receipt=submit_dag(config,replacement,config.get('detector_workers_per_wave',100)+2)
+        state.setdefault('reviewed_main_preflight_replacements',{})[index]=dict(authority=authority,previous=copy.deepcopy(entry),terminal_native_ad=native)
+        for key in ('terminal','successful','exit_code','queue'):entry.pop(key,None)
+        entry.update(reviewed_main_preflight_replacement_sha256=digest,replacement_detector_directory=str(replacement),replacement_detector_cluster=receipt['cluster'])
+        for key in ('wave_'+index,'held_wave_'+index):state.setdefault('failures',{}).pop(key,None)
+        save(Path(config['directory'])/'state.json',state)
+
+
 def adopt_reviewed_main_cleanup(config, state):
     """Accept only an audited cleanup failure after complete detector publication.
 
@@ -1884,6 +1960,7 @@ def step(config, config_path, state):
     adopt_reviewed_main_cleanup(config, state)
     adopt_reviewed_gen_handoffs(config, config_path, state)
     adopt_reviewed_detector_stages(config, state)
+    adopt_reviewed_main_preflight_replacements(config,state)
     adopt_reviewed_runtime_rescues(config,state)
     observation = quota(config)
     state['quota'] = observation
