@@ -229,7 +229,9 @@ class CandidateHandoffTest(unittest.TestCase):
         (directory/'dagman.config').write_text('DAGMAN_MAX_JOBS_SUBMITTED = 2000\n')
         files.extend([handoff.pin(directory/'response.dag'),handoff.pin(directory/'dagman.config')])
         config = self.root/(sid+'_config.json')
-        handoff.save(config,dict(schema=handoff.SCHEMA,output_directory=str(directory)))
+        handoff.save(config,dict(schema=handoff.SCHEMA,output_directory=str(directory),
+            frozen=self.config['frozen'], helpers_directory=str(self.helpers),
+            helper_sha256s=self.config['helper_sha256s']))
         manifest = dict(configuration_sha256=handoff.sha(config),source_id=sid,
             working_directory=str(directory),jobs=jobs,detector_jobs=[jobs[1]],
             collector=jobs[2],frozen_files=files)

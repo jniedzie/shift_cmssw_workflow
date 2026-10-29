@@ -413,6 +413,7 @@ def wave_sources(config):
         source_config = read(checked(item['path'], item['sha256']))
         if source_config.get('schema') != SCHEMA:
             raise ValueError('Wave input is not a source handoff configuration')
+        validate_frozen(source_config)
         directory = persistent_directory(source_config['output_directory'])
         manifest_path = directory/'prepared.json'
         manifest = verify_prepared(read(manifest_path), item['sha256'])
