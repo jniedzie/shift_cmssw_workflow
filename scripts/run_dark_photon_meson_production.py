@@ -8,10 +8,12 @@ must reach merged histograms and publication before bulk source admission.
 """
 import argparse
 import copy
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import fcntl
 import gzip
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -21,6 +23,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import threading
@@ -1402,13 +1405,15 @@ def qualify_gen_source(config, batch):
     return proof
 
 
-def adoption_sources(config, names, operational_names, previous=None):
+def adoption_sources(config, names, operational_names, previous=None, source_directory=None):
     """Keep scientific sources original and freeze orchestration from this owner.
 
     An interrupted handoff keeps its already pinned operational helpers, even
     when a later controller resumes it from another sealed directory.
     """
     frozen = {}
+    accounting = (source_accounting_export(config, source_directory).parent
+                  if source_directory is not None else None)
     old = (previous or {}).get('frozen_dependencies', {}).get('sources', {})
     for name in sorted(names):
         if name in operational_names and name in old:
@@ -1418,12 +1423,19 @@ def adoption_sources(config, names, operational_names, previous=None):
                 raise ValueError('Previously adopted operational helper changed: '+name)
             frozen[name] = copy.deepcopy(item)
             continue
-        source = (Path(__file__).resolve().parent if name in operational_names else Path(config['tools']))/name
+        source = (Path(__file__).resolve().parent if name in operational_names else
+                  accounting if accounting is not None and name in {'dark_photon_senscalc.py','run_dark_photon_senscalc_gen.py'}
+                  else Path(config['tools']))/name
         frozen[name] = dict(frozen_copy=str(source), sha256=durable.sha(source))
     return frozen
 
 
 def adopt(config, batch):
+    with source_accounting_scope(config,batch_directory(config,batch)):
+        return adopt_with_accounting(config,batch)
+
+
+def adopt_with_accounting(config, batch):
     import prepare_dark_photon_grid as grid
     directory = batch_directory(config, batch)
     status = read(directory / 'source_status.json')
@@ -1463,7 +1475,7 @@ def adopt(config, batch):
     preparation = directory / 'preparation.json'
     previous = read(preparation) if preparation.exists() else None
     plan['frozen_dependencies'] = dict(sources=adoption_sources(
-        config,sources,set(grid.RUNTIME_HELPER_SOURCES),previous),
+        config,sources,set(grid.RUNTIME_HELPER_SOURCES),previous,directory),
         templates={name:dict(frozen_copy=str(path),sha256=durable.sha(path))
             for path in sorted((Path(config['directory'])/'templates').glob('step*.py')) for name in [path.name]})
     # Generic downstream workers consume the real audited GEN source directly.
@@ -1618,7 +1630,8 @@ def handoff(config, batch):
             *(['--main-histogrammer',str(pinned_path(config['main_histogrammer']))]
               if config.get('main_histogrammer') is not None else []),
             *(['--absolute-stage-timeouts', *map(str,config['operational_stage_timeouts_seconds'])]
-              if config.get('operational_stage_timeouts_seconds') is not None else [])],
+              if config.get('operational_stage_timeouts_seconds') is not None else []),
+            *source_accounting_preparation_arguments(config,directory)],
             directory/'prepare_production.log', timeout=1800)
     if config.get('future_detector_runtime') is not None:
         from dark_photon_runtime_recovery import future_preflight
@@ -1695,6 +1708,49 @@ def source_accounting_export(config, directory):
         if durable.sha(source)!=digest or durable.sha(tools/source.name)!=expected:
             raise ValueError('Source accounting helper differs from its reviewed overlay: '+source.name)
     return tools/'export_dark_photon_cross_sections.py'
+
+
+@contextmanager
+def source_accounting_scope(config,directory):
+    """Use the exact reviewed producer helpers without changing other cohorts.
+
+    Handoff and preparer processes execute one cohort sequentially; independent
+    cohorts run in separate processes. Do not use this import scope concurrently.
+    """
+    tools=source_accounting_export(config,directory).parent
+    if tools==Path(config['tools']):
+        yield
+        return
+    names=('dark_photon_senscalc','run_dark_photon_senscalc_gen')
+    previous={name:sys.modules.get(name) for name in names}
+    try:
+        for name in names:
+            spec=importlib.util.spec_from_file_location(name,tools/(name+'.py'))
+            module=importlib.util.module_from_spec(spec);sys.modules[name]=module
+            spec.loader.exec_module(module)
+        yield
+    finally:
+        for name,module in previous.items():
+            if module is None:sys.modules.pop(name,None)
+            else:sys.modules[name]=module
+
+
+def source_accounting_preparation_arguments(config,directory):
+    if source_accounting_export(config,directory).parent==Path(config['tools']):return []
+    authority=read_pinned(config['reviewed_source_accounting'])
+    names=set(authority['batches'])
+    selected={key:copy.deepcopy(config[key]) for key in ('directory','tools','reviewed_source_accounting')}
+    selected['batches']=[copy.deepcopy(row) for row in config['batches'] if row['batch'] in names]
+    gen=Path(directory)/'gen'
+    binding=dict(schema='shift-reviewed-source-accounting-preparation-v1',configuration=selected,
+        source_directory=str(directory),source_status=dict(path=str(Path(directory)/'source_status.json'),
+        sha256=durable.sha(Path(directory)/'source_status.json')),
+        contract=dict(path=str(gen/'contract.json'),sha256=durable.sha(gen/'contract.json')))
+    path=Path(directory)/'source_accounting_preparation.json'
+    if path.exists():
+        if read(path)!=binding:raise ValueError('Reviewed source accounting preparation changed')
+    else:durable.new(path,binding)
+    return ['--reviewed-source-accounting',str(path),'--reviewed-source-accounting-sha256',durable.sha(path)]
 
 
 def reviewed_source_receipt(config, batch, original):

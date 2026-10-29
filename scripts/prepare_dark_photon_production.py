@@ -694,6 +694,25 @@ def freeze_absolute_stage_budget(output, stage_timeouts):
 
 
 def prepare(args):
+    binding_path=getattr(args,'reviewed_source_accounting',None)
+    if binding_path is None:return prepare_with_accounting(args)
+    if sha256(binding_path)!=getattr(args,'reviewed_source_accounting_sha256',None):
+        raise ValueError('Reviewed source accounting preparation checksum changed')
+    binding=read(binding_path);plan=read(args.preparation)
+    if (binding.get('schema')!='shift-reviewed-source-accounting-preparation-v1'
+            or len(plan['points'])!=1
+            or Path(plan['points'][0]['gen_directory'])!=Path(binding['source_directory'])/'gen'):
+        raise ValueError('Reviewed source accounting preparation identifies another GEN cohort')
+    for name in ('source_status','contract'):
+        pin=binding[name]
+        if sha256(pin['path'])!=pin['sha256']:
+            raise ValueError('Reviewed source accounting preparation changed its completed GEN')
+    from run_dark_photon_meson_production import source_accounting_scope
+    with source_accounting_scope(binding['configuration'],binding['source_directory']):
+        return prepare_with_accounting(args)
+
+
+def prepare_with_accounting(args):
     if getattr(args,'main_histogrammer',None) is not None:
         return prepare_main_histograms(args)
     timeouts = detector_timeout_settings(args)
@@ -938,6 +957,8 @@ def main():
                         help='Pinned measured full-chain Nano/metadata canary required for nano-metadata-v1')
     parser.add_argument('--main-histogrammer',type=Path,
                         help='Qualified main histogrammer runtime and Nano integrity helper; bypass legacy BDT scoring')
+    parser.add_argument('--reviewed-source-accounting',type=Path)
+    parser.add_argument('--reviewed-source-accounting-sha256')
     print(json.dumps(prepare(parser.parse_args())))
 
 

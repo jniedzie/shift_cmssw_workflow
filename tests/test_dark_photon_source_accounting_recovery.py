@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -55,6 +56,48 @@ class SourceAccountingRecovery(unittest.TestCase):
                 if changed=='mass':config['batches'][0]['mass_gev']=.7
                 else:(tools/'export_dark_photon_cross_sections.py').write_text('unreviewed export')
                 with self.assertRaises(ValueError):production.source_accounting_export(config,bank)
+
+    def test_width_scope_and_frozen_sources_use_only_the_reviewed_two_helpers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);original=root/'original';reviewed=root/'reviewed'
+            original.mkdir();reviewed.mkdir()
+            (reviewed/'dark_photon_senscalc.py').write_text('VALUE="reviewed"\n')
+            (reviewed/'run_dark_photon_senscalc_gen.py').write_text('from dark_photon_senscalc import VALUE\n')
+            before={name:sys.modules.get(name) for name in ('dark_photon_senscalc','run_dark_photon_senscalc_gen')}
+            config=dict(tools=str(original),directory=str(root))
+            with patch.object(production,'source_accounting_export',return_value=reviewed/'export.py'):
+                with self.assertRaisesRegex(RuntimeError,'control'):
+                    with production.source_accounting_scope(config,root/'bank'):
+                        self.assertEqual(sys.modules['run_dark_photon_senscalc_gen'].VALUE,'reviewed')
+                        raise RuntimeError('control')
+                with patch.object(production,'adopt_with_accounting',side_effect=lambda config,batch:
+                        sys.modules['run_dark_photon_senscalc_gen'].VALUE):
+                    self.assertEqual(production.adopt(config,dict(batch='bank')),'reviewed')
+                frozen=production.adoption_sources(config,
+                    {'dark_photon_senscalc.py','run_dark_photon_senscalc_gen.py'},set(),source_directory=root/'bank')
+            self.assertTrue(all(Path(row['frozen_copy']).parent==reviewed for row in frozen.values()))
+            self.assertEqual({name:sys.modules.get(name) for name in before},before)
+
+    def test_preparer_binding_covers_validation_and_rejects_a_different_gen(self):
+        import prepare_dark_photon_production as preparer
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);bank=root/'bank';bank.mkdir();gen=bank/'gen';gen.mkdir()
+            original=root/'original';reviewed=root/'reviewed';original.mkdir();reviewed.mkdir()
+            (reviewed/'dark_photon_senscalc.py').write_text('VALUE="reviewed"\n')
+            (reviewed/'run_dark_photon_senscalc_gen.py').write_text('from dark_photon_senscalc import VALUE\n')
+            def pin(path,value):
+                path.write_text(json.dumps(value));return dict(path=str(path),sha256=production.durable.sha(path))
+            status=pin(bank/'source_status.json',dict(complete=True));contract=pin(gen/'contract.json',{})
+            binding=root/'binding.json';pin(binding,dict(schema='shift-reviewed-source-accounting-preparation-v1',
+                configuration=dict(tools=str(original)),source_directory=str(bank),source_status=status,contract=contract))
+            plan=root/'plan.json';pin(plan,dict(points=[dict(gen_directory=str(gen))]))
+            args=SimpleNamespace(preparation=plan,reviewed_source_accounting=binding,
+                reviewed_source_accounting_sha256=production.durable.sha(binding))
+            with patch.object(production,'source_accounting_export',return_value=reviewed/'export.py'), \
+                    patch.object(preparer,'prepare_with_accounting',side_effect=lambda args:sys.modules['run_dark_photon_senscalc_gen'].VALUE):
+                self.assertEqual(preparer.prepare(args),'reviewed')
+                pin(plan,dict(points=[dict(gen_directory='/different/GEN')]))
+                with self.assertRaisesRegex(ValueError,'another GEN cohort'):preparer.prepare(args)
 
     def test_aggregates_without_recovered_sources_keep_the_original_operational_helpers(self):
         with tempfile.TemporaryDirectory() as temporary:
