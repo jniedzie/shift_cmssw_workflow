@@ -8,6 +8,7 @@ import errno
 import copy
 import math
 import importlib.util
+import hashlib
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -20,7 +21,152 @@ import run_shift_smart_sm_controller as main_controller
 import run_shift_sm_postprocessing as post
 from test_shift_production_selection import native_proposal_fixture
 from shift_production_selection import bind_source, selected_decay_proposals, proposal_source_exposure
-from run_shift_sm_postprocessing_controller import compact_source
+from run_shift_sm_postprocessing_controller import compact_source, response_closed_source
+
+
+class ResponsePublicationTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory()
+        self.root=Path(self.temporary.name)
+        self.addCleanup(self.temporary.cleanup)
+        self.normalization=dict(source_id='response',stratum='qcd_20toinf',gen_sha256='a'*64,
+            denominator_kind='fixed_source_trials',full_source_trials=1000,sigma_nd_pb=123.)
+        original=self.write('original.json',dict(complete=True,exit_code=0,source=self.normalization))
+        source=dict(event_ids=[[1,1,11],[1,1,99],[1,1,12]],weights=[2.,4.,3.],
+            selected_indices=[0,1,2],sampling_probabilities=[.25,1.,.5],gen_sha256='b'*64,
+            normalization_record=self.normalization,nano_base='/eos/user/j/jniedzie/shift_cmssw_support/test')
+        selected=[]
+        for position,region,q in [(0,'deep',.5),(2,'candidate',1.)]:
+            selected.append(dict(source_id='response',stratum='qcd_20toinf',
+                event_id=source['event_ids'][position],native_weight=source['weights'][position],
+                existing_sampling_probability=source['sampling_probabilities'][position],
+                selected_position=position,original_index=position,gen_sha256='a'*64,
+                prepared_gen_sha256='b'*64,benchmark_region=region,benchmark_inclusion_probability=q))
+        self.plan=dict(draw_frozen=True,population_events=3,selected_events=2,selected=selected,
+            strata=[dict(source_id='response',stratum='qcd_20toinf',benchmark_region=region,
+                population_events=n,selected_events=1,benchmark_inclusion_probability=q)
+                for region,n,q in [('deep',2,.5),('candidate',1,1.)]])
+        plan_pin=self.write('plan.json',self.plan)
+        full=self.write('full.json',dict(sources=[dict(source_id='response',
+            original_raw_gen_sha256='a'*64,prepared_gen_sha256='b'*64,
+            original_full_exposure=self.normalization,old_selected_events=3,original_saved_events=5,
+            original_result_path=original['path'],original_result_sha256=original['sha256'])],
+            original_saved_GEN_events=5,includes_sources_with_no_benchmark_event_drawn=True))
+        jobs=[];producers=[]
+        for index,chosen in enumerate(selected):
+            directory=self.root/('det_'+str(index));directory.mkdir()
+            request=self.write(str(directory/'request.json'),dict(detector_source=source,
+                selected_skip=chosen['selected_position'],selected_count=1))
+            nano_path='/eos/test/nano'+str(index)+'.root';nano_sha=str(index+1)*64
+            result=self.write(str(directory/'result.json'),dict(complete=True,exit_code=0,
+                request_sha256=request['sha256'],nano_sha256=nano_sha,nano_readback_sha256=nano_sha,
+                nano_path=nano_path,nano=dict(event_ids=[chosen['event_id']]),
+                source_indices=[chosen['original_index']],sampling_probabilities=[chosen['existing_sampling_probability']],
+                source_descriptor_sha256='e'*64))
+            jobs.append(dict(job_directory=str(directory),request_sha256=request['sha256'],selected=chosen))
+            producers.append(dict(directory=str(directory),request_sha256=request['sha256'],
+                result_sha256=result['sha256'],nano_path=nano_path,nano_sha256=nano_sha))
+        collector=self.root/'collect';collector.mkdir()
+        self.collector_request=dict(schema='shift-stream-payload-v1',stage='sm_response_collect',
+            benchmark_plan=plan_pin,full_population_exposure=full,job_records=jobs)
+        request=self.write(str(collector/'request.json'),self.collector_request)
+        self.collector=dict(schema='shift-sm-prospective-response-collection-v1',complete=True,exit_code=0,
+            complete_frozen_draw_collected=True,original_weights_and_p_unchanged=True,
+            request_sha256=request['sha256'],benchmark_plan_sha256=plan_pin['sha256'],events=2,
+            producer_receipts=producers)
+        self.collector_pin=self.write(str(collector/'result.json'),self.collector)
+        self.prepared_pin=self.write('prepared.json',dict(schema='shift-sm-candidate-handoff-v1',
+            source_id='response',collector=dict(job_directory=str(collector),request_sha256=request['sha256']),
+            benchmark_plan=plan_pin))
+
+    def write(self,name,value):
+        path=self.root/name
+        path.write_text(json.dumps(value,indent=2)+'\n')
+        return dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def discover(self):
+        return response_closed_source(self.prepared_pin,self.collector_pin)
+
+    def test_complete_response_discovery_retains_original_p_and_full_trials(self):
+        result=self.discover();source=compact_source(result['selected'])
+        self.assertEqual(source['sampling_probabilities'],[.25,.5])
+        self.assertEqual(post.histogram_weight_branch([source]),'shiftResponseGenWeight')
+        rows,full,nanos=post.response_sampling_contract(source)
+        self.assertEqual([r['response_sampling_probability'] for r in rows],[.5,1.])
+        self.assertEqual([r['native_weight']/r['sampling_probability']/r['response_sampling_probability'] for r in rows],[16.,6.])
+        self.assertEqual(full[0]['full_source_trials'],1000)
+        self.assertEqual(len(nanos),2)
+        self.assertEqual(exposure([result['normalization']],'qcd_20toinf')['full_source_sumw'],1000)
+
+    def test_partial_or_failed_collectors_cannot_enter_discovery(self):
+        for change in [dict(complete_frozen_draw_collected=False),dict(complete=False),
+                       dict(exit_code=1),dict(events=1),dict(original_weights_and_p_unchanged=False)]:
+            self.collector_pin=self.write('collect/result.json',dict(self.collector,**change))
+            with self.subTest(change=change),self.assertRaisesRegex(ValueError,'complete, pinned'):
+                self.discover()
+
+    def test_changed_plan_and_same_count_changed_original_are_rejected(self):
+        source=self.discover()['selected']
+        changed=copy.deepcopy(source);changed['event_ids'][0]=[1,1,999]
+        with self.assertRaisesRegex(ValueError,'descriptor changed'):
+            selected_rows(changed)
+        changed=copy.deepcopy(source);changed['gen_sha256']='f'*64
+        with self.assertRaisesRegex(ValueError,'full original normalization'):
+            selected_rows(changed)
+        self.write('plan.json',dict(self.plan,population_events=4))
+        with self.assertRaisesRegex(ValueError,'authority changed'):
+            selected_rows(source)
+
+    def test_missing_producer_and_failed_or_changed_nano_receipts_are_rejected(self):
+        self.collector_pin=self.write('collect/result.json',dict(self.collector,producer_receipts=self.collector['producer_receipts'][:1]))
+        with self.assertRaisesRegex(ValueError,'one producer'):
+            self.discover()
+        self.collector_pin=self.write('collect/result.json',self.collector)
+        path=self.root/'det_0/result.json';value=json.loads(path.read_text());value['nano_readback_sha256']='f'*64
+        pin=self.write(str(path),value)
+        changed=copy.deepcopy(self.collector);changed['producer_receipts'][0]['result_sha256']=pin['sha256']
+        self.collector_pin=self.write('collect/result.json',changed)
+        with self.assertRaisesRegex(ValueError,'producer is incomplete'):
+            self.discover()
+
+    def test_response_cannot_mix_ordinary_or_decay_proposal_weights(self):
+        source=self.discover()['selected']
+        ordinary=dict(event_ids=[[2,1,1]],weights=[1.],selected_indices=[0],sampling_probabilities=[1.])
+        with self.assertRaisesRegex(ValueError,'separate publication'):
+            post.histogram_weight_branch([source,ordinary])
+        source['decay_proposal']={}
+        with self.assertRaisesRegex(ValueError,'separate snapshots'):
+            selected_rows(source)
+
+    def test_frozen_q_still_has_to_match_complete_cell_counts(self):
+        source=self.discover()['selected'];changed=copy.deepcopy(self.plan)
+        changed['selected'][0]['benchmark_inclusion_probability']=.2
+        changed['strata'][0]['benchmark_inclusion_probability']=.2
+        original=post.read_response_pin
+        with patch.object(post,'read_response_pin',side_effect=lambda pin:
+                changed if Path(pin['path']).name=='plan.json' else original(pin)):
+            with self.assertRaisesRegex(ValueError,'q=n/N'):
+                selected_rows(source)
+
+    def test_discovered_response_uses_the_existing_snapshot_request(self):
+        source=self.discover()
+        config=dict(campaign='response_test',histogram_runtime=dict(path='runtime',sha256='a'*64),
+            worker_publication_bound_bytes=1000000,output_base='/eos/synthetic',
+            worker_template='initialdir = @DIRECTORY@\nrequest_sha = @REQUEST_SHA@\n')
+        task=snapshot(self.root,config,'qcd_20toinf',[source])
+        request=json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertEqual(request['schema'],'shift-smart-SM-postprocessing-v1')
+        self.assertEqual(request['selected_sources'][0]['response_sampling'],source['selected']['response_sampling'])
+        self.assertEqual(len(request['nano_inputs']),2)
+        self.assertEqual(request['normalization_sources'][0]['full_source_trials'],1000)
+        extra=copy.deepcopy(request);extra['normalization_sources'].append(dict(self.normalization,source_id='unfinished',gen_sha256='f'*64))
+        path=self.write('extra_exposure.json',extra)['path']
+        with self.assertRaisesRegex(ValueError,'exactly the complete'):
+            post.run(path)
+        request['nano_inputs']=request['nano_inputs'][:1]
+        path=self.write('incomplete_publication.json',request)['path']
+        with self.assertRaisesRegex(ValueError,'Nano inputs differ'):
+            post.run(path)
 
 
 class PostprocessingTest(unittest.TestCase):

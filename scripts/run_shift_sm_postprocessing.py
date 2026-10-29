@@ -204,6 +204,8 @@ def exposure(sources, stratum):
 
 
 def selected_rows(source):
+    if source.get('response_sampling') is not None:
+        return response_sampling_contract(source)[0]
     if source.get('decay_proposal') is not None:
         from shift_production_selection import selected_decay_proposals
         return selected_decay_proposals(source)[0]
@@ -223,10 +225,129 @@ def selected_rows(source):
 
 def histogram_weight_branch(sources):
     """Require an explicit homogeneous contract, never guess from ROOT branches."""
-    modes = {source.get('decay_proposal') is not None for source in sources if selected_rows(source)}
+    modes = {('response' if source.get('response_sampling') is not None else
+              'proposal' if source.get('decay_proposal') is not None else 'ordinary')
+             for source in sources if selected_rows(source)}
     if len(modes) > 1:
-        raise ValueError('Legacy and proposal sources require separate publication snapshots')
-    return 'shiftProposalGenWeight' if modes == {True} else 'shiftSamplingGenWeight'
+        raise ValueError('Different weight contracts require separate publication snapshots')
+    return {'response': 'shiftResponseGenWeight', 'proposal': 'shiftProposalGenWeight'}.get(
+        next(iter(modes), 'ordinary'), 'shiftSamplingGenWeight')
+
+
+def read_response_pin(pin):
+    """Read immutable, caller-pinned source authority, never a mutable latest file."""
+    if digest(pin['path']) != pin['sha256']:
+        raise ValueError('Frozen response publication authority changed: '+pin['path'])
+    return read(pin['path'])
+
+
+def response_sampling_contract(source):
+    """Bind a fully collected response draw to its old p and full GEN exposure.
+
+    This is a publication adapter for the existing response collector, not a
+    new selection. The supervising caller retains native terminal-job proof;
+    here the exact collector/request/result pins and original Nano population
+    are checked again before the ordinary publisher can use them.
+    """
+    from run_shift_sm_response_collection import verify_exposure, verify_worker_request
+    from shift_event_weights import validate_response_sampling_rows
+    if source.get('decay_proposal') is not None or source.get('prepared_weight_authority') is not None:
+        raise ValueError('Response and decay-proposal publication require separate snapshots')
+    authority = source['response_sampling']
+    request = read_response_pin(authority['collector_request'])
+    result = read_response_pin(authority['collector_result'])
+    plan = read_response_pin(request['benchmark_plan'])
+    full = read_response_pin(request['full_population_exposure'])
+    verify_exposure(full, plan)
+    if (request.get('schema') != 'shift-stream-payload-v1'
+            or request.get('stage') != 'sm_response_collect'
+            or result.get('schema') != 'shift-sm-prospective-response-collection-v1'
+            or plan.get('draw_frozen') is not True or result.get('complete') is not True
+            or result.get('exit_code') != 0 or result.get('complete_frozen_draw_collected') is not True
+            or result.get('original_weights_and_p_unchanged') is not True
+            or result['request_sha256'] != authority['collector_request']['sha256']
+            or result['benchmark_plan_sha256'] != request['benchmark_plan']['sha256']
+            or result['events'] != plan['selected_events']):
+        raise ValueError('Only a complete, pinned frozen response draw may enter publication')
+    if len(full['sources']) != 1:
+        raise ValueError('Response discovery must retain one original source per descriptor')
+    original = full['sources'][0]
+    normalization = original['original_full_exposure']
+    original_result = read_response_pin(dict(path=original['original_result_path'],
+                                             sha256=original['original_result_sha256']))
+    if (source['normalization_record'] != normalization
+            or source['gen_sha256'] != original['prepared_gen_sha256']
+            or original_result.get('complete') is not True or original_result.get('exit_code') != 0
+            or original_result['source'] != normalization
+            or original['original_raw_gen_sha256'] != normalization['gen_sha256']
+            or original['source_id'] != normalization['source_id']):
+        raise ValueError('Response source differs from its full original normalization')
+    selected = plan['selected']
+    identities = [tuple(row['event_id']) for row in selected]
+    if len(set(identities)) != len(identities) or len(identities) != plan['selected_events']:
+        raise ValueError('Frozen response selection repeats or omits an original')
+    cells = {(r['source_id'],r['stratum'],r['benchmark_region']): r for r in plan['strata']}
+    if (len(cells) != len(plan['strata'])
+            or sum(cell['population_events'] for cell in cells.values()) != plan['population_events']
+            or sum(cell['selected_events'] for cell in cells.values()) != plan['selected_events']):
+        raise ValueError('Response cell populations do not cover the frozen draw')
+    for cell in cells.values():
+        population, selected_count = cell['population_events'],cell['selected_events']
+        q = cell['benchmark_inclusion_probability']
+        if (type(population) is not int or type(selected_count) is not int
+                or not 1 <= selected_count <= population
+                or not isinstance(q,(int,float)) or isinstance(q,bool) or not math.isfinite(q)
+                or not math.isclose(q,selected_count/population,rel_tol=2.e-12,abs_tol=0.)):
+            raise ValueError('Every nonempty response cell needs positive q=n/N')
+    rows, exposures = [], [dict(source_id=normalization['source_id'],
+        original_source_sha256=normalization['gen_sha256'],
+        denominator_kind=normalization['denominator_kind'],
+        **{key: normalization[key] for key in ('full_source_trials','full_source_events') if key in normalization})]
+    counts = {}
+    for row in selected:
+        key = row['source_id'],row['stratum'],row['benchmark_region']
+        cell = cells[key]; counts[key] = counts.get(key,0)+1
+        if (row['source_id'] != normalization['source_id'] or row['stratum'] != normalization['stratum']
+                or row['gen_sha256'] != normalization['gen_sha256']
+                or row['benchmark_inclusion_probability'] != cell['benchmark_inclusion_probability']):
+            raise ValueError('Response event changed source, bin or frozen q')
+        rows.append(dict(event_id=row['event_id'],source_id=row['source_id'],
+            original_source_sha256=row['gen_sha256'],native_weight=row['native_weight'],
+            sampling_probability=row['existing_sampling_probability'],
+            response_draw_id=request['benchmark_plan']['sha256'],
+            response_sampling_probability=row['benchmark_inclusion_probability'],
+            response_population_events=cell['population_events'],response_selected_events=cell['selected_events']))
+    if any(counts.get(key,0) != cell['selected_events'] for key,cell in cells.items()):
+        raise ValueError('Response draw does not cover each complete sampling cell')
+    validate_response_sampling_rows(rows,exposures)
+    ordinary = {key:value for key,value in source.items() if key != 'response_sampling'}
+    if selected_rows(ordinary) != [{key:row[key] for key in ('event_id','native_weight','sampling_probability')} for row in rows]:
+        raise ValueError('Response descriptor changed its frozen original event identities or W/p')
+    jobs = request['job_records']; producers = result['producer_receipts']
+    by_directory = {row['directory']:row for row in producers}
+    if len(by_directory) != len(producers) or len(jobs) != len(rows) or len(producers) != len(rows):
+        raise ValueError('Response collector lacks exactly one producer per selected original')
+    expected = {tuple(row['event_id']):row for row in selected}; seen=set(); nanos=[]
+    for job in jobs:
+        chosen=job['selected']; identity=tuple(chosen['event_id'])
+        if identity in seen or expected.get(identity) != chosen:
+            raise ValueError('Response collector job repeats or changes the frozen selection')
+        seen.add(identity); directory=Path(job['job_directory'])
+        producer=by_directory[str(directory)]
+        producer_request=read_response_pin(dict(path=str(directory/'request.json'),sha256=job['request_sha256']))
+        verify_worker_request(producer_request,chosen)
+        receipt=read_response_pin(dict(path=str(directory/'result.json'),sha256=producer['result_sha256']))
+        if (producer['request_sha256'] != job['request_sha256'] or receipt.get('complete') is not True
+                or receipt.get('exit_code') != 0 or receipt['request_sha256'] != job['request_sha256']
+                or receipt['nano_sha256'] != receipt.get('nano_readback_sha256')
+                or receipt['nano_sha256'] != producer['nano_sha256'] or receipt['nano_path'] != producer['nano_path']
+                or receipt['nano']['event_ids'] != [chosen['event_id']]
+                or receipt['source_indices'] != [chosen['original_index']]
+                or receipt['sampling_probabilities'] != [chosen['existing_sampling_probability']]):
+            raise ValueError('Response producer is incomplete or changed its original Nano')
+        nanos.append(dict(path=receipt['nano_path'],sha256=receipt['nano_sha256'],events=1,
+            stratum=normalization['stratum'],source_descriptor_sha256=receipt['source_descriptor_sha256']))
+    return rows,exposures,nanos
 
 
 def _proposal_exposures(rows, expected):
@@ -325,6 +446,9 @@ def inspect_nano(path, expected, proposal_exposures=None):
     seen, weights, ordered = [], [], []
     try:
         tree = file.Get('Events')
+        if file.Get('ShiftResponseSamplingWeights') or any(tree.GetBranch(name) for name in
+                ('shiftResponseSamplingProbability','shiftResponseSamplingWeight','shiftResponseGenWeight')):
+            raise ValueError('Use original Nano inputs; refusing a repeated response correction')
         for event in tree:
             identity = (int(event.run), int(event.luminosityBlock), int(event.event))
             if identity not in expected:
@@ -407,6 +531,23 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     assert request['schema'] in ('shift-smart-SM-postprocessing-v1','shift-production-postprocessing-v1')
     assert request['complete_source_selections_only'] is True
     weight_branch = histogram_weight_branch(request['selected_sources'])
+    response_exposures, response_inputs = [], []
+    if weight_branch == 'shiftResponseGenWeight':
+        selected_normalizations = [source['normalization_record'] for source in request['selected_sources']]
+        canonical = lambda records: sorted(json.dumps(row,sort_keys=True) for row in records)
+        if canonical(selected_normalizations) != canonical(request['normalization_sources']):
+            raise ValueError('Response normalization must cover exactly the complete selected sources')
+        for source in request['selected_sources']:
+            if source.get('response_sampling') is None:
+                raise ValueError('Response snapshots require an explicit contract on every source')
+            if source['normalization_record'] not in request['normalization_sources']:
+                raise ValueError('Response source normalization is absent from the full publication exposure')
+            _, full, inputs = response_sampling_contract(source)
+            response_exposures.extend(full); response_inputs.extend(inputs)
+        def input_keys(inputs):
+            return sorted((row['path'],row['sha256'],row['events']) for row in inputs)
+        if input_keys(response_inputs) != input_keys(request['nano_inputs']):
+            raise ValueError('Response publication Nano inputs differ from the complete frozen draw')
     proposal_exposures = None
     if weight_branch == 'shiftProposalGenWeight':
         from shift_production_selection import proposal_source_exposure
@@ -435,6 +576,13 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         metadata.update(histogram_weight='native_gen_weight*decay_proposal_weight/reco_inclusion_probability',
                         histogram_weight_branch=weight_branch,
                         decay_correction_application_count=1, material_survival_correction_applied=False)
+    if response_exposures:
+        from shift_event_weights import RESPONSE_WEIGHT_POLICY
+        metadata.update(histogram_weight=RESPONSE_WEIGHT_POLICY,histogram_weight_branch=weight_branch,
+            response_correction_application_count=1,material_survival_correction_applied=False,
+            complete_frozen_response_draws_only=True,
+            response_draw_authorities=[source['response_sampling'] for source in request['selected_sources']],
+            histogram_sumw2_is_pair_fills_not_sampling_design_variance=True)
     work = Path.cwd()
     capsule = work / 'histogram_runtime.tar.gz'
     download(request['histogram_runtime']['path'], capsule, request['histogram_runtime']['sha256'])
@@ -469,6 +617,25 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     from shift_nano_integrity import compare_all_branches
     integrity = compare_all_branches(inputs, merged)
     _, sumw, sumw2 = inspect_nano(merged, expected, proposal_exposures)
+    response_metadata = None
+    if response_exposures:
+        from shift_event_weights import annotate_response_sampling_weights, RESPONSE_BRANCHES, RESPONSE_METADATA_KEY
+        from shift_nano_integrity import semantic_inventory
+        before = semantic_inventory([merged])
+        response_metadata = annotate_response_sampling_weights(merged,list(expected.values()),
+            response_exposures,expected_nano_sha256=digest(merged))
+        after = semantic_inventory([merged])
+        after.pop(RESPONSE_METADATA_KEY)
+        for branch in RESPONSE_BRANCHES:
+            after['Events']['branches'].pop(branch)
+        if before != after:
+            raise ValueError('Response correction changed original Nano branches or EDM metadata')
+        final = [row['native_weight']/row['sampling_probability']/row['response_sampling_probability']
+                 for row in expected.values()]
+        sumw, sumw2 = math.fsum(final), math.fsum(w*w for w in final)
+        integrity = dict(integrity,response_annotated_merged_sha256=digest(merged),
+            response_annotation_only=True,
+            all_original_branches_and_EDM_preserved_after_annotation=True)
     environment = transfer_env()
     environment.update(PYTHONHOME=str(payload / 'runtime'), ROOTSYS=str(payload / 'runtime'),
         PYTHONPATH=str(payload / 'configs') + ':' + str(payload / 'bin'),
@@ -522,6 +689,8 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         original_nano_retired=False, checked_epoch=time.time())
     if proposal_metadata is not None:
         receipt.update(decay_proposal_annotation=proposal_metadata, histogram_weight_branch=weight_branch)
+    if response_metadata is not None:
+        receipt.update(response_sampling_annotation=response_metadata,histogram_weight_branch=weight_branch)
     save(work / 'receipt.json', receipt)
     publish(work / 'receipt.json', request['sample_directory'] + '/metadata/postprocessing/' + request['snapshot_name'])
     save(work / 'result.json', receipt)

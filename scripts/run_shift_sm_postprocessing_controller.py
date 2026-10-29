@@ -12,7 +12,8 @@ import re
 import sys
 import time
 
-from run_shift_sm_postprocessing import read, save, exposure, selected_rows, digest
+from run_shift_sm_postprocessing import (read, save, exposure, selected_rows, digest,
+                                        read_response_pin, response_sampling_contract)
 from shift_condor_native import query, run_condor, NativeCondorError
 
 
@@ -24,6 +25,10 @@ def descriptor_hashes(source):
 
 def compact_source(source):
     selected = selected_rows(source)
+    if source.get('response_sampling') is not None:
+        keys = ('event_ids','weights','selected_indices','sampling_probabilities',
+                'gen_sha256','normalization_record','response_sampling')
+        return json.loads(json.dumps({key:source[key] for key in keys},allow_nan=False))
     if source.get('decay_proposal') is not None:
         # The optional authority covers rejected originals as well as selected rows.
         keys = ('event_ids', 'weights', 'selected_indices', 'sampling_probabilities', 'gen_sha256',
@@ -33,6 +38,39 @@ def compact_source(source):
                 weights=[r['native_weight'] for r in selected],
                 selected_indices=list(range(len(selected))),
                 sampling_probabilities=[r['sampling_probability'] for r in selected])
+
+
+def response_closed_source(prepared_manifest, collector_result):
+    """Adapt one native-qualified response collector to ordinary snapshot input.
+
+    The supervisor supplies pinned terminal receipts only after its native job
+    checks. Pending or partial sources never acquire exposure by this route.
+    Existing production source and discovery paths remain unchanged.
+    """
+    prepared = read_response_pin(prepared_manifest)
+    if prepared.get('schema') != 'shift-sm-candidate-handoff-v1':
+        raise ValueError('Response discovery requires the candidate source authority')
+    collector = prepared['collector']
+    request_pin = dict(path=str(Path(collector['job_directory'])/'request.json'),
+                       sha256=collector['request_sha256'])
+    request = read_response_pin(request_pin)
+    if (Path(collector_result['path']) != Path(collector['job_directory'])/'result.json'
+            or prepared['benchmark_plan'] != request['benchmark_plan']):
+        raise ValueError('Response collector is outside its prepared source authority')
+    plan = read_response_pin(request['benchmark_plan'])
+    full = read_response_pin(request['full_population_exposure'])['sources']
+    if len(full) != 1 or full[0]['source_id'] != prepared['source_id']:
+        raise ValueError('Response prepared source has ambiguous full GEN exposure')
+    normalization=full[0]['original_full_exposure']; selected=plan['selected']
+    descriptor=dict(event_ids=[row['event_id'] for row in selected],
+        weights=[row['native_weight'] for row in selected],selected_indices=list(range(len(selected))),
+        sampling_probabilities=[row['existing_sampling_probability'] for row in selected],
+        gen_sha256=full[0]['prepared_gen_sha256'],normalization_record=normalization,
+        response_sampling=dict(collector_request=request_pin,collector_result=collector_result))
+    _,_,nanos=response_sampling_contract(descriptor)
+    return dict(normalization=normalization,selected=descriptor,nano_inputs=nanos,
+        descriptor_hashes=sorted({row['source_descriptor_sha256'] for row in nanos}),
+        original_result_path=collector_result['path'],original_result_sha256=collector_result['sha256'])
 
 
 def closed_sources(sources, nanos):
