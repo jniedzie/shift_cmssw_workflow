@@ -914,7 +914,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
     operational={'tools','simultaneous_sources','simultaneous_detector_points',
                  'additional_reserved_worklists','additional_reserved_meson_forecasts',
                  'prior_meson_controller_directory', 'meson_peer_controller_directories',
-                 'main_cleanup_recovery_guard'}
+                 'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards'}
     immutable=set(original)-operational
     if any(config.get(key)!=original[key] for key in immutable):
         raise ValueError('Replacement controller changed frozen production settings')
@@ -939,7 +939,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
                                    'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
-                                   'main_cleanup_recovery_guard', 'eos_executable'}:
+                                   'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1704,6 +1704,12 @@ def handoff_directory(config, batch, queue_snapshot=None):
                  Path(operational['directory'])/batch['batch'])
     if not directory.is_absolute() or not (directory/'worker.sub').is_file():
         raise ValueError('Operational handoff is not a frozen persistent worker')
+    if directory == original and preserved is not None:
+        # A successful/submitted science launcher retains its original owner.
+        # Only handoffs without a submission use the replacement tools.
+        if not (original/'submission.json').is_file():
+            raise ValueError('Preserved original handoff has no submission receipt')
+        return original
     seal_path=directory.parents[1]/'seal.json'
     seal_digest=durable.sha(seal_path)
     frozen=read(seal_path)['files']
@@ -3205,16 +3211,27 @@ def main_histogram_preflight_child(directory,child,cluster):
 
 def reviewed_main_cleanup_terminal(config, receipt):
     """Accept one exact postpublication cleanup repair, never a detector retry."""
-    authority=config.get('main_cleanup_recovery_guard')
-    if authority is None:return None
-    guard=read_pinned(authority['configuration']);seal=read_pinned(authority['seal'])
+    authorities = ([config['main_cleanup_recovery_guard']]
+                   if config.get('main_cleanup_recovery_guard') is not None else [])
+    authorities += config.get('additional_main_cleanup_recovery_guards', [])
+    matches=[]
+    for candidate in authorities:
+        guarded=read_pinned(candidate['configuration'])
+        if any(target['directory']==receipt['task'] for target in guarded.get('targets', [])):
+            matches.append((candidate,guarded))
+    if len(matches)>1:raise ValueError('Cleanup recovery repeats a guarded detector owner')
+    if not matches:return None
+    authority,guard=matches[0];seal=read_pinned(authority['seal'])
     root=Path(guard['directory'])
+    count=len(guard.get('targets',[]))
+    bounded = (seal.get('exact_two_prepared_cohorts_only') is True and count==2) or (
+        seal.get('exact_prepared_cohorts_only') is True and 1<=count<=10
+        and seal.get('prepared_cohort_count')==count and guard.get('prepared_cohort_count')==count)
     if (authority['configuration']['path']!=str(root/'config.json')
             or authority['seal']['path']!=str(root/'seal.json')
             or seal.get('files',{}).get(str(root/'config.json'))!=authority['configuration']['sha256']
-            or seal.get('exact_two_prepared_cohorts_only') is not True
-            or guard.get('no_GEN_or_detector_rerun') is not True or len(guard.get('targets',[]))!=2):
-        raise ValueError('Cleanup guard is not the exact frozen two-cohort recovery')
+            or not bounded or guard.get('no_GEN_or_detector_rerun') is not True):
+        raise ValueError('Cleanup guard is not an exact frozen bounded-cohort recovery')
     targets=[target for target in guard['targets'] if target['directory']==receipt['task']]
     if not targets:return None
     if len(targets)!=1:raise ValueError('Cleanup guard repeats a target')

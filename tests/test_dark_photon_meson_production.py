@@ -26,8 +26,31 @@ class FixedExposure(unittest.TestCase):
         with patch.object(production,'read_pinned',side_effect=[guard,seal]):
             self.assertIsNone(production.reviewed_main_cleanup_terminal(config,dict(task='/other',cluster=10)))
         with patch.object(production,'read_pinned',side_effect=[guard,dict(seal,exact_two_prepared_cohorts_only=False)]):
-            with self.assertRaisesRegex(ValueError,'exact frozen two-cohort'):
+            with self.assertRaisesRegex(ValueError,'exact frozen bounded-cohort'):
                 production.reviewed_main_cleanup_terminal(config,dict(task='/one',cluster=10))
+
+    def test_added_cleanup_guard_is_exact_bounded_and_does_not_replace_prior_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);guard_root=root/'guard';guard_root.mkdir()
+            targets=[dict(batch='b'+str(i),directory=str(root/'batches'/('b'+str(i))/'production'),
+                          original_manager=100+i) for i in range(10)]
+            guard=dict(directory=str(guard_root),no_GEN_or_detector_rerun=True,
+                       prepared_cohort_count=10,targets=targets)
+            seal=dict(exact_prepared_cohorts_only=True,prepared_cohort_count=10,
+                      files={str(guard_root/'config.json'):'config'})
+            authority=dict(configuration=dict(path=str(guard_root/'config.json'),sha256='config'),
+                           seal=dict(path=str(guard_root/'seal.json'),sha256='seal'))
+            config=dict(directory=str(root),additional_main_cleanup_recovery_guards=[authority])
+            receipt=dict(task=targets[0]['directory'],cluster=100)
+            with patch.object(production,'read_pinned',side_effect=[guard,seal]):
+                self.assertIsNone(production.reviewed_main_cleanup_terminal(config,receipt))
+            with patch.object(production,'read_pinned',side_effect=[guard,dict(seal,prepared_cohort_count=9)]):
+                with self.assertRaisesRegex(ValueError,'bounded-cohort'):
+                    production.reviewed_main_cleanup_terminal(config,receipt)
+            config['main_cleanup_recovery_guard']=authority
+            with patch.object(production,'read_pinned',return_value=guard):
+                with self.assertRaisesRegex(ValueError,'repeats a guarded'):
+                    production.reviewed_main_cleanup_terminal(config,receipt)
 
     def test_cleanup_adoption_preserves_failed_native_record_and_never_resubmits(self):
         proof=dict(authority=dict(path='/guard/recovery.json',sha256='proof'),
@@ -1976,6 +1999,37 @@ class NativeHealth(unittest.TestCase):
             self.assertTrue((new/'handoffs/failed/worker.sub').is_file())
             self.assertFalse((new/'handoffs/successful').exists())
             self.assertEqual(actual['reviewed_failures']['failed']['sha256'],production.durable.sha(review))
+
+    def test_main_stage_rollover_automatically_replaces_future_science_launchers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);science=root/'science';old=root/'old';new=root/'new'
+            science.mkdir();(old/'tools').mkdir(parents=True)
+            batches=[dict(batch=name) for name in ['submitted','future']]
+            original=dict(directory=str(science),tools=str(science/'tools'),batches=batches,
+                main_histogrammer=dict(path='/qualified/main.json',sha256='unchanged'),
+                simultaneous_sources=2,simultaneous_detector_points=2)
+            for name in ['config.json','seal.json']:(science/name).write_text('{}')
+            (old/'config.json').write_text(json.dumps(original))
+            descriptor='\n'.join(['+SendCredential = True','+MaxRuntime = 604800',
+                'on_exit_hold = (ExitCode != 0)','periodic_release = False',
+                'arguments = OPERATIONS_SEAL_DIGEST'])
+            (old/'controller.sub.in').write_text(descriptor);(old/'lcg_controller.sh').write_text('#!/bin/bash\n')
+            (old/'seal.json').write_text(json.dumps(dict(files={})))
+            digest=production.durable.sha(old/'seal.json')
+            (old/'controller.sub').write_text(descriptor.replace('OPERATIONS_SEAL_DIGEST',digest))
+            submitted=science/'batches/submitted/handoff';submitted.mkdir(parents=True)
+            (submitted/'submission.json').write_text('{}');(submitted/'worker.sub').write_text('original sealed worker')
+            with patch.object(production,'verify',return_value=original), \
+                 patch.object(production,'operational_configuration',return_value=original):
+                replacement.prepare(science,production.durable.sha(science/'seal.json'),old,digest,new)
+            actual=json.loads((new/'config.json').read_text())
+            self.assertEqual(actual['operational_handoffs']['preserved_directories'],{'submitted':str(submitted)})
+            self.assertEqual(production.handoff_directory(actual,batches[0]),submitted)
+            future=production.handoff_directory(actual,batches[1])
+            self.assertIn(str(new/'tools/run_dark_photon_meson_production.py'),(future/'run.sh').read_text())
+            self.assertNotIn(str(science/'tools/run_dark_photon_meson_production.py'),(future/'run.sh').read_text())
+            self.assertEqual(production.durable.sha(new/'tools/dark_photon_production_support.py'),
+                             production.durable.sha(Path(replacement.__file__).with_name('dark_photon_production_support.py')))
 
     def test_versioned_controller_preserves_original_physics_and_frozen_settings(self):
         with tempfile.TemporaryDirectory() as temporary:

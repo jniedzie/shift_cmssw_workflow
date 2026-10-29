@@ -54,6 +54,9 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
     original = production.verify(directory, original_seal)
+    # Main-stage preparation copies helpers beside its executing script.
+    # A replacement owner therefore needs replacement handoff launchers too.
+    operational_handoffs = operational_handoffs or original.get('main_histogrammer') is not None
     first_operation = template == directory
     if first_operation:
         if template_seal != original_seal:
@@ -168,7 +171,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         shutil.copy2(maintained, tools/name)
         seal_files[str(tools/name)] = production.durable.sha(tools/name)
     if operational_handoffs:
-        previous_handoffs=copy.deepcopy(config.get('operational_handoffs',{}))
+        previous_handoffs=copy.deepcopy(config.get('operational_handoffs') or {})
         replacement_batches={batch for batch,_ in reviewed_handoff_failures}
         config['operational_handoffs']=dict(directory=str(output/'handoffs'),
             reviewed_failures=previous_handoffs.get('reviewed_failures',{}),preserved_directories={})
@@ -182,12 +185,15 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             old=previous_handoffs.get('preserved_directories',{}).get(batch['batch'])
             if old is None and previous_handoffs.get('directory'):
                 old=str(Path(previous_handoffs['directory'])/batch['batch'])
+            if old is None:
+                old=str(production.batch_directory(original,batch)/'handoff')
             # An explicitly reviewed failed launcher needs a new worker. All
             # other submitted launchers keep their original owner and receipt.
             if (old is not None and (Path(old)/'submission.json').is_file()
                     and batch['batch'] not in replacement_batches):
                 config['operational_handoffs']['preserved_directories'][batch['batch']]=old
-                old_seal=Path(old).parents[1]/'seal.json'
+                old_seal=(directory/'seal.json' if old==str(production.batch_directory(original,batch)/'handoff')
+                          else Path(old).parents[1]/'seal.json')
                 seal_files[str(old_seal)]=production.durable.sha(old_seal)
                 continue
             paths=production.prepare_handoff_worker(config,batch,output,original_seal)
