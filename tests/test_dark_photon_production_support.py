@@ -74,17 +74,21 @@ class MainHistogramHandoff(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);self.stage(root)
             write(root/'main_histogrammer.json',dict(detector_stage_timeouts=[21600,3600,5400,7200],
-                detector_timeout_seconds=43200,worker_runtime_seconds=43200))
+                detector_timeout_seconds=43200,worker_runtime_seconds=43200,
+                detector_event_stall_timeout_seconds=7200))
             class ReachedPayload(Exception):pass
             with patch('dark_photon_stage_budget.recorded_primary_environment',return_value={}), \
                  patch('dark_photon_production_support.subprocess.run',side_effect=ReachedPayload) as run:
                 with self.assertRaises(ReachedPayload):main_histogram_stage(root,'detector',0)
             argv=run.call_args.args[0]
             self.assertEqual(argv[argv.index('--stage-timeouts')+1],'21600,3600,5400,7200')
+            self.assertEqual(argv[argv.index('--event-stall-timeout')+1],'7200')
             self.assertEqual(run.call_args.kwargs['timeout'],43200)
 
     def test_invalid_stage_budget_cannot_start_or_create_an_attempt(self):
-        invalid=[dict(detector_stage_timeouts=[7200,3600,5400]),
+        invalid=[dict(detector_event_stall_timeout_seconds=True),
+                 dict(detector_event_stall_timeout_seconds=43201),
+                 dict(detector_stage_timeouts=[7200,3600,5400]),
                  dict(detector_stage_timeouts=[True,3600,5400,7200]),
                  dict(detector_stage_timeouts=[0,3600,5400,7200]),
                  dict(detector_stage_timeouts=[21600,3600,5400,7200],detector_timeout_seconds=30000),
