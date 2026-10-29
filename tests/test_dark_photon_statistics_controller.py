@@ -1391,3 +1391,49 @@ class ReviewedMainPreflightReplacement(unittest.TestCase):
             authority['review']['sha256']=controller.sha(root/'review.json');config['dependencies'][str(root/'review.json')]=controller.sha(root/'review.json')
             with self.assertRaisesRegex(ValueError,'native mismatch controls'):
                 controller.validate_main_preflight_replacement(config,'12',authority)
+
+
+class SharedRegisteredStorageAdmission(unittest.TestCase):
+    def fixture(self):
+        shared=dict(configuration=dict(path='/low/config.json',sha256='a'*64),seal=dict(path='/low/seal.json',sha256='b'*64))
+        config=dict(directory='/direct',eos_base='/eos/user/test',minimum_free_files=20000,
+                    shared_registered_storage=shared,dependencies={p['path']:p['sha256'] for p in shared.values()})
+        peer=dict(directory='/low/science',eos_base=config['eos_base'],minimum_eos_free_bytes=50000000000,
+                  minimum_eos_free_files=20000,maximum_meson_forecast_bytes=69000000000,
+                  committed_direct_storage_peer=dict(reservation_name='direct_topups',reserved_bytes=20000000000))
+        registration=dict(storage_registration=dict(peer_reservations=[dict(name='direct_topups',reserved_bytes=20000000000)],registered_controller_directories=['/direct']))
+        seal=dict(files={'/low/config.json':'a'*64})
+        observation=dict(observed_utc=controller.datetime.now(controller.timezone.utc).isoformat(),free_bytes=205000000000,free_files=50000)
+        return config,peer,registration,seal,observation
+
+    def test_shared_gate_is_the_only_storage_claim_and_uses_current_peer_state(self):
+        config,peer,registration,seal,observation=self.fixture()
+        state=dict(batches={'closed':dict(published=True)})
+        with patch.object(controller,'pinned_json',side_effect=[peer,seal]), \
+             patch.object(controller,'read',return_value=state), \
+             patch('run_dark_photon_meson_production.fresh_production_authority',return_value=registration), \
+             patch('run_dark_photon_meson_production.storage_gate',return_value=(True,dict(required_free_bytes=204000000000))) as gate:
+            allowed,evidence=controller.supplement_admission(config,observation)
+        self.assertTrue(allowed)
+        self.assertEqual(evidence['required_free_bytes'],204000000000)
+        gate.assert_called_once_with(peer,observation,bulk=True,state=state,persist_terminal_cache=False)
+        self.assertTrue(evidence['whole_account_registration'])
+
+    def test_partial_direct_reservation_cannot_delegate(self):
+        config,peer,registration,seal,observation=self.fixture()
+        registration['storage_registration']['peer_reservations'][0]['reserved_bytes']=19000000000
+        with patch.object(controller,'pinned_json',side_effect=[peer,seal]), \
+             patch('run_dark_photon_meson_production.fresh_production_authority',return_value=registration), \
+             patch('run_dark_photon_meson_production.storage_gate') as gate:
+            with self.assertRaisesRegex(ValueError,'complete direct20GB'):
+                controller.supplement_admission(config,observation)
+            gate.assert_not_called()
+
+    def test_changed_or_unsealed_authority_cannot_delegate(self):
+        config,peer,registration,seal,observation=self.fixture()
+        seal['files']['/low/config.json']='changed'
+        with patch.object(controller,'pinned_json',side_effect=[peer,seal]), \
+             patch('run_dark_photon_meson_production.storage_gate') as gate:
+            with self.assertRaisesRegex(ValueError,'sealed campaign'):
+                controller.supplement_admission(config,observation)
+            gate.assert_not_called()

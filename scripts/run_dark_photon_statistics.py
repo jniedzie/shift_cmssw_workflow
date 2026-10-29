@@ -586,7 +586,44 @@ def supplement_canaries(config, policy, policy_hash):
     return True
 
 
+def shared_registered_admission(config, observation, shared):
+    """Use one sealed whole-account gate; do not add direct claims twice."""
+    from run_dark_photon_meson_production import fresh_production_authority, storage_gate
+    if set(shared)!={'configuration','seal'}:
+        raise ValueError('Registered shared storage requires exact configuration and seal pins')
+    for pin in shared.values():
+        if config['dependencies'].get(pin['path'])!=pin['sha256']:
+            raise ValueError('Registered shared-storage authority is outside frozen dependencies')
+    peer=pinned_json(shared['configuration']);seal=pinned_json(shared['seal'])
+    if (seal['files'].get(shared['configuration']['path'])!=shared['configuration']['sha256']
+            or peer.get('eos_base')!=config['eos_base'] or peer.get('directory')==config['directory']
+            or peer.get('minimum_eos_free_bytes',0)<50000000000
+            or peer.get('minimum_eos_free_files',0)<config['minimum_free_files']
+            or peer.get('maximum_meson_forecast_bytes')!=69000000000):
+        raise ValueError('Shared registration lost its sealed campaign, low-mass allocation or free floor')
+    fresh=fresh_production_authority(peer,reader=pinned_json)
+    if fresh is None:
+        raise ValueError('Shared admission requires its fresh production storage registration')
+    claims={row['name']:row['reserved_bytes'] for row in fresh['storage_registration']['peer_reservations']}
+    direct=peer.get('committed_direct_storage_peer',{})
+    if (claims.get('direct_topups')!=20000000000 or direct.get('reserved_bytes')!=20000000000
+            or direct.get('reservation_name')!='direct_topups'
+            or config['directory'] not in fresh['storage_registration']['registered_controller_directories']):
+        raise ValueError('Shared registration does not protect the complete direct20GB allocation')
+    observed=datetime.fromisoformat(observation['observed_utc']).timestamp()
+    if not 0<=datetime.now(timezone.utc).timestamp()-observed<=300:
+        return False,dict(reason='waiting_for_fresh_quota')
+    state=read(Path(peer['directory'])/'state.json')
+    allowed,evidence=storage_gate(peer,observation,bulk=True,state=state,persist_terminal_cache=False)
+    evidence=dict(evidence,shared_configuration=shared['configuration'],whole_account_registration=True)
+    evidence.setdefault('reason','admitted' if allowed else 'waiting_for_shared_storage')
+    return allowed,evidence
+
+
 def supplement_admission(config, observation):
+    shared=config.get('shared_registered_storage')
+    if shared is not None:
+        return shared_registered_admission(config,observation,shared)
     authority = config['supplement_admission']
     if config['dependencies'].get(authority['path']) != authority['sha256']:
         raise ValueError('Supplement admission policy is outside frozen dependencies')
