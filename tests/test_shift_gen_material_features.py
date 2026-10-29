@@ -130,6 +130,29 @@ class GenMaterialFeatureTests(unittest.TestCase):
             row=features.event_features(rows,[1,1,1],1.,[1.])
             self.assertEqual(row['unknown_transport_ancestor_barcodes'],[1])
 
+    def test_catalogued_octet_onia_are_generator_states_only_in_allowed_statuses(self):
+        self.assertEqual(len(features.PYTHIA8317_OCTET_ONIA_IDS), 24)
+        for pdg in features.PYTHIA8317_OCTET_ONIA_IDS:
+            for status in (23, 62):
+                self.assertTrue(features.generator_bookkeeping_state(pdg, status))
+            for status in (1, 2, 4, 22, 33, 51, 63, 71):
+                self.assertFalse(features.generator_bookkeeping_state(pdg, status))
+        for pdg in (-9940103, 9940000, 9949999, 9959999, 9900015, 1000021):
+            for status in (23, 62):
+                self.assertFalse(features.generator_bookkeeping_state(pdg, status))
+
+    def test_octet_history_keeps_physical_parents_weights_and_graph(self):
+        rows = [particle(1, 9940103, status=23), particle(2, 9940103, [1], status=62),
+                particle(3, 100443, [2]), particle(4, 443, [3]),
+                particle(5, 13, [4], status=1, end=None)]
+        result = features.event_features(rows, [1, 1, 1], -.125, [-.125])
+        self.assertEqual(result['unknown_transport_ancestor_barcodes'], [])
+        self.assertEqual(result['muons'][0]['ancestor_barcodes'], [1, 2, 3, 4])
+        self.assertEqual(result['muons'][0]['transport_parent_barcodes'], [3, 4])
+        self.assertEqual([row['pdg'] for row in result['parent_flights']], [100443, 443])
+        self.assertEqual(result['native_weight'], -.125)
+        self.assertEqual(result['hepmc_weights'], [-.125])
+
 
 if __name__ == '__main__':
     unittest.main()

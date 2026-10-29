@@ -46,6 +46,31 @@ def generator_bookkeeping_diquark(pdg, status):
             and value % 100 in (1, 3))
 
 
+# Pythia 8.317's ParticleData.xml, SHA256
+# 330ba4e7f5a081235b5055f7b312fe6f5c9fe9c95411a845cba7a3e82e67ecca.
+# These are its explicit unphysical colour-octet onium intermediates, each
+# converting exclusively to a physical quarkonium state plus a gluon.
+# https://pythia.org/latest-manual/OniaProcesses.html documents the ID scheme.
+PYTHIA8317_OCTET_ONIA_IDS = frozenset((
+    9940001, 9940003, 9940005, 9940011, 9940023, 9940103,
+    9941003, 9941103, 9942003, 9942033, 9942103,
+    9950001, 9950003, 9950005, 9950011, 9950023, 9950103, 9950203,
+    9951003, 9951103, 9951203, 9952003, 9952103, 9952203,
+))
+
+
+def generator_bookkeeping_state(pdg, status):
+    """Identify documented generator intermediates, never guessed hadrons.
+
+    The octet IDs are catalogued partonic onium states, not a new physical
+    transport model. Status 23 is an outgoing hard-process record; 62 is its
+    primordial-kT copy. Status-1/2 particles and uncatalogued IDs stay unknown.
+    Missing saved flight endpoints are not interpreted as a zero flight.
+    """
+    return (generator_bookkeeping_diquark(pdg, status)
+            or status in (23, 62) and int(pdg) in PYTHIA8317_OCTET_ONIA_IDS)
+
+
 def kinematics(momentum):
     if len(momentum) != 3 or any(not math.isfinite(float(x)) for x in momentum):
         raise ValueError('Momentum needs three finite GeV components')
@@ -156,7 +181,7 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
         unknown_ancestors.update(number for number in parents
             if particles[number]['status'] != 4 and not hadron(particles[number]['pdg'])
             and abs(particles[number]['pdg']) not in known_elementary
-            and not generator_bookkeeping_diquark(particles[number]['pdg'], particles[number]['status']))
+            and not generator_bookkeeping_state(particles[number]['pdg'], particles[number]['status']))
         needed_ancestors.update(parents)
         flight_numbers = [number for number in parents if hadron(particles[number]['pdg'])
                           and particles[number]['status'] != 4]

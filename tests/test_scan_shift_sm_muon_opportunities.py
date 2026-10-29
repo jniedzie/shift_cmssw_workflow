@@ -68,6 +68,28 @@ def write_pin(path, value, compressed=False):
 
 
 class OpportunityTest(unittest.TestCase):
+    def test_catalogued_octet_copy_flags_are_reclassified_without_inventing_flights(self):
+        for pdg, status, ignored in ((9940103, 23, True), (9940103, 62, True),
+                (9940103, 1, False), (9940103, 2, False), (9940103, 51, False),
+                (9949999, 23, False), (9900015, 62, False), (1000021, 23, False)):
+            with self.subTest(pdg=pdg, status=status):
+                original = event()
+                original['unknown_transport_ancestor_barcodes'] = [5]
+                original['ancestor_nodes'] = [dict(barcode=5, pdg=pdg, status=status,
+                                                    immediate_parent_barcodes=[])]
+                for muon in original['muons']:
+                    muon.update(ancestor_barcodes=[5], first_non_muon_parent_barcodes=[5])
+                saved = copy.deepcopy(original)
+                counts, result = describe_event(original, geometry(), 1.)
+                self.assertEqual(original, saved)
+                self.assertEqual(counts['remaining_unknown_transport_ancestor_nodes'], int(not ignored))
+                if ignored:
+                    self.assertEqual(result['pairs'][0]['transport_parent_union']['parent_records'], [])
+                    self.assertEqual(result['original_unknown_transport_ancestor_barcodes'], [5])
+                    self.assertEqual(result['ignored_generator_bookkeeping_ancestor_nodes'], original['ancestor_nodes'])
+                else:
+                    self.assertIsNone(result)
+
     def test_old_hadronization_flags_use_shared_exact_node_predicate_and_keep_originals(self):
         for pdg, status in ((2101, 72), (2103, 73), (2203, 72), (9900015, 72), (2101, 2)):
             with self.subTest(pdg=pdg, status=status):

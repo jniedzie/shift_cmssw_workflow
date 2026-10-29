@@ -29,7 +29,7 @@ import tempfile
 
 from run_shift_sm_postprocessing import digest, download, save
 from shift_csc_active_geometry import ray_intersections
-from shift_gen_material_features import generator_bookkeeping_diquark
+from shift_gen_material_features import generator_bookkeeping_state
 from shift_sm_response_features import SHALLOW_PARENT_DEPTH_MAX, _station_misses
 
 
@@ -122,7 +122,7 @@ def classified_unknown_ancestors(original_unknown, nodes):
     if not isinstance(original_unknown, list):
         return None, []
     ignored = [nodes[n] for n in original_unknown if n in nodes
-               and generator_bookkeeping_diquark(nodes[n]['pdg'], nodes[n]['status'])]
+               and generator_bookkeeping_state(nodes[n]['pdg'], nodes[n]['status'])]
     ignored_ids = {row['barcode'] for row in ignored}
     return [n for n in original_unknown if n not in ignored_ids], ignored
 
@@ -327,7 +327,7 @@ def scan(request):
         geometry_is_straight_active_layer_footprints_not_measured_reco_efficiency=True,
         scattering_field_losses_electronics_and_reconstruction_not_predicted=True,
         saved_ancestry_flags_reclassified_only_by_shared_bookkeeping_predicate=True,
-        bookkeeping_classifier_file_sha256=digest(generator_bookkeeping_diquark.__code__.co_filename),
+        bookkeeping_classifier_file_sha256=digest(generator_bookkeeping_state.__code__.co_filename),
         material_is_saved_external_path_description_not_survival_weight=True)
     if parent_limit is not None:
         report.update(maximum_known_parent_depth=parent_limit,
