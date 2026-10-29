@@ -164,6 +164,41 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'frozen watchdog authority'):
             WATCH.reviewed_main_preflight_replacements(self.config)
 
+    def test_reviewed_source_retry_follows_new_iwd_and_preserves_original_payload(self):
+        original = self.root/'batches/b0'; original.mkdir(parents=True)
+        replacement = self.root/'source_recovery/b0'; replacement.mkdir(parents=True)
+        def write(path, value):
+            path.write_text(json.dumps(value)); return dict(path=str(path), sha256=WATCH.sha(path))
+        write(original/'submission.json', dict(cluster=100, task=str(original), utc='1970-01-01T00:00:00+00:00'))
+        new_pin = write(replacement/'submission.json', dict(cluster=300, task=str(replacement),
+            submit_sha256='a'*64, utc='1970-01-01T00:00:00+00:00'))
+        native = dict(ClusterId=100, ProcId=0, JobStatus=3, Iwd=str(original), ExitCode=1, ExitBySignal=False)
+        old_pin = write(replacement/'original_native.json', [native])
+        review = write(replacement/'review.json', dict(original_native_removed=old_pin,
+            replacement_submission=new_pin))
+        authorities = {'b0': review}
+        owner = write(replacement/'owner.json', dict(directory=str(self.root), batches=[{'batch': 'b0'}],
+            reviewed_source_recovery_receipts=authorities))
+        helper = replacement/'validator.py'
+        helper.write_text('import json\nfrom pathlib import Path\n'
+            'def reviewed_source_receipt(config,batch,original):\n'
+            ' assert batch=={"batch":"b0"} and original["cluster"]==100\n'
+            ' return json.loads(Path('+repr(new_pin['path'])+').read_text())\n')
+        self.config.update(reviewed_source_recovery_receipts=authorities,
+            source_recovery_configuration=owner,
+            source_recovery_validator=dict(path=str(helper), sha256=WATCH.sha(helper)),
+            dependencies={owner['path']: owner['sha256'], review['path']: review['sha256'],
+                          str(helper): WATCH.sha(helper)})
+        receipts = WATCH.manager_receipts(self.root, config=self.config)
+        self.assertEqual(receipts[100]['kind'], 'reviewed_orchestration')
+        self.assertEqual(receipts[300]['kind'], 'meson_source')
+        self.assertEqual(receipts[300]['directory'], str(replacement))
+        self.assertEqual(receipts[300]['payload_directory'], str(original))
+        self.assertEqual(WATCH.reviewed_source_retries(self.config)[100]['native'], native)
+        helper.write_text('raise AssertionError("changed source validator")')
+        with self.assertRaisesRegex(ValueError, 'frozen watchdog authority'):
+            WATCH.reviewed_source_retries(self.config)
+
     def test_native_bound_point_preflight_has_its_declared_child_directory(self):
         production, directory, manager, child = self.point_preflight_fixture()
         self.assertTrue(WATCH.declared_point_preflight_child(production, child, manager))

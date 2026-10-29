@@ -239,9 +239,57 @@ def operational_recoveries(config):
         result[native['ClusterId']] = dict(authority=authority['review'], native=native,
             kind='detector_stage_recovery', original_directory=str(original),
             recovery_submission=str(replacement/'submission.json'))
+    result.update(reviewed_source_retries(config))
     result.update(reviewed_main_preflight_replacements(config))
     result.update(reviewed_runtime_rescues(config))
     return result
+
+
+def reviewed_source_retries(config):
+    """Follow exact fresh-clock source receipts, preserving removed failures."""
+    authorities = config.get('reviewed_source_recovery_receipts', {})
+    if not authorities:
+        return {}
+    helper = config['source_recovery_validator']; path = Path(helper['path'])
+    configuration = config['source_recovery_configuration']
+    members = list(path.parent.glob('*.py'))
+    for pin in (helper, configuration):
+        if (config.get('dependencies', {}).get(pin['path']) != pin['sha256']
+                or sha(pin['path']) != pin['sha256']):
+            raise ValueError('Source recovery validator is outside frozen watchdog authority')
+    if any(config.get('dependencies', {}).get(str(p)) != sha(p) for p in members):
+        raise ValueError('Source recovery imports are outside frozen watchdog authority')
+    owner = read(configuration['path'])
+    if (owner['directory'] != config['production_directory']
+            or owner.get('reviewed_source_recovery_receipts') != authorities):
+        raise ValueError('Source recovery changed its exact frozen owner configuration')
+    previous_path = list(sys.path); names = {p.stem for p in members}
+    previous_modules = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location('_watch_source_recovery', path)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        result = {}
+        for name, pin in authorities.items():
+            if config.get('dependencies', {}).get(pin['path']) != pin['sha256'] or sha(pin['path']) != pin['sha256']:
+                raise ValueError('Source retry review is outside frozen watchdog authority')
+            batch, = [b for b in owner['batches'] if b['batch'] == name]
+            directory = Path(owner['directory'])/'batches'/name
+            original = read(directory/'submission.json')
+            replacement = module.reviewed_source_receipt(owner, batch, original)
+            proof = read(pin['path']); native, = read(proof['original_native_removed']['path'])
+            replacement_path = proof['replacement_submission']['path']
+            if (replacement != read(replacement_path) or native['ClusterId'] != original['cluster']
+                    or native['Iwd'] != str(directory)):
+                raise ValueError('Source retry changed its exact original or replacement identity')
+            result[original['cluster']] = dict(authority=pin, native=native,
+                kind='source_stage_recovery', original_directory=str(directory),
+                recovery_submission=replacement_path, payload_directory=str(directory))
+        return result
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+        sys.modules.update(previous_modules); sys.path[:] = previous_path
 
 
 def reviewed_main_preflight_replacements(config):
@@ -436,6 +484,8 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
             if record['directory']==str(replacement):
                 if item['kind'] == 'detector_stage_recovery':
                     record.update(kind='production', payload_directory=item.get('payload_directory', item['original_directory']))
+                elif item['kind'] == 'source_stage_recovery':
+                    record.update(kind='meson_source', payload_directory=item['original_directory'])
                 else:
                     record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
     preserved = set(preserved_handoffs(config).values()) if config else set()
@@ -1029,7 +1079,7 @@ def assess(config, previous, rows, history, receipts, now):
                 raise ValueError('Native history conflicts with the reviewed failed aggregate')
             summary['reviewed_terminal_failure'] = reviewed[cluster]
             recovery = reviewed[cluster].get('recovery_submission')
-            if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery','detector_stage_recovery'):
+            if reviewed[cluster].get('kind') in ('partial_gen_recovery','meson_handoff_recovery','detector_stage_recovery','source_stage_recovery'):
                 issue('reviewed_orchestration_failure_'+str(cluster),'warning',
                       'Original orchestration failure is retained; its exact replacement is monitored separately',job=cluster)
             if reviewed[cluster].get('kind') == 'main_cleanup_recovery':
