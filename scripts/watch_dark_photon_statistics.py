@@ -29,6 +29,7 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'DAGManJobId', 'JobStatus', 'Iwd', 'NumJobS
               'ExitCode', 'ExitBySignal', 'CompletionDate', 'Args', 'Out',
               'ShiftDPStatisticsWatchdog', 'RemoteUserCpu', 'RemoteSysCpu', 'Cmd',
               'ShiftDPPointPreflightManifestSHA256']
+PAYLOAD_COUNTING_VERSION = 2
 
 
 def retry_shared_storage(operation):
@@ -599,7 +600,8 @@ def stage_counts(directory):
     plan = read(plan_path) if plan_path.is_file() else {}
     counts = dict(planned_events=plan.get('events', 0), completed_events=0,
                   started_receipts=0, failed_receipts=0, complete_receipts=0,
-                  completed_points=0, failed_files=[], latest_receipt_epoch=0)
+                  completed_points=0, failed_files=[], latest_receipt_epoch=0,
+                  payload_counting_version=PAYLOAD_COUNTING_VERSION)
     for path in sorted((directory / 'statuses').glob('*.json')):
         item = read(path)
         counts['latest_receipt_epoch'] = max(counts['latest_receipt_epoch'], path.stat().st_mtime)
@@ -607,7 +609,8 @@ def stage_counts(directory):
             counts['started_receipts'] += 1
         if item.get('complete') is True:
             counts['complete_receipts'] += 1
-            counts['completed_events'] += item.get('events', item.get('parent', {}).get('events', 0))
+            if item.get('action') not in ('finalize', 'collect'):
+                counts['completed_events'] += item.get('events', item.get('parent', {}).get('events', 0))
         elif item.get('error'):
             counts['failed_receipts'] += 1
             counts['failed_files'].append(str(path))
@@ -1043,7 +1046,9 @@ def assess(config, previous, rows, history, receipts, now):
         old = previous.get('stages', {}).get(str(cluster), {})
         stamps = {name: (payload_directory / name).stat().st_mtime_ns if (payload_directory / name).exists() else 0
                   for name in ('plan.json', 'statuses', 'completed_points', 'source_status.json', 'source_heartbeat.json')}
-        counts = old['counts'] if old.get('directory_stamps') == stamps else stage_counts(payload_directory)
+        counts = (old['counts'] if old.get('directory_stamps') == stamps
+                  and old.get('counts', {}).get('payload_counting_version') == PAYLOAD_COUNTING_VERSION
+                  else stage_counts(payload_directory))
         executed = (old.get('observed_execute_events', []) if terminal and old else execute_events(directory)) \
             if receipt['kind'] in ('gen_stage', 'production') else []
         known_execute.update(executed)

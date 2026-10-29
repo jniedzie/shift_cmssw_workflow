@@ -35,7 +35,8 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.receipts = {100: dict(directory=str(self.directory), receipt='fake', kind='gen_stage', submitted=self.now - 120)}
         self.counts = dict(planned_events=60, completed_events=0, started_receipts=0,
                            failed_receipts=0, complete_receipts=0, completed_points=0,
-                           failed_files=[], latest_receipt_epoch=0)
+                           failed_files=[], latest_receipt_epoch=0,
+                           payload_counting_version=WATCH.PAYLOAD_COUNTING_VERSION)
 
     def assess(self, children, events=None, previous=None, manager_age=120):
         manager = dict(ClusterId=100, ProcId=0, JobStatus=2, Iwd=str(self.directory), JobStartDate=self.now - manager_age)
@@ -798,6 +799,27 @@ class StatisticsWatchdogTest(unittest.TestCase):
         report = self.assess([self.child(age=13 * 3600)])
         self.assertEqual(report['health'], 'critical')
         self.assertTrue(any(item['code'] == 'queue_101' for item in report['issues']))
+
+    def test_finalizer_and_collector_summaries_do_not_duplicate_payload_events(self):
+        stage = self.root/'response'; (stage/'statuses').mkdir(parents=True)
+        for name, data in [('chunk_0', dict(action='detector', complete=True, events=4)),
+                           ('chunk_1', dict(action='detector', complete=True, events=3)),
+                           ('finalizer', dict(action='finalize', complete=True, events=7)),
+                           ('collector', dict(action='collect', complete=True, events=7))]:
+            (stage/'statuses'/(name+'.json')).write_text(json.dumps(data))
+        counts = WATCH.stage_counts(stage)
+        self.assertEqual(counts['completed_events'], 7)
+        self.assertEqual(counts['complete_receipts'], 4)
+
+    def test_old_completed_event_cache_is_recomputed_after_counting_fix(self):
+        previous = self.assess([])
+        previous['stages']['100']['counts'].pop('payload_counting_version')
+        with patch.object(WATCH, 'stage_counts', return_value=dict(self.counts, completed_events=7)) as count, \
+                patch.object(WATCH, 'execute_events', return_value=[]):
+            manager = dict(ClusterId=100, ProcId=0, JobStatus=2, Iwd=str(self.directory))
+            report = WATCH.assess(self.config, previous, [manager], [], self.receipts, self.now)
+        count.assert_called_once()
+        self.assertEqual(report['stages']['100']['counts']['completed_events'], 7)
 
     def test_stage_budget_recovery_preserves_gen_counts_and_follows_new_handoff(self):
         stage=self.root/'waves/w001/gen_stage';stage.mkdir(parents=True)
