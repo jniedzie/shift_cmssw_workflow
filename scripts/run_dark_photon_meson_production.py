@@ -940,7 +940,7 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
                                    'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable',
-                                   'committed_direct_storage_peer'}:
+                                   'committed_direct_storage_peer', 'reviewed_source_accounting'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -1636,10 +1636,84 @@ def export_original_rates(config, directory, production):
     """Keep the original physical source/rate authority for runtime repairs."""
     rates = directory / 'rates.json'
     if not rates.exists():
-        durable.run_logged([os.sys.executable, Path(config['tools'])/'export_dark_photon_cross_sections.py',
+        durable.run_logged([os.sys.executable, source_accounting_export(config,directory),
             '--plan', production/'plan.json', '--output', directory/'rates', '--publish', '--eos-rpc'],
             directory/'export_rates.log', timeout=1800)
         durable.new(rates, dict(complete=True, production_plan_sha256=durable.sha(production/'plan.json')))
+
+
+def source_accounting_export(config, directory):
+    """Use a reviewed exact-source precision repair only for its named banks."""
+    original=Path(config['tools'])
+    pin=config.get('reviewed_source_accounting')
+    if pin is None:return original/'export_dark_photon_cross_sections.py'
+    authority=read_pinned(pin)
+    if authority.get('schema')!='shift-reviewed-exact-source-mass-accounting-v1':
+        raise ValueError('Source accounting repair lacks its qualified authority')
+    proof=read_pinned(authority['helper_overlay']);saved=proof.get('saved_banks',{})
+    if Path(directory).name not in saved:return original/'export_dark_photon_cross_sections.py'
+    if read(Path(directory)/'source_status.json').get('complete') is not True:
+        raise ValueError('Source accounting repair requires completed GEN')
+    audit=read_pinned(proof['authority'])
+    names={'dark_photon_senscalc.py','run_dark_photon_senscalc_gen.py'}
+    declared={row['batch']:row for row in config['batches']}
+    rows=audit.get('batches',[])
+    if (proof.get('schema')!='shift-reviewed-exact-source-pole-mass-helper-overlay-v1'
+            or set(proof.get('changed_helpers',{}))!=names or set(authority.get('only_changed_helpers',[]))!=names
+            or set(authority.get('batches',{}))!=set(saved)
+            or proof.get('source_p4_or_weights_changed') is not False
+            or proof.get('additional_source_collisions')!=0 or not 1<=len(saved)<=3
+            or {row['batch'] for row in rows}!=set(saved) or len(rows)!=len(saved)
+            or audit.get('physics_or_source_momenta_changed') is not False
+            or audit.get('source_collisions_redrawn_for_production')!=0
+            or audit.get('diagnostic_replay_exposure_credit')!=0):
+        raise ValueError('Source accounting repair changed its exact reviewed scope')
+    for row in rows:
+        batch=declared[row['batch']];bank=saved[row['batch']];manifest=read_pinned(bank['manifest'])
+        if (row.get('all_original_trials_and_candidates_identical') is not True
+                or row.get('all_bookkept_generated_and_pole_masses_equal_requested') is not True
+                or bank.get('additional_source_collisions')!=0
+                or any(row[key]!=batch[expected] for key,expected in
+                       [('mass_gev','mass_gev'),('seed','source_seed'),('source_trials','source_collisions')])
+                or any(manifest[key]!=row[key] for key in ('mass_gev','seed','source_trials'))):
+            raise ValueError('Source accounting repair changed a frozen bank identity')
+    tools=pinned_path(authority['helper_overlay']).parent/'tools'
+    if str(tools)!=authority.get('accounting_tools'):
+        raise ValueError('Source accounting repair changed its private toolchain')
+    seal=read(Path(config['directory'])/'seal.json')
+    originals={Path(path).name for path in seal['files'] if Path(path).parent==original}
+    if not names|{'export_dark_photon_cross_sections.py'}<=originals:
+        raise ValueError('Source accounting repair lacks its original sealed helpers')
+    for path,digest in seal['files'].items():
+        source=Path(path)
+        if source.parent!=original:continue
+        replacement=proof['changed_helpers'].get(source.name)
+        if replacement and replacement['original_sha256']!=digest:
+            raise ValueError('Source accounting repair has a different original helper')
+        expected=replacement['replacement_sha256'] if replacement else digest
+        if durable.sha(source)!=digest or durable.sha(tools/source.name)!=expected:
+            raise ValueError('Source accounting helper differs from its reviewed overlay: '+source.name)
+    return tools/'export_dark_photon_cross_sections.py'
+
+
+def main_aggregate_tools(config, sources):
+    """Keep repaired accounting local to aggregates containing those sources."""
+    tools=Path(__file__).resolve().parent
+    pin=config.get('reviewed_source_accounting')
+    if pin is None:return tools
+    authority=read_pinned(pin)
+    repaired={str(batch_directory(config,dict(batch=name))/'production/plan.json'):name
+              for name in authority['batches']}
+    selected=[repaired[row['plan_path']] for row in sources if row['plan_path'] in repaired]
+    if not selected:return tools
+    source_accounting_export(config,batch_directory(config,dict(batch=selected[0])))
+    overlay=read_pinned(authority['helper_overlay']);replacement=tools/'source_mass_accounting'
+    for name in durable.aggregate_helper_names(dict(config,tools=str(tools))):
+        expected=(overlay['changed_helpers'][name]['replacement_sha256']
+                  if name in overlay['changed_helpers'] else durable.sha(tools/name))
+        if durable.sha(replacement/name)!=expected:
+            raise ValueError('Aggregate source accounting differs from its exact reviewed closure: '+name)
+    return replacement
 
 
 def prepare_handoff_worker(config, batch, operational_directory=None, original_seal=None):
@@ -2915,7 +2989,8 @@ def cumulative_result(config,state,batch,transport,primitive):
         version=max((int(path.name[1:]) for path in root.glob('v*')),default=0)+1
         directory=root/f'v{version:04d}'
         guard=batch_directory(config,next(row for row in config['batches'] if row['operational_canary']))/'production'
-        durable.aggregate_plan(dict(config,aggregation_guard=str(guard)),point,sources,directory)
+        durable.aggregate_plan(dict(config,tools=str(main_aggregate_tools(config,sources)),
+            aggregation_guard=str(guard)),point,sources,directory)
         pending=durable.aggregate_record(directory,point,sources)
         durable.new(directory/'aggregate_intent.json',pending)
         state.setdefault('aggregates',{})[point]=pending
@@ -2982,7 +3057,7 @@ def complete_empty_admission(config, batch, status):
     validate_rate_only_report(read(path),row,status['parent'],report['plan_sha256'],report['seal_sha256'])
     rates=directory/'rates.json'
     if not rates.exists():
-        durable.run_logged([os.sys.executable,Path(config['tools'])/'export_dark_photon_cross_sections.py',
+        durable.run_logged([os.sys.executable,source_accounting_export(config,directory),
             '--plan',production/'plan.json','--output',directory/'rates','--publish','--eos-rpc'],
             directory/'export_rates.log',timeout=1800)
         immutable(rates,dict(complete=True,production_plan_sha256=report['plan_sha256']))

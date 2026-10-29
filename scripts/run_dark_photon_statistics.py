@@ -948,10 +948,11 @@ def main_histogram_aggregate_plan(config,point,sources,directory):
     model={key:rows[0][key] for key in ('mass_gev','epsilon','proper_ctau_mm','sampling_epsilon')}
     if any(any(row[key]!=value for key,value in model.items()) for row in rows):
         raise ValueError('Cumulative main histograms change the physical point')
+    helpers=aggregate_helper_names(config)
     directory.mkdir(parents=True)
     for name in ('logs','completed_points','failures'):(directory/name).mkdir()
     dependencies={}
-    for name in aggregate_helper_names(config):
+    for name in helpers:
         target=directory/name;shutil.copy2(Path(config['tools'])/name,target);dependencies[str(target)]=sha(target)
     campaign=config['campaign_prefix']+'-'+point+'-v'+directory.name[1:]
     prefix=config['eos_base']+'/darkphoton_'+point+'/'+campaign

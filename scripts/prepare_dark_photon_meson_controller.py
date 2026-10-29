@@ -28,7 +28,8 @@ def replacement_tool_names(original):
     if original.get('automatic_bulk_admission') is not None:
         names += ('dark_photon_automatic_admission.py',)
     if original.get('main_histogrammer') is not None:
-        names += ('dark_photon_production_support.py',)
+        from run_dark_photon_statistics import aggregate_helper_names
+        names += aggregate_helper_names(dict(original,tools=str(Path(__file__).resolve().parent)))
     return names
 
 
@@ -49,7 +50,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
             operational_handoffs=False, reviewed_handoff_failures=(),
             regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None, absolute_detector_stage_budgets=False,
-            reviewed_regrouping_canary_recovery=None):
+            reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -80,6 +81,9 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if reviewed_source_accounting is not None:
+        path=Path(reviewed_source_accounting).resolve()
+        config['reviewed_source_accounting']=dict(path=str(path),sha256=production.durable.sha(path))
     if reviewed_regrouping_canary_recovery is not None:
         path=Path(reviewed_regrouping_canary_recovery).resolve()
         config['reviewed_regrouping_canary_recovery']=dict(path=str(path),sha256=production.durable.sha(path))
@@ -170,6 +174,18 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         maintained = Path(__file__).with_name(name)
         shutil.copy2(maintained, tools/name)
         seal_files[str(tools/name)] = production.durable.sha(tools/name)
+    if config.get('reviewed_source_accounting') is not None:
+        from run_dark_photon_statistics import aggregate_helper_names
+        authority=production.read_pinned(config['reviewed_source_accounting'])
+        overlay=production.read_pinned(authority['helper_overlay'])
+        accounting=tools/'source_mass_accounting';accounting.mkdir()
+        for name in aggregate_helper_names(dict(config,tools=str(tools))):
+            replacement=overlay['changed_helpers'].get(name)
+            source=(Path(authority['accounting_tools'])/name if replacement else tools/name)
+            if replacement and production.durable.sha(source)!=replacement['replacement_sha256']:
+                raise ValueError('Reviewed source-accounting replacement changed: '+name)
+            shutil.copy2(source,accounting/name)
+            seal_files[str(accounting/name)]=production.durable.sha(accounting/name)
     if operational_handoffs:
         previous_handoffs=copy.deepcopy(config.get('operational_handoffs') or {})
         replacement_batches={batch for batch,_ in reviewed_handoff_failures}
@@ -311,6 +327,7 @@ def main():
     parser.add_argument('--historical-anchor-calibration',type=Path)
     parser.add_argument('--absolute-detector-stage-budgets',action='store_true')
     parser.add_argument('--reviewed-regrouping-canary-recovery',type=Path)
+    parser.add_argument('--reviewed-source-accounting',type=Path)
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -321,7 +338,7 @@ def main():
                              args.operational_handoffs,args.reviewed_handoff_failure,
                              args.regroup_complete_points,args.aggregation_storage_registration,
                              args.historical_anchor_calibration,args.absolute_detector_stage_budgets,
-                             args.reviewed_regrouping_canary_recovery), sort_keys=True))
+                             args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting), sort_keys=True))
 
 
 if __name__ == '__main__':
