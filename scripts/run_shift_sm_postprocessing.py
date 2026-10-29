@@ -526,8 +526,25 @@ def hadd_command(output, inputs, maximum_open_files=50):
     return ['hadd', '-fk', '-n', str(maximum_open_files), str(output), *map(str, inputs)]
 
 
+
+def merged_nano_publication(request):
+    """Keep interim plots available without repeated cumulative Nano uploads."""
+    publish = request.get('publish_merged_nano', True)
+    if type(publish) is not bool:
+        raise ValueError('Merged Nano publication must be explicitly boolean')
+    expected = request.get('expected_bin_source_ids')
+    if expected is not None:
+        observed = [row['source_id'] for row in request['normalization_sources']]
+        if (len(expected) != len(set(expected)) or len(observed) != len(set(observed))
+                or not set(observed) <= set(expected)
+                or publish != (set(observed) == set(expected))):
+            raise ValueError('Final merged Nano requires the entire frozen bin source census')
+    return publish
+
+
 def run(request_path, maximum_open_files=50, merge_timeout=3600):
     request = read(request_path)
+    publish_nano = merged_nano_publication(request)
     assert request['schema'] in ('shift-smart-SM-postprocessing-v1','shift-production-postprocessing-v1')
     assert request['complete_source_selections_only'] is True
     weight_branch = histogram_weight_branch(request['selected_sources'])
@@ -666,15 +683,21 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
     finally:
         root.Close()
     bound = request.get('maximum_publication_bytes', 256000000)
-    if merged.stat().st_size + 2 * hist.stat().st_size + 1048576 > bound:
+    nano_bytes = merged.stat().st_size if publish_nano else 0
+    if nano_bytes + 2 * hist.stat().st_size + 1048576 > bound:
         raise ValueError('Merged outputs exceed the declared publication reservation')
     # One independently validated per-bin snapshot is already the bin's merged
     # histogram. Publish both standard stages, with the plotter input last.
     published = {}
     name = request['snapshot_name'] + '.root'
-    merged.rename(work / name)
-    published['merged_nano'] = publish(work / name, request['sample_directory'] + '/nanoAOD_merged')
-    (work / name).unlink()
+    if publish_nano:
+        merged.rename(work / name)
+        published['merged_nano'] = publish(work / name, request['sample_directory'] + '/nanoAOD_merged')
+        (work / name).unlink()
+    else:
+        # Keep original Nanos available. Interim plots need the validated
+        # weighted histogram, without another cumulative Nano upload.
+        merged.unlink()
     hist.rename(work / name)
     published['histogram'] = publish(work / name, request['sample_directory'] + '/histograms')
     published['merged_histogram'] = publish(work / name, request['sample_directory'] + '/histograms_merged')
@@ -686,7 +709,8 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         source_ids=[s['source_id'] for s in request['normalization_sources']],
         full_original_exposure=metadata, original_nano_inputs=request['nano_inputs'],
         merged_nano_integrity=integrity, published=published,
-        original_nano_retired=False, checked_epoch=time.time())
+        original_nano_retired=False, merged_nano_published=publish_nano,
+        interim_histogram_only=not publish_nano, checked_epoch=time.time())
     if proposal_metadata is not None:
         receipt.update(decay_proposal_annotation=proposal_metadata, histogram_weight_branch=weight_branch)
     if response_metadata is not None:

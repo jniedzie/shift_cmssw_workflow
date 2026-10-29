@@ -229,6 +229,20 @@ def nano_cache(parent, inventory, state):
         state['nanos'][key] = dict(row, original_result_sha256=key)
 
 
+
+def complete_bin_source_ids(config, stratum):
+    """Read the pinned union worklist for optional final-only Nano publication."""
+    monitor = read_response_pin(config['response_monitor_config'])
+    plan = read_response_pin(monitor['plan'])
+    rows = plan['sources'] + monitor.get('extra_sources', [])
+    if any('stratum' not in row for row in rows):
+        raise ValueError('Final-bin publication requires explicit process/bin on every expected source')
+    ids = [row['source_id'] for row in rows if row['stratum'] == stratum]
+    if not ids or len(ids) != len(set(ids)):
+        raise ValueError('Final-bin publication has no unique frozen source census')
+    return sorted(ids)
+
+
 def snapshot(root, config, stratum, sources):
     sources = sorted(sources, key=lambda s: s['normalization']['source_id'])
     normalizations = [s['normalization'] for s in sources]
@@ -245,6 +259,12 @@ def snapshot(root, config, stratum, sources):
                 selected_sources=[s['selected'] for s in sources], nano_inputs=inputs,
                 histogram_runtime=config['histogram_runtime'],
                 maximum_publication_bytes=config['worker_publication_bound_bytes'])
+    if config.get('merged_nano_only_when_bin_complete') is True:
+        expected = complete_bin_source_ids(config,stratum)
+        observed = [row['source_id'] for row in normalizations]
+        if not set(observed) <= set(expected):
+            raise ValueError('Closed source lies outside the frozen bin worklist')
+        body.update(publish_merged_nano=set(observed)==set(expected),expected_bin_source_ids=expected)
     checksum = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     directory = root / 'jobs' / (stratum + '_' + checksum[:12])
     timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -259,7 +279,8 @@ def snapshot(root, config, stratum, sources):
     (directory / 'worker.sub').write_text(text)
     return dict(directory=str(directory), phase='ready', stratum=stratum,
                 request_sha256=digest(directory / 'request.json'),
-                source_ids=[s['source_id'] for s in normalizations], events=len(identities))
+                source_ids=[s['source_id'] for s in normalizations], events=len(identities),
+                publishes_merged_nano=body.get('publish_merged_nano',True))
 
 
 
@@ -405,7 +426,11 @@ def poll(root, config, state):
         last_finished = max((t.get('finished_epoch', 0) for t in state['tasks'].values()
                              if t['stratum'] == stratum and t['phase'] == 'done'), default=0)
         hourly_update = set(ids) > set(previous) and time.time() - last_finished > 3600
-        if not meaningful_update(previous, ids) and not hourly_update:
+        final_due = (config.get('merged_nano_only_when_bin_complete') is True
+            and set(ids) == set(complete_bin_source_ids(config,stratum))
+            and not any(task['stratum']==stratum and task['phase']=='done'
+                and task.get('publishes_merged_nano') is True for task in state['tasks'].values()))
+        if not meaningful_update(previous, ids) and not hourly_update and not final_due:
             continue
         task = snapshot(root, config, stratum, sources)
         if task:

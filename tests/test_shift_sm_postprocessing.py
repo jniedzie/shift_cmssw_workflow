@@ -169,6 +169,35 @@ class ResponsePublicationTest(unittest.TestCase):
             post.run(path)
 
 
+    def test_interim_histograms_and_final_nano_share_exact_source_exposure(self):
+        import run_shift_sm_postprocessing_controller as controller
+        source=self.discover()
+        monitor=self.write('publication_monitor.json',dict(plan=self.write('publication_plan.json',
+            dict(sources=[dict(source_id=sid,stratum='qcd_20toinf') for sid in ('response','next')]))))
+        config=dict(campaign='response_test',histogram_runtime=dict(path='runtime',sha256='a'*64),
+            worker_publication_bound_bytes=1000000,output_base='/eos/synthetic',worker_template='',
+            merged_nano_only_when_bin_complete=True,response_monitor_config=monitor)
+        task=controller.snapshot(self.root,config,'qcd_20toinf',[source])
+        request=json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertFalse(task['publishes_merged_nano'])
+        self.assertFalse(post.merged_nano_publication(request))
+        self.assertEqual(request['normalization_sources'],[self.normalization])
+        self.assertEqual(request['expected_bin_source_ids'],['next','response'])
+        with patch.object(controller,'complete_bin_source_ids',return_value=['response']):
+            final=controller.snapshot(self.root,config,'qcd_20toinf',[source])
+        final_request=json.loads((Path(final['directory'])/'request.json').read_text())
+        self.assertTrue(final['publishes_merged_nano']);self.assertTrue(post.merged_nano_publication(final_request))
+        self.assertNotEqual(task['request_sha256'],final['request_sha256'])
+        self.assertEqual(final_request['normalization_sources'],request['normalization_sources'])
+        self.assertEqual(final_request['nano_inputs'],request['nano_inputs'])
+        changed=dict(request,publish_merged_nano=True)
+        with self.assertRaisesRegex(ValueError,'entire frozen bin'):
+            post.merged_nano_publication(changed)
+        changed=dict(final_request,publish_merged_nano=False)
+        with self.assertRaisesRegex(ValueError,'entire frozen bin'):
+            post.merged_nano_publication(changed)
+
+
 class ResponseDiscoveryControllerTest(unittest.TestCase):
     def setUp(self):
         # Native proof deliberately rejects frontend-local /tmp authorities.
