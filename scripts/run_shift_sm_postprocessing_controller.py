@@ -333,6 +333,20 @@ def refresh_quota(root, config, ads):
         phase='running',quota_only=True))
 
 
+
+def publication_qualification_ready(config, state):
+    """Wait for the named real native canary before ordinary admission."""
+    name = config.get('qualification_task')
+    if name is None:
+        return True
+    task = state['tasks'].get(name)
+    if task is None or task.get('qualification_only') is not True:
+        raise ValueError('Required positive publication canary is missing')
+    if task['phase'] == 'failed':
+        raise ValueError('Required positive publication canary failed; no ordinary publication')
+    return task['phase'] == 'done'
+
+
 def poll(root, config, state):
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
                 'Iwd', 'DAGManJobId', 'Owner', 'GlobalJobId', 'NumJobStarts', 'HoldReason'], timeout=45)
@@ -367,6 +381,12 @@ def poll(root, config, state):
     if config.get('refresh_quota') is True:
         refresh_quota(root, config, ads)
     parent = read(Path(config['parent_state']) / 'ledger.json')
+    if not publication_qualification_ready(config,state):
+        save(root / 'state.json', state)
+        save(root / 'heartbeat.json', dict(checked_epoch=time.time(),
+            phase='waiting_for_publication_qualification',
+            qualification_task=config['qualification_task']))
+        return
     if config.get('response_monitor_config') is not None:
         groups = response_source_cache(config, state, ads)
     else:

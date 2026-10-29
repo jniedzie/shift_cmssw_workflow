@@ -296,6 +296,19 @@ class PublisherQuotaTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'source write bounds'):
             science_write_reservation(config,state,30)
 
+    def test_required_native_publication_canary_blocks_admission_until_done(self):
+        from run_shift_sm_postprocessing_controller import publication_qualification_ready
+        config=dict(qualification_task='positive')
+        state=dict(tasks=dict(positive=dict(qualification_only=True,phase='submitted')))
+        self.assertFalse(publication_qualification_ready(config,state))
+        state['tasks']['positive']['phase']='done'
+        self.assertTrue(publication_qualification_ready(config,state))
+        state['tasks']['positive']['phase']='failed'
+        with self.assertRaisesRegex(ValueError,'canary failed'):
+            publication_qualification_ready(config,state)
+        with self.assertRaisesRegex(ValueError,'canary is missing'):
+            publication_qualification_ready(config,dict(tasks={}))
+
     def test_old_or_physics_ledger_cannot_become_quota_authority(self):
         import run_shift_sm_postprocessing_controller as controller
         with self.assertRaisesRegex(ValueError,'own private quota'):
