@@ -7,7 +7,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_sm_response_labels import event_labels
-from summarize_shift_sm_response import (benchmark_report, candidate_regions,
+from summarize_shift_sm_response import (benchmark_report, candidate_regions, candidate_response_report,
     response_statistics, sampling_forecast, summarize, wilson_interval,
     zero_success_population_upper)
 from prepare_shift_sm_prospective_benchmark import prepare_benchmark
@@ -218,6 +218,83 @@ class StratifiedResponseTest(unittest.TestCase):
             changed[-1][field] = value
             with self.assertRaises(ValueError):
                 benchmark_report(population, plan, changed)
+
+
+class CandidateReportTest(unittest.TestCase):
+    def row(self, number, pairs=(), native=1., p=1., q=1., region='credible_shallow_pointing'):
+        pairs = [dict(item, vz=14800.) for item in pairs]
+        row = event(number, pairs, native, p*q)
+        row.update(original_sampling_probability=p, benchmark_sampling_probability=q,
+            benchmark_region=region, cost=dict(sim_wall_seconds_per_event=10.))
+        row['labels'].update(n_shift_muons=2 if pairs else 0, retained_pairs=pairs)
+        return row
+
+    def test_partial_positive_is_not_a_completed_zero_or_efficiency(self):
+        row = self.row(1, [pair()])
+        result = candidate_response_report([], [row], dict(complete_sources=0, selected_events=20))
+        self.assertEqual(result['scope']['complete_events'], 0)
+        self.assertEqual(result['scope']['partial_completed_events'], 1)
+        pooled = result['pooled_groups'][0]
+        self.assertIsNone(pooled['targets']['both_both']['raw_event_probability'])
+        partial = next(r for r in result['partial_groups'] if r['stratum']=='all_qcd'
+            and r['region_group']=='candidate')
+        self.assertEqual(partial['targets']['both_both']['positive_originals'], 1)
+        self.assertNotIn('raw_event_probability', partial['targets']['both_both'])
+        self.assertTrue(partial['rates_and_intervals_withheld'])
+
+    def test_histogram_moments_group_pairs_by_original_and_correct_once(self):
+        rows = [self.row(1, [pair(), pair()], native=2., p=.5),
+                self.row(2, [pair()], native=3., q=.25)]
+        result = candidate_response_report(rows, [], dict(complete_sources=1, complete_events=2))
+        hist = next(r for r in result['histograms'] if r['stratum']=='all_qcd'
+            and r['region_group']=='candidate' and r['category']=='both_both_good' and r['field']=='mass')
+        self.assertEqual(sum(hist['raw_counts']), 3)
+        self.assertEqual(sum(hist['event_weighted_sum']), 20.)
+        self.assertEqual(sum(hist['event_weighted_second_moment']), 208.)
+        stats = result['pooled_groups'][0]['targets']['both_both_good']
+        self.assertEqual(stats['weighted_pair_sum'], 20.)
+        self.assertAlmostEqual(stats['effective_pair_contributions'], 400/208)
+
+    def test_pooled_effective_count_is_recomputed_not_added(self):
+        rows = [self.row(1, [pair()]), self.row(2, [pair()], native=9.)]
+        rows[1]['stratum'] = 'qcd_10to20'
+        result = candidate_response_report(rows, [], dict(complete_sources=2))
+        stats = result['pooled_groups'][0]['targets']['both_both_good']
+        self.assertAlmostEqual(stats['effective_pair_contributions'], 100/82)
+        self.assertEqual(len(result['groups']), 4)
+
+    def test_repeated_originals_wrong_probabilities_and_label_drift_fail(self):
+        row = self.row(1, [pair()], p=.5, q=.25)
+        with self.assertRaisesRegex(ValueError, 'Overlapping'):
+            candidate_response_report([row], [copy.deepcopy(row)], {})
+        wrong = copy.deepcopy(row)
+        wrong['sampling_probability'] = .5
+        with self.assertRaisesRegex(ValueError, 'p\\*q'):
+            candidate_response_report([wrong], [], {})
+        wrong = copy.deepcopy(row)
+        wrong['labels']['pair_counts']['both_both_good'] = 0
+        with self.assertRaisesRegex(ValueError, 'retained reconstructed pairs'):
+            candidate_response_report([wrong], [], {})
+        with self.assertRaisesRegex(ValueError, 'promoted'):
+            candidate_response_report([row], [], dict(complete_sources=0))
+        with self.assertRaisesRegex(ValueError, 'snapshot scope'):
+            candidate_response_report([row], [], dict(complete_events=2))
+        wrong = copy.deepcopy(row)
+        wrong['benchmark_region'] = 'misspelled_candidate'
+        with self.assertRaisesRegex(ValueError, 'explicit classification'):
+            candidate_response_report([], [wrong], {})
+        wrong = copy.deepcopy(row)
+        wrong['native_weight'] = float('nan')
+        with self.assertRaisesRegex(ValueError, 'finite native weight'):
+            candidate_response_report([], [wrong], {})
+
+    def test_historical_comparison_does_not_claim_matched_policy_gain(self):
+        result = candidate_response_report([], [], {}, historical_rows=[self.row(1, [pair()])])
+        baseline = result['historical_baseline']
+        self.assertEqual(baseline['events'], 1)
+        self.assertFalse(baseline['matched_policy_gain_qualified'])
+        self.assertIn('one station', baseline['classifier_difference'])
+        self.assertFalse(result['tail_gain_qualified'])
 
 
 if __name__ == '__main__':

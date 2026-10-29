@@ -14,7 +14,8 @@ import json
 import math
 from pathlib import Path
 
-from shift_sm_response_labels import CATEGORIES, TAILS
+from shift_sm_response_labels import (CATEGORIES, DEFAULT_HISTOGRAM_EDGES, TAILS,
+                                     event_labels, pair_histograms)
 
 
 FEATURE_AXES = {
@@ -334,19 +335,155 @@ def summarize(rows):
         physics_normalization_ready=False, production_policy_qualified=False)
 
 
+def candidate_response_report(complete_rows, partial_rows, scope, historical_rows=None):
+    """Compare frozen candidate/control draws without treating pending work as zero.
+
+    Fractions describe only whole source draws already collected. Individual
+    completed responses from unfinished sources are count-only observations.
+    The weighted moments use native W/(p*q), not a calibrated physical yield.
+    """
+    seen = set()
+    for row in list(complete_rows)+list(partial_rows):
+        key = row['gen_sha256'], tuple(row['event_id'])
+        if key in seen:
+            raise ValueError('Overlapping complete or partial original responses')
+        seen.add(key)
+        p, q = row['original_sampling_probability'], row['benchmark_sampling_probability']
+        if (not 0 < p <= 1 or not 0 < q <= 1
+                or not math.isclose(p*q, row['sampling_probability'], rel_tol=2.e-12)):
+            raise ValueError('Response probability must equal the frozen p*q exactly once')
+        if row['benchmark_region'] not in ('credible_shallow_pointing', 'border_pointing',
+                'deep_pointing', 'no_both_sides_pointing_pair', 'unknown_parent'):
+            raise ValueError('Unknown candidate/control region requires explicit classification')
+        cost = row['cost']['sim_wall_seconds_per_event']
+        if not math.isfinite(row['native_weight']) or not math.isfinite(cost) or cost < 0:
+            raise ValueError('Response needs finite native weight and nonnegative SIM wall time')
+        labels = row['labels']
+        expected = event_labels(labels['retained_pairs'])
+        if (labels['pair_counts'] != expected['pair_counts']
+                or labels['tail_counts'] != expected['tail_counts']):
+            raise ValueError('Stored response labels differ from the retained reconstructed pairs')
+        if type(labels['n_shift_muons']) is not int or labels['n_shift_muons'] < 0:
+            raise ValueError('Invalid reconstructed muon multiplicity')
+    complete_events = scope.get('completed_source_events', scope.get('complete_events', len(complete_rows)))
+    complete_sources = scope.get('completed_sources', scope.get('complete_sources'))
+    if complete_events != len(complete_rows):
+        raise ValueError('Complete-source event count differs from the snapshot scope')
+    if complete_rows and complete_sources == 0:
+        raise ValueError('Partial responses cannot be promoted to complete-source statistics')
+
+    def region(row):
+        return 'candidate' if row['benchmark_region'] == 'credible_shallow_pointing' else 'controls'
+
+    def group(sample, stratum, name):
+        return dict(stratum=stratum, region_group=name, rows=len(sample), sample_available=bool(sample),
+            muon_events=sum(row['labels']['n_shift_muons'] > 0 for row in sample),
+            muons=sum(row['labels']['n_shift_muons'] for row in sample),
+            total_sim_seconds=math.fsum(row['cost']['sim_wall_seconds_per_event'] for row in sample),
+            targets={category: response_statistics(sample, category) for category in CATEGORIES},
+            tails={category: {tail: response_statistics(sample, category, tail) for tail in TAILS}
+                   for category in CATEGORIES})
+
+    def grouped(sample):
+        return [group([row for row in sample if row['stratum'] == stratum and region(row) == name],
+                      stratum, name)
+                for stratum in sorted({row['stratum'] for row in sample})
+                for name in ('candidate', 'controls')]
+
+    def pooled(sample):
+        return [group([row for row in sample if region(row) == name], 'all_qcd', name)
+                for name in ('candidate', 'controls')]
+
+    def histograms(sample):
+        output = []
+        strata = sorted({row['stratum'] for row in sample})+['all_qcd']
+        for stratum in strata:
+            for name in ('candidate', 'controls'):
+                cohort = [row for row in sample if (stratum == 'all_qcd' or row['stratum'] == stratum)
+                          and region(row) == name]
+                contributions = [(row['native_weight']/row['sampling_probability'],
+                                  pair_histograms(row['labels']['retained_pairs'])) for row in cohort]
+                for category in MAP_CATEGORIES:
+                    for field, edges in DEFAULT_HISTOGRAM_EDGES.items():
+                        vectors = [(weight, hist[category][field]['counts'])
+                                   for weight, hist in contributions]
+                        output.append(dict(stratum=stratum, region_group=name, category=category,
+                            field=field, edges=list(edges),
+                            raw_counts=[sum(values[i] for _, values in vectors) for i in range(len(edges)+1)],
+                            event_weighted_sum=[math.fsum(w*values[i] for w, values in vectors)
+                                                for i in range(len(edges)+1)],
+                            event_weighted_second_moment=[math.fsum((w*values[i])**2 for w, values in vectors)
+                                                          for i in range(len(edges)+1)],
+                            nonfinite=sum(hist[category][field]['nonfinite'] for _, hist in contributions)))
+        return output
+
+    partial = []
+    for stratum in sorted({row['stratum'] for row in partial_rows})+['all_qcd']:
+        for name in ('candidate', 'controls'):
+            sample = [row for row in partial_rows if (stratum == 'all_qcd' or row['stratum'] == stratum)
+                      and region(row) == name]
+            partial.append(dict(stratum=stratum, region_group=name, rows=len(sample),
+                muon_events=sum(row['labels']['n_shift_muons'] > 0 for row in sample),
+                muons=sum(row['labels']['n_shift_muons'] for row in sample),
+                targets={category: dict(pairs=sum(target_value(row, category) for row in sample),
+                    positive_originals=sum(target_value(row, category) > 0 for row in sample))
+                    for category in CATEGORIES},
+                rates_and_intervals_withheld=True, completion_conditioned=True))
+    result = dict(schema='shift-sm-candidate-response-analysis-v1',
+        scope=dict(scope, complete_sources=complete_sources, complete_events=len(complete_rows),
+                   partial_completed_events=len(partial_rows),
+                   completion_conditioned=True),
+        groups=grouped(complete_rows), pooled_groups=pooled(complete_rows),
+        partial_groups=partial, histograms=histograms(complete_rows),
+        intervals_describe_raw_sample_not_population=True,
+        weighted_moments_are_native_proposal_units_not_physical_yields=True,
+        histogram_second_moments_group_pairs_by_original=True,
+        pending_or_failed_responses_are_not_physics_zeros=True,
+        physical_normalization_ready=False, tail_gain_qualified=False)
+    if historical_rows is not None:
+        result['historical_baseline'] = dict(events=len(historical_rows),
+            description='Earlier complete independent QCD response draw; separate selection and source mix.',
+            strata=sorted({row['stratum'] for row in historical_rows}),
+            classifier_difference='Historical joint parent check used one station per endcap; current draw requires two.',
+            pooled_groups=pooled(historical_rows), groups=grouped(historical_rows),
+            histograms=histograms(historical_rows), matched_policy_gain_qualified=False)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('joined_jsonl', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--population', type=Path)
     parser.add_argument('--benchmark-plan', type=Path)
+    parser.add_argument('--candidate-scope', type=Path,
+                        help='Snapshot coverage JSON; compare whole-source candidates and controls')
+    parser.add_argument('--partial-jsonl', type=Path,
+                        help='Individual completed responses from unfinished sources; counts only')
+    parser.add_argument('--historical-jsonl', type=Path,
+                        help='Separate historical comparison; never pooled with current responses')
     args = parser.parse_args()
     if bool(args.population) != bool(args.benchmark_plan):
         parser.error('--population and --benchmark-plan are required together')
-    opener = gzip.open if args.joined_jsonl.suffix == '.gz' else open
-    with opener(args.joined_jsonl, 'rt') as stream:
-        rows = [json.loads(line) for line in stream if line.strip()]
-    result = summarize(rows)
+    if (args.partial_jsonl or args.historical_jsonl) and not args.candidate_scope:
+        parser.error('--partial-jsonl and --historical-jsonl require --candidate-scope')
+    if args.candidate_scope and args.population:
+        parser.error('Candidate snapshots and the older population benchmark are separate reports')
+
+    def load_rows(path):
+        if path is None:
+            return []
+        opener = gzip.open if path.suffix == '.gz' else open
+        with opener(path, 'rt') as stream:
+            return [json.loads(line) for line in stream if line.strip()]
+
+    rows = load_rows(args.joined_jsonl)
+    if args.candidate_scope:
+        scope = json.loads(args.candidate_scope.read_text())
+        historical = load_rows(args.historical_jsonl) if args.historical_jsonl else None
+        result = candidate_response_report(rows, load_rows(args.partial_jsonl), scope, historical)
+    else:
+        result = summarize(rows)
     if args.population:
         with gzip.open(args.population, 'rt') as stream:
             population = [json.loads(line) for line in stream if line.strip()]
