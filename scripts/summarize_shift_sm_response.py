@@ -435,6 +435,12 @@ def candidate_response_report(complete_rows, partial_rows, scope, historical_row
                    completion_conditioned=True),
         groups=grouped(complete_rows), pooled_groups=pooled(complete_rows),
         partial_groups=partial, histograms=histograms(complete_rows),
+        partial_positive_originals=[dict(source_id=row.get('source_id'),
+            gen_sha256=row['gen_sha256'], event_id=row['event_id'], stratum=row['stratum'],
+            region_group=region(row), muons=row['labels']['n_shift_muons'],
+            pair_counts=row['labels']['pair_counts'], retained_pairs=row['labels']['retained_pairs'],
+            rates_and_intervals_withheld=True)
+            for row in partial_rows if row['labels']['pair_counts']['inclusive'] > 0],
         intervals_describe_raw_sample_not_population=True,
         weighted_moments_are_native_proposal_units_not_physical_yields=True,
         histogram_second_moments_group_pairs_by_original=True,

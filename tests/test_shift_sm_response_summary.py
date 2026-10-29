@@ -241,6 +241,10 @@ class CandidateReportTest(unittest.TestCase):
         self.assertEqual(partial['targets']['both_both']['positive_originals'], 1)
         self.assertNotIn('raw_event_probability', partial['targets']['both_both'])
         self.assertTrue(partial['rates_and_intervals_withheld'])
+        observation = result['partial_positive_originals'][0]
+        self.assertEqual(observation['event_id'], row['event_id'])
+        self.assertEqual(observation['retained_pairs'], row['labels']['retained_pairs'])
+        self.assertTrue(observation['rates_and_intervals_withheld'])
 
     def test_histogram_moments_group_pairs_by_original_and_correct_once(self):
         rows = [self.row(1, [pair(), pair()], native=2., p=.5),
