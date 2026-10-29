@@ -73,6 +73,85 @@ def response_closed_source(prepared_manifest, collector_result):
         original_result_path=collector_result['path'],original_result_sha256=collector_result['sha256'])
 
 
+
+def response_source_cache(config, state, ads):
+    """Discover complete sources from an explicitly pinned response monitor.
+
+    One fresh account queue observation is shared with publication admission.
+    Cached sources keep their exact native closure and immutable receipt pins;
+    pending, held or replaying source payloads never add publication exposure.
+    The existing worker independently checks every selected producer again.
+    """
+    from monitor_shift_sm_candidate_search import (source_owner,
+        native_collector_closure, complete_result, within)
+    monitor = read_response_pin(config['response_monitor_config'])
+    if (monitor.get('schema') != 'shift-sm-candidate-search-watchdog-v1'
+            or monitor.get('individual_source_watchdogs', True)):
+        raise ValueError('Response publication requires aggregate native collector authority')
+    plan = read_response_pin(monitor['plan'])
+    root = Path(monitor['root_directory'])
+    expected = [dict(source_id=row['source_id'],
+        reconstruction_directory=str(root/'reconstruction'/row['source_id']))
+        for row in plan['sources']]
+    expected.extend(monitor.get('extra_sources', []))
+    ids = [row['source_id'] for row in expected]
+    if len(ids) != len(set(ids)):
+        raise ValueError('Response publication source authority repeats an original source')
+    cache = state.setdefault('response_sources', {})
+    if not set(cache) <= set(ids):
+        raise ValueError('A cached response source disappeared from the frozen worklist')
+    groups = defaultdict(list)
+    for row in expected:
+        sid = row['source_id']; output = Path(row['reconstruction_directory'])
+        if (not output.is_absolute() or str(output).startswith(('/tmp/', '/pool/'))
+                or not within(str(output), root/'reconstruction')):
+            raise ValueError('Response source is outside its persistent reconstruction authority')
+        # Check the fresh queue even after native proof has been cached. A new
+        # replay under the same source must be reviewed rather than counted twice.
+        active = [ad for ad in ads if within(ad.get('Iwd'), output/'jobs')
+            and ad.get('JobUniverse') == 5 and ad.get('JobStatus') in (1,2,3,5,6,7)]
+        if active:
+            if sid in cache:
+                raise ValueError('A native-qualified published source has an active replay: '+sid)
+            continue
+        cached = cache.get(sid)
+        if cached is not None:
+            for pin in cached['pins']:
+                if digest(pin['path']) != pin['sha256']:
+                    raise ValueError('Cached response native closure changed: '+pin['path'])
+            prepared = read(output/'prepared.json'); submission = read(output/'submission.json')
+            owner = source_owner(sid, output, prepared, submission, monitor, ads)
+            if owner != cached['native_closure']['owner']:
+                raise ValueError('Cached response source native owner changed')
+            groups[cached['source']['normalization']['stratum']].append(cached['source'])
+            continue
+        paths = [output/'prepared.json', output/'submission.json', output/'jobs/collect/result.json']
+        if not all(path.exists() for path in paths):
+            continue
+        prepared, submission, collector = [read(path) for path in paths]
+        if not complete_result(collector):
+            if collector.get('exit_code') not in (None, 0):
+                raise ValueError('Response collector failed: '+sid)
+            continue
+        if (collector.get('benchmark_plan_sha256') != prepared['benchmark_plan']['sha256']
+                or collector.get('complete_frozen_draw_collected') is not True
+                or collector.get('events') != len(prepared['detector_jobs'])):
+            raise ValueError('Response collector does not close its entire frozen source: '+sid)
+        closure = native_collector_closure(sid, output, prepared, submission, collector,
+            monitor, state.setdefault('response_native', {}), ads)
+        if closure is None:
+            continue
+        pins = [dict(path=str(path), sha256=digest(path)) for path in paths]
+        pins.extend(dict(path=str(output/'jobs/collect'/name),
+            sha256=digest(output/'jobs/collect'/name)) for name in ('request.json','status.json','events.log'))
+        source = response_closed_source(pins[0], pins[2])
+        if source['normalization']['source_id'] != sid:
+            raise ValueError('Response source normalization differs from its frozen worklist')
+        cache[sid] = dict(pins=pins, native_closure=closure, source=source, closed_epoch=time.time())
+        groups[source['normalization']['stratum']].append(source)
+    return groups
+
+
 def closed_sources(sources, nanos):
     """Never publish a convenient subset of one source's frozen selection."""
     by_hash = defaultdict(list)
@@ -183,9 +262,80 @@ def snapshot(root, config, stratum, sources):
                 source_ids=[s['source_id'] for s in normalizations], events=len(identities))
 
 
+
+
+def science_write_reservation(parent_config, state, quota_epoch):
+    """Keep full allocation; credit future writes only after whole-source closure.
+
+    A quota observation newer than our exact native collection proof already
+    includes that cohort's completed GEN/Nano/collector publications. Partial
+    cohorts, missing bounds and closures newer than quota keep their full claim.
+    """
+    total = parent_config.get('reserved_science_bytes', 0)
+    bounds = parent_config.get('science_source_write_bounds', {})
+    if (type(total) is not int or total < 0 or not isinstance(bounds, dict)
+            or any(not isinstance(sid,str) or type(value) is not int or value < 0
+                   for sid,value in bounds.items()) or sum(bounds.values()) > total):
+        raise ValueError('Invalid full science allocation or source write bounds')
+    closed = state.get('response_sources', {})
+    credit = sum(value for sid,value in bounds.items() if sid in closed
+        and closed[sid].get('closed_epoch', float('inf')) <= quota_epoch)
+    return total, total-credit
+
+
+def refresh_quota(root, config, ads):
+    """Own a quota-only ledger for a new response publisher, never an old campaign.
+
+    This uses the normal smart-SM quota payload and native observer. It cannot
+    admit physics jobs or share a writable ledger with another controller.
+    """
+    from run_shift_smart_sm_controller import make_task, observe, save as save_ledger
+    directory = Path(config['parent_state'])
+    if directory != root/'quota':
+        raise ValueError('Publisher quota authority must be its own private quota directory')
+    directory.mkdir(exist_ok=True)
+    parent_config = read(config['parent_config'])
+    path = directory/'ledger.json'
+    parent = read(path) if path.exists() else dict(tasks={})
+    tasks = list(parent['tasks'].values())
+    if any(task['kind'] != 'quota' for task in tasks):
+        raise ValueError('Publisher cannot refresh another production ledger')
+    for task in tasks:
+        observe(task, ads)
+    save_ledger(path, parent)
+    if any(task['phase'] == 'failed' for task in tasks):
+        raise ValueError('Native quota worker failed; review before retry')
+    completed = [task for task in tasks if task['phase'] == 'done']
+    latest = max(completed, key=lambda task:task['finished_epoch']) if completed else None
+    quota = read(Path(latest['directory'])/'result.json') if latest else {}
+    if (time.time()-quota.get('checked_epoch', 0) >= 900
+            and not any(task['phase'] in ('ready','submitted','submitting') for task in tasks)):
+        name = 'quota_'+str(len(tasks)).zfill(5)
+        request = dict(schema='shift-stream-payload-v1', environment='cmssw', stage='smart_sm_quota',
+            cohort_id=config['campaign'], argv=['python3','@TOOLS@/scripts/run_shift_smart_sm_detector.py',
+            'request.json'], application_timeout_seconds=300, result_path='report.json',
+            return_files=[], status_fields={}, reservation_bytes=0)
+        parent['tasks'][name] = make_task(directory, parent_config, name, request, 'quota', '')
+        save_ledger(path, parent)
+    for task in parent['tasks'].values():
+        if task['phase'] != 'ready':
+            continue
+        task.update(phase='submitting', intent_epoch=time.time())
+        save_ledger(path, parent)
+        answer = run_condor(['/usr/bin/condor_submit','-terse',
+            str(Path(task['directory'])/'worker.sub')],cwd=task['directory'],timeout=45)
+        match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*',answer)
+        if not match:
+            raise ValueError('Uncertain native quota submission requires review')
+        task.update(phase='submitted', cluster=int(match[1]),submitted_epoch=time.time())
+        save_ledger(path, parent)
+    save_ledger(directory/'heartbeat.json',dict(checked_epoch=time.time(),
+        phase='running',quota_only=True))
+
+
 def poll(root, config, state):
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
-                'Iwd', 'DAGManJobId'], timeout=45)
+                'Iwd', 'DAGManJobId', 'Owner', 'GlobalJobId', 'NumJobStarts', 'HoldReason'], timeout=45)
     live = {a['ClusterId']: a for a in ads}
     for name, task in state['tasks'].items():
         if task['phase'] not in ('submitted', 'submitting'):
@@ -214,11 +364,16 @@ def poll(root, config, state):
                     published_bytes=sum(r['bytes'] for r in receipt['published'].values())
                     + result.stat().st_size + 65536, finished_epoch=time.time())
         state['latest'][task['stratum']] = task['source_ids']
+    if config.get('refresh_quota') is True:
+        refresh_quota(root, config, ads)
     parent = read(Path(config['parent_state']) / 'ledger.json')
-    inventory = read(Path(config['parent_state']) / 'source_inventory.json')
-    source_cache(parent, state)
-    nano_cache(parent, inventory, state)
-    groups = closed_sources(state['sources'].values(), state['nanos'].values())
+    if config.get('response_monitor_config') is not None:
+        groups = response_source_cache(config, state, ads)
+    else:
+        inventory = read(Path(config['parent_state']) / 'source_inventory.json')
+        source_cache(parent, state)
+        nano_cache(parent, inventory, state)
+        groups = closed_sources(state['sources'].values(), state['nanos'].values())
     busy = {t['stratum'] for t in state['tasks'].values() if t['phase'] in ('ready', 'submitted', 'submitting')}
     failed = {t['stratum'] for t in state['tasks'].values() if t['phase'] == 'failed'}
     # At most one immutable snapshot per bin at a time; meaningful changes only.
@@ -239,7 +394,6 @@ def poll(root, config, state):
     # This is an extension of the registered SM production, not another GEN or
     # detector production. Keep its extra writes bounded and protect both the
     # parent's full allocation and all of the parent's external reservations.
-    quota = read(Path(config['parent_state']) / 'heartbeat.json')
     submitted = 0
     spent = sum(t.get('published_bytes', 0) for t in state['tasks'].values())
     reserved = sum(config['worker_publication_bound_bytes'] for t in state['tasks'].values()
@@ -248,6 +402,11 @@ def poll(root, config, state):
     # authenticated quota worker and its pinned native-success receipt.
     observations = [t for t in parent['tasks'].values()
                     if t['kind'] == 'quota' and t['phase'] == 'done']
+    if not observations:
+        save(root / 'state.json', state)
+        save(root / 'heartbeat.json', dict(checked_epoch=time.time(), phase='waiting_for_quota',
+            reason='Waiting for the first authenticated native quota worker; no publication admission'))
+        return
     observation = max(observations, key=lambda t: t['finished_epoch'])
     result = Path(observation['directory']) / 'result.json'
     if digest(result) != observation['result_sha256'] or observation.get('native_exit_code') != 0:
@@ -264,9 +423,16 @@ def poll(root, config, state):
                     if t.get('finished_epoch', 0) > quota['checked_epoch'])
     free = quota['free_bytes'] - parent_since - own_since
     parent_config = read(config['parent_config'])
+    if config.get('refresh_quota') is True and 'reserved_science_bytes' not in parent_config:
+        raise ValueError('Private quota publication requires an explicit full science write reservation')
+    science_reserve, science_future = science_write_reservation(parent_config,state,quota['checked_epoch'])
     parent_committed = sum(t.get('published_bytes', 0) for t in parent['tasks'].values() if t['phase'] == 'done')
     parent_in_flight = sum(t.get('bound_bytes', 0) for t in parent['tasks'].values()
                            if t['phase'] in ('submitted', 'submitting'))
+    # The quota-only ledger does not own physics task bookkeeping. Preserve
+    # the entire registered allocation, while fresh quota can release future
+    # writes for exact, wholly completed source cohorts.
+    parent_future = parent_in_flight + science_future
     parent_remaining = max(0, parent_config['own_reservation_bytes'] - parent_committed)
     floor = parent_config['external_future_reservation_bytes'] + parent_config['safety_floor_bytes']
     account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
@@ -276,9 +442,9 @@ def poll(root, config, state):
         bound = config['worker_publication_bound_bytes']
         if spent + reserved + bound > config['maximum_publication_bytes']:
             break
-        if parent_committed + parent_in_flight + spent + reserved + bound > parent_config['own_reservation_bytes']:
+        if parent_committed + parent_in_flight + science_reserve + spent + reserved + bound > parent_config['own_reservation_bytes']:
             break
-        if free - reserved - bound < floor + parent_in_flight:
+        if free - reserved - bound < floor + parent_future:
             break
         if account_workers + submitted >= parent_config['account_worker_ceiling']:
             break
@@ -306,7 +472,8 @@ def poll(root, config, state):
         tasks={phase: sum(t['phase'] == phase for t in state['tasks'].values())
                for phase in ('ready', 'submitted', 'done', 'failed')},
         EOS_free_bytes=free, protected_parent_remaining_bytes=parent_remaining,
-        protected_external_and_floor_bytes=floor))
+        protected_external_and_floor_bytes=floor,
+        protected_science_allocation_bytes=science_reserve,protected_science_future_bytes=science_future))
     save(root / 'state.json', state)
 
 

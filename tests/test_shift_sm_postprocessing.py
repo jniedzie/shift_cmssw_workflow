@@ -169,6 +169,160 @@ class ResponsePublicationTest(unittest.TestCase):
             post.run(path)
 
 
+class ResponseDiscoveryControllerTest(unittest.TestCase):
+    def setUp(self):
+        # Native proof deliberately rejects frontend-local /tmp authorities.
+        task_area=Path(__file__).resolve().parents[1]/'tmp'
+        task_area.mkdir(exist_ok=True)
+        self.temporary=tempfile.TemporaryDirectory(dir=task_area)
+        self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name)
+        self.output=self.root/'reconstruction'/'source'
+        (self.output/'jobs/collect').mkdir(parents=True)
+        self.prepared=dict(benchmark_plan=dict(sha256='b'*64),detector_jobs=[{}])
+        self.collector=dict(complete=True,exit_code=0,benchmark_plan_sha256='b'*64,
+                            complete_frozen_draw_collected=True,events=1)
+        for name,value in [('prepared.json',self.prepared),('submission.json',{}),
+            ('jobs/collect/result.json',self.collector),('jobs/collect/request.json',{}),
+            ('jobs/collect/status.json',dict(complete=True,exit_code=0))]:
+            self.write(self.output/name,value)
+        (self.output/'jobs/collect/events.log').write_text('native terminal proof')
+        plan=self.write(self.root/'plan.json',dict(sources=[dict(source_id='source')]))
+        monitor=dict(schema='shift-sm-candidate-search-watchdog-v1',root_directory=str(self.root),
+            plan=plan,individual_source_watchdogs=False)
+        self.config=dict(response_monitor_config=self.write(self.root/'monitor.json',monitor))
+        self.source=dict(normalization=dict(source_id='source',stratum='qcd_20toinf'))
+        self.state={}
+
+    def write(self,path,value):
+        path.write_text(json.dumps(value)+'\n')
+        return dict(path=str(path),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    def discover(self,ads=(),closure=None):
+        import run_shift_sm_postprocessing_controller as controller
+        import monitor_shift_sm_candidate_search as monitor
+        proof=dict(owner=dict(cluster_id=5),collector_terminal=dict(successful=True))
+        with patch.object(monitor,'native_collector_closure',return_value=closure or proof) as native, \
+             patch.object(monitor,'source_owner',return_value=dict(cluster_id=5)), \
+             patch.object(controller,'response_closed_source',return_value=self.source) as adapt:
+            groups=controller.response_source_cache(self.config,self.state,ads)
+        return groups,native,adapt
+
+    def test_native_qualified_source_is_cached_and_never_redrawn(self):
+        groups,native,adapt=self.discover()
+        self.assertEqual(groups['qcd_20toinf'],[self.source])
+        self.assertEqual(native.call_count,1);self.assertEqual(adapt.call_count,1)
+        groups,native,adapt=self.discover()
+        self.assertEqual(groups['qcd_20toinf'],[self.source])
+        self.assertEqual(native.call_count,0);self.assertEqual(adapt.call_count,0)
+
+    def test_fresh_active_or_held_replay_blocks_cached_exposure(self):
+        self.discover()
+        for status in (1,2,3,5,6,7):
+            with self.assertRaisesRegex(ValueError,'active replay'):
+                self.discover([dict(Iwd=str(self.output/'jobs/det_0'),
+                    JobUniverse=5,JobStatus=status)])
+        self.state={}
+        groups,_,_=self.discover([dict(Iwd=str(self.output/'jobs/det_0'),JobUniverse=5,JobStatus=2)])
+        self.assertEqual(dict(groups),{})
+
+    def test_changed_cached_result_or_native_status_is_rejected(self):
+        self.discover()
+        self.write(self.output/'jobs/collect/status.json',dict(complete=True,exit_code=1))
+        with self.assertRaisesRegex(ValueError,'Cached response native closure changed'):
+            self.discover()
+
+    def test_changed_monitor_or_missing_worklist_member_is_rejected(self):
+        self.discover()
+        self.write(self.root/'monitor.json',{})
+        with self.assertRaisesRegex(ValueError,'authority changed'):
+            self.discover()
+
+    def test_json_completion_without_native_closure_has_no_exposure(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import monitor_shift_sm_candidate_search as monitor
+        with patch.object(monitor,'native_collector_closure',return_value=None):
+            self.assertEqual(dict(controller.response_source_cache(self.config,self.state,[])),{})
+        self.assertEqual(self.state['response_sources'],{})
+
+    def test_changed_owner_and_failed_native_proof_stop_discovery(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import monitor_shift_sm_candidate_search as monitor
+        with patch.object(monitor,'native_collector_closure',side_effect=ValueError('wrong native DAG owner')):
+            with self.assertRaisesRegex(ValueError,'wrong native DAG owner'):
+                controller.response_source_cache(self.config,self.state,[])
+        self.discover()
+        with patch.object(monitor,'source_owner',return_value=dict(cluster_id=99)):
+            with self.assertRaisesRegex(ValueError,'native owner changed'):
+                controller.response_source_cache(self.config,self.state,[])
+
+
+class PublisherQuotaTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name)
+        self.parent_config=self.root/'quota_config.json'
+        self.parent_config.write_text(json.dumps(dict(worker_template='queue 1\n')))
+        self.config=dict(campaign='night',parent_state=str(self.root/'quota'),parent_config=str(self.parent_config))
+
+    def test_quota_uses_normal_native_stage_and_does_not_duplicate_pending_worker(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import run_shift_smart_sm_controller as native
+        task=dict(kind='quota',phase='ready',directory=str(self.root/'job'),request_sha256='a'*64)
+        with patch.object(native,'make_task',return_value=task) as make, \
+             patch.object(controller,'run_condor',return_value='123.0 - 123.0\n') as submit:
+            controller.refresh_quota(self.root,self.config,[])
+            request=make.call_args.args[3]
+            self.assertEqual(request['stage'],'smart_sm_quota')
+            self.assertEqual(request['reservation_bytes'],0)
+            self.assertEqual(submit.call_count,1)
+            with patch.object(native,'observe'):
+                controller.refresh_quota(self.root,self.config,[])
+            self.assertEqual(make.call_count,1);self.assertEqual(submit.call_count,1)
+        ledger=json.loads((self.root/'quota/ledger.json').read_text())
+        self.assertEqual(ledger['tasks']['quota_00000']['cluster'],123)
+
+    def test_source_future_credit_requires_newer_quota_but_never_reduces_allocation(self):
+        from run_shift_sm_postprocessing_controller import science_write_reservation
+        config=dict(reserved_science_bytes=1000,science_source_write_bounds=dict(done=300,partial=400))
+        state=dict(response_sources=dict(done=dict(closed_epoch=20)))
+        self.assertEqual(science_write_reservation(config,state,10),(1000,1000))
+        self.assertEqual(science_write_reservation(config,state,30),(1000,700))
+        # Unassigned300B and unfinished400B stay protected. A legacy cache
+        # without its native-proof observation epoch receives no future credit.
+        state['response_sources']['partial']={}
+        self.assertEqual(science_write_reservation(config,state,30),(1000,700))
+        config['science_source_write_bounds']['partial']=800
+        with self.assertRaisesRegex(ValueError,'source write bounds'):
+            science_write_reservation(config,state,30)
+
+    def test_old_or_physics_ledger_cannot_become_quota_authority(self):
+        import run_shift_sm_postprocessing_controller as controller
+        with self.assertRaisesRegex(ValueError,'own private quota'):
+            controller.refresh_quota(self.root,dict(self.config,parent_state='/afs/old_campaign'),[])
+        (self.root/'quota').mkdir()
+        (self.root/'quota/ledger.json').write_text(json.dumps(dict(tasks={'physics':dict(kind='detector')})))
+        with self.assertRaisesRegex(ValueError,'another production ledger'):
+            controller.refresh_quota(self.root,self.config,[])
+
+    def test_uncertain_submission_and_failed_worker_never_auto_retry(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import run_shift_smart_sm_controller as native
+        task=dict(kind='quota',phase='ready',directory=str(self.root/'job'),request_sha256='a'*64)
+        with patch.object(native,'make_task',return_value=task), \
+             patch.object(controller,'run_condor',return_value='unknown'):
+            with self.assertRaisesRegex(ValueError,'Uncertain native quota submission'):
+                controller.refresh_quota(self.root,self.config,[])
+        ledger=json.loads((self.root/'quota/ledger.json').read_text())
+        self.assertEqual(ledger['tasks']['quota_00000']['phase'],'submitting')
+        with self.assertRaisesRegex(RuntimeError,'Uncertain submission'):
+            controller.refresh_quota(self.root,self.config,[])
+        ledger['tasks']['quota_00000']['phase']='failed'
+        (self.root/'quota/ledger.json').write_text(json.dumps(ledger))
+        with self.assertRaisesRegex(ValueError,'Native quota worker failed'):
+            controller.refresh_quota(self.root,self.config,[])
+
+
 class PostprocessingTest(unittest.TestCase):
     def test_prepared_sidecar_requires_full_census_contract_before_identity_compaction(self):
         sidecar = dict(path='/eos/prepared/weight_authority.json', sha256='a'*64,
