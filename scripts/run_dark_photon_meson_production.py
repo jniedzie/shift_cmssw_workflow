@@ -2953,6 +2953,129 @@ def committed_direct_peer_bytes(config, observed):
     return total
 
 
+def committed_SM_closeout_bytes(config, authority, registration, observed):
+    """Replace preparation credit with a reviewed, closed SM component total."""
+    closeout = authority['reviewed_terminal_closeout']
+    ledger = storage_pinned_read(closeout['ledger'])
+    receipt = storage_pinned_read(closeout['receipt'])
+    review = storage_pinned_read(closeout['review'])
+    root = Path(registration['directory'])
+    prefix = authority['EOS_namespace_prefix'].rstrip('/')+'/'
+    components = {'GEN_preparation', 'detector_Nano_evidence_receipt',
+                  'response_collection', 'namespaced_control_Nano_evidence_receipt'}
+    total = ledger.get('verified_committed_bytes')
+    preparation = ledger.get('components', {}).get('GEN_preparation', {}).get('verified_committed_bytes')
+    if (ledger.get('schema') != 'shift-verified-storage-commit-ledger-v1'
+            or receipt.get('schema') != 'shift-SM-final-storage-closeout-receipt-v1'
+            or review.get('schema') != 'shift-reviewed-SM-additional-paid-storage-v1'
+            or ledger.get('closeout') is not True or ledger.get('uncredited_responses') != []
+            or ledger.get('global_allocation_unchanged') is not True
+            or ledger.get('global_SM_allocation_bytes') != 137000000000
+            or receipt.get('global_SM_allocation_bytes') != 137000000000
+            or review.get('global_SM_allocation_bytes') != 137000000000
+            or any(ledger.get('search_plan', {}).get(key) != authority['plan'].get(key)
+                   for key in ('path', 'sha256'))
+            or receipt.get('ledger') != closeout['ledger']
+            or review.get('ledger') != closeout['ledger']
+            or review.get('closeout_receipt') != closeout['receipt']
+            or set(ledger.get('components', {})) != components
+            or receipt.get('components') != ledger['components']
+            or review.get('components') != ledger['components']
+            or type(total) is not int or type(preparation) is not int
+            or not 0 <= preparation <= total <= min(registration['maximum_new_component_publication_bytes'],
+                                                    authority['registered_peer_bytes'])
+            or ledger.get('candidate_allocation_bytes') != registration['maximum_new_component_publication_bytes']
+            or receipt.get('candidate_allocation_bytes') != ledger['candidate_allocation_bytes']
+            or review.get('allocation_bytes') != ledger['candidate_allocation_bytes']
+            or receipt.get('verified_committed_bytes') != total or review.get('total_paid_bytes') != total
+            or review.get('already_credited_GEN_preparation_bytes') != preparation
+            or review.get('additional_paid_bytes') != total-preparation
+            or ledger.get('protected_future_writes_bytes') != ledger['candidate_allocation_bytes']-total
+            or receipt.get('protected_future_writes_bytes') != ledger['protected_future_writes_bytes']
+            or ledger.get('created_epoch', float('inf')) > observed):
+        raise ValueError('Reviewed SM terminal closeout differs from its registered allocation or preparation subtotal')
+    # Pin hashes are checked on every poll. Closed producer payloads are hashed
+    # once; later polls check their file identities and fresh queue absence.
+    if durable.jobs(config, directory_condition(root)):
+        raise RuntimeError('Reviewed SM terminal closeout still has live producers')
+    cache_key = 'SM_terminal_closeout:'+hashlib.sha256(json.dumps(authority, sort_keys=True).encode()).hexdigest()
+    def identity(path):
+        stat = Path(path).stat()
+        return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    if cache_key in _REVIEWED_STORAGE_CACHES:
+        saved = _REVIEWED_STORAGE_CACHES[cache_key]
+        if any(identity(path) != stamp for path, stamp in saved['proof_files'].items()):
+            raise ValueError('Cached SM closeout producer proof changed')
+        return saved['bytes']
+    objects, pins = {}, {}
+    measured = {name:dict(producers=0, verified_committed_bytes=0) for name in components}
+    readbacks = {'terminal producer independent SHA256 readback and native remote stat',
+                 'terminal producer semantic Nano readback SHA256 plus fresh remote size',
+                 'independent ledger-builder SHA256 readback',
+                 'independent ledger-builder semantic receipt readback'}
+    for row in ledger['producer_records']:
+        component = row['component']
+        work = Path(row['producer_directory'])
+        if component not in components or not work.is_relative_to(root) or '..' in work.parts:
+            raise ValueError('SM closeout producer is outside its registered namespace')
+        proof = row['producer_proof']
+        native = proof['native_terminal']
+        if (native.get('exit_code') != 0 or native.get('fresh_queue_absence') is not True
+                or type(native.get('cluster_id')) is not int
+                or native.get('completion_epoch', float('inf')) > ledger['created_epoch']):
+            raise ValueError('SM closeout includes a live, failed or future producer')
+        for name, pin in [(name, proof[name]) for name in ('request', 'result', 'status')]+[
+                ('events.log', native['event_log'])]:
+            expected = work/(name if name == 'events.log' else name+'.json')
+            if Path(pin['path']) != expected:
+                raise ValueError('SM closeout producer proof changed its exact path')
+            old = pins.setdefault(str(expected), (pin, native['cluster_id']))
+            if old != (pin, native['cluster_id']):
+                raise ValueError('SM closeout repeats a conflicting producer proof')
+        amount = 0
+        for item in row['publications']:
+            path = item['path']
+            if (not path.startswith(prefix) or '..' in Path(path).parts
+                    or type(item['bytes']) is not int or item['bytes'] < 0
+                    or not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])
+                    or item.get('proof') not in readbacks):
+                raise ValueError('SM closeout object lacks an exact in-namespace readback')
+            if path in objects:
+                raise ValueError('SM closeout would double-count a published object')
+            objects[path] = item
+            amount += item['bytes']
+        if amount != row['verified_committed_bytes']:
+            raise ValueError('SM closeout producer includes unwritten storage allowance')
+        measured[component]['producers'] += 1
+        measured[component]['verified_committed_bytes'] += amount
+    if (measured != ledger['components'] or sum(item['bytes'] for item in objects.values()) != total
+            or review.get('objects') != len(objects) or receipt.get('exact_published_paths') != len(objects)
+            or review.get('duplicate_paths') != 0 or review.get('GEN_paths_disjoint_from_extra') is not True):
+        raise ValueError('SM closeout role counts, unique objects or committed bytes changed')
+    def verify(pin_and_cluster):
+        pin, cluster = pin_and_cluster
+        stamp = identity(pin['path'])
+        payload = storage_payload(pin['path'])
+        if (len(payload) != pin['bytes'] or hashlib.sha256(payload).hexdigest() != pin['sha256']
+                or identity(pin['path']) != stamp):
+            raise ValueError('SM closeout terminal producer proof changed: '+pin['path'])
+        if Path(pin['path']).name in ('result.json', 'status.json'):
+            result = json.loads(payload)
+            if result.get('complete') is not True or result.get('exit_code') != 0:
+                raise ValueError('SM closeout producer is not complete')
+        elif Path(pin['path']).name == 'events.log':
+            blocks = payload.decode().split('\n...\n')
+            if not any(re.match(r'005 \('+str(cluster)+r'\.000\.', block)
+                       and 'Normal termination (return value 0)' in block for block in blocks):
+                raise ValueError('SM closeout lost its exact successful native event')
+        return pin['path'], stamp
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        proof_files = dict(pool.map(verify, pins.values()))
+    _REVIEWED_STORAGE_CACHES[cache_key] = dict(bytes=total, proof_files=proof_files)
+    return total
+
+
 def committed_SM_preparation_bytes(config, observed):
     """Credit closed prepared SM outputs; reused raw GEN never counts twice."""
     authority = config.get('committed_SM_preparation_peer')
@@ -2971,6 +3094,8 @@ def committed_SM_preparation_bytes(config, observed):
             or claims.get('SM_and_parent') != authority.get('registered_peer_bytes')
             or plan['total_registered_bound_bytes'] != registration['maximum_new_component_publication_bytes']):
         raise ValueError('Prepared SM storage credit differs from its shared allocation')
+    if authority.get('reviewed_terminal_closeout') is not None:
+        return committed_SM_closeout_bytes(config, authority, registration, observed)
     live_ids = {r['ClusterId'] for r in durable.jobs(config,directory_condition(root/'preparation'))}
     objects = {}
     for source in plan['sources']:
@@ -3497,8 +3622,7 @@ def publish_batch(config, state, batch):
         allowed = list(config.get('allowed_previous_aliases',{}).get(batch['point'], []))
         allowed.extend(prior_campaigns)
         allowed.extend(row['campaign'] for row in config['batches'] if row['point']==batch['point'])
-        previous_campaign = (prior_cumulative_campaign(config, state, batch, result, transport)
-                             if promotion is not None else None)
+        previous_campaign = prior_cumulative_campaign(config, state, batch, result, transport)
         if previous_campaign is not None:
             allowed.append(previous_campaign)
         if old is not None and old != result['campaign'] and old not in allowed:

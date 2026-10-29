@@ -158,3 +158,95 @@ class SMPreparationCreditTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'registered plan'):self.credit()
         self.config['committed_SM_preparation_peer']['registered_peer_bytes']=900
         with self.assertRaisesRegex(ValueError,'shared allocation'):self.credit()
+
+
+class SMTerminalCloseoutCreditTest(unittest.TestCase):
+    write = SMPreparationCreditTest.write
+    pin = SMPreparationCreditTest.pin
+    credit = SMPreparationCreditTest.credit
+
+    def setUp(self):
+        SMPreparationCreditTest.setUp(self)
+        components = [('GEN_preparation',20),('detector_Nano_evidence_receipt',10),
+                      ('response_collection',3),('namespaced_control_Nano_evidence_receipt',2)]
+        records=[]
+        for index,(component,amount) in enumerate(components):
+            work=self.peer/'proofs'/component;work.mkdir(parents=True)
+            self.write(work/'request.json',dict(stage=component))
+            for name in ('result','status'):
+                self.write(work/(name+'.json'),dict(complete=True,exit_code=0))
+            (work/'events.log').write_text(f'005 ({100+index}.000.000) Terminated\n'
+                'Normal termination (return value 0)\n...\n')
+            def pin(path):
+                return dict(self.pin(path),bytes=path.stat().st_size)
+            records.append(dict(component=component,producer_directory=str(work),
+                producer_proof=dict(**{n:pin(work/(n+'.json')) for n in ('request','result','status')},
+                    native_terminal=dict(cluster_id=100+index,exit_code=0,completion_epoch=1,
+                        fresh_queue_absence=True,event_log=pin(work/'events.log'))),
+                publications=[dict(path='/eos/new/'+component+'/payload',bytes=amount,sha256='a'*64,
+                    proof='independent ledger-builder SHA256 readback')],verified_committed_bytes=amount))
+        self.ledger=dict(schema='shift-verified-storage-commit-ledger-v1',created_epoch=1.5,
+            closeout=True,uncredited_responses=[],global_allocation_unchanged=True,
+            global_SM_allocation_bytes=137000000000,search_plan=self.pin(self.peer/'plan.json'),
+            candidate_allocation_bytes=100,verified_committed_bytes=35,protected_future_writes_bytes=65,
+            components={c:dict(producers=1,verified_committed_bytes=n) for c,n in components},
+            producer_records=records)
+        self.install_closeout()
+
+    def install_closeout(self):
+        self.write(self.peer/'closeout.json',self.ledger)
+        receipt=dict(schema='shift-SM-final-storage-closeout-receipt-v1',ledger=self.pin(self.peer/'closeout.json'),
+            global_SM_allocation_bytes=137000000000,candidate_allocation_bytes=100,
+            components=self.ledger['components'],verified_committed_bytes=35,
+            protected_future_writes_bytes=65,exact_published_paths=4)
+        self.write(self.peer/'closeout_receipt.json',receipt)
+        review=dict(schema='shift-reviewed-SM-additional-paid-storage-v1',ledger=receipt['ledger'],
+            closeout_receipt=self.pin(self.peer/'closeout_receipt.json'),global_SM_allocation_bytes=137000000000,
+            allocation_bytes=100,components=self.ledger['components'],total_paid_bytes=35,
+            already_credited_GEN_preparation_bytes=20,additional_paid_bytes=15,
+            objects=4,duplicate_paths=0,GEN_paths_disjoint_from_extra=True)
+        self.write(self.peer/'review.json',review)
+        self.config['committed_SM_preparation_peer']['reviewed_terminal_closeout']=dict(
+            ledger=receipt['ledger'],receipt=review['closeout_receipt'],review=self.pin(self.peer/'review.json'))
+
+    def test_total_replaces_preparation_credit_and_cached_polls_keep_live_checks(self):
+        with patch.object(production,'storage_payload',wraps=production.storage_payload) as reads:
+            self.assertEqual(self.credit(),35)
+            reads.reset_mock()
+            self.assertEqual(self.credit(),35)
+            self.assertFalse(any('/proofs/' in str(call.args[0]) for call in reads.call_args_list))
+        with self.assertRaisesRegex(RuntimeError,'live producers'):
+            self.credit([dict(ClusterId=101,Iwd=self.ledger['producer_records'][1]['producer_directory'])])
+
+    def test_foreign_namespace_and_duplicate_object_are_rejected(self):
+        item=self.ledger['producer_records'][1]['publications'][0]
+        original=item['path'];item['path']='/eos/old/reused_GEN.root';self.install_closeout()
+        with self.assertRaisesRegex(ValueError,'in-namespace'):self.credit()
+        item['path']=self.ledger['producer_records'][0]['publications'][0]['path'];self.install_closeout()
+        with self.assertRaisesRegex(ValueError,'double-count'):self.credit()
+        item['path']=original
+
+    def test_changed_authority_and_changed_cached_producer_block_credit(self):
+        self.assertEqual(self.credit(),35)
+        work=Path(self.ledger['producer_records'][1]['producer_directory'])
+        self.write(work/'status.json',dict(complete=False,exit_code=1))
+        with self.assertRaisesRegex(ValueError,'Cached SM closeout producer proof changed'):self.credit()
+        (self.peer/'closeout.json').write_text('{}')
+        with self.assertRaisesRegex(ValueError,'Pinned storage evidence changed'):self.credit()
+
+    def test_future_producers_and_unwritten_allowance_are_rejected(self):
+        native=self.ledger['producer_records'][1]['producer_proof']['native_terminal']
+        native['completion_epoch']=3;self.install_closeout()
+        with self.assertRaisesRegex(ValueError,'future producer'):self.credit()
+        native['completion_epoch']=1
+        self.ledger['producer_records'][1]['publications'][0]['proof']='unwritten future allowance'
+        self.install_closeout()
+        with self.assertRaisesRegex(ValueError,'readback'):self.credit()
+
+    def test_changed_preparation_subtotal_and_role_counts_are_rejected(self):
+        review=json.loads((self.peer/'review.json').read_text())
+        review['already_credited_GEN_preparation_bytes']=21;self.write(self.peer/'review.json',review)
+        self.config['committed_SM_preparation_peer']['reviewed_terminal_closeout']['review']=self.pin(self.peer/'review.json')
+        with self.assertRaisesRegex(ValueError,'preparation subtotal'):self.credit()
+        self.ledger['components']['detector_Nano_evidence_receipt']['producers']=2;self.install_closeout()
+        with self.assertRaisesRegex(ValueError,'role counts'):self.credit()

@@ -83,6 +83,30 @@ def meson_storage_limit(config):
     return maximum
 
 
+def freeze_main_histogrammer(authority, output, files):
+    """Keep the qualified integrity helper independent of later analysis edits."""
+    source = pinned_path(authority)
+    target = output / 'main_histogrammer.json'
+    shutil.copy2(source, target)
+    if sha(target) != authority['sha256']:
+        raise ValueError('Main histogrammer profile changed during freezing')
+    settings = json.loads(target.read_text())
+    qualification = settings['qualification']
+    files[str(pinned_path(qualification))] = qualification['sha256']
+    integrity = settings['nano_integrity']
+    source = pinned_path(integrity)
+    helper = output / 'histogram_helpers' / 'shift_nano_integrity.py'
+    helper.parent.mkdir()
+    shutil.copy2(source, helper)
+    if sha(helper) != integrity['sha256']:
+        raise ValueError('Nano integrity helper changed during freezing')
+    settings['nano_integrity'] = dict(integrity, path=str(helper))
+    target.write_text(json.dumps(settings, indent=2) + '\n')
+    files[str(helper)] = integrity['sha256']
+    files[str(target)] = sha(target)
+    return dict(path=str(target), sha256=sha(target))
+
+
 def validate_batches(rows, prior_inventories, seed_base=761216001,
                      run_base=1761216001, detector_job_base=5500000,
                      mechanism='eta-etaprime-radiative', execution_limits=None, model_card=None):
@@ -343,12 +367,8 @@ def prepare(configuration, output, scripts=None):
         files[str(target)]=sha(target)
     config['operational_authorities']=authorities
     if config.get('main_histogrammer') is not None:
-        source=pinned_path(config['main_histogrammer']);target=output/'main_histogrammer.json'
-        shutil.copy2(source,target);config['main_histogrammer']=dict(path=str(target),sha256=sha(target))
-        files[str(target)]=sha(target)
-        settings=json.loads(target.read_text())
-        for key in ('qualification','nano_integrity'):
-            authority=settings[key];files[str(pinned_path(authority))]=authority['sha256']
+        config['main_histogrammer'] = freeze_main_histogrammer(
+            config['main_histogrammer'], output, files)
     if mechanism in REFERENCE_MECHANISMS:
         for key in ('runtime_profile','settings'):
             source=pinned_path(config['reference_source'][key])

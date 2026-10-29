@@ -1345,6 +1345,8 @@ class PublicationSafety(unittest.TestCase):
         from watch_dark_photon_production import completed_histogram
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
+            config, batch, _ = self.publication_floor_fixture(root)
+            config.pop('minimum_histogram_events_before_latest')
             point = 'm0p3_prompt'
             directory = root/'aggregates'/point/'v0001'
             (directory/'completed_points').mkdir(parents=True)
@@ -1363,18 +1365,53 @@ class PublicationSafety(unittest.TestCase):
             path = directory/'completed_points'/(point+'.json')
             path.write_text(json.dumps(report))
             class Transport:
+                current_campaign = 'cumulative-v0001'
                 def root_files(self, where): return [histogram]
                 def verify_file(self, where, size, digest):
                     self.checked = (where, size, digest)
+                def alias_target(self, where): return self.current_campaign
+                def publish_alias(self, where, campaign, allowed):
+                    self.promotion = (where, campaign, allowed)
             transport = Transport()
             previous = completed_histogram(dict(source=source, row=row, output=output), transport)
             previous.update(source_plans=['one', 'two'])
             state = dict(published={point: previous})
             result = dict(campaign='cumulative-v0002', events=30, source_plans=['one', 'two', 'three'])
-            config, batch = dict(directory=str(root)), dict(point=point)
             self.assertEqual(production.prior_cumulative_campaign(config, state, batch, result, transport),
                              'cumulative-v0001')
             self.assertEqual(transport.checked, (histogram, 123, 'a'*64))
+
+            # Exercise publication without a histogram floor, keeping the real
+            # predecessor receipt, payload and source-inclusion checks active.
+            def ready(candidate, rpc):
+                if candidate['source']['directory'] == directory:
+                    return completed_histogram(candidate, rpc)
+                return dict(campaign=batch['campaign'], events=9)
+
+            with patch('watch_dark_photon_production.EosRpc', return_value=transport), \
+                 patch('watch_dark_photon_production.completed_histogram', side_effect=ready), \
+                 patch.object(production, 'cumulative_result', return_value=result), \
+                 patch('export_dark_photon_cross_sections.publish_file_rpc'), \
+                 patch.object(production, 'prior_publication_ready', return_value=(True,
+                     dict(allowed_previous_campaigns=[]))), \
+                 patch.object(production, 'common_sample_anchor', return_value={}):
+                self.assertIsNone(production.histogram_promotion_floor(config, batch, result))
+                published = production.publish_batch(config, json.loads(json.dumps(state)), batch)
+                self.assertTrue(published['alias_published'])
+                self.assertEqual(transport.promotion[1], 'cumulative-v0002')
+                self.assertIn('cumulative-v0001', transport.promotion[2])
+                transport.current_campaign = 'foreign-production'
+                del transport.promotion
+                with self.assertRaisesRegex(ValueError, 'reviewed ownership'):
+                    production.publish_batch(config, json.loads(json.dumps(state)), batch)
+                self.assertFalse(hasattr(transport, 'promotion'))
+                transport.current_campaign = 'cumulative-v0001'
+                for change in (dict(source_plans=['one']), dict(events=19)):
+                    with self.subTest(publication_change=change), \
+                         patch.object(production, 'cumulative_result', return_value=dict(result, **change)), \
+                         self.assertRaisesRegex(ValueError, 'Previous cumulative'):
+                        production.publish_batch(config, json.loads(json.dumps(state)), batch)
+                    self.assertFalse(hasattr(transport, 'promotion'))
             for change in (dict(source_plans=['one']), dict(events=19)):
                 with self.subTest(change=change), self.assertRaises(ValueError):
                     production.prior_cumulative_campaign(config, state, batch, dict(result, **change), transport)
@@ -2324,3 +2361,74 @@ class HandoffStartPollReset(unittest.TestCase):
                         self.assertEqual(production.parallel_handoff(config,state,dict(batch=str(i)),{},{}),('active',None))
                     self.assertEqual(production.parallel_handoff(config,state,dict(batch='next'),{},{}),('waiting',None))
                 self.assertEqual(state['detector_handoff_starts_this_poll'],10)
+
+
+class FrozenMainHistogramIntegrity(unittest.TestCase):
+    def inputs(self, root):
+        helper = root / 'analysis_integrity.py'
+        helper.write_text('# qualified original helper\n')
+        qualification = root / 'qualification.json'
+        runtime = dict(path='/qualified/histograms.tar.gz', sha256='binary', bytes=123)
+        qualification.write_text(json.dumps(dict(complete=True, histogram_runtime=runtime,
+            histogram_positive_control=dict(all_seven_logmass_categories_present=True,
+                                             positive_logmass_filled=True))))
+        settings = dict(runtime=runtime,
+            qualification=dict(path=str(qualification), sha256=production.durable.sha(qualification)),
+            nano_integrity=dict(path=str(helper), sha256=production.durable.sha(helper)),
+            maximum_publication_bytes=1000)
+        profile = root / 'original_histogrammer.json'
+        profile.write_text(json.dumps(settings))
+        return helper, settings, dict(path=str(profile), sha256=production.durable.sha(profile))
+
+    def test_prepared_helper_and_real_consumer_survive_upstream_edit(self):
+        import prepare_dark_photon_production as detector
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper, original, authority = self.inputs(root)
+            deployment = root / 'deployment'; deployment.mkdir()
+            files = {}
+            frozen = preparation.freeze_main_histogrammer(authority, deployment, files)
+            settings = json.loads(Path(frozen['path']).read_text())
+            private = Path(settings['nano_integrity']['path'])
+            self.assertEqual(settings, dict(original, nano_integrity=dict(
+                original['nano_integrity'], path=str(private))))
+            self.assertNotIn(str(helper), files)
+            self.assertEqual(files[str(private)], original['nano_integrity']['sha256'])
+            helper.write_text('# a later unrelated analysis change\n')
+            for name, digest in files.items():
+                self.assertEqual(production.durable.sha(name), digest)
+
+            gen = root / 'gen'; gen.mkdir()
+            identity = [[123, 1, 1]]
+            (gen / 'material_selected_source.json').write_text(json.dumps(dict(
+                event_ids=identity, gen_sha256='GEN', selected_indices=[0])))
+            # Stop after the real downstream helper copy, before physics setup.
+            (gen / 'contract.json').write_text('{')
+            plan = dict(points=[dict(point='signal', events=1, gen_directory=str(gen))],
+                events=1, group_events=4000, detector_runtime={},
+                frozen_dependencies=dict(sources={}, templates={}))
+            for name, value in [('plan.json', plan), ('inventory.json', dict(points=dict(
+                    signal=dict(event_ids=identity, gen_sha256='GEN')))), ('publication.json', {})]:
+                (root / name).write_text(json.dumps(value))
+            args = SimpleNamespace(preparation=root/'plan.json', output=root/'stage',
+                gen_inventory=root/'inventory.json', gen_publication=root/'publication.json',
+                prior_inventories=[], main_histogrammer=Path(frozen['path']))
+            with patch.object(detector, 'validate_physical_preflight'), \
+                 patch.object(detector, 'validate_plan'), patch.object(detector, 'check_gen'), \
+                 patch('dark_photon_detector_runtime.validate_profile'):
+                with self.assertRaises(json.JSONDecodeError):
+                    detector.prepare_main_histograms(args)
+            consumed = args.output / 'frozen/sources/shift_nano_integrity.py'
+            self.assertEqual(consumed.read_bytes(), private.read_bytes())
+            self.assertEqual(production.durable.sha(consumed), original['nano_integrity']['sha256'])
+
+    def test_changed_helper_before_freezing_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            helper, settings, authority = self.inputs(root)
+            helper.write_text('# unexpected changed helper\n')
+            deployment = root / 'deployment'; deployment.mkdir()
+            with self.assertRaisesRegex(ValueError, 'changed'):
+                preparation.freeze_main_histogrammer(authority, deployment, {})
+            self.assertFalse((deployment/'histogram_helpers/shift_nano_integrity.py').exists())
