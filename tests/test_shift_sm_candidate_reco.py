@@ -12,7 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from prepare_shift_sm_candidate_reco import prepare_draw
+from prepare_shift_sm_candidate_reco import materialize_fresh_authorities, prepare_draw
 from prepare_shift_sm_response_jobs import detector_request
 from run_shift_sm_response_collection import verify_exposure
 
@@ -29,7 +29,7 @@ def event(number, depth=20., x=300.):
             ancestor_barcodes=[7], first_non_muon_parent_barcodes=[7], immediate_parent_barcodes=[7],
             transport_parent_barcodes=[7], straight_line_towards_CMS_entry=True,
             material_to_CMS_entry=dict(complete=True, column_density_g_cm2=1000.)))
-    return dict(event_id=[100, 1, number], native_weight=float(number), GEN_muons=2,
+    return dict(event_id=[100, 1, number], native_weight=float(number), GEN_muons=2, graph_sha256='c'*64,
         muons=muons, parent_flights=[dict(barcode=7, material=dict(
             complete=True, full_saved_chord_coverage=True, interaction_depth_proxy=depth))],
         ancestor_nodes=[dict(barcode=7, pdg=211, status=2)], unknown_transport_ancestor_barcodes=[],
@@ -115,6 +115,31 @@ class CandidateRecoTest(unittest.TestCase):
         self.assertNotIn([100, 1, 1], [row['event_id'] for row in result['plan']['selected']])
         self.assertEqual(result['exposure']['original_saved_GEN_events'], 7)
         self.assertEqual(result['plan']['population_events'], 6)
+
+    def test_explicit_fresh_census_covers_masked_candidate_before_first_sim(self):
+        self.indices = list(range(1, 7))
+        record = self.record()
+        original_bytes = Path(record['result_path']).read_bytes()
+        record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+        result = prepare_draw([record], 'seed', controls_per_cell=1)
+        self.assertFalse(result['missed_candidates'])
+        candidate = next(row for row in result['plan']['selected'] if row['event_id'] == [100, 1, 1])
+        self.assertEqual(candidate['existing_sampling_probability'], 1.)
+        self.assertEqual(candidate['benchmark_inclusion_probability'], 1.)
+        self.assertEqual(result['plan']['population_events'], 7)
+        materialize_fresh_authorities(result, self.directory/'response_authority')
+        pin = result['source_pins']['sources'][0]
+        authority = json.loads(Path(pin['original_result_path']).read_text())
+        self.assertEqual(authority['selected_source'], pin['original_selected_source'])
+        self.assertEqual(authority['response_census_selection']['original_unused_selected_source']['selected_indices'], self.indices)
+        self.assertEqual(Path(record['result_path']).read_bytes(), original_bytes)
+        self.assertEqual(pin['original_selected_source']['sampling_probabilities'], [1.]*7)
+
+    def test_fresh_census_requires_first_sim_and_unused_mask_declarations(self):
+        record = self.record()
+        record['fresh_census'] = True
+        with self.assertRaisesRegex(ValueError, 'first-SIM'):
+            prepare_draw([record], 'seed')
 
     def test_unknown_parent_prefix_is_not_promoted_to_known_shallow(self):
         self.events[0]['parent_flights'][0]['material']['full_saved_chord_coverage'] = False

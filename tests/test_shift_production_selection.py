@@ -186,6 +186,29 @@ class ProductionSelectionTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'Unknown production'):
             common.production_policy('cohort', 'seed', 'typo')
 
+    def test_full_response_census_is_explicit_sm_only_and_keeps_default(self):
+        rows = [event(i+1, native=2.5+i) for i in range(20)]
+        data = bundle(rows)
+        baseline = common.prepare_default_selection(data)
+        data['policy_variant'] = 'sm-response-census-v1'
+        ledger = common.prepare_default_selection(data)
+        self.assertEqual(baseline['policy']['control_probability'], .1)
+        self.assertNotIn('variant', baseline['policy'])
+        self.assertEqual(ledger['policy']['control_probability'], 1.)
+        for stratum in ('qcd_20toinf', 'dy_20toinf', 'jpsi_20toinf'):
+            selected = common.bind_source(descriptor(rows, stratum), ledger)
+            self.assertEqual(selected['selected_indices'], list(range(20)))
+            self.assertEqual(selected['sampling_probabilities'], [1.]*20)
+            self.assertEqual(selected['weights'], [row['native_weight'] for row in rows])
+            common.validate_contract(selected['production_selection'])
+        with self.assertRaisesRegex(ValueError, 'only as an SM option'):
+            common.bind_source(descriptor(rows, 'darkphoton_new_model'), ledger)
+        changed = copy.deepcopy(selected['production_selection'])
+        changed['policy']['control_probability'] = .9
+        changed['policy_sha256'] = admission.checksum(changed['policy'])
+        with self.assertRaises(ValueError):
+            common.validate_contract(changed)
+
     def test_unknown_model_is_not_a_hadron_or_given_guessed_absorption(self):
         for pdg in (32, 1000022, 4900111, 9900015):
             self.assertFalse(features.hadron(pdg))

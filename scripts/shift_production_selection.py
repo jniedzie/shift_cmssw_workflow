@@ -242,6 +242,10 @@ def production_policy(cohort_id, selection_seed, variant='shared-default'):
     policy = default_policy(cohort_id, selection_seed)
     if variant == 'shared-default':
         return policy
+    if variant == 'sm-response-census-v1':
+        policy.update(variant=variant, control_probability=1.)
+        validate_policy(policy)
+        return policy
     if variant != 'sm-pointing-scoped-v1':
         raise ValueError('Unknown production material policy variant: '+str(variant))
     policy['variant'] = variant
@@ -290,9 +294,9 @@ def bind_sources(descriptors, ledger):
 
 
 def _bind_source(descriptor, ledger, rows, ledger_sha):
-    if (ledger['policy'].get('variant') == 'sm-pointing-scoped-v1'
+    if (ledger['policy'].get('variant') in ('sm-pointing-scoped-v1', 'sm-response-census-v1')
             and descriptor['stratum'].split('_', 1)[0] not in ('qcd', 'dy', 'jpsi')):
-        raise ValueError('The experimental pointing-scoped policy is available only as an SM option')
+        raise ValueError('The experimental response policy is available only as an SM option')
     if descriptor.get('selected_indices') is not None or descriptor.get('production_selection'):
         raise ValueError('Cannot reopen an existing reconstruction selection')
     by_id = {tuple(row['event_id']): row for row in rows}

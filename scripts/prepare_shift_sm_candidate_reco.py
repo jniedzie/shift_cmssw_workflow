@@ -20,6 +20,49 @@ from prepare_shift_sm_prospective_benchmark import CONTROL_COUNTS, prepare_bench
 from run_shift_sm_response_collection import verify_exposure
 from scan_shift_sm_muon_opportunities import parent_union_description, validate_census
 from shift_sm_response_features import _column_ratio, _station_misses, feature_values
+from shift_production_selection import bind_source, prepare_default_selection
+
+
+def fresh_census_authority(record, authority, features):
+    """Declare first SIM on an untouched source, preserving its unused old mask."""
+    if record.get('first_sim_source') is not True or record.get('preparation_mask_unused') is not True:
+        raise ValueError('Fresh census requires explicit first-SIM and unused preparation-mask evidence')
+    descriptor = copy.deepcopy(authority['selected_source'])
+    if descriptor.get('decay_proposal') is not None:
+        raise ValueError('Fresh response census does not reopen a decay proposal')
+    for name in ('selected_indices', 'sampling_probabilities', 'sampling', 'production_selection'):
+        descriptor.pop(name, None)
+    source = authority['source']
+    sid = source['source_id']
+    old_pin = dict(path=str(Path(record['result_path']).resolve()), sha256=record['result_sha256'])
+    events = [dict(source_id=sid, original_source_sha256=source['gen_sha256'],
+        feature_source_sha256=descriptor['gen_sha256'], event_id=row['event_id'],
+        graph_sha256=row['graph_sha256'], native_weight=row['native_weight'],
+        sampling_probability=1., previous_selection_domains=[], proposal_kind='ordinary',
+        proposal_draw_id='unchanged-prepared-GEN:'+row['graph_sha256'],
+        proposal_density_ratio=1., proposal_correction=1.,
+        proposal_provenance_sha256=record['result_sha256'], saved_decays_unchanged=True)
+        for row in features['events']]
+    inputs = dict(schema='shift-production-material-inputs-v1',
+        cohort_id=record.get('response_cohort_id', 'SM_response_census_20261029_v1')+':'+sid,
+        selection_seed='full-census-no-additional-draw', policy_variant='sm-response-census-v1',
+        features=features, authority=dict(schema='shift-material-admission-authority-v1',
+            population_scope='representative_census', sources=[dict(source_id=sid,
+                original_source_sha256=source['gen_sha256'],
+                feature_source_sha256s=[descriptor['gen_sha256']], full_gen_exposure=source,
+                generator_profile='ordinary', decay_dependent_filter=False)], events=events))
+    ledger = prepare_default_selection(inputs)
+    selected = bind_source(descriptor, ledger)
+    if (selected['selected_indices'] != list(range(source['saved_events']))
+            or selected['sampling_probabilities'] != [1.]*source['saved_events']):
+        raise ValueError('Fresh response census must retain every original with p=1')
+    updated = copy.deepcopy(authority)
+    updated.update(selected_source=selected, selected_events=source['saved_events'],
+        response_census_selection=dict(schema='shift-sm-first-response-census-v1',
+            first_SIM_on_this_source=True, unused_preparation_authority=old_pin,
+            original_unused_selected_source=authority['selected_source'],
+            GEN_unchanged=True, original_exposure_unchanged=True))
+    return updated, ledger, old_pin
 
 
 def digest(path):
@@ -105,6 +148,11 @@ def source_rows(record):
         feature_pin=feature_pin, prepared_GEN_pin=gen_pin,
         event_authority=dict(event_ids=descriptor['event_ids'], native_weights=descriptor['weights'])),
         authority, features)
+    fresh = None
+    if record.get('fresh_census') is True:
+        authority, ledger, old_pin = fresh_census_authority(record, authority, features)
+        descriptor = authority['selected_source']
+        fresh = dict(authority=authority, ledger=ledger, original_unused_preparation_pin=old_pin)
     indices = descriptor['selected_indices']
     probabilities = descriptor['sampling_probabilities']
     if (len(indices) != len(probabilities) or len(indices) != len(set(indices))
@@ -140,7 +188,7 @@ def source_rows(record):
         full_original_exposure=copy.deepcopy(exposure), original_selected_source=copy.deepcopy(descriptor),
         selected_descriptor_canonical_json_sha256=hashlib.sha256(json.dumps(descriptor,
             sort_keys=True, separators=(',', ':')).encode()).hexdigest())
-    return rows, missed, pin
+    return rows, missed, pin, fresh
 
 
 def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
@@ -150,14 +198,16 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
     if type(maximum_events) is not int or maximum_events < 1 or not isinstance(seed, str) or not seed:
         raise ValueError('Require an explicit seed and positive event budget')
     selected, strata, exposures, pins, missed = [], [], [], [], []
-    source_ids, raw_hashes = set(), set()
+    source_ids, raw_hashes, fresh_authorities = set(), set(), {}
     for record in records:
-        rows, omitted, pin = source_rows(record)
+        rows, omitted, pin, fresh = source_rows(record)
         sid, raw = pin['source_id'], pin['original_raw_gen_sha256']
         if sid in source_ids or raw in raw_hashes:
             raise ValueError('Duplicate original source/exposure')
         source_ids.add(sid)
         raw_hashes.add(raw)
+        if fresh is not None:
+            fresh_authorities[sid] = fresh
         draw = prepare_benchmark(rows, seed, maximum_events,
             controls={name: controls_per_cell for name in CONTROL_COUNTS})
         selected.extend(draw['selected'])
@@ -188,7 +238,30 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
         includes_sources_with_no_benchmark_event_drawn=True)
     verify_exposure(exposure, plan)
     return dict(plan=plan, exposure=exposure, source_pins=dict(
-        schema='shift-sm-prospective-source-pins-v1', sources=pins), missed_candidates=missed)
+        schema='shift-sm-prospective-source-pins-v1', sources=pins), missed_candidates=missed,
+        fresh_authorities=fresh_authorities)
+
+
+def materialize_fresh_authorities(result, directory):
+    """Persist new first-SIM authorities; never overwrite original preparation."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    for sid, fresh in result.get('fresh_authorities', {}).items():
+        if not sid or Path(sid).name != sid:
+            raise ValueError('Invalid source ID for persistent authority')
+        target = directory/sid
+        target.mkdir(exist_ok=True)
+        for name, value in [('result.json', fresh['authority']), ('selection_ledger.json', fresh['ledger'])]:
+            data = json.dumps(value, indent=2, allow_nan=False)+'\n'
+            path = target/name
+            if path.exists() and path.read_text() != data:
+                raise ValueError('Refuse to overwrite a frozen response authority')
+            path.write_text(data)
+        authority_path = target/'result.json'
+        for row in result['source_pins']['sources']+result['exposure']['sources']:
+            if row['source_id'] == sid:
+                row.update(original_result_path=str(authority_path.resolve()),
+                    original_result_sha256=digest(authority_path))
 
 
 def main():
@@ -202,6 +275,7 @@ def main():
     result = prepare_draw(config['sources'], config['seed'], config.get('controls_per_cell', 4),
         config.get('maximum_events', 2000))
     args.output_directory.mkdir(parents=True, exist_ok=True)
+    materialize_fresh_authorities(result, args.output_directory/'response_authority')
     plan = args.output_directory/'plan.json'
     plan.write_text(json.dumps(result['plan'], indent=2, allow_nan=False)+'\n')
     result['source_pins'].update(frozen_benchmark_path=str(plan.resolve()),
