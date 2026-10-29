@@ -23,7 +23,7 @@ from shift_condor_native import NativeCondorError, query
 
 SCHEMA = 'shift-sm-candidate-search-watchdog-v1'
 ATTRIBUTES = ['ClusterId','ProcId','Owner','Iwd','JobStatus','JobUniverse',
-    'JobBatchName','DAGManJobId','DAG_Status','DAG_NodesFailed','HoldReason','ExitCode','ExitBySignal']
+    'JobBatchName','GlobalJobId','DAGManJobId','DAG_Status','DAG_NodesFailed','HoldReason','ExitCode','ExitBySignal']
 
 
 def read(path):
@@ -127,6 +127,100 @@ def complete_result(value):
     return value is not None and value.get('complete') is True and value.get('exit_code') == 0
 
 
+def source_owner(source_id, output, prepared, submission, config, ads):
+    """Bind either a private DAG or an explicitly declared shared wave."""
+    manager = submission['manager']
+    cluster = manager['cluster_id']
+    directory = persistent(manager['binding']['working_directory'])
+    if type(cluster) is not int or cluster <= 0:
+        raise ValueError('Source manager identity is invalid')
+    native_job = manager['native_job']
+    if native_job.get('ClusterId') != cluster or native_job.get('Iwd') != str(directory):
+        raise ValueError('Saved native source manager binding differs')
+    node = prepared['collector']['node']
+    if submission.get('shared_wave') is True:
+        if (submission.get('source_id') != source_id
+                or submission.get('shared_wave_directory') != str(directory)
+                or not within(str(directory), config['root_directory'])):
+            raise ValueError('Shared wave source/directory binding differs')
+        source_pin, wave_pin = submission['source_prepared_manifest'], submission['wave_prepared_manifest']
+        if (source_pin['path'] != str(output/'prepared.json')
+                or digest(source_pin['path']) != source_pin['sha256']
+                or Path(wave_pin['path']).parent != directory
+                or digest(wave_pin['path']) != wave_pin['sha256']):
+            raise ValueError('Shared wave frozen source/manifest changed')
+        wave = read(wave_pin['path'])
+        members = [row for row in wave['sources'] if row['source_id'] == source_id]
+        if (len(members) != 1 or members[0]['prepared_manifest'] != source_pin
+                or members[0]['source_job_nodes'] != submission['source_job_nodes']
+                or members[0]['collector'] != prepared['collector']):
+            raise ValueError('Source is not an exact member of its shared wave')
+        node = submission['source_job_nodes'][node]
+    elif directory != output:
+        raise ValueError('A private source manager cannot own another directory')
+    live = [ad for ad in ads if ad.get('ClusterId') == cluster and ad.get('ProcId') == 0]
+    if len(live) > 1:
+        raise ValueError('Ambiguous source manager queue record')
+    if live:
+        if (live[0].get('Iwd') != str(directory)
+                or (manager.get('native_job', {}).get('GlobalJobId')
+                    and live[0].get('GlobalJobId') != manager['native_job']['GlobalJobId'])):
+            raise ValueError('Actual source manager identity/directory differs')
+    for ad in ads:
+        if within(ad.get('Iwd'), output/'jobs') and ad.get('JobUniverse') == 5:
+            if ad.get('DAGManJobId') != cluster:
+                raise ValueError('Source payload is owned by another native DAG manager')
+    return dict(cluster_id=cluster, directory=str(directory), collector_node=node,
+        manager_output=str(directory/'response.dag.dagman.out'))
+
+
+def native_collector_closure(source_id, output, prepared, submission, collector, config, state, ads, owner=None):
+    """Prove collection without one scheduler-universe watcher per source."""
+    owner = owner or source_owner(source_id, output, prepared, submission, config, ads)
+    directory = output/'jobs/collect'
+    record = prepared['collector']
+    if (record['job_directory'] != str(directory)
+            or digest(directory/'request.json') != record['request_sha256']
+            or collector.get('request_sha256') != record['request_sha256']):
+        raise ValueError('Collector request binding differs from its frozen source')
+    status = optional(directory/'status.json')
+    if not complete_result(status):
+        return None
+    active = [ad for ad in ads if within(ad.get('Iwd'), output/'jobs')
+              and ad.get('JobUniverse') == 5 and ad.get('JobStatus') in (1,2,3,5,6,7)]
+    if active:
+        return None
+    path = directory/'events.log'
+    if not path.exists():
+        return None
+    if path.stat().st_size > 8*1048576:
+        raise ValueError('Collector event log exceeds bounded native review')
+    ids = set(re.findall(r'(?m)^000 \((\d+)\.000\.000\)', path.read_text(errors='replace')))
+    if len(ids) != 1:
+        raise ValueError('Collector event log has no unique native job identity')
+    cluster = int(ids.pop())
+    terminal = native_terminal(dict(cluster_id=cluster, directory=str(directory), event_log=str(path)), state)
+    if terminal is None:
+        return None
+    if not terminal['successful']:
+        raise ValueError('Collector native job did not terminate successfully')
+    # DAGMan's own event reports bind the terminal worker to its exact node.
+    # This remains available after the worker leaves the queue, without a
+    # history scan or waiting for unrelated sources in the shared wave.
+    native = Path(owner['manager_output'])
+    if not native.exists():
+        return None
+    if native.stat().st_size > 32*1048576:
+        raise ValueError('Source manager output exceeds bounded ownership review')
+    pattern = (r'ULOG_(?:SUBMIT|EXECUTE|TERMINATED) for HTCondor Node '
+               + re.escape(owner['collector_node'])+r' \('+str(cluster)+r'\.0\.0\)')
+    if not re.search(pattern, native.read_text(errors='replace')):
+        raise ValueError('Native collector is not bound to its source DAG node')
+    return dict(owner=owner, collector_terminal=terminal,
+        collector_result_sha256=digest(directory/'result.json'),
+        collector_status_sha256=digest(directory/'status.json'))
+
+
 def source_status(source, config, state, ads, now):
     sid = source['source_id']
     preparation = Path(source['preparation_directory'])
@@ -147,7 +241,8 @@ def source_status(source, config, state, ads, now):
     prepared = optional(output/'prepared.json')
     submission = optional(output/'submission.json')
     collector = optional(output/'jobs/collect/result.json')
-    heartbeat = optional(output/'watchdog/heartbeat.json')
+    individual_watchdogs = config.get('individual_source_watchdogs', True)
+    heartbeat = optional(output/'watchdog/heartbeat.json') if individual_watchdogs else None
     handoff_live = any(within(ad.get('Iwd'), handoff_directory)
         and ad.get('JobStatus') in (1,2,6,7) for ad in local)
     grace = config.get('transition_grace_seconds',900)
@@ -161,7 +256,13 @@ def source_status(source, config, state, ads, now):
         failures.append('Final response collector failed')
     if heartbeat is not None:
         failures.extend('Source watchdog: '+str(problem) for problem in heartbeat.get('problems', []))
-    if submission is not None and not complete_result(collector):
+    owner = None
+    if submission is not None and prepared is not None and not individual_watchdogs:
+        try:
+            owner = source_owner(sid, output, prepared, submission, config, ads)
+        except (KeyError,TypeError,ValueError) as error:
+            failures.append('Source ownership binding failed: '+str(error))
+    if submission is not None and not complete_result(collector) and individual_watchdogs:
         if heartbeat is None:
             if elapsed(state, 'watchdog:'+sid, now) > grace:
                 failures.append('Submitted detector DAG has no watchdog heartbeat after grace')
@@ -174,6 +275,21 @@ def source_status(source, config, state, ads, now):
         elif (collector.get('complete_frozen_draw_collected') is not True
                 or collector.get('events') != len(prepared['detector_jobs'])):
             failures.append('Final collector does not cover the complete frozen draw')
+        elif not individual_watchdogs:
+            if submission is None:
+                failures.append('Complete collector lacks native source ownership')
+            elif owner is not None:
+                try:
+                    closure = native_collector_closure(sid, output, prepared, submission, collector,
+                        config, state, ads, owner)
+                except (KeyError,TypeError,ValueError) as error:
+                    failures.append('Native collector closure failed: '+str(error))
+                    closure = None
+                if closure is not None:
+                    collected = True
+                    state.setdefault('source_collector_closures', {})[sid] = closure
+                elif elapsed(state, 'closure:'+sid, now) > grace:
+                    failures.append('Complete collector lacks successful native closure after grace')
         elif heartbeat is not None and heartbeat.get('terminal') is True and not heartbeat.get('problems'):
             terminal = heartbeat.get('manager_terminal', {})
             if (terminal.get('ExitCode') == 0 and terminal.get('ExitBySignal') is False

@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import monitor_shift_sm_candidate_search as monitor
@@ -168,6 +168,100 @@ class CandidateSearchMonitorTest(unittest.TestCase):
         self.assertEqual(result['phase'],'watchdog_runtime_limit')
         self.assertFalse(result['terminal'])
         self.assertEqual(observer.call_count,0)
+
+    def native_collection(self, shared=False):
+        persistence = patch.object(monitor, 'persistent', side_effect=Path)
+        persistence.start()
+        self.addCleanup(persistence.stop)
+        self.collected()
+        self.close_managers()
+        self.config['individual_source_watchdogs'] = False
+        (self.reconstruction/'watchdog/heartbeat.json').unlink()
+        directory = self.reconstruction/'jobs/collect'
+        save(directory/'request.json', dict(frozen='request'))
+        prepared = monitor.read(self.reconstruction/'prepared.json')
+        prepared['collector'] = dict(node='COLLECT',job_directory=str(directory),
+            request_sha256=monitor.digest(directory/'request.json'))
+        save(self.reconstruction/'prepared.json',prepared)
+        result = monitor.read(directory/'result.json')
+        result['request_sha256'] = prepared['collector']['request_sha256']
+        save(directory/'result.json',result)
+        save(directory/'status.json',dict(complete=True,exit_code=0))
+        (directory/'events.log').write_text('000 (104.000.000) 10/29 12:00:00 Job submitted.\n...\n'
+            '005 (104.000.000) 10/29 12:01:00 Job terminated.\n'
+            '    (1) Normal termination (return value 0)\n...\n')
+        manager_dir = self.root/'waves/w000' if shared else self.reconstruction
+        manager_dir.mkdir(parents=True,exist_ok=True)
+        node = 'S000_COLLECT' if shared else 'COLLECT'
+        (manager_dir/'response.dag.dagman.out').write_text('Event: ULOG_SUBMIT for HTCondor Node '
+            +node+' (104.0.0) {10/29/26 12:00:00}\n')
+        manager = dict(cluster_id=103,binding=dict(working_directory=str(manager_dir)),
+            native_job=dict(ClusterId=103,Iwd=str(manager_dir),GlobalJobId='schedd#103.0#1000'))
+        submission = dict(source_id=self.sid,manager=manager)
+        if shared:
+            source_pin = dict(path=str(self.reconstruction/'prepared.json'),
+                sha256=monitor.digest(self.reconstruction/'prepared.json'))
+            source_nodes = dict(COLLECT=node)
+            wave_path = manager_dir/'prepared.json'
+            save(wave_path,dict(sources=[dict(source_id=self.sid,prepared_manifest=source_pin,
+                source_job_nodes=source_nodes,collector=prepared['collector'])]))
+            submission.update(shared_wave=True,shared_wave_directory=str(manager_dir),
+                source_prepared_manifest=source_pin,wave_prepared_manifest=dict(path=str(wave_path),
+                    sha256=monitor.digest(wave_path)),source_job_nodes=source_nodes)
+        save(self.reconstruction/'submission.json',submission)
+        return manager_dir,directory
+
+    def test_native_collector_closes_without_per_source_watchdog_or_manager_exit(self):
+        manager_dir,_ = self.native_collection()
+        live = self.ad(103,manager_dir)
+        live['GlobalJobId'] = 'schedd#103.0#1000'
+        state = {}
+        observed = monitor.observe(self.config,state,now=1000,query_jobs=Mock(return_value=[live]))
+        self.assertTrue(observed['sources'][0]['collector_complete'])
+        self.assertEqual(observed['counts']['collected_events'],2)
+        self.assertIn(self.sid,state['source_collector_closures'])
+
+    def test_shared_wave_membership_and_native_node_ownership_close_one_source(self):
+        manager_dir,_ = self.native_collection(shared=True)
+        live = self.ad(103,manager_dir)
+        live['GlobalJobId'] = 'schedd#103.0#1000'
+        observed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[live]))
+        self.assertTrue(observed['sources'][0]['collector_complete'])
+        (manager_dir/'response.dag.dagman.out').write_text('Event: ULOG_SUBMIT for HTCondor Node '
+            'S001_COLLECT (104.0.0)\n')
+        failed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[live]))
+        self.assertFalse(failed['sources'][0]['collector_complete'])
+        self.assertTrue(any('not bound to its source DAG node' in value for value in failed['problems']))
+
+    def test_wrong_wave_membership_or_queued_payload_owner_cannot_be_credited(self):
+        manager_dir,_ = self.native_collection(shared=True)
+        active = self.ad(104,self.reconstruction/'jobs/collect',2,5,999)
+        failed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[active]))
+        self.assertTrue(any('another native DAG' in value for value in failed['problems']))
+        path = self.reconstruction/'submission.json'
+        submission = monitor.read(path)
+        wave_path = Path(submission['wave_prepared_manifest']['path'])
+        save(wave_path,dict(sources=[]))
+        submission['wave_prepared_manifest']['sha256'] = monitor.digest(wave_path)
+        save(path,submission)
+        failed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[]))
+        self.assertTrue(any('not an exact member' in value for value in failed['problems']))
+
+    def test_failed_native_collector_cannot_be_replaced_by_successful_json(self):
+        _,directory = self.native_collection()
+        path = directory/'events.log'
+        path.write_text(path.read_text().replace('return value 0','return value 1'))
+        failed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[]))
+        self.assertTrue(any('did not terminate successfully' in value for value in failed['problems']))
+
+    def test_wrong_request_or_active_source_response_prevents_native_closure(self):
+        _,directory = self.native_collection()
+        active = self.ad(200,self.reconstruction/'jobs/det_0000',2,5,103)
+        observed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[active]))
+        self.assertFalse(observed['sources'][0]['collector_complete'])
+        save(directory/'request.json',dict(changed=True))
+        failed = monitor.observe(self.config,{},now=1000,query_jobs=Mock(return_value=[]))
+        self.assertTrue(any('request binding differs' in value for value in failed['problems']))
 
 
 if __name__ == '__main__':
