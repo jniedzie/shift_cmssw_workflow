@@ -939,7 +939,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_runtime_recovery', 'reviewed_remaining_storage_authority',
                                    'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
-                                   'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable'}:
+                                   'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable',
+                                   'committed_direct_storage_peer'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -2710,10 +2711,84 @@ def committed_meson_source_bytes(config, batch, entry, live_ids):
     return sum(item['bytes'] for item in objects)
 
 
+def committed_direct_peer_bytes(config, observed):
+    """Count retained new direct outputs already paid from its registered budget.
+
+    Reuse the producer's independent retirement readbacks, bound to its sealed
+    complete plan and native successful exit. Older baseline cohorts and live
+    writers never release this new campaign's reservation.
+    """
+    authority = config.get('committed_direct_storage_peer')
+    if authority is None:
+        return 0
+    peer = storage_pinned_read(authority['configuration'])
+    root = Path(peer['directory'])
+    fresh = fresh_production_authority(config,reader=storage_pinned_read)
+    registration = fresh['storage_registration']
+    claims = {row['name']:row['reserved_bytes'] for row in registration['peer_reservations']}
+    if (str(root) not in registration['registered_controller_directories']
+            or root == Path(config['directory']) or authority.get('reservation_name') != 'direct_topups'
+            or claims.get('direct_topups') != authority.get('reserved_bytes')):
+        raise ValueError('Direct paid-write credit is outside its existing registration')
+    worklist = storage_ledger(peer['worklist'])
+    if peer['dependencies'].get(peer['worklist']) != durable.sha(peer['worklist']):
+        raise ValueError('Registered direct worklist changed')
+    live = durable.jobs(config,directory_condition(root))
+    objects = {}
+    for index in range(len(worklist['waves'])):
+        directory = root/'waves'/f'w{index:03d}'/'production'
+        if any(j.get('Iwd','') == str(directory) or j.get('Iwd','').startswith(str(directory)+'/') for j in live):
+            continue
+        if not (directory/'submission.json').exists():
+            continue
+        cluster = storage_ledger(directory/'submission.json')['cluster']
+        log = directory/'pipeline.dag.dagman.log'
+        if not log.exists():
+            continue
+        terminal = next((b for b in reversed(storage_payload(log).decode().split('\n...\n')[:-1])
+            if re.match(r'005 \('+str(cluster)+r'\.000\.',b)), '')
+        if 'Normal termination (return value 0)' not in terminal:
+            continue
+        plan = storage_ledger(directory/'plan.json')
+        if plan['campaign'] != peer['campaign_prefix']+f'-w{index:03d}':
+            raise ValueError('Paid direct cohort changed its registered campaign')
+        for row in plan['points']:
+            point = row['point']
+            if not storage_closed_primitive(directory,point,row.get('full_gen_events',row['events']),observed):
+                continue
+            report = storage_ledger(directory/'completed_points'/(point+'.json'))
+            marker = report.get('main_histograms',{})
+            pin = marker.get('primitive_nano_retirement')
+            if not pin or pin.get('complete') is not True:
+                continue
+            retirement = storage_pinned_read(pin)
+            published = marker['published']
+            retained = [published['merged_nano'],published['merged_histogram']]
+            if (retirement.get('complete') is not True
+                    or retirement.get('retained_readbacks_verified') is not True
+                    or retirement.get('replacement') != retained[0]
+                    or retirement.get('retained_histogram') != retained[1]
+                    or marker.get('complete') is not True):
+                raise ValueError('Direct output credit lost its independent retained readbacks')
+            for item in retained:
+                if (not item['path'].startswith(row['final_output_base']+'/')
+                        or type(item['bytes']) is not int or item['bytes'] <= 0
+                        or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])):
+                    raise ValueError('Invalid retained direct output identity')
+                previous = objects.setdefault(item['path'],item)
+                if previous != item:
+                    raise ValueError('Conflicting committed direct output')
+    total = sum(item['bytes'] for item in objects.values())
+    if total > authority['reserved_bytes']:
+        raise ValueError('Paid direct outputs exceed their unchanged allocation')
+    return total
+
+
 def storage_gate(config, observation, bulk=False, state=None, persist_terminal_cache=True):
     reviewed = bulk and config.get('reviewed_remaining_storage_authority')
     reservation = 0 if reviewed else adaptive_reservation(config)
     source_credit = 0
+    peer_credit = 0
     additional = 500000000 if not bulk else None
     if bulk:
         from prepare_dark_photon_meson_production import meson_storage_limit
@@ -2760,6 +2835,8 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
                         raise ValueError('Written GEN objects exceed their original bank allocation')
                     additional -= credit
                     source_credit += credit
+            peer_credit = committed_direct_peer_bytes(config,observed)
+            reservation -= peer_credit
     accounting = None
     if reviewed:
         import shift_condor_native as native
@@ -2776,6 +2853,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
         meson_forecast_bytes=additional, additional_reserved_bytes=reserved,
         committed_source_bytes=source_credit,
+        committed_direct_peer_bytes=peer_credit,
         aggregate_storage_reservation_bytes=regrouping,
         additional_reserved_worklists=claims, required_free_bytes=required,
         **({'reviewed_remaining_storage': accounting} if accounting is not None else {}))

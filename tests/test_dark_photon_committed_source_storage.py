@@ -57,3 +57,57 @@ class SourceStorageTest(unittest.TestCase):
         self.status['metadata_archive']['readback_sha256']='c'*64
         self.write(self.directory/'source_status.json',self.status)
         with self.assertRaisesRegex(ValueError,'original source or readback'):self.credit()
+
+class PeerStorageTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name);self.peer=self.root/'direct'
+        self.stage=self.peer/'waves/w000/production';(self.stage/'completed_points').mkdir(parents=True)
+        self.config=dict(directory=str(self.root/'low'))
+        self.registration=dict(storage_registration=dict(
+            registered_controller_directories=[str(self.peer)],
+            peer_reservations=[dict(name='direct_topups',reserved_bytes=100)]))
+        self.write(self.peer/'worklist.json',dict(waves=[{}]))
+        peer=dict(directory=str(self.peer),campaign_prefix='new',worklist=str(self.peer/'worklist.json'),
+                  dependencies={str(self.peer/'worklist.json'):production.durable.sha(self.peer/'worklist.json')})
+        self.write(self.peer/'config.json',peer)
+        self.config['committed_direct_storage_peer']=dict(configuration=self.pin(self.peer/'config.json'),
+            reservation_name='direct_topups',reserved_bytes=100)
+        self.plan=dict(campaign='new-w000',points=[dict(point='p',events=7,full_gen_events=7,
+            final_output_base='/eos/new/w000')])
+        self.write(self.stage/'plan.json',self.plan)
+        self.write(self.stage/'seal.json',dict(files={str(self.stage/'plan.json'):production.durable.sha(self.stage/'plan.json')}))
+        self.write(self.stage/'submission.json',dict(cluster=7))
+        (self.stage/'pipeline.dag.dagman.log').write_text('005 (7.000.000) Job terminated.\nNormal termination (return value 0)\n...\n')
+        self.nano=dict(path='/eos/new/w000/nano.root',bytes=10,sha256='a'*64)
+        self.hist=dict(path='/eos/new/w000/hist.root',bytes=20,sha256='b'*64)
+        self.retirement=dict(complete=True,retained_readbacks_verified=True,replacement=self.nano,retained_histogram=self.hist)
+        self.write(self.stage/'retirement.json',self.retirement)
+        self.report=dict(complete=True,point='p',events=7,full_gen_events=7,
+            plan_sha256=production.durable.sha(self.stage/'plan.json'),seal_sha256=production.durable.sha(self.stage/'seal.json'),
+            main_histograms=dict(complete=True,primitive_nano_retirement=dict(self.pin(self.stage/'retirement.json'),complete=True),
+                published=dict(merged_nano=self.nano,merged_histogram=self.hist)))
+        self.write(self.stage/'completed_points/p.json',self.report)
+    def write(self,p,x):p.write_text(json.dumps(x))
+    def pin(self,p):return dict(path=str(p),sha256=production.durable.sha(p))
+    def credit(self,live=()):
+        import time
+        with patch.object(production,'fresh_production_authority',return_value=self.registration), \
+             patch.object(production.durable,'jobs',return_value=list(live)):
+            return production.committed_direct_peer_bytes(self.config,time.time()+1)
+    def test_only_closed_new_objects_reduce_the_existing_peer_claim(self):
+        self.assertEqual(self.credit(),30)
+        self.assertEqual(self.credit([dict(ClusterId=7,Iwd=str(self.stage))]),0)
+    def test_native_failure_or_foreign_campaign_never_credits_peer(self):
+        p=self.stage/'pipeline.dag.dagman.log';p.write_text(p.read_text().replace('value 0','value 1'))
+        self.assertEqual(self.credit(),0)
+        p.write_text(p.read_text().replace('value 1','value 0'))
+        self.plan['campaign']='old_baseline';self.write(self.stage/'plan.json',self.plan)
+        with self.assertRaisesRegex(ValueError,'registered campaign'):self.credit()
+    def test_retained_readback_and_registered_budget_are_required(self):
+        self.retirement['retained_readbacks_verified']=False;self.write(self.stage/'retirement.json',self.retirement)
+        self.report['main_histograms']['primitive_nano_retirement'].update(self.pin(self.stage/'retirement.json'))
+        self.write(self.stage/'completed_points/p.json',self.report)
+        with self.assertRaisesRegex(ValueError,'independent retained readbacks'):self.credit()
+        self.config['committed_direct_storage_peer']['reserved_bytes']=999
+        with self.assertRaisesRegex(ValueError,'existing registration'):self.credit()
