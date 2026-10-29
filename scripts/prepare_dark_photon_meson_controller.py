@@ -50,11 +50,16 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
             operational_handoffs=False, reviewed_handoff_failures=(),
             regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None, absolute_detector_stage_budgets=False,
-            reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None):
+            reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None, reviewed_nano_integrity_relocation=None):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
-    original = production.verify(directory, original_seal)
+    relocation=(dict(path=str(Path(reviewed_nano_integrity_relocation).resolve()),
+                     sha256=production.durable.sha(reviewed_nano_integrity_relocation))
+                if reviewed_nano_integrity_relocation is not None else None)
+    if relocation is None and (template/'config.json').is_file():
+        relocation=production.read(template/'config.json').get('reviewed_nano_integrity_relocation')
+    original = production.verify(directory, original_seal, relocation)
     # Main-stage preparation copies helpers beside its executing script.
     # A replacement owner therefore needs replacement handoff launchers too.
     operational_handoffs = operational_handoffs or original.get('main_histogrammer') is not None
@@ -69,7 +74,8 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         descriptor = descriptor.replace('arguments = '+original_seal,
                                         'arguments = OPERATIONS_SEAL_DIGEST')
     else:
-        previous = production.operational_configuration(original, template/'config.json', template_seal)
+        previous = production.operational_configuration(original, template/'config.json', template_seal,
+            reviewed_nano_integrity_relocation=relocation)
         descriptor = (template/'controller.sub.in').read_text()
         if (template/'controller.sub').read_text() != descriptor.replace('OPERATIONS_SEAL_DIGEST', template_seal):
             raise ValueError('Template submit description differs from its sealed template')
@@ -81,6 +87,10 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if relocation is not None:
+        moved=production.nano_integrity_relocation(directory,original_seal,relocation)
+        config.update(reviewed_nano_integrity_relocation=relocation,
+                      main_histogrammer=moved['profile'],source_admission_closed=True)
     if reviewed_source_accounting is not None:
         path=Path(reviewed_source_accounting).resolve()
         config['reviewed_source_accounting']=dict(path=str(path),sha256=production.durable.sha(path))
@@ -278,6 +288,9 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         retirement_pins.append(config['reviewed_regrouping_canary_recovery'])
     for pin in retirement_pins:
         seal_files[str(production.pinned_path(pin))] = pin['sha256']
+    if relocation is not None:
+        for authority in (relocation, moved['profile'], moved['replacement']):
+            seal_files[str(production.pinned_path(authority))]=authority['sha256']
     production.durable.new(output/'seal.json', dict(schema='shift-meson-controller-seal-v1', files=seal_files))
     digest = production.durable.sha(output/'seal.json')
     (output/'controller.sub').write_text((output/'controller.sub.in').read_text().replace('OPERATIONS_SEAL_DIGEST', digest))
@@ -328,6 +341,7 @@ def main():
     parser.add_argument('--absolute-detector-stage-budgets',action='store_true')
     parser.add_argument('--reviewed-regrouping-canary-recovery',type=Path)
     parser.add_argument('--reviewed-source-accounting',type=Path)
+    parser.add_argument('--reviewed-nano-integrity-relocation',type=Path)
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -338,7 +352,7 @@ def main():
                              args.operational_handoffs,args.reviewed_handoff_failure,
                              args.regroup_complete_points,args.aggregation_storage_registration,
                              args.historical_anchor_calibration,args.absolute_detector_stage_budgets,
-                             args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting), sort_keys=True))
+                             args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting,args.reviewed_nano_integrity_relocation), sort_keys=True))
 
 
 if __name__ == '__main__':

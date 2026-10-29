@@ -864,13 +864,48 @@ def coverage(config):
         raise
 
 
-def verify(directory, seal_digest):
-    directory = Path(directory)
+def nano_integrity_relocation(directory, seal_digest, authority):
+    """Relocate only the sealed Nano integrity bytes; preserve the science seal."""
+    if authority is None:
+        return None
+    directory = Path(directory).resolve()
+    proof = read_pinned(authority)
+    original_seal = dict(path=str(directory/'seal.json'), sha256=seal_digest)
+    if (proof.get('schema') != 'shift-reviewed-nano-integrity-relocation-v1'
+            or proof.get('original_seal') != original_seal
+            or durable.sha(directory/'seal.json') != seal_digest):
+        raise ValueError('Integrity relocation belongs to another science seal')
+    original = read(directory/'config.json')
+    if proof.get('original_main_histogrammer') != original.get('main_histogrammer'):
+        raise ValueError('Integrity relocation changed the original histogram profile')
+    before = read_pinned(proof['original_main_histogrammer'])
+    after = read_pinned(proof['replacement_main_histogrammer'])
+    old, new = before['nano_integrity'], after['nano_integrity']
+    expected = copy.deepcopy(before)
+    expected['nano_integrity'] = dict(old, path=new['path'])
+    if (after != expected or new['path'] == old['path']
+            or old['sha256'] != new['sha256']
+            or Path(new['path']).name != 'shift_nano_integrity.py'
+            or read(directory/'seal.json')['files'].get(old['path']) != old['sha256']):
+        raise ValueError('Integrity relocation changed more than its byte-identical helper path')
+    pinned_path(new)
+    return dict(original=old, replacement=new, profile=proof['replacement_main_histogrammer'])
+
+
+def relocated_dependency_sha(path, relocation):
+    if relocation is not None and path == relocation['original']['path']:
+        return durable.sha(pinned_path(relocation['replacement']))
+    return durable.sha(path)
+
+
+def verify(directory, seal_digest, reviewed_nano_integrity_relocation=None):
+    directory = Path(directory).resolve()
     if durable.sha(directory / 'seal.json') != seal_digest:
         raise ValueError('Meson deployment seal changed')
     seal = read(directory / 'seal.json')
+    relocation = nano_integrity_relocation(directory, seal_digest, reviewed_nano_integrity_relocation)
     for path, expected in seal['files'].items():
-        if durable.sha(path) != expected:
+        if relocated_dependency_sha(path, relocation) != expected:
             raise ValueError('Frozen meson dependency changed: ' + path)
     config = read(directory / 'config.json')
     if config.get('schema') != 'shift-dp-meson-production-v1' or config['directory'] != str(directory):
@@ -897,7 +932,7 @@ def batch_directory(config, batch):
     return Path(config['directory']) / 'batches' / batch['batch']
 
 
-def operational_configuration(original,path,expected,_reservation_chain=()):
+def operational_configuration(original,path,expected,_reservation_chain=(), reviewed_nano_integrity_relocation=None):
     """Adopt a separately sealed controller without changing live GEN sources."""
     path=Path(path)
     if str(path) in _reservation_chain or len(_reservation_chain) >= 32:
@@ -908,16 +943,25 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
     seal=read(seal_path)
     if seal['files'].get(str(path))!=durable.sha(path):
         raise ValueError('Replacement configuration is outside its seal')
-    for name,digest in seal['files'].items():
-        if durable.sha(name)!=digest:
-            raise ValueError('Replacement controller dependency changed: '+name)
     config=read(path)
+    authority=config.get('reviewed_nano_integrity_relocation', reviewed_nano_integrity_relocation)
+    relocation=(nano_integrity_relocation(original['directory'], durable.sha(Path(original['directory'])/'seal.json'), authority)
+                if authority is not None else None)
+    for name,digest in seal['files'].items():
+        if relocated_dependency_sha(name, relocation)!=digest:
+            raise ValueError('Replacement controller dependency changed: '+name)
+    if config.get('reviewed_nano_integrity_relocation') is not None:
+        if (config.get('source_admission_closed') is not True
+                or config.get('main_histogrammer') != relocation['profile']):
+            raise ValueError('Integrity relocation requires closed new-source admission and its exact private profile')
     # Scheduling can use the complete already budgeted grid. Source exposure,
     # seeds, worklist order, physics and storage claims remain frozen.
     operational={'tools','simultaneous_sources','simultaneous_detector_points',
                  'additional_reserved_worklists','additional_reserved_meson_forecasts',
                  'prior_meson_controller_directory', 'meson_peer_controller_directories',
                  'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards'}
+    if config.get('reviewed_nano_integrity_relocation') is not None:
+        operational.add('main_histogrammer')
     immutable=set(original)-operational
     if any(config.get(key)!=original[key] for key in immutable):
         raise ValueError('Replacement controller changed frozen production settings')
@@ -943,8 +987,9 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
                                    'reviewed_unsubmitted_runtime_recoveries',
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
                                    'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable',
-                                   'committed_direct_storage_peer', 'committed_SM_preparation_peer', 'reviewed_source_accounting',
-                                   'reviewed_source_recovery_receipts'}:
+                                   'committed_direct_storage_peer', 'committed_SM_preparation_peer', 'additional_SM_preparation_peer',
+                                   'reviewed_source_accounting',
+                                   'reviewed_source_recovery_receipts', 'reviewed_nano_integrity_relocation'}:
         raise ValueError('Replacement controller added unreviewed production settings')
     if 'source_admission_closed' in config and config['source_admission_closed'] is not True:
         raise ValueError('A source-admission closure may only stop future submissions')
@@ -985,7 +1030,8 @@ def operational_configuration(original,path,expected,_reservation_chain=()):
         if previous_seal != previous.parent/'seal.json':
             raise ValueError('Meson registration predecessor is outside its sealed deployment')
         predecessor = operational_configuration(original, previous, registration['previous_seal']['sha256'],
-                                                 (*_reservation_chain, str(path)))
+                                                 (*_reservation_chain, str(path)),
+                                                 reviewed_nano_integrity_relocation=authority)
         additions = validate_meson_reservation_additions(predecessor, config)
         if registration.get('added_peer_names') != [row['name'] for row in additions]:
             raise ValueError('Meson registration changed its declared added peers')
@@ -3076,7 +3122,7 @@ def committed_SM_closeout_bytes(config, authority, registration, observed):
     return total
 
 
-def committed_SM_preparation_bytes(config, observed):
+def original_SM_preparation_bytes(config, observed):
     """Credit closed prepared SM outputs; reused raw GEN never counts twice."""
     authority = config.get('committed_SM_preparation_peer')
     if authority is None:
@@ -3140,6 +3186,75 @@ def committed_SM_preparation_bytes(config, observed):
     if amount > min(registration['maximum_new_component_publication_bytes'],authority['registered_peer_bytes']):
         raise ValueError('Prepared SM outputs exceed the unchanged registered allocation')
     return amount
+
+
+
+def committed_SM_preparation_bytes(config, observed):
+    """Combine the old closeout with disjoint, already paid night preparation."""
+    original = original_SM_preparation_bytes(config, observed)
+    authority = config.get('additional_SM_preparation_peer')
+    if authority is None:
+        return original
+    proof = storage_pinned_read(authority)
+    registration = storage_pinned_read(proof['registration'])
+    plan = storage_pinned_read(proof['plan'])
+    root = Path(registration['directory'])
+    old_prefix = config['committed_SM_preparation_peer']['EOS_namespace_prefix'].rstrip('/')+'/'
+    fresh = fresh_production_authority(config, reader=storage_pinned_read)
+    claims = {row['name']: row['reserved_bytes'] for row in fresh['storage_registration']['peer_reservations']}
+    if (proof.get('schema') != 'shift-reviewed-SM-night-preparation-credit-candidate-v1'
+            or registration.get('total_parent_SM_reservation_bytes') != 137000000000
+            or registration.get('additional_global_reservation_bytes') != 0
+            or registration.get('existing_SM_and_BSM_allocations_unchanged') is not True
+            or registration.get('BSM_bindings_modified') is not False
+            or registration.get('old_parent_registry_or_ledger_modified') is not False
+            or claims.get('SM_and_parent') != config['committed_SM_preparation_peer']['registered_peer_bytes']
+            or proof.get('raw_GEN_excluded') is not True
+            or plan.get('source_cohorts') != proof.get('producers')
+            or len(plan['sources']) != len(proof['rows'])):
+        raise ValueError('Additional SM preparation differs from its unchanged allocation')
+    sources = {row['source_id']: row for row in plan['sources']}
+    if len(sources) != len(proof['rows']) or {row['source_id'] for row in proof['rows']} != set(sources):
+        raise ValueError('Additional SM preparation repeats or loses a source')
+    live = {row['ClusterId'] for row in durable.jobs(config, directory_condition(root/'preparation'))}
+    objects = {}
+    for row in proof['rows']:
+        source = sources[row['source_id']]
+        work = root/'preparation/sources'/row['source_id']
+        if source['directory'] != str(work):
+            raise ValueError('Additional SM preparation changed its producer directory')
+        for name in ('request.json', 'result.json', 'status.json', 'events.log'):
+            item = row['pins'][name]
+            if item['path'] != str(work/name) or durable.sha(work/name) != item['sha256']:
+                raise ValueError('Additional SM preparation producer proof changed')
+        if row['cluster'] in live:
+            raise ValueError('Additional SM preparation producer is still live')
+        result = storage_ledger(work/'result.json')
+        task = dict(directory=str(work), phase='done', native_exit_code=0, cluster=row['cluster'],
+            request_sha256=row['pins']['request.json']['sha256'],
+            result_sha256=row['pins']['result.json']['sha256'], finished_epoch=result['finished_epoch'])
+        if (task['request_sha256'] != source['request_sha256'] or task['finished_epoch'] > observed
+                or result.get('source_id') != row['source_id'] or result.get('new_GEN_exposure') != 0):
+            raise ValueError('Additional SM preparation changed its frozen source')
+        producer = committed_sm_storage_entry(task, root)
+        request = storage_ledger(work/'request.json')
+        prefix = request['publication_directory'].rstrip('/')+'/'
+        if prefix.startswith(old_prefix) or old_prefix.startswith(prefix):
+            raise ValueError('Additional SM preparation overlaps the original credit namespace')
+        paid = [item for item in producer['objects'] if item['path'].startswith(prefix)]
+        if paid != row['objects'] or sum(item['bytes'] for item in paid) != row['bytes']:
+            raise ValueError('Additional SM preparation changed its exact paid outputs')
+        for item in paid:
+            if (item['path'] in objects or type(item['bytes']) is not int or item['bytes'] <= 0
+                    or not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])):
+                raise ValueError('Additional SM preparation repeats or corrupts an output')
+            objects[item['path']] = item
+    amount = sum(item['bytes'] for item in objects.values())
+    if (amount != proof['new_preparation_bytes'] or len(objects) != proof['objects']
+            or amount > registration['maximum_new_component_publication_bytes']
+            or original+amount > claims['SM_and_parent']):
+        raise ValueError('Additional SM preparation exceeds its registered paid scope')
+    return original+amount
 
 
 def storage_gate(config, observation, bulk=False, state=None, persist_terminal_cache=True):
@@ -4291,7 +4406,14 @@ def main():
     parser.add_argument('--controller-seal')
     parser.add_argument('--once',action='store_true')
     args=parser.parse_args()
-    config=verify(args.directory.resolve(),args.seal)
+    relocation=None
+    if args.controller_config is not None:
+        op_seal=args.controller_config.parent/'seal.json'
+        if (args.controller_seal is None or durable.sha(op_seal)!=args.controller_seal
+                or read(op_seal)['files'].get(str(args.controller_config.resolve()))!=durable.sha(args.controller_config)):
+            raise ValueError('Operational entry lost its sealed configuration')
+        relocation=read(args.controller_config).get('reviewed_nano_integrity_relocation')
+    config=verify(args.directory.resolve(),args.seal,relocation)
     os.chdir(config['directory'])
     if args.controller_config is not None:
         if args.action not in ('controller','handoff') or args.controller_seal is None:

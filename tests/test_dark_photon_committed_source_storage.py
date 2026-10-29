@@ -250,3 +250,42 @@ class SMTerminalCloseoutCreditTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'preparation subtotal'):self.credit()
         self.ledger['components']['detector_Nano_evidence_receipt']['producers']=2;self.install_closeout()
         with self.assertRaisesRegex(ValueError,'role counts'):self.credit()
+
+
+class AdditionalPreparationCreditTest(unittest.TestCase):
+    def test_absent_peer_preserves_original_credit(self):
+        with patch.object(production, 'original_SM_preparation_bytes', return_value=25):
+            self.assertEqual(production.committed_SM_preparation_bytes({}, 10), 25)
+
+    def test_live_changed_or_overlapping_extra_producer_is_rejected(self):
+        # Use the existing source fixture, with its own separate registered allocation.
+        fixture = SMPreparationCreditTest(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        root = fixture.root; peer = fixture.peer; work = fixture.work
+        old = fixture.config['committed_SM_preparation_peer']; old['EOS_namespace_prefix'] = '/eos/original'
+        result = dict(complete=True, exit_code=0, request_sha256=production.durable.sha(work/'request.json'),
+            finished_epoch=1, source_id='s0', new_GEN_exposure=0)
+        fixture.write(work/'result.json',result);fixture.write(work/'status.json',dict(complete=True,exit_code=0))
+        plan=json.loads((peer/'plan.json').read_text());plan['source_cohorts']=1;fixture.write(peer/'plan.json',plan)
+        registration=dict(directory=str(peer),total_parent_SM_reservation_bytes=137000000000,
+            additional_global_reservation_bytes=0,existing_SM_and_BSM_allocations_unchanged=True,
+            BSM_bindings_modified=False,old_parent_registry_or_ledger_modified=False,
+            maximum_new_component_publication_bytes=100)
+        fixture.write(peer/'extra_registration.json',registration)
+        objects=[dict(path='/eos/new/s0/GEN.root',bytes=20,sha256='a'*64)]
+        proof=dict(schema='shift-reviewed-SM-night-preparation-credit-candidate-v1',
+            registration=fixture.pin(peer/'extra_registration.json'),plan=fixture.pin(peer/'plan.json'),
+            raw_GEN_excluded=True,producers=1,objects=1,new_preparation_bytes=20,
+            rows=[dict(source_id='s0',cluster=11,bytes=20,objects=objects,
+                pins={name:fixture.pin(work/name) for name in ('request.json','result.json','status.json','events.log')})])
+        fixture.write(peer/'proof.json',proof);fixture.config['additional_SM_preparation_peer']=fixture.pin(peer/'proof.json')
+        with patch.object(production,'original_SM_preparation_bytes',return_value=25), \
+             patch.object(production,'fresh_production_authority',return_value=fixture.fresh), \
+             patch.object(production.durable,'jobs',return_value=[]) as jobs, \
+             patch.object(production,'committed_sm_storage_entry',return_value=dict(objects=objects)):
+            self.assertEqual(production.committed_SM_preparation_bytes(fixture.config,2),45)
+            jobs.return_value=[dict(ClusterId=11)]
+            with self.assertRaisesRegex(ValueError,'still live'):production.committed_SM_preparation_bytes(fixture.config,2)
+            jobs.return_value=[];old['EOS_namespace_prefix']='/eos/new'
+            with self.assertRaisesRegex(ValueError,'overlaps'):production.committed_SM_preparation_bytes(fixture.config,2)
+            old['EOS_namespace_prefix']='/eos/original';(work/'status.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError,'proof changed'):production.committed_SM_preparation_bytes(fixture.config,2)

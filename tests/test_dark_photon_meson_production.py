@@ -2432,3 +2432,48 @@ class FrozenMainHistogramIntegrity(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, 'changed'):
                 preparation.freeze_main_histogrammer(authority, deployment, {})
             self.assertFalse((deployment/'histogram_helpers/shift_nano_integrity.py').exists())
+
+
+class ReviewedNanoIntegrityRelocation(unittest.TestCase):
+    def fixture(self, root):
+        science=root/'science';science.mkdir();helper=root/'shift_nano_integrity.py';helper.write_text('qualified original\n')
+        private=root/'private';private.mkdir();copy=private/'shift_nano_integrity.py';copy.write_bytes(helper.read_bytes())
+        pin=lambda p:dict(path=str(p),sha256=production.durable.sha(p))
+        profile=root/'main.json';profile.write_text(json.dumps(dict(nano_integrity=pin(helper),runtime=dict(sha256='binary'))))
+        replacement=root/'private_main.json';settings=json.loads(profile.read_text());settings['nano_integrity']['path']=str(copy);replacement.write_text(json.dumps(settings))
+        fingerprint=root/'runtime.json';fingerprint.write_text(json.dumps(dict(files={})))
+        config=dict(schema='shift-dp-meson-production-v1',directory=str(science),batches=[],runtime_fingerprint=str(fingerprint),main_histogrammer=pin(profile))
+        (science/'config.json').write_text(json.dumps(config));files={str(p):production.durable.sha(p)for p in (helper,profile,fingerprint,science/'config.json')};(science/'seal.json').write_text(json.dumps(dict(files=files)));seal=production.durable.sha(science/'seal.json')
+        proof=root/'relocation.json';proof.write_text(json.dumps(dict(schema='shift-reviewed-nano-integrity-relocation-v1',original_seal=pin(science/'seal.json'),original_main_histogrammer=pin(profile),replacement_main_histogrammer=pin(replacement))))
+        return science,seal,helper,copy,profile,replacement,proof,pin,config
+
+    def test_only_exact_byte_identical_helper_can_move(self):
+        with tempfile.TemporaryDirectory()as tmp:
+            science,seal,helper,copy,profile,replacement,proof,pin,config=self.fixture(Path(tmp));helper.write_text('new shared diagnostics\n')
+            with self.assertRaisesRegex(ValueError,'Frozen meson dependency'):
+                production.verify(science,seal)
+            self.assertEqual(production.verify(science,seal,pin(proof)),config)
+            profile.write_text('changed unrelated profile')
+            with self.assertRaises(ValueError):production.verify(science,seal,pin(proof))
+
+    def test_changed_private_helper_and_changed_profile_settings_are_rejected(self):
+        for change in ('helper','profile','seal'):
+            with self.subTest(change=change),tempfile.TemporaryDirectory()as tmp:
+                science,seal,helper,copy,profile,replacement,proof,pin,config=self.fixture(Path(tmp))
+                if change=='helper':copy.write_text('wrong bytes')
+                elif change=='profile':
+                    data=json.loads(replacement.read_text());data['runtime']['sha256']='otherbinary';replacement.write_text(json.dumps(data));review=json.loads(proof.read_text());review['replacement_main_histogrammer']=pin(replacement);proof.write_text(json.dumps(review))
+                else:
+                    review=json.loads(proof.read_text());review['original_seal']['sha256']='wrong';proof.write_text(json.dumps(review))
+                with self.assertRaises(ValueError):production.verify(science,seal,pin(proof))
+
+    def test_relocated_operational_profile_cannot_reopen_sources(self):
+        with tempfile.TemporaryDirectory()as tmp:
+            root=Path(tmp);science,seal,helper,copy,profile,replacement,proof,pin,original=self.fixture(root)
+            operation=root/'operation';operation.mkdir()
+            candidate=dict(original,source_admission_closed=False,
+                reviewed_nano_integrity_relocation=pin(proof),main_histogrammer=pin(replacement))
+            path=operation/'config.json';path.write_text(json.dumps(candidate))
+            (operation/'seal.json').write_text(json.dumps(dict(files={str(path):production.durable.sha(path)})))
+            with self.assertRaisesRegex(ValueError,'requires closed new-source admission'):
+                production.operational_configuration(original,path,production.durable.sha(operation/'seal.json'))
