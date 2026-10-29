@@ -8,7 +8,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_sm_response_labels import event_labels
 from summarize_shift_sm_response import (benchmark_report, candidate_regions, candidate_response_report,
-    response_statistics, sampling_forecast, summarize, wilson_interval,
+    representative_candidate_pair, response_statistics, sampling_forecast, summarize, wilson_interval,
     zero_success_population_upper)
 from prepare_shift_sm_prospective_benchmark import prepare_benchmark
 
@@ -299,6 +299,65 @@ class CandidateReportTest(unittest.TestCase):
         self.assertFalse(baseline['matched_policy_gain_qualified'])
         self.assertIn('one station', baseline['classifier_difference'])
         self.assertFalse(result['tail_gain_qualified'])
+
+    def test_mixed_policies_need_separate_source_coverage_and_are_not_pooled(self):
+        positive,negative = self.row(1,[pair()]),self.row(2)
+        positive['selection_policy_version'] = 'v1'
+        negative['selection_policy_version'] = 'v2'
+        with self.assertRaisesRegex(ValueError,'separate frozen source coverage'):
+            candidate_response_report([positive,negative],[],{})
+        scopes = {key:dict(completed_sources=1,completed_source_events=1,selected_events=1,
+                          pending_events=0,total_sources=1) for key in ('v1','v2')}
+        result = candidate_response_report([positive,negative],[],dict(completed_sources=2,
+            completed_source_events=2),policy_scopes=scopes)
+        self.assertEqual(result['pooled_groups'],[])
+        self.assertTrue(result['mixed_policy_efficiencies_withheld'])
+        policies = {r['selection_policy_version']:r for r in result['policy_groups']}
+        self.assertEqual(policies['v1']['pooled_groups'][0]['targets']['both_both_good']['raw_event_probability'],1.)
+        self.assertEqual(policies['v2']['pooled_groups'][0]['targets']['both_both_good']['raw_event_probability'],0.)
+        self.assertEqual(result['processing_counts']['pair_counts']['both_both_good'],1)
+
+    def test_pending_policy_is_explicitly_empty_and_missing_version_fails(self):
+        row = self.row(1)
+        row['selection_policy_version'] = 'v1'
+        scopes = dict(v1=dict(complete_sources=1,complete_events=1),
+                      v2=dict(complete_sources=0,complete_events=0,pending_events=20))
+        result = candidate_response_report([row],[],{},policy_scopes=scopes)
+        empty = next(r for r in result['policy_groups'] if r['selection_policy_version']=='v2')
+        self.assertIsNone(empty['pooled_groups'][0]['targets']['both_both']['raw_event_probability'])
+        other = self.row(2)
+        with self.assertRaisesRegex(ValueError,'lack their selection policy version'):
+            candidate_response_report([row,other],[],{},policy_scopes=scopes)
+
+    def test_representative_features_stay_on_one_pair(self):
+        row = self.row(1,[pair()])
+        first = dict(muon_barcodes=[1,2],min_muon_p_GeV=100.,max_muon_column_loss_over_p=.95,
+            known_union_parent_depth=.1,two_station_miss_cm=0.)
+        second = dict(muon_barcodes=[3,4],min_muon_p_GeV=50.,max_muon_column_loss_over_p=.1,
+            known_union_parent_depth=.2,two_station_miss_cm=20.)
+        row['joint'] = dict(n_credible_shallow_pairs=2,n_shallow_parent_unknown_column_pairs=0,
+                            candidate_pair_examples=[first,second])
+        representative = representative_candidate_pair(row)
+        self.assertEqual(representative['muon_barcodes'],[3,4])
+        self.assertEqual(representative['values']['min_muon_p_GeV'],50.)
+        self.assertEqual(representative['values']['known_union_parent_depth'],.2)
+        self.assertEqual(representative['values']['residual_momentum_proxy_GeV'],45.)
+
+    def test_censored_pair_inventory_and_unknown_column_are_not_zero_material(self):
+        row = self.row(1,[pair()])
+        example = dict(muon_barcodes=[1,2],min_muon_p_GeV=50.,max_muon_column_loss_over_p=.1,
+            known_union_parent_depth=0.,two_station_miss_cm=0.)
+        row['joint'] = dict(n_credible_shallow_pairs=2,n_shallow_parent_unknown_column_pairs=0,
+                            candidate_pair_examples=[example])
+        self.assertEqual(representative_candidate_pair(row)['status'],'censored_pair_examples')
+        result = candidate_response_report([row],[],dict(complete_sources=1))
+        profile = next(r for r in result['energy_material_profiles'] if r['stratum']=='all_qcd'
+            and r['region_group']=='candidate' and r['feature']=='known_union_parent_depth')
+        self.assertEqual(profile['cells'][0]['bin'],'unknown')
+        self.assertEqual(profile['cells'][0]['targets']['both_both_good']['positive_originals'],1)
+        row['joint']['n_credible_shallow_pairs'] = 1
+        example['max_muon_column_loss_over_p'] = None
+        self.assertEqual(representative_candidate_pair(row)['status'],'unknown_muon_column')
 
 
 if __name__ == '__main__':

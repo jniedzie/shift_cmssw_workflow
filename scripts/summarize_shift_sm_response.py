@@ -335,7 +335,82 @@ def summarize(rows):
         physics_normalization_ready=False, production_policy_qualified=False)
 
 
-def candidate_response_report(complete_rows, partial_rows, scope, historical_rows=None):
+PAIR_RESPONSE_AXES = {
+    'min_muon_p_GeV': [0., 2., 5., 10., 20., 50., 100., 500., 1000.],
+    'max_muon_column_loss_over_p': [0., .1, .3, 1., 3., 10., 100.],
+    'known_union_parent_depth': [0., .01, .1, .3, 1., 3., 10.],
+    'two_station_miss_cm': [0., 50., 100., 250., 500., 1000.],
+    'residual_momentum_proxy_GeV': [0., 2., 5., 10., 20., 50., 100., 500., 1000.],
+}
+
+
+def representative_candidate_pair(row):
+    """Choose one frozen GEN pair, without consulting its reconstruction result.
+
+    The margin is only an external minimum-ionization proxy. It omits radiative
+    losses and unmodelled central CMS material, and is not a survival estimate.
+    Missing columns or a censored pair inventory remain explicit unknowns.
+    """
+    joint = row.get('joint')
+    if joint is None:
+        return dict(status='missing_frozen_joint', values=None)
+    count = joint['n_credible_shallow_pairs']+joint['n_shallow_parent_unknown_column_pairs']
+    examples = joint['candidate_pair_examples']
+    if count == 0:
+        return dict(status='no_qualifying_pair', values=None)
+    if len(examples) < count:
+        return dict(status='censored_pair_examples', values=None)
+    if len(examples) != count:
+        raise ValueError('Candidate pair examples differ from the frozen joint census')
+    if any(pair['max_muon_column_loss_over_p'] is None for pair in examples):
+        return dict(status='unknown_muon_column', values=None)
+    candidates = []
+    for pair in examples:
+        values = {name: pair[name] for name in PAIR_RESPONSE_AXES
+                  if name != 'residual_momentum_proxy_GeV'}
+        if any(not math.isfinite(value) or value < 0 for value in values.values()):
+            raise ValueError('Candidate pair features must be finite and nonnegative')
+        values['residual_momentum_proxy_GeV'] = values['min_muon_p_GeV']*max(
+            0., 1.-values['max_muon_column_loss_over_p'])
+        candidates.append((values, pair['muon_barcodes']))
+    values, barcodes = max(candidates, key=lambda item: (
+        item[0]['residual_momentum_proxy_GeV'], item[0]['min_muon_p_GeV'],
+        -item[0]['two_station_miss_cm'], -item[0]['known_union_parent_depth'],
+        tuple(-number for number in item[1])))
+    return dict(status='complete_known_pair', values=values, muon_barcodes=barcodes)
+
+
+def candidate_response_profiles(rows):
+    """Measured marginal response for a single, predeclared same-pair predictor."""
+    output = []
+    described = [(row, representative_candidate_pair(row)) for row in rows]
+    for stratum in sorted({row['stratum'] for row in rows})+['all_qcd']:
+        for region in ('candidate', 'controls'):
+            sample = [(row, pair) for row, pair in described
+                if (stratum == 'all_qcd' or row['stratum'] == stratum)
+                and ('candidate' if row['benchmark_region']=='credible_shallow_pointing'
+                     else 'controls') == region]
+            for feature, axis in PAIR_RESPONSE_AXES.items():
+                cells = defaultdict(list)
+                statuses = defaultdict(int)
+                for row, pair in sample:
+                    statuses[pair['status']] += 1
+                    value = pair['values'][feature] if pair['values'] is not None else None
+                    cells[feature_bin(value, axis)].append(row)
+                output.append(dict(stratum=stratum, region_group=region, feature=feature,
+                    edges=list(axis), pair_status_counts=dict(statuses),
+                    cells=[dict(bin=key, rows=len(cell),
+                        muon_events=sum(row['labels']['n_shift_muons'] > 0 for row in cell),
+                        muon_event_probability_interval95=wilson_interval(
+                            sum(row['labels']['n_shift_muons'] > 0 for row in cell), len(cell)),
+                        targets={category: response_statistics(cell, category) for category in MAP_CATEGORIES})
+                        for key, cell in sorted(cells.items())],
+                    same_pair_components=True, marginal_raw_intervals_not_population_efficiency=True,
+                    physical_survival_model=False))
+    return output
+
+
+def candidate_response_report(complete_rows, partial_rows, scope, historical_rows=None, policy_scopes=None):
     """Compare frozen candidate/control draws without treating pending work as zero.
 
     Fractions describe only whole source draws already collected. Individual
@@ -371,6 +446,48 @@ def candidate_response_report(complete_rows, partial_rows, scope, historical_row
         raise ValueError('Complete-source event count differs from the snapshot scope')
     if complete_rows and complete_sources == 0:
         raise ValueError('Partial responses cannot be promoted to complete-source statistics')
+    versions = {row.get('selection_policy_version', 'unspecified')
+                for row in list(complete_rows)+list(partial_rows)}
+    if any(not isinstance(version, str) or not version for version in versions):
+        raise ValueError('Selection policy version must be explicit text')
+    if 'unspecified' in versions and len(versions) > 1:
+        raise ValueError('Some responses lack their selection policy version')
+    if policy_scopes:
+        if versions-set(policy_scopes):
+            raise ValueError('Response policy lacks its frozen source coverage')
+        versions.update(policy_scopes)
+    if len(versions) > 1:
+        if not policy_scopes:
+            raise ValueError('Mixed selection policies require separate frozen source coverage')
+        groups = []
+        for version in sorted(versions):
+            whole = [row for row in complete_rows if row['selection_policy_version'] == version]
+            pending = [row for row in partial_rows if row['selection_policy_version'] == version]
+            child = candidate_response_report(whole, pending, policy_scopes[version])
+            child['selection_policy_version'] = version
+            groups.append(child)
+        all_rows = list(complete_rows)+list(partial_rows)
+        result = dict(schema='shift-sm-candidate-response-analysis-v1',
+            scope=dict(scope, complete_sources=complete_sources, complete_events=len(complete_rows),
+                       partial_completed_events=len(partial_rows), completion_conditioned=True),
+            selection_policy_versions=sorted(versions), policy_groups=groups,
+            mixed_policy_efficiencies_withheld=True, groups=[], pooled_groups=[], histograms=[],
+            partial_groups=[], partial_positive_originals=[dict(row, selection_policy_version=g['selection_policy_version'])
+                for g in groups for row in g['partial_positive_originals']],
+            processing_counts=dict(checked_events=len(all_rows),
+                muon_events=sum(row['labels']['n_shift_muons'] > 0 for row in all_rows),
+                muons=sum(row['labels']['n_shift_muons'] for row in all_rows),
+                total_sim_seconds=math.fsum(row['cost']['sim_wall_seconds_per_event'] for row in all_rows),
+                pair_counts={category:sum(target_value(row,category) for row in all_rows)
+                             for category in CATEGORIES},
+                tail_pair_counts={category:{tail:sum(target_value(row,category,tail) for row in all_rows)
+                    for tail in TAILS} for category in CATEGORIES}),
+            physical_normalization_ready=False, tail_gain_qualified=False,
+            pending_or_failed_responses_are_not_physics_zeros=True)
+        if historical_rows is not None:
+            old = candidate_response_report([], [], dict(complete_events=0, complete_sources=0), historical_rows)
+            result['historical_baseline'] = old['historical_baseline']
+        return result
 
     def region(row):
         return 'candidate' if row['benchmark_region'] == 'credible_shallow_pointing' else 'controls'
@@ -425,9 +542,13 @@ def candidate_response_report(complete_rows, partial_rows, scope, historical_row
             partial.append(dict(stratum=stratum, region_group=name, rows=len(sample),
                 muon_events=sum(row['labels']['n_shift_muons'] > 0 for row in sample),
                 muons=sum(row['labels']['n_shift_muons'] for row in sample),
+                total_sim_seconds=math.fsum(row['cost']['sim_wall_seconds_per_event'] for row in sample),
                 targets={category: dict(pairs=sum(target_value(row, category) for row in sample),
                     positive_originals=sum(target_value(row, category) > 0 for row in sample))
                     for category in CATEGORIES},
+                tails={category:{tail:dict(pairs=sum(target_value(row,category,tail) for row in sample),
+                    positive_originals=sum(target_value(row,category,tail) > 0 for row in sample))
+                    for tail in TAILS} for category in CATEGORIES},
                 rates_and_intervals_withheld=True, completion_conditioned=True))
     result = dict(schema='shift-sm-candidate-response-analysis-v1',
         scope=dict(scope, complete_sources=complete_sources, complete_events=len(complete_rows),
@@ -435,6 +556,18 @@ def candidate_response_report(complete_rows, partial_rows, scope, historical_row
                    completion_conditioned=True),
         groups=grouped(complete_rows), pooled_groups=pooled(complete_rows),
         partial_groups=partial, histograms=histograms(complete_rows),
+        selection_policy_version=next(iter(versions)) if versions else scope.get('selection_policy_version'),
+        energy_material_profiles=candidate_response_profiles(complete_rows),
+        pair_predictor_definition='One complete known frozen candidate pair, maximizing minP*max(0,1-max(column-ionization/p)); ties use minP, miss, depth and barcodes.',
+        pair_proxy_limitations='Minimum-ionization external material only; omits radiative losses and unknown central CMS material. No survival probability or selection cut.',
+        partial_feature_observations=[dict(source_id=row.get('source_id'),
+            gen_sha256=row['gen_sha256'], event_id=row['event_id'], stratum=row['stratum'],
+            region_group=region(row), pair_predictor=representative_candidate_pair(row),
+            n_shift_muons=row['labels']['n_shift_muons'], pair_counts=row['labels']['pair_counts'],
+            tail_counts=row['labels']['tail_counts'],
+            sim_wall_seconds=row['cost']['sim_wall_seconds_per_event'],
+            native_weight=row['native_weight'], sampling_probability=row['sampling_probability'],
+            rates_and_intervals_withheld=True) for row in partial_rows],
         partial_positive_originals=[dict(source_id=row.get('source_id'),
             gen_sha256=row['gen_sha256'], event_id=row['event_id'], stratum=row['stratum'],
             region_group=region(row), muons=row['labels']['n_shift_muons'],
@@ -464,6 +597,8 @@ def main():
     parser.add_argument('--benchmark-plan', type=Path)
     parser.add_argument('--candidate-scope', type=Path,
                         help='Snapshot coverage JSON; compare whole-source candidates and controls')
+    parser.add_argument('--policy-scopes', type=Path,
+                        help='Per-policy source coverage JSON; required for mixed selection policies')
     parser.add_argument('--partial-jsonl', type=Path,
                         help='Individual completed responses from unfinished sources; counts only')
     parser.add_argument('--historical-jsonl', type=Path,
@@ -471,8 +606,8 @@ def main():
     args = parser.parse_args()
     if bool(args.population) != bool(args.benchmark_plan):
         parser.error('--population and --benchmark-plan are required together')
-    if (args.partial_jsonl or args.historical_jsonl) and not args.candidate_scope:
-        parser.error('--partial-jsonl and --historical-jsonl require --candidate-scope')
+    if (args.partial_jsonl or args.historical_jsonl or args.policy_scopes) and not args.candidate_scope:
+        parser.error('--partial-jsonl, --historical-jsonl and --policy-scopes require --candidate-scope')
     if args.candidate_scope and args.population:
         parser.error('Candidate snapshots and the older population benchmark are separate reports')
 
@@ -486,8 +621,10 @@ def main():
     rows = load_rows(args.joined_jsonl)
     if args.candidate_scope:
         scope = json.loads(args.candidate_scope.read_text())
+        policy_scopes = json.loads(args.policy_scopes.read_text()) if args.policy_scopes else None
         historical = load_rows(args.historical_jsonl) if args.historical_jsonl else None
-        result = candidate_response_report(rows, load_rows(args.partial_jsonl), scope, historical)
+        result = candidate_response_report(rows, load_rows(args.partial_jsonl), scope, historical,
+                                          policy_scopes=policy_scopes)
     else:
         result = summarize(rows)
     if args.population:
