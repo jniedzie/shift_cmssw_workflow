@@ -821,6 +821,21 @@ class StatisticsWatchdogTest(unittest.TestCase):
         count.assert_called_once()
         self.assertEqual(report['stages']['100']['counts']['completed_events'], 7)
 
+    def test_overlapping_cumulative_publications_are_not_added_per_bank(self):
+        Path(self.config['worklist']).write_text(json.dumps(dict(schema='shift-dp-meson-production-v1',
+            batches=[dict(batch='b0',point='p',source_collisions=10),
+                     dict(batch='b1',point='p',source_collisions=10)])))
+        state=dict(checked_epoch=self.now,batches={
+            'b0':dict(published=dict(events=9,source_plans=['b0','b1']),primitive_histograms=dict(events=4)),
+            'b1':dict(published=dict(events=9,source_plans=['b0','b1']),primitive_histograms=dict(events=5))})
+        for with_primitives in [True, False]:
+            with self.subTest(with_primitives=with_primitives):
+                if not with_primitives:
+                    for entry in state['batches'].values():entry.pop('primitive_histograms')
+                (self.root/'state.json').write_text(json.dumps(state))
+                report=self.assess([])
+                self.assertEqual(report['actual_planned_progress']['published_total_events_by_point'],{'p':9})
+
     def test_stage_budget_recovery_preserves_gen_counts_and_follows_new_handoff(self):
         stage=self.root/'waves/w001/gen_stage';stage.mkdir(parents=True)
         (stage/'submission.json').write_text(json.dumps(dict(cluster=100,utc='1970-01-01T00:00:00+00:00')))

@@ -1188,12 +1188,21 @@ def assess(config, previous, rows, history, receipts, now):
     if meson:
         names = {row['batch']: row['point'] for row in worklist['batches']}
         batches=Counter()
+        cumulative={}
         for batch,row in controller.get('batches',{}).items():
             output=row.get('published',{})
             if (batch in names and output and not output.get('source_qualification_only')
                     and type(output.get('events')) is int):
-                batches[names[batch]]+=output['events']
+                point=names[batch]; primitive=row.get('primitive_histograms',{})
+                if type(primitive.get('events')) is int:
+                    batches[point]+=primitive['events']
+                elif not output.get('source_plans'):
+                    batches[point]+=output['events']
+                if output.get('source_plans'):
+                    cumulative[point]=max(cumulative.get(point,0),output['events'])
         published=dict(batches)
+        for point,events in cumulative.items():
+            published[point]=max(published.get(point,0),events)
         for point,row in controller.get('published',{}).items():
             if type(row.get('events')) is int and not row.get('source_qualification_only'):
                 published[point]=row['events']
