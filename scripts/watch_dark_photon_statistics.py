@@ -238,8 +238,46 @@ def operational_recoveries(config):
         result[native['ClusterId']] = dict(authority=authority['review'], native=native,
             kind='detector_stage_recovery', original_directory=str(original),
             recovery_submission=str(replacement/'submission.json'))
+    result.update(reviewed_main_preflight_replacements(config))
     result.update(reviewed_runtime_rescues(config))
     return result
+
+
+def reviewed_main_preflight_replacements(config):
+    """Reuse the owner's read-only validator for a pre-SIM native repair."""
+    authorities = config.get('reviewed_main_preflight_replacements', {})
+    if not authorities:
+        return {}
+    helper = config['main_preflight_replacement_validator']; path = Path(helper['path'])
+    members = list(path.parent.glob('*.py'))
+    if (not path.is_absolute() or sha(path) != helper['sha256']
+            or any(config.get('dependencies', {}).get(str(p)) != sha(p) for p in members)):
+        raise ValueError('Main preflight validator is outside frozen watchdog authority')
+    previous_path = list(sys.path); names = {p.stem for p in members}
+    previous_modules = {name: sys.modules.pop(name) for name in names if name in sys.modules}
+    sys.path.insert(0, str(path.parent))
+    try:
+        spec = importlib.util.spec_from_file_location('_watch_main_preflight', path)
+        module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+        result = {}
+        validation = dict(config, directory=config['production_directory'])
+        for index, authority in authorities.items():
+            proof, original, replacement = module.validate_main_preflight_replacement(validation, index, authority)
+            native = proof['terminal_native_ad']; cluster = proof['original_detector_manager']
+            if (native.get('ClusterId') != cluster or native.get('ProcId') != 0
+                    or native.get('Iwd') != str(original) or native.get('ExitBySignal') is not False
+                    or native.get('JobStatus') not in (3, 4)
+                    or native.get('JobStatus') == 4 and native.get('ExitCode') in (None, 0)
+                    or read(Path(original)/'submission.json').get('cluster') != cluster):
+                raise ValueError('Main preflight replacement lacks its exact failed native owner')
+            result[cluster] = dict(authority=authority['review'], native=native,
+                kind='detector_stage_recovery', original_directory=str(original),
+                payload_directory=str(replacement), recovery_submission=str(Path(replacement)/'submission.json'))
+        return result
+    finally:
+        for name in names:
+            sys.modules.pop(name, None)
+        sys.modules.update(previous_modules); sys.path[:] = previous_path
 
 
 def reviewed_runtime_rescues(config):
@@ -396,7 +434,7 @@ def manager_receipts(root, supervisor_receipt=None, external_productions=(), ope
         for record in result.values():
             if record['directory']==str(replacement):
                 if item['kind'] == 'detector_stage_recovery':
-                    record.update(kind='production', payload_directory=item['original_directory'])
+                    record.update(kind='production', payload_directory=item.get('payload_directory', item['original_directory']))
                 else:
                     record['kind']='gen_stage' if item['kind']=='partial_gen_recovery' else 'handoff'
     preserved = set(preserved_handoffs(config).values()) if config else set()
@@ -555,12 +593,23 @@ def reviewed_main_cleanup_failures(config):
     records = controller.get('reviewed_main_cleanup_records', {})
     authorities = dict(config.get('reviewed_main_cleanup_recoveries', {}))
     guarded = {}
-    guard_pin = config.get('main_cleanup_recovery_guard')
-    if guard_pin:
+    guard_pins = ([config['main_cleanup_recovery_guard']]
+                  if config.get('main_cleanup_recovery_guard') else [])
+    guard_pins += config.get('additional_main_cleanup_recovery_guards', [])
+    seen_targets = set()
+    for guard_pin in guard_pins:
         for pin in guard_pin.values():
             if config.get('dependencies', {}).get(pin['path']) != pin['sha256'] or sha(pin['path']) != pin['sha256']:
                 raise ValueError('Cleanup guard is outside frozen watchdog authority')
         guard = read(guard_pin['configuration']['path']); seal = read(guard_pin['seal']['path'])
+        count = len(guard.get('targets', []))
+        if (guard_pin in config.get('additional_main_cleanup_recovery_guards', [])
+                and seal.get('exact_prepared_cohorts_only') is not True):
+            raise ValueError('Additional cleanup guard lacks an exact prepared cohort count')
+        if seal.get('exact_prepared_cohorts_only') is True and not (
+                1 <= count <= 10 and seal.get('prepared_cohort_count') == count
+                and guard.get('prepared_cohort_count') == count):
+            raise ValueError('Cleanup guard changed its exact prepared cohort count')
         if (guard.get('no_GEN_or_detector_rerun') is not True or guard.get('maximum_recovery_attempts_per_target') != 1
                 or seal.get('no_science_rerun') is not True
                 or seal.get('files', {}).get(guard_pin['configuration']['path']) != guard_pin['configuration']['sha256']
@@ -568,6 +617,9 @@ def reviewed_main_cleanup_failures(config):
             raise ValueError('Cleanup guard changed its exact read-only science scope')
         for target in guard['targets']:
             key = target['batch']; record = records.get(key)
+            if key in seen_targets:
+                raise ValueError('Cleanup guards repeat a protected batch')
+            seen_targets.add(key)
             if record is None:
                 continue
             pin = record['authority']
@@ -781,10 +833,55 @@ def reviewed_terminal_failures(config):
     return result
 
 
+def declared_primary_preflight_child(production, child, manager):
+    """Recognize the ordinary full-source scanner from its exact declared DAG."""
+    production = Path(production); directory = production/'primary_preflight'
+    if (child.get('Iwd') != str(directory) or child.get('Cmd') != str(directory/'worker.sh')
+            or child.get('Args', '') or child.get('ProcId', 0) != 0
+            or child.get('DAGManJobId') != manager.get('ClusterId')
+            or manager.get('Cmd') != '/usr/bin/condor_dagman'
+            or manager.get('Iwd') != str(production)):
+        return False
+    try:
+        scan = read(directory/'preflight.json')
+        if (scan.get('schema') != 'shift-primary-kinematics-preflight-preparation-v1'
+                or scan.get('production') != str(production) or scan.get('output') != str(directory)
+                or 'JOB P '+str(directory/'worker.sub') not in (production/'pipeline.dag').read_text().splitlines()):
+            return False
+        for key, filename in [('original_plan', 'plan.json'), ('original_seal', 'seal.json'),
+                              ('inventory', 'gen_inventory.json')]:
+            path = production/filename
+            if scan[key] != dict(path=str(path), sha256=sha(path)):
+                return False
+        profile = scan['replacement_profile']
+        if (Path(profile['path']) != production/'detector_runtime_profile.json'
+                or sha(profile['path']) != profile['sha256']
+                or read(profile['path'])['runtime_sha256'] != scan['replacement_runtime_sha256']):
+            return False
+        helpers = {Path(pin['path']).name: pin for pin in scan['helpers']}
+        if set(helpers) != {'dark_photon_detector_runtime.py', 'prepare_dark_photon_kinematics_preflight.py'}:
+            return False
+        for name, pin in helpers.items():
+            path = directory/'helpers'/name
+            if pin != dict(path=str(path), sha256=sha(path)):
+                return False
+        for path, digest in read(production/'seal.json')['files'].items():
+            if sha(path) != digest:
+                return False
+        submit = (directory/'worker.sub').read_text().splitlines()
+        return ('initialdir = '+str(directory) in submit
+                and 'executable = '+str(directory/'worker.sh') in submit
+                and 'cd '+str(directory) in (directory/'worker.sh').read_text().splitlines())
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        return False
+
+
 def declared_point_preflight_child(production, child, manager):
     """Accept only the exact scoped scanner bound to its native DAG manager."""
     production = Path(production)
     directory = Path(child.get('Iwd', ''))
+    if directory == production/'primary_preflight':
+        return declared_primary_preflight_child(production, child, manager)
     if (directory.parent != production / 'point_preflights'
             or child.get('DAGManJobId') != manager.get('ClusterId')
             or manager.get('Cmd') != '/usr/bin/condor_dagman'

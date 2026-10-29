@@ -133,6 +133,37 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'frozen authority'):
             WATCH.reviewed_runtime_rescues(config)
 
+    def test_main_preflight_replacement_reuses_exact_frozen_validation_and_new_payload_iwd(self):
+        tools = self.root/'main_preflight_tools'; tools.mkdir()
+        original = self.root/'waves/w012/production'; original.mkdir(parents=True)
+        replacement = original.parent/'production_native'; replacement.mkdir()
+        for directory, cluster in [(original, 100), (replacement, 200)]:
+            (directory/'submission.json').write_text(json.dumps(dict(cluster=cluster,
+                task=str(directory), utc='2026-10-26T09:00:00+00:00')))
+        native = dict(ClusterId=100, ProcId=0, JobStatus=3, ExitCode=1,
+                      ExitBySignal=False, Iwd=str(original))
+        proof = self.root/'main_preflight_review.json'
+        proof.write_text(json.dumps(dict(original_detector_manager=100, terminal_native_ad=native)))
+        authority = dict(directory=str(replacement), review=dict(path=str(proof), sha256=WATCH.sha(proof)))
+        helper = tools/'validator.py'
+        helper.write_text('import json\nfrom pathlib import Path\n'
+            'def validate_main_preflight_replacement(config,index,authority):\n'
+            ' assert index=="12"\n'
+            ' assert config["directory"]=='+repr(str(self.root))+'\n'
+            ' proof=json.loads(Path(authority["review"]["path"]).read_text())\n'
+            ' return proof,Path('+repr(str(original))+'),Path(authority["directory"])\n')
+        self.config.update(reviewed_main_preflight_replacements={'12': authority},
+            main_preflight_replacement_validator=dict(path=str(helper), sha256=WATCH.sha(helper)),
+            dependencies={str(helper): WATCH.sha(helper), str(proof): WATCH.sha(proof)})
+        recovered = WATCH.reviewed_main_preflight_replacements(self.config)
+        self.assertEqual(recovered[100]['native'], native)
+        receipts = WATCH.manager_receipts(self.root, config=self.config)
+        self.assertEqual(receipts[200]['kind'], 'production')
+        self.assertEqual(receipts[200]['payload_directory'], str(replacement))
+        helper.write_text('raise AssertionError("changed validator must never run")')
+        with self.assertRaisesRegex(ValueError, 'frozen watchdog authority'):
+            WATCH.reviewed_main_preflight_replacements(self.config)
+
     def test_native_bound_point_preflight_has_its_declared_child_directory(self):
         production, directory, manager, child = self.point_preflight_fixture()
         self.assertTrue(WATCH.declared_point_preflight_child(production, child, manager))
@@ -164,6 +195,51 @@ class StatisticsWatchdogTest(unittest.TestCase):
         production, directory, manager, child = self.point_preflight_fixture()
         child['Iwd'] = str(production / 'point_preflights/m40_prompt')
         self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def primary_preflight_fixture(self):
+        production = self.root/'ordinary_production'; directory = production/'primary_preflight'
+        (directory/'helpers').mkdir(parents=True)
+        def write(path, value):
+            path.write_text(json.dumps(value)); return dict(path=str(path), sha256=WATCH.sha(path))
+        plan = write(production/'plan.json', {'points': [{'point': 'm2_prompt'}]})
+        seal = write(production/'seal.json', {'files': {}})
+        inventory = write(production/'gen_inventory.json', {'points': {'m2_prompt': {}}})
+        profile = write(production/'detector_runtime_profile.json', {'runtime_sha256': 'a'*64})
+        helpers = []
+        for name in ('dark_photon_detector_runtime.py', 'prepare_dark_photon_kinematics_preflight.py'):
+            path = directory/'helpers'/name; path.write_text('# frozen helper')
+            helpers.append(dict(path=str(path), sha256=WATCH.sha(path)))
+        write(directory/'preflight.json', dict(schema='shift-primary-kinematics-preflight-preparation-v1',
+            production=str(production), output=str(directory), original_plan=plan, original_seal=seal,
+            inventory=inventory, replacement_profile=profile, replacement_runtime_sha256='a'*64, helpers=helpers))
+        (directory/'worker.sh').write_text('#!/bin/bash\ncd '+str(directory)+'\n')
+        (directory/'worker.sub').write_text('executable = '+str(directory/'worker.sh')+
+                                          '\ninitialdir = '+str(directory)+'\n')
+        (production/'pipeline.dag').write_text('JOB P '+str(directory/'worker.sub')+'\n')
+        manager = dict(ClusterId=100, Cmd='/usr/bin/condor_dagman', Iwd=str(production))
+        child = dict(ClusterId=101, ProcId=0, DAGManJobId=100, Iwd=str(directory), Cmd=str(directory/'worker.sh'))
+        return production, directory, manager, child
+
+    def test_declared_ordinary_primary_preflight_has_its_exact_persistent_iwd(self):
+        production, directory, manager, child = self.primary_preflight_fixture()
+        self.assertTrue(WATCH.declared_point_preflight_child(production, child, manager))
+        child['DAGManJobId'] = 999
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def test_ordinary_primary_preflight_requires_unchanged_source_pins_and_dag_declaration(self):
+        production, directory, manager, child = self.primary_preflight_fixture()
+        original = (production/'pipeline.dag').read_text()
+        (production/'pipeline.dag').write_text('JOB OTHER '+str(directory/'worker.sub')+'\n')
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+        (production/'pipeline.dag').write_text(original)
+        (production/'gen_inventory.json').write_text('{"different_source":true}')
+        self.assertFalse(WATCH.declared_point_preflight_child(production, child, manager))
+
+    def test_ordinary_primary_preflight_does_not_allow_other_commands_or_scratch(self):
+        production, directory, manager, child = self.primary_preflight_fixture()
+        for key, value in [('Cmd', '/bin/bash'), ('Args', 'unreviewed.py'), ('Iwd', '/pool/condor/scratch')]:
+            changed = dict(child, **{key: value})
+            self.assertFalse(WATCH.declared_point_preflight_child(production, changed, manager))
 
     def test_long_shared_storage_read_outage_keeps_the_verified_snapshot(self):
         target = self.root / 'verified.json'
@@ -1031,6 +1107,32 @@ class StatisticsWatchdogTest(unittest.TestCase):
         state['reviewed_main_cleanup_records']['b0']['authority']['path']=str(self.root/'unreviewed.json')
         (self.root/'state.json').write_text(json.dumps(state))
         with self.assertRaisesRegex(ValueError,'allowlist'):
+            WATCH.reviewed_terminal_failures(self.config)
+
+    def test_additional_cleanup_guard_requires_exact_bounded_cohort_count(self):
+        directory, native, path = self.cleanup_recovery(guarded=True)
+        guard_pin = self.config.pop('main_cleanup_recovery_guard')
+        config_path = Path(guard_pin['configuration']['path']); seal_path = Path(guard_pin['seal']['path'])
+        guard = json.loads(config_path.read_text()); seal = json.loads(seal_path.read_text())
+        guard['prepared_cohort_count'] = 1
+        seal.update(exact_prepared_cohorts_only=True, prepared_cohort_count=1)
+        def freeze():
+            config_path.write_text(json.dumps(guard)); seal['files'][str(config_path)] = WATCH.sha(config_path)
+            seal_path.write_text(json.dumps(seal))
+            for pin in guard_pin.values():
+                pin['sha256'] = WATCH.sha(pin['path']); self.config['dependencies'][pin['path']] = pin['sha256']
+            self.config['additional_main_cleanup_recovery_guards'] = [guard_pin]
+        freeze()
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native'], native)
+        guard['prepared_cohort_count'] = 2; freeze()
+        with self.assertRaisesRegex(ValueError, 'prepared cohort count'):
+            WATCH.reviewed_terminal_failures(self.config)
+
+    def test_cleanup_guards_cannot_claim_the_same_batch_twice(self):
+        self.cleanup_recovery(guarded=True)
+        authority = self.config['main_cleanup_recovery_guard']
+        self.config['additional_main_cleanup_recovery_guards'] = [authority]
+        with self.assertRaisesRegex(ValueError, 'Additional cleanup guard'):
             WATCH.reviewed_terminal_failures(self.config)
 
     def test_pending_reference_gate_does_not_admit_the_frozen_bank_ceiling(self):
