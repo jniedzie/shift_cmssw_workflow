@@ -176,10 +176,14 @@ class ResponsePublicationTest(unittest.TestCase):
             dict(sources=[dict(source_id=sid,stratum='qcd_20toinf') for sid in ('response','next')]))))
         config=dict(campaign='response_test',histogram_runtime=dict(path='runtime',sha256='a'*64),
             worker_publication_bound_bytes=1000000,output_base='/eos/synthetic',worker_template='',
-            merged_nano_only_when_bin_complete=True,response_monitor_config=monitor)
+            merged_nano_only_when_bin_complete=True,response_monitor_config=monitor,
+            worker_publication_bounds_by_stratum=dict(qcd_20toinf=2000000),
+            interim_histogram_publication_bound_bytes=100000)
         task=controller.snapshot(self.root,config,'qcd_20toinf',[source])
         request=json.loads((Path(task['directory'])/'request.json').read_text())
         self.assertFalse(task['publishes_merged_nano'])
+        self.assertEqual(task['publication_bound_bytes'],100000)
+        self.assertEqual(request['maximum_publication_bytes'],100000)
         self.assertFalse(post.merged_nano_publication(request))
         self.assertEqual(request['normalization_sources'],[self.normalization])
         self.assertEqual(request['expected_bin_source_ids'],['next','response'])
@@ -187,6 +191,7 @@ class ResponsePublicationTest(unittest.TestCase):
             final=controller.snapshot(self.root,config,'qcd_20toinf',[source])
         final_request=json.loads((Path(final['directory'])/'request.json').read_text())
         self.assertTrue(final['publishes_merged_nano']);self.assertTrue(post.merged_nano_publication(final_request))
+        self.assertEqual(final['publication_bound_bytes'],2000000)
         self.assertNotEqual(task['request_sha256'],final['request_sha256'])
         self.assertEqual(final_request['normalization_sources'],request['normalization_sources'])
         self.assertEqual(final_request['nano_inputs'],request['nano_inputs'])
@@ -324,6 +329,19 @@ class PublisherQuotaTest(unittest.TestCase):
         config['science_source_write_bounds']['partial']=800
         with self.assertRaisesRegex(ValueError,'source write bounds'):
             science_write_reservation(config,state,30)
+
+    def test_worker_bounds_follow_actual_bin_and_interim_request(self):
+        from run_shift_sm_postprocessing_controller import worker_publication_bound
+        config=dict(worker_publication_bound_bytes=100,
+            worker_publication_bounds_by_stratum=dict(qcd_5to10=300,qcd_20toinf=50),
+            interim_histogram_publication_bound_bytes=8)
+        self.assertEqual(worker_publication_bound(config,'qcd_5to10'),300)
+        self.assertEqual(worker_publication_bound(config,'qcd_20toinf'),50)
+        self.assertEqual(worker_publication_bound(config,'dy_1to2'),100)
+        self.assertEqual(worker_publication_bound(config,'qcd_5to10',interim=True),8)
+        config['worker_publication_bounds_by_stratum']['qcd_5to10']=0
+        with self.assertRaisesRegex(ValueError,'positive integer'):
+            worker_publication_bound(config,'qcd_5to10')
 
     def test_required_native_publication_canary_blocks_admission_until_done(self):
         from run_shift_sm_postprocessing_controller import publication_qualification_ready

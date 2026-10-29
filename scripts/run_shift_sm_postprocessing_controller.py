@@ -230,6 +230,17 @@ def nano_cache(parent, inventory, state):
 
 
 
+
+def worker_publication_bound(config, stratum, *, interim=False):
+    bound = config.get('worker_publication_bounds_by_stratum', {}).get(
+        stratum,config['worker_publication_bound_bytes'])
+    if interim:
+        bound = min(bound,config.get('interim_histogram_publication_bound_bytes',bound))
+    if type(bound) is not int or bound <= 0:
+        raise ValueError('Worker publication reservation must be a positive integer')
+    return bound
+
+
 def complete_bin_source_ids(config, stratum):
     """Read the pinned union worklist for optional final-only Nano publication."""
     monitor = read_response_pin(config['response_monitor_config'])
@@ -258,13 +269,15 @@ def snapshot(root, config, stratum, sources):
                 normalization_sources=normalizations,
                 selected_sources=[s['selected'] for s in sources], nano_inputs=inputs,
                 histogram_runtime=config['histogram_runtime'],
-                maximum_publication_bytes=config['worker_publication_bound_bytes'])
+                maximum_publication_bytes=worker_publication_bound(config,stratum))
     if config.get('merged_nano_only_when_bin_complete') is True:
         expected = complete_bin_source_ids(config,stratum)
         observed = [row['source_id'] for row in normalizations]
         if not set(observed) <= set(expected):
             raise ValueError('Closed source lies outside the frozen bin worklist')
         body.update(publish_merged_nano=set(observed)==set(expected),expected_bin_source_ids=expected)
+        body['maximum_publication_bytes'] = worker_publication_bound(config,stratum,
+            interim=not body['publish_merged_nano'])
     checksum = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     directory = root / 'jobs' / (stratum + '_' + checksum[:12])
     timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -280,7 +293,8 @@ def snapshot(root, config, stratum, sources):
     return dict(directory=str(directory), phase='ready', stratum=stratum,
                 request_sha256=digest(directory / 'request.json'),
                 source_ids=[s['source_id'] for s in normalizations], events=len(identities),
-                publishes_merged_nano=body.get('publish_merged_nano',True))
+                publishes_merged_nano=body.get('publish_merged_nano',True),
+                publication_bound_bytes=body['maximum_publication_bytes'])
 
 
 
@@ -441,7 +455,7 @@ def poll(root, config, state):
     # parent's full allocation and all of the parent's external reservations.
     submitted = 0
     spent = sum(t.get('published_bytes', 0) for t in state['tasks'].values())
-    reserved = sum(config['worker_publication_bound_bytes'] for t in state['tasks'].values()
+    reserved = sum(t.get('publication_bound_bytes',config['worker_publication_bound_bytes']) for t in state['tasks'].values()
                    if t['phase'] in ('submitted', 'submitting'))
     # Scheduler hosts have no EOS client. Reuse the main production's actual
     # authenticated quota worker and its pinned native-success receipt.
@@ -484,7 +498,7 @@ def poll(root, config, state):
     for task in sorted(state['tasks'].values(), key=lambda t: t['events']):
         if task['phase'] != 'ready':
             continue
-        bound = config['worker_publication_bound_bytes']
+        bound = task.get('publication_bound_bytes',config['worker_publication_bound_bytes'])
         if spent + reserved + bound > config['maximum_publication_bytes']:
             break
         if parent_committed + parent_in_flight + science_reserve + spent + reserved + bound > parent_config['own_reservation_bytes']:
