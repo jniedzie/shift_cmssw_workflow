@@ -612,7 +612,8 @@ def reviewed_main_cleanup_failures(config):
                 and guard.get('prepared_cohort_count') == count):
             raise ValueError('Cleanup guard changed its exact prepared cohort count')
         if (guard.get('no_GEN_or_detector_rerun') is not True or guard.get('maximum_recovery_attempts_per_target') != 1
-                or seal.get('no_science_rerun') is not True
+                or (seal.get('no_science_rerun') is not True and not (
+                    'no_science_rerun' not in seal and seal.get('exact_prepared_cohorts_only') is True))
                 or seal.get('files', {}).get(guard_pin['configuration']['path']) != guard_pin['configuration']['sha256']
                 or any(sha(path) != digest for path, digest in seal['files'].items())):
             raise ValueError('Cleanup guard changed its exact read-only science scope')

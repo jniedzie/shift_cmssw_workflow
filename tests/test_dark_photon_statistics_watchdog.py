@@ -1147,6 +1147,14 @@ class StatisticsWatchdogTest(unittest.TestCase):
             self.config['additional_main_cleanup_recovery_guards'] = [guard_pin]
         freeze()
         self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native'], native)
+        # The new bounded-cohort seal uses its exact scope/count while the
+        # pinned guard configuration declares no GEN or detector rerun.
+        seal.pop('no_science_rerun'); freeze()
+        self.assertEqual(WATCH.reviewed_terminal_failures(self.config)[100]['native'], native)
+        seal['no_science_rerun'] = False; freeze()
+        with self.assertRaisesRegex(ValueError, 'read-only science scope'):
+            WATCH.reviewed_terminal_failures(self.config)
+        seal.pop('no_science_rerun')
         guard['prepared_cohort_count'] = 2; freeze()
         with self.assertRaisesRegex(ValueError, 'prepared cohort count'):
             WATCH.reviewed_terminal_failures(self.config)
