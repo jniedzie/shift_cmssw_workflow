@@ -49,6 +49,16 @@ class SourceStorageTest(unittest.TestCase):
             self.status['unexpected_change']=True;self.write(self.directory/'source_status.json',self.status)
             with self.assertRaisesRegex(ValueError,'changed completed GEN'):
                 self.credit()
+    def test_peer_reader_keeps_unverified_claim_without_competing_cache_writes(self):
+        with patch('run_shift_sm_postprocessing.download') as download:
+            self.assertEqual(production.committed_meson_source_bytes(self.config,self.batch,
+                self.entry,set(),persist_terminal_cache=False),0)
+            download.assert_not_called()
+            self.assertFalse((self.root/'committed_source_storage').exists())
+            self.assertEqual(self.credit(),30)
+            self.assertEqual(production.committed_meson_source_bytes(self.config,self.batch,
+                self.entry,set(),persist_terminal_cache=False),30)
+            self.assertEqual(download.call_count,2)
     def test_failed_terminal_event_and_unverified_output_are_not_paid(self):
         log=self.directory/'events.log';log.write_text(log.read_text().replace('value 0','value 1'))
         with patch('run_shift_sm_postprocessing.download') as download:

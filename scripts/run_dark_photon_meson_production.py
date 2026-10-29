@@ -2758,7 +2758,7 @@ def reviewed_remaining_storage(config, observation, state, persist_terminal_cach
         SM_committed=detail, no_GEN_or_ledger_future_writes=True)
 
 
-def committed_meson_source_bytes(config, batch, entry, live_ids):
+def committed_meson_source_bytes(config, batch, entry, live_ids, *, persist_terminal_cache=True):
     """Deduct paid GEN objects only; a completed generator is not a detector response."""
     directory = batch_directory(config, batch)
     cluster = entry.get('source_cluster')
@@ -2810,6 +2810,8 @@ def committed_meson_source_bytes(config, batch, entry, live_ids):
         if storage_ledger(cache) != identity:
             raise ValueError('Preserve changed completed GEN storage evidence')
     else:
+        if not persist_terminal_cache:
+            return 0  # The producing supervisor alone owns new readbacks/cache writes.
         # The producer already checked its upload; read the objects independently
         # once here. Cached immutable receipts avoid repeated campaign downloads.
         from run_shift_sm_postprocessing import download
@@ -3006,7 +3008,8 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
                         and durable.meson_published_batch(config['directory'],batch,proof,observed)):
                     additional -= forecasts[batch['batch']]
                 elif batch['batch'] in allowed:
-                    credit = committed_meson_source_bytes(config,batch,entry,live_ids)
+                    credit = committed_meson_source_bytes(config,batch,entry,live_ids,
+                        persist_terminal_cache=persist_terminal_cache)
                     if credit > forecasts[batch['batch']]:
                         raise ValueError('Written GEN objects exceed their original bank allocation')
                     additional -= credit
