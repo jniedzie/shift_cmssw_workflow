@@ -114,6 +114,19 @@ class SourceAccountingRecovery(unittest.TestCase):
             with patch.object(production.durable,'jobs',return_value=[]):
                 self.assertEqual(production.committed_meson_source_bytes(config,config['batches'][0],dict(source_cluster=20),set()),0)
 
+    def test_successful_fresh_source_archives_only_its_reviewed_old_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config,bank,old,new,proof,authority=self.source_retry(Path(temporary))
+            known=dict(stage='GEN',cluster=10,error='Original reviewed failure')
+            unknown=dict(stage='GEN',cluster=99,error='Unrelated failure remains visible')
+            state=dict(failed_batches=dict(a=[known,unknown]));entry=dict(failure=known)
+            with patch.object(production,'native_status',return_value='complete'), \
+                 patch.object(production,'reconcile_runtime_failures'):
+                self.assertEqual(production.batch_job_status(config,state,config['batches'][0],entry,new,'GEN'),'complete')
+            self.assertEqual(state['failed_batches']['a'],[unknown])
+            self.assertEqual(state['resolved_failed_batches']['a'][0]['failures'],[known])
+            self.assertNotIn('failure',entry)
+
     def test_paid_source_proof_avoids_repeated_history_but_never_overrides_live_jobs(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);config,bank,tools,original=self.fixture(root)

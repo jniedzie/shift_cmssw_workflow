@@ -3823,6 +3823,19 @@ def batch_job_status(config, state, batch, entry, receipt, stage, queue_snapshot
                 return 'complete'
         result=(native_status(config,receipt,queue_snapshot) if queue_snapshot is not None
                 else native_status(config,receipt))
+        source_recovery=config.get('reviewed_source_recovery_receipts',{}).get(batch['batch'])
+        if stage=='GEN' and result=='complete' and source_recovery is not None:
+            proof=read_pinned(source_recovery);old=read_pinned(proof['original_submission'])['cluster']
+            failures=state.get('failed_batches',{}).get(batch['batch'],[])
+            known=[row for row in failures if row.get('stage')=='GEN' and row.get('cluster')==old]
+            if known:
+                remaining=[row for row in failures if row not in known]
+                if remaining:state['failed_batches'][batch['batch']]=remaining
+                else:state['failed_batches'].pop(batch['batch'])
+                state.setdefault('resolved_failed_batches',{}).setdefault(batch['batch'],[]).append(
+                    dict(failures=known,source_recovery=source_recovery,replacement_submission=receipt))
+            if entry.get('failure',{}).get('cluster')==old:entry.pop('failure')
+            entry['reviewed_source_recovery']=source_recovery
         reconcile_runtime_failures(config,state,batch,entry,receipt,queue_snapshot)
         return result
     except MesonJobFailure as error:
