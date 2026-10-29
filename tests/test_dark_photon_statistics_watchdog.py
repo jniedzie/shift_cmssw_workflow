@@ -418,6 +418,29 @@ class StatisticsWatchdogTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'persistent batch directory'):
             WATCH.manager_receipts(self.root,config=self.config)
 
+    def test_preserved_canonical_handoff_still_requires_exact_batch_and_launch_pins(self):
+        directory = self.root/'batches/b001/handoff'; directory.mkdir(parents=True)
+        submit = directory/'worker.sub'; submit.write_text('queue\n')
+        receipt = directory/'submission.json'; receipt.write_text(json.dumps(dict(
+            cluster=301, task=str(directory), submit_sha256=WATCH.sha(submit))))
+        self.config.update(operational_handoffs=dict(preserved_directories={'b001': str(directory)}),
+            dependencies={str(p): WATCH.sha(p) for p in (submit, receipt)})
+        self.assertEqual(WATCH.preserved_handoffs(self.config)['b001'], directory)
+        self.config['operational_handoffs']['preserved_directories'] = {'b002': str(directory)}
+        with self.assertRaisesRegex(ValueError, 'persistent batch directory'):
+            WATCH.preserved_handoffs(self.config)
+
+    def test_reviewed_removed_manager_can_preserve_an_absent_exit_code(self):
+        native = dict(ClusterId=100, ProcId=0, Iwd=str(self.directory), JobStatus=3, ExitBySignal=False)
+        reviewed = {100: dict(native=native, kind='detector_stage_recovery',
+            original_directory=str(self.directory))}
+        with patch.object(WATCH, 'reviewed_terminal_failures', return_value=reviewed), \
+                patch.object(WATCH, 'stage_counts', return_value=self.counts), \
+                patch.object(WATCH, 'execute_events', return_value=[]):
+            report = WATCH.assess(self.config, {}, [], [native], self.receipts, self.now)
+        self.assertIsNone(report['stages']['100']['terminal_exit'])
+        self.assertNotIn('ExitCode', report['stages']['100']['reviewed_terminal_failure']['native'])
+
     def test_seven_real_gen_qualification_rows_need_no_expected_signal_count(self):
         masses=('m0p22','m0p25','m0p3','m0p4','m0p5','m0p7','m0p9')
         rows=[dict(batch='gen_qualification_%02d'%index,point=mass+'_prompt',source_collisions=10000,

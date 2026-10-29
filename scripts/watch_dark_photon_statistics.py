@@ -125,8 +125,9 @@ def preserved_handoffs(config):
     result = {}
     for batch, name in config.get('operational_handoffs', {}).get('preserved_directories', {}).items():
         directory = Path(name)
+        canonical = Path(config['production_directory'])/'batches'/batch/'handoff'
         if (not re.fullmatch(r'[A-Za-z0-9_-]+', batch) or not directory.is_absolute()
-                or '..' in directory.parts or directory.name != batch):
+                or '..' in directory.parts or (directory.name != batch and directory != canonical)):
             raise ValueError('Preserved handoff needs its exact persistent batch directory')
         for path in (directory / 'submission.json', directory / 'worker.sub'):
             if config.get('dependencies', {}).get(str(path)) != sha(path):
@@ -1022,7 +1023,7 @@ def assess(config, previous, rows, history, receipts, now):
                 else:
                     summary['observed_terminal_native']=terminal
                 expected=terminal or {}
-            if terminal and reviewed[cluster]['native'] is not None and any(terminal.get(key) != expected[key]
+            if terminal and reviewed[cluster]['native'] is not None and any(terminal.get(key) != expected.get(key)
                     for key in ('ClusterId', 'ProcId', 'Iwd', 'ExitCode', 'ExitBySignal')):
                 raise ValueError('Native history conflicts with the reviewed failed aggregate')
             summary['reviewed_terminal_failure'] = reviewed[cluster]
