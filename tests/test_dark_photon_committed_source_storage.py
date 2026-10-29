@@ -111,3 +111,40 @@ class PeerStorageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'independent retained readbacks'):self.credit()
         self.config['committed_direct_storage_peer']['reserved_bytes']=999
         with self.assertRaisesRegex(ValueError,'existing registration'):self.credit()
+
+class SMPreparationCreditTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+        self.root=Path(self.tmp.name);self.peer=self.root/'SM';self.work=self.peer/'preparation/sources/s0'
+        self.work.mkdir(parents=True)
+        self.write(self.work/'request.json',dict(publication_directory='/eos/new/s0'))
+        self.write(self.work/'result.json',dict(complete=True,exit_code=0,finished_epoch=1,source_id='s0',new_GEN_exposure=0))
+        self.write(self.work/'status.json',{})
+        (self.work/'events.log').write_text('005 (11.000.000) Terminated\nNormal termination (return value 0)\n...\n')
+        plan=dict(total_registered_bound_bytes=100,sources=[dict(source_id='s0',directory=str(self.work),
+            request_sha256=production.durable.sha(self.work/'request.json'))])
+        self.write(self.peer/'plan.json',plan)
+        reg=dict(schema='shift-shared-production-storage-registration-v1',directory=str(self.peer),
+            total_parent_SM_reservation_bytes=137000000000,additional_global_reservation_bytes=0,
+            old_claims_preserved=True,maximum_new_component_publication_bytes=100,plan=self.pin(self.peer/'plan.json'))
+        self.write(self.peer/'registration.json',reg)
+        self.config=dict(committed_SM_preparation_peer=dict(registration=self.pin(self.peer/'registration.json'),
+            plan=self.pin(self.peer/'plan.json'),EOS_namespace_prefix='/eos/new',registered_peer_bytes=1000))
+        self.fresh=dict(storage_registration=dict(peer_reservations=[dict(name='SM_and_parent',reserved_bytes=1000)]))
+        self.objects=[dict(path='/eos/new/s0/GEN.root',bytes=20,sha256='a'*64),
+                      dict(path='/eos/old/raw.root',bytes=999,sha256='b'*64)]
+    def write(self,p,x):p.write_text(json.dumps(x))
+    def pin(self,p):return dict(path=str(p),sha256=production.durable.sha(p))
+    def credit(self,live=()):
+        with patch.object(production,'fresh_production_authority',return_value=self.fresh), \
+             patch.object(production.durable,'jobs',return_value=list(live)), \
+             patch.object(production,'committed_sm_storage_entry',return_value=dict(objects=self.objects)):
+            return production.committed_SM_preparation_bytes(self.config,2)
+    def test_reused_raw_GEN_is_excluded_and_live_producer_keeps_claim(self):
+        self.assertEqual(self.credit(),20)
+        self.assertEqual(self.credit([dict(ClusterId=11)]),0)
+    def test_changed_request_or_budget_is_rejected(self):
+        self.write(self.work/'request.json',dict(publication_directory='/eos/other'))
+        with self.assertRaisesRegex(ValueError,'registered plan'):self.credit()
+        self.config['committed_SM_preparation_peer']['registered_peer_bytes']=900
+        with self.assertRaisesRegex(ValueError,'shared allocation'):self.credit()
