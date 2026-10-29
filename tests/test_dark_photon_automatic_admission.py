@@ -197,7 +197,7 @@ class ReferenceAdmissionTest(unittest.TestCase):
         state = dict(batches={'bank0':dict(primitive_histograms={'verified':'receipt'})})
         observed = dict(observed_utc=datetime.now(timezone.utc).isoformat(),
                         free_bytes=1000000000, free_files=100)
-        live = [{'Iwd':str(self.directory/'batches/bank0'), 'JobStatus':2}]
+        live = [{'ClusterId':17, 'Iwd':str(self.directory/'batches/bank0'), 'JobStatus':2}]
         with patch.object(production, 'adaptive_reservation', return_value=0), \
              patch.object(production, 'additional_reservations', return_value=(0, [])), \
              patch.object(production, 'aggregation_reservation', return_value=0), \

@@ -2654,9 +2654,66 @@ def reviewed_remaining_storage(config, observation, state, persist_terminal_cach
         SM_committed=detail, no_GEN_or_ledger_future_writes=True)
 
 
+def committed_meson_source_bytes(config, batch, entry, live_ids):
+    """Deduct paid GEN objects only; a completed generator is not a detector response."""
+    directory = batch_directory(config, batch)
+    cluster = entry.get('source_cluster')
+    status_path, receipt_path = directory/'source_status.json', directory/'submission.json'
+    if not cluster or cluster in live_ids or not status_path.exists():
+        return 0
+    status, receipt = storage_ledger(status_path), storage_ledger(receipt_path)
+    if status.get('complete') is not True:
+        return 0
+    blocks = storage_payload(directory/'events.log').decode().split('\n...\n')[:-1]
+    terminal = next((block for block in reversed(blocks)
+        if re.match(r'005 \('+str(cluster)+r'\.000\.', block)), '')
+    if 'Normal termination (return value 0)' not in terminal:
+        return 0
+    manifest_path = directory/'gen/manifest.json'
+    publication_path = directory/'gen/root_publication.json'
+    manifest, publication = storage_ledger(manifest_path), storage_ledger(publication_path)
+    base = str(Path(config['eos_base'])/('darkphoton_'+batch['point'])/
+               (config['campaign_prefix']+'-'+batch['batch']))
+    objects = [status['publication'], status['metadata_archive']]
+    if (receipt.get('cluster') != cluster or receipt.get('task') != str(directory)
+            or status.get('batch') != batch['batch'] or status.get('point') != batch['point']
+            or status.get('source_collisions') != batch['source_collisions']
+            or status.get('seal_sha256') != durable.sha(Path(config['directory'])/'seal.json')
+            or status['publication']['sha256'] != manifest.get('output_sha256')
+            or status['parent']['manifest_sha256'] != durable.sha(manifest_path)
+            or any(status['publication'][key] != publication[key]
+                   for key in ('path','bytes','sha256','readback_sha256'))
+            or objects[0]['path'] != base+'/GEN/gen.root'
+            or objects[1]['path'] != base+'/metadata/GEN/gen_metadata.tar.gz'
+            or any(type(item['bytes']) is not int or item['bytes'] <= 0
+                   or not re.fullmatch(r'[0-9a-f]{64}',item['sha256'])
+                   or item['sha256'] != item.get('readback_sha256') for item in objects)):
+        raise ValueError('Completed GEN storage credit changed its original source or readback')
+    identity = dict(source_status_sha256=durable.sha(status_path),
+        submission_sha256=durable.sha(receipt_path), manifest_sha256=durable.sha(manifest_path),
+        publication_sha256=durable.sha(publication_path), cluster=cluster,
+        native_zero_exit=terminal, objects=objects)
+    cache = Path(config['directory'])/'committed_source_storage'/f'{cluster}.json'
+    if cache.exists():
+        if storage_ledger(cache) != identity:
+            raise ValueError('Preserve changed completed GEN storage evidence')
+    else:
+        # The producer already checked its upload; read the objects independently
+        # once here. Cached immutable receipts avoid repeated campaign downloads.
+        from run_shift_sm_postprocessing import download
+        with tempfile.TemporaryDirectory(prefix='dp-paid-GEN-',
+                dir=os.environ.get('_CONDOR_SCRATCH_DIR','/tmp')) as scratch:
+            for index,item in enumerate(objects):
+                download(item['path'],Path(scratch)/str(index),item['sha256'])
+        cache.parent.mkdir(exist_ok=True)
+        durable.save(cache,identity)
+    return sum(item['bytes'] for item in objects)
+
+
 def storage_gate(config, observation, bulk=False, state=None, persist_terminal_cache=True):
     reviewed = bulk and config.get('reviewed_remaining_storage_authority')
     reservation = 0 if reviewed else adaptive_reservation(config)
+    source_credit = 0
     additional = 500000000 if not bulk else None
     if bulk:
         from prepare_dark_photon_meson_production import meson_storage_limit
@@ -2688,6 +2745,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
             observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
             live = durable.jobs(config,directory_condition(Path(config['directory'])))
             additional = sum(value for name,value in forecasts.items() if name in allowed)
+            live_ids = {row['ClusterId'] for row in live}
             for batch in config['batches']:
                 entry = published.get(batch['batch'],{})
                 proof = entry.get('primitive_histograms')
@@ -2696,6 +2754,12 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
                         and not any(row.get('Iwd','') == prefix or row.get('Iwd','').startswith(prefix+'/') for row in live)
                         and durable.meson_published_batch(config['directory'],batch,proof,observed)):
                     additional -= forecasts[batch['batch']]
+                elif batch['batch'] in allowed:
+                    credit = committed_meson_source_bytes(config,batch,entry,live_ids)
+                    if credit > forecasts[batch['batch']]:
+                        raise ValueError('Written GEN objects exceed their original bank allocation')
+                    additional -= credit
+                    source_credit += credit
     accounting = None
     if reviewed:
         import shift_condor_native as native
@@ -2711,6 +2775,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
     return observation['free_bytes'] >= required and observation['free_files'] >= config['minimum_eos_free_files'], dict(
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
         meson_forecast_bytes=additional, additional_reserved_bytes=reserved,
+        committed_source_bytes=source_credit,
         aggregate_storage_reservation_bytes=regrouping,
         additional_reserved_worklists=claims, required_free_bytes=required,
         **({'reviewed_remaining_storage': accounting} if accounting is not None else {}))
