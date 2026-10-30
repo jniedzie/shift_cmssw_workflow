@@ -1404,7 +1404,9 @@ def prepare_material_admission(config, batch, status):
     profile_path=directory/'material_runtime_profile.json'
     immutable(request_path,request)
     immutable(profile_path,config['detector_runtime'])
-    tools=Path(config['tools'])
+    # Operational repairs freeze their material helpers beside this entry.
+    # The original tools path remains the GEN and rate-accounting authority.
+    tools=Path(__file__).resolve().parent
     from dark_photon_detector_runtime import clean_environment
     invocation=['/usr/bin/python3',str(tools/'dark_photon_detector_runtime.py'),
         '--profile',str(profile_path),'--entry',str(tools/'prepare_dark_photon_material_source.py'),

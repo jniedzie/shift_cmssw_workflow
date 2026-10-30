@@ -309,6 +309,23 @@ class StatisticsWatchdogTest(unittest.TestCase):
         self.assertEqual(len(calls), 6)
         self.assertTrue(all(value is report for value in calls))
 
+    def test_monitor_retries_health_stat_before_polling(self):
+        target=self.root/'health.json'
+        target.write_text(json.dumps(dict(terminal_history=[123])))
+        original=Path.is_file
+        failures=[]
+        def transient(path):
+            if path==target and len(failures)<5:
+                failures.append(True)
+                raise OSError(errno.ETIMEDOUT,'AFS stat timeout')
+            return original(path)
+        with patch.object(Path,'is_file',transient), patch.object(WATCH.time,'sleep'), \
+                patch.object(WATCH.sys,'stderr'), patch.object(WATCH,'run_condor') as query:
+            previous=WATCH.polling_state(self.root)
+        self.assertEqual(len(failures),5)
+        self.assertEqual(previous['terminal_history'],[123])
+        query.assert_not_called()
+
     def test_shared_storage_retry_does_not_hide_corrupt_or_unauthorized_state(self):
         for error in (ValueError('changed identity'), PermissionError(errno.EACCES, 'denied'),
                       OSError(errno.ENOSPC, 'quota')):
@@ -799,6 +816,29 @@ class StatisticsWatchdogTest(unittest.TestCase):
         report = self.assess([self.child(age=13 * 3600)])
         self.assertEqual(report['health'], 'critical')
         self.assertTrue(any(item['code'] == 'queue_101' for item in report['issues']))
+
+    def test_histogram_helper_relocation_preserves_exact_bytes_and_settings(self):
+        stage=self.root/'waves/w001/gen_stage';stage.mkdir(parents=True)
+        (stage/'submission.json').write_text(json.dumps(dict(cluster=100)))
+        for name in ('gen_inventory.json','gen_publication.json'):
+            (stage/name).write_text(json.dumps(dict(complete=True)))
+        helper=self.root/'private.py';helper.write_text('frozen bytes')
+        before=dict(runtime='unchanged',nano_integrity=dict(path='/old/shared.py',sha256=WATCH.sha(helper)))
+        after=dict(before,nano_integrity=dict(before['nano_integrity'],path=str(helper)))
+        profiles=[]
+        for name,data in [('before.json',before),('after.json',after)]:
+            p=self.root/name;p.write_text(json.dumps(data));profiles.append(dict(path=str(p),sha256=WATCH.sha(p)))
+        proof=dict(schema='shift-reviewed-gen-handoff-v1',wave_index=1,gen_cluster=100,science_rerun=False,
+            failure_kind='frozen_Nano_integrity_path_before_SIM',
+            terminal_native_ad=dict(ClusterId=100,ProcId=0,Iwd=str(stage),JobStatus=4,ExitCode=1,ExitBySignal=False),
+            files={name:WATCH.sha(stage/name) for name in ('gen_inventory.json','gen_publication.json')},
+            original_main_histogrammer=profiles[0],replacement_main_histogrammer=profiles[1])
+        p=self.root/'review.json';p.write_text(json.dumps(proof));pin=dict(path=str(p),sha256=WATCH.sha(p))
+        self.config.update(reviewed_gen_handoffs=[pin],dependencies={x['path']:x['sha256'] for x in [pin,*profiles]})
+        self.assertIn(100,WATCH.reviewed_terminal_failures(self.config))
+        helper.write_text('different bytes')
+        with self.assertRaisesRegex(ValueError,'physics or bytes'):
+            WATCH.reviewed_terminal_failures(self.config)
 
     def test_finalizer_and_collector_summaries_do_not_duplicate_payload_events(self):
         stage = self.root/'response'; (stage/'statuses').mkdir(parents=True)

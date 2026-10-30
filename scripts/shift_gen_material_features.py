@@ -321,7 +321,9 @@ def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, fram
             child.join(2)
             if child.is_alive():
                 child.kill()
-                child.join(2)
+                # A busy worker can take longer to reap a killed process.
+                # Wait before starting another navigator; keep the same timeout result.
+                child.join(30)
         code = child.exitcode
         if child.is_alive():
             raise RuntimeError('Material navigator child could not be stopped')

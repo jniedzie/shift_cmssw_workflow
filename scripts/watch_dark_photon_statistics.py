@@ -573,10 +573,10 @@ def polling_state(directory):
     """Recover the last native cache when an older unknown report discarded it."""
     directory = Path(directory)
     path = directory / 'health.json'
-    previous = read(path) if path.is_file() else {}
+    previous = read(path) if retry_shared_storage(path.is_file) else {}
     verified_path = directory / 'last_verified_health.json'
     if (previous.get('scheduler_state') == 'unknown' and 'terminal_history' not in previous
-            and verified_path.is_file()):
+            and retry_shared_storage(verified_path.is_file)):
         verified = read(verified_path)
         if verified.get('scheduler_state') == 'verified':
             for key in ('terminal_history', 'stages'):
@@ -819,14 +819,28 @@ def reviewed_terminal_failures(config):
         directory = wave / 'gen_stage'
         native = proof['terminal_native_ad']
         budget_upgrade = proof.get('failure_kind') == 'detector_stage_budget_upgrade_before_SIM'
+        integrity_relocation = proof.get('failure_kind') == 'frozen_Nano_integrity_path_before_SIM'
         if (proof.get('schema') != 'shift-reviewed-gen-handoff-v1'
-                or (not budget_upgrade and proof.get('failure_kind') != 'downstream_prepare_ImportError_only')
+                or (not budget_upgrade and not integrity_relocation
+                    and proof.get('failure_kind') != 'downstream_prepare_ImportError_only')
                 or proof.get('science_rerun') is not False or native.get('JobStatus') != 4
                 or native.get('ExitBySignal') is not False or native.get('ExitCode') != 1
                 or native.get('ProcId') != 0 or native.get('Iwd') != str(directory)
                 or native.get('ClusterId') != proof['gen_cluster']
                 or read(directory / 'submission.json').get('cluster') != proof['gen_cluster']):
             raise ValueError('Reviewed GEN failure differs from its exact downstream handoff')
+        if integrity_relocation:
+            profiles=[]
+            for key in ('original_main_histogrammer','replacement_main_histogrammer'):
+                pin=proof[key]
+                if config['dependencies'].get(pin['path'])!=pin['sha256'] or sha(pin['path'])!=pin['sha256']:
+                    raise ValueError('Reviewed histogram helper relocation profile changed')
+                profiles.append(read(pin['path']))
+            before,after=profiles
+            expected=dict(before,nano_integrity=dict(before['nano_integrity'],path=after['nano_integrity']['path']))
+            if (after!=expected or before['nano_integrity']['path']==after['nano_integrity']['path']
+                    or sha(after['nano_integrity']['path'])!=before['nano_integrity']['sha256']):
+                raise ValueError('Reviewed histogram helper relocation changed its physics or bytes')
         for name in ('gen_inventory.json', 'gen_publication.json'):
             if sha(directory / name) != proof['files'][name] or read(directory / name).get('complete') is not True:
                 raise ValueError('Reviewed GEN population is changed or unfinished')
@@ -1378,8 +1392,8 @@ def main():
     directory = Path(config['state_directory'])
     if not directory.is_absolute() or str(directory).startswith('/tmp/'):
         raise ValueError('Watchdog needs an absolute persistent state directory')
-    directory.mkdir(parents=True, exist_ok=True)
-    with (directory / 'watchdog.lock').open('a') as lock:
+    retry_shared_storage(lambda: directory.mkdir(parents=True, exist_ok=True))
+    with retry_shared_storage(lambda: (directory / 'watchdog.lock').open('a')) as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         while True:
             previous = polling_state(directory)

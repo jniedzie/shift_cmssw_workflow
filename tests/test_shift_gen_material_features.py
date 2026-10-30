@@ -3,7 +3,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import shift_gen_material_features as features
@@ -54,6 +54,25 @@ class GenMaterialFeatureTests(unittest.TestCase):
         for invalid in (0.,-1.,float('nan'),float('inf')):
             with self.assertRaises(ValueError):
                 features.bounded_event_features([], [1,1,1],1.,[1.],None,{},invalid)
+
+    def test_slow_kill_reaping_keeps_timeout_unknown_and_rejects_live_child(self):
+        rows=[particle(1,211),particle(2,13,[1],status=1,end=None)]
+        child=Mock(exitcode=-9)
+        child.is_alive.side_effect=[True,True,False]
+        context=Mock()
+        context.Process.return_value=child
+        with patch.object(features.multiprocessing,'get_context',return_value=context):
+            result=features.bounded_event_features(rows,[1,1,1],2.,[2.],object(),{},.02)
+        child.kill.assert_called_once()
+        self.assertEqual(child.join.call_args_list[-1].args,(30,))
+        self.assertTrue(result['material_navigation_timeout'])
+        self.assertEqual(result['native_weight'],2.)
+        self.assertIsNone(result['parent_flights'][0]['material']['interaction_depth_proxy'])
+        child.is_alive.side_effect=None
+        child.is_alive.return_value=True
+        with patch.object(features.multiprocessing,'get_context',return_value=context):
+            with self.assertRaisesRegex(RuntimeError,'could not be stopped'):
+                features.bounded_event_features(rows,[1,1,1],2.,[2.],object(),{},.02)
 
     def test_zero_muon_event_and_unfinished_hadrons_are_retained(self):
         row=features.event_features([particle(1,211,status=1,end=None)], [1,2,3], -2., [-2.])
