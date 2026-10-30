@@ -60,12 +60,16 @@ def prepare_main_histograms(args):
     profile=plan['detector_runtime'];validate_profile(profile)
     output.mkdir(parents=True);frozen=output/'frozen';(frozen/'sources').mkdir(parents=True)
     (frozen/'templates').mkdir();files={}
+    runtime_core_sources = {}
     for category in ('sources','templates'):
         for name,record in plan['frozen_dependencies'][category].items():
             if sha256(record['frozen_copy'])!=record['sha256']:
                 raise ValueError('Changed detector handoff dependency: '+name)
             target=frozen/category/name
-            if category=='sources':freeze_detector_source(record['frozen_copy'],target,profile)
+            if category=='sources':
+                authority = freeze_detector_source(record['frozen_copy'],target,profile)
+                if name in ('run_shift_gen_to_nano.py', 'run_dark_photon_detector.py'):
+                    runtime_core_sources[name] = authority
             else:shutil.copy2(record['frozen_copy'],target)
             files[str(target)]=sha256(target)
     for name in ('dark_photon_production_support.py','dark_photon_stage_budget.py',
@@ -91,6 +95,7 @@ def prepare_main_histograms(args):
         write(output/name,read(path))
     plan.update(schema='shift-dark-photon-main-histograms-v1',runtime=plan.get('runtime',{}),
         new_worker_cap=args.detector_workers,main_histogrammer=True,
+        runtime_core_sources=runtime_core_sources,
         original_preparation_sha256=sha256(args.preparation))
     write(output/'plan.json',plan)
     files.update({str(output/name):sha256(output/name) for name in
@@ -182,14 +187,18 @@ def freeze_detector_source(source, target, runtime_profile=None):
     source, target = Path(source), Path(target)
     selected, derivation = source, None
     if runtime_profile is not None:
-        from dark_photon_detector_runtime import CORE_SOURCES, validate_profile
+        from dark_photon_detector_runtime import CORE_SOURCES, validate_profile, deploy
         manifest = validate_profile(runtime_profile)
         if target.name in CORE_SOURCES:
             expected = manifest['files']['workflow_helpers/' + target.name]['sha256']
             if sha256(source) != expected:
-                raise ValueError('Detector source differs from its qualified private capsule: ' + target.name)
-        shutil.copy2(source, target)
+                selected = deploy(runtime_profile, manifest) / 'workflow_helpers' / target.name
+                if sha256(selected) != expected:
+                    raise ValueError('Detector source differs from its qualified private capsule: ' + target.name)
+        shutil.copy2(selected, target)
         return dict(source=str(source), sha256=sha256(target),
+                    capsule_member=('workflow_helpers/' + target.name if target.name in CORE_SOURCES else None),
+                    copied_from_qualified_capsule=selected != source,
                     runtime_profile=runtime_profile['schema'],
                     private_runtime_sha256=runtime_profile['runtime_sha256'])
     replacement = Path(__file__).with_name('run_shift_gen_to_nano.py')

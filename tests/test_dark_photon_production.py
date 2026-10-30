@@ -500,8 +500,16 @@ class PrivateDetectorProfile(unittest.TestCase):
             self.assertEqual(target.read_bytes(),source.read_bytes())
             self.assertEqual(record['private_runtime_sha256'],profile['runtime_sha256'])
             changed=root/'changed.py';changed.write_text(source.read_text()+'\nUNREVIEWED=True\n')
-            with self.assertRaisesRegex(ValueError,'qualified private capsule'):
-                production_preparation.freeze_detector_source(changed,target,profile)
+            cache=root/'capsule';(cache/'workflow_helpers').mkdir(parents=True)
+            qualified=cache/'workflow_helpers'/source.name
+            qualified.write_bytes(source.read_bytes())
+            with patch('dark_photon_detector_runtime.deploy',return_value=cache):
+                record=production_preparation.freeze_detector_source(changed,target,profile)
+                self.assertEqual(target.read_bytes(),source.read_bytes())
+                self.assertTrue(record['copied_from_qualified_capsule'])
+                qualified.write_text('CHANGED_CAPSULE=True\n')
+                with self.assertRaisesRegex(ValueError,'qualified private capsule'):
+                    production_preparation.freeze_detector_source(changed,target,profile)
 
     def test_manifest_replacement_and_disabled_optin_fail_closed(self):
         from dark_photon_detector_runtime import validate_profile
