@@ -148,6 +148,65 @@ class ResponsePublicationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'q=n/N'):
                 selected_rows(source)
 
+    def install_global_projection(self, arm):
+        selected = copy.deepcopy(self.plan['selected'])
+        for row in selected:
+            row['comparison_arm'] = arm
+            if arm == 'random':
+                row['benchmark_inclusion_probability'] = 2/3
+        global_rows = copy.deepcopy(selected)
+        for row in copy.deepcopy(selected):
+            row.update(source_id='other')
+            row['event_id'][0] = 2
+            global_rows.append(row)
+        if arm == 'random':
+            cells = [dict(stratum='qcd_20toinf',comparison_arm=arm,
+                benchmark_region='uniform_complete_population',population_events=6,
+                selected_events=4,benchmark_inclusion_probability=2/3)]
+        else:
+            cells = [dict(r,comparison_arm=arm,population_events=r['population_events']*2,
+                          selected_events=2) for r in self.plan['strata']]
+            for row in cells:
+                row.pop('source_id')
+        global_pin = self.write('global.json',dict(draw_frozen=True,
+            comparison_kind='disjoint-source-smart-versus-random-v1',
+            source_assignments=dict(response=arm,other=arm),population_events=6,
+            selected_events=4,selected=global_rows,strata=cells))
+        local = dict(self.plan,selected=selected,strata=[],global_comparison_plan=global_pin,
+                     source_projection_does_not_redraw=True)
+        plan_pin = self.write('plan.json',local)
+        request = copy.deepcopy(self.collector_request)
+        request['benchmark_plan'] = plan_pin
+        for job,row in zip(request['job_records'],selected):
+            job['selected'] = row
+        request_pin = self.write('collect/request.json',request)
+        collector = dict(self.collector,request_sha256=request_pin['sha256'],
+                         benchmark_plan_sha256=plan_pin['sha256'])
+        self.collector_pin = self.write('collect/result.json',collector)
+        self.prepared_pin = self.write('prepared.json',dict(schema='shift-sm-candidate-handoff-v1',
+            source_id='response',collector=dict(job_directory=str(self.root/'collect'),
+                request_sha256=request_pin['sha256']),benchmark_plan=plan_pin))
+
+    def test_global_smart_cells_keep_global_q_when_published_one_source_at_a_time(self):
+        self.install_global_projection('smart')
+        source = self.discover()['selected']
+        rows,_,_ = post.response_sampling_contract(source)
+        self.assertEqual([r['response_population_events'] for r in rows],[4,2])
+        self.assertEqual([r['response_selected_events'] for r in rows],[2,2])
+        self.assertEqual([r['response_sampling_probability'] for r in rows],[.5,1.])
+
+    def test_random_projection_uses_uniform_cell_even_when_physical_regions_differ(self):
+        self.install_global_projection('random')
+        rows,_,_ = post.response_sampling_contract(self.discover()['selected'])
+        self.assertEqual([r['response_sampling_probability'] for r in rows],[2/3,2/3])
+        self.assertEqual([r['response_population_events'] for r in rows],[6,6])
+        source = self.discover()['selected']
+        path = self.root/'global.json'
+        value = json.loads(path.read_text());value['selected'][0]['native_weight'] *= 2
+        self.write('global.json',value)
+        with self.assertRaisesRegex(ValueError,'authority changed'):
+            post.response_sampling_contract(source)
+
     def test_discovered_response_uses_the_existing_snapshot_request(self):
         source=self.discover()
         config=dict(campaign='response_test',histogram_runtime=dict(path='runtime',sha256='a'*64),

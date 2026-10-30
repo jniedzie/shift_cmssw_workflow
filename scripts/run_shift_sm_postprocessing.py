@@ -286,10 +286,29 @@ def response_sampling_contract(source):
     identities = [tuple(row['event_id']) for row in selected]
     if len(set(identities)) != len(identities) or len(identities) != plan['selected_events']:
         raise ValueError('Frozen response selection repeats or omits an original')
-    cells = {(r['source_id'],r['stratum'],r['benchmark_region']): r for r in plan['strata']}
-    if (len(cells) != len(plan['strata'])
-            or sum(cell['population_events'] for cell in cells.values()) != plan['population_events']
-            or sum(cell['selected_events'] for cell in cells.values()) != plan['selected_events']):
+    global_pin = plan.get('global_comparison_plan')
+    sampling_plan = read_response_pin(global_pin) if global_pin is not None else plan
+    if global_pin is not None:
+        if (plan.get('source_projection_does_not_redraw') is not True
+                or sampling_plan.get('comparison_kind') != 'disjoint-source-smart-versus-random-v1'
+                or sampling_plan.get('draw_frozen') is not True
+                or sampling_plan['source_assignments'].get(normalization['source_id']) not in ('smart','random')
+                or selected != [r for r in sampling_plan['selected']
+                                if r['source_id'] == normalization['source_id']]):
+            raise ValueError('Source projection differs from the immutable global comparison')
+
+    def cell_key(row, selected_row=False):
+        if global_pin is None:
+            return row['source_id'],row['stratum'],row['benchmark_region']
+        arm = row['comparison_arm']
+        region = ('uniform_complete_population' if selected_row and arm == 'random'
+                  else row['benchmark_region'])
+        return arm,row['stratum'],region
+
+    cells = {cell_key(r): r for r in sampling_plan['strata']}
+    if (len(cells) != len(sampling_plan['strata'])
+            or sum(cell['population_events'] for cell in cells.values()) != sampling_plan['population_events']
+            or sum(cell['selected_events'] for cell in cells.values()) != sampling_plan['selected_events']):
         raise ValueError('Response cell populations do not cover the frozen draw')
     for cell in cells.values():
         population, selected_count = cell['population_events'],cell['selected_events']
@@ -299,13 +318,26 @@ def response_sampling_contract(source):
                 or not isinstance(q,(int,float)) or isinstance(q,bool) or not math.isfinite(q)
                 or not math.isclose(q,selected_count/population,rel_tol=2.e-12,abs_tol=0.)):
             raise ValueError('Every nonempty response cell needs positive q=n/N')
+    if global_pin is not None:
+        global_counts = {}
+        seen_global = set()
+        for row in sampling_plan['selected']:
+            identity = row['source_id'],tuple(row['event_id'])
+            key = cell_key(row, True)
+            if (identity in seen_global or row['comparison_arm'] != sampling_plan['source_assignments'][row['source_id']]
+                    or key not in cells or row['benchmark_inclusion_probability'] != cells[key]['benchmark_inclusion_probability']):
+                raise ValueError('Global comparison changed an identity, arm or q')
+            seen_global.add(identity)
+            global_counts[key] = global_counts.get(key, 0)+1
+        if any(global_counts.get(key, 0) != cell['selected_events'] for key,cell in cells.items()):
+            raise ValueError('Global comparison does not cover its complete sampling cells')
     rows, exposures = [], [dict(source_id=normalization['source_id'],
         original_source_sha256=normalization['gen_sha256'],
         denominator_kind=normalization['denominator_kind'],
         **{key: normalization[key] for key in ('full_source_trials','full_source_events') if key in normalization})]
     counts = {}
     for row in selected:
-        key = row['source_id'],row['stratum'],row['benchmark_region']
+        key = cell_key(row, True)
         cell = cells[key]; counts[key] = counts.get(key,0)+1
         if (row['source_id'] != normalization['source_id'] or row['stratum'] != normalization['stratum']
                 or row['gen_sha256'] != normalization['gen_sha256']
@@ -317,7 +349,7 @@ def response_sampling_contract(source):
             response_draw_id=request['benchmark_plan']['sha256'],
             response_sampling_probability=row['benchmark_inclusion_probability'],
             response_population_events=cell['population_events'],response_selected_events=cell['selected_events']))
-    if any(counts.get(key,0) != cell['selected_events'] for key,cell in cells.items()):
+    if global_pin is None and any(counts.get(key,0) != cell['selected_events'] for key,cell in cells.items()):
         raise ValueError('Response draw does not cover each complete sampling cell')
     validate_response_sampling_rows(rows,exposures)
     ordinary = {key:value for key,value in source.items() if key != 'response_sampling'}

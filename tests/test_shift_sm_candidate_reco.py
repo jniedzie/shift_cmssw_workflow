@@ -111,6 +111,24 @@ class CandidateRecoTest(unittest.TestCase):
         second = prepare_draw([record], 'fixed-seed', controls_per_cell=1)
         self.assertEqual(first, second)
 
+    def test_complete_dy_and_jpsi_authorities_use_their_own_feature_census(self):
+        for family in ('dy', 'jpsi'):
+            record = self.record()
+            path = Path(record['result_path'])
+            authority = json.loads(path.read_text())
+            authority['source']['stratum'] = family+'_20toinf'
+            authority['selected_source']['stratum'] = family+'_20toinf'
+            authority['selected_source']['normalization_record']['stratum'] = family+'_20toinf'
+            authority['prepared_publications'][0]['name'] = family+'_features.json.gz'
+            path.write_text(json.dumps(authority))
+            record['result_sha256'] = checksum(path)
+            result = prepare_draw([record], 'independent-SM-source', controls_per_cell=1)
+            self.assertEqual(result['exposure']['original_saved_GEN_events'], 7)
+            self.assertTrue(all(row['stratum'] == family+'_20toinf'
+                                for row in result['plan']['selected']))
+            self.assertTrue(all(row['existing_sampling_probability'] == .25
+                                for row in result['plan']['selected']))
+
     def test_missed_original_candidate_is_reported_and_never_silently_readmitted(self):
         self.indices = list(range(1, 7))
         result = prepare_draw([self.record()], 'seed', controls_per_cell=1)

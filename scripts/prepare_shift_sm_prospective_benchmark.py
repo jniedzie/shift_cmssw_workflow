@@ -61,7 +61,7 @@ def draw_hash(seed, row):
     return hashlib.sha256(json.dumps(key, separators=(',', ':')).encode()).hexdigest()
 
 
-def prepare_benchmark(rows, seed, maximum_events=400, controls=None):
+def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_candidates=None):
     """Make a deterministic fixed-size random draw within each bin/region.
 
     For a nonempty control cell, q=n/N. Every credible or explicitly protected
@@ -78,11 +78,13 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None):
         counts.update(controls)
     if any(type(value) is not int or value <= 0 for value in counts.values()):
         raise ValueError('Every control stratum needs positive sampling support')
+    if maximum_candidates is not None and (type(maximum_candidates) is not int or maximum_candidates < 1):
+        raise ValueError('Candidate cap must retain positive support')
     groups = defaultdict(list)
     seen = set()
     for row in rows:
-        if not row['stratum'].startswith('qcd_'):
-            raise ValueError('This bounded planner is for ordinary QCD diagnostics')
+        if row['stratum'].split('_', 1)[0] not in ('qcd', 'dy', 'jpsi'):
+            raise ValueError('This bounded planner is for ordinary SM diagnostics')
         key = identity(row)
         if key in seen:
             raise ValueError('Duplicate original GEN identity in benchmark population')
@@ -94,7 +96,13 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None):
         groups[(row['stratum'], benchmark_region(row))].append(row)
     selected, cells = [], []
     for (stratum, region), population in sorted(groups.items()):
-        number = min(counts[region], len(population)) if region in counts else len(population)
+        # The independent DY/Jpsi transfer check found useful Jpsi pairs in
+        # this region. Never transfer QCD unknown-parent thinning to them.
+        protected = region == 'unknown_parent' and not stratum.startswith('qcd_')
+        number = (min(counts[region], len(population))
+                  if region in counts and not protected else len(population))
+        if region == 'credible_shallow_pointing' and maximum_candidates is not None:
+            number = min(number, maximum_candidates)
         probability = number/len(population)
         chosen = sorted(population, key=lambda row: draw_hash(seed, row))[:number]
         cells.append(dict(stratum=stratum, benchmark_region=region,

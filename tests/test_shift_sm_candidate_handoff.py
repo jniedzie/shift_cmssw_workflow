@@ -94,6 +94,52 @@ class CandidateHandoffTest(unittest.TestCase):
         self.assertEqual(handoff.read(self.budget)['reservations'], {})
         self.assertFalse((Path(self.config['output_directory'])/'prepared.json').exists())
 
+    def test_detector_ids_are_reserved_once_and_do_not_overlap_sources(self):
+        state = handoff.read(self.budget)
+        state.update(next_detector_job=6000000, detector_job_limit=6600000)
+        handoff.save(self.budget, state)
+        first = handoff.reserve_budget(self.budget, 'first', 'a'*64, 3)
+        self.assertEqual(first['detector_job_base'], 6000000)
+        self.assertEqual(first, handoff.reserve_budget(self.budget, 'first', 'a'*64, 3))
+        second = handoff.reserve_budget(self.budget, 'second', 'b'*64, 2)
+        self.assertEqual(second['detector_job_base'], 6000003)
+        with self.assertRaisesRegex(ValueError, 'differs'):
+            handoff.reserve_budget(self.budget, 'first', 'a'*64, 2)
+
+    def test_empty_native_trial_cohort_has_collector_and_preserves_denominator(self):
+        path = self.root/'result.json'
+        result = handoff.read(path)
+        result.update(empty_source=True, selected_events=0)
+        result.pop('selected_source')
+        result['source'].update(saved_events=0, full_source_trials=1000)
+        handoff.save(path, result)
+        prepared = handoff.prepare(self.config, 'e'*64)
+        self.assertEqual(prepared['detector_jobs'], [])
+        output = Path(prepared['working_directory'])
+        exposure = handoff.read(output/'full_population_exposure.json')
+        self.assertEqual(exposure['sources'][0]['original_full_exposure']['full_source_trials'], 1000)
+        self.assertEqual(exposure['original_saved_GEN_events'], 0)
+        self.assertIn('JOB COLLECT', (output/'response.dag').read_text())
+
+    def test_fresh_full_census_ledgers_can_be_archived_off_afs(self):
+        self.config.update(fresh_census=True, first_sim_source=True,
+                           preparation_mask_unused=True,
+                           archive_census_ledgers_to=self.config['output_eos_directory']+'/authority')
+        publications = []
+        def publish(path, destination):
+            with tarfile.open(path) as stream:
+                self.assertTrue(any(m.name.endswith('/selection_ledger.json') for m in stream.getmembers()))
+            publications.append((path.stat().st_size, destination))
+            return dict(path=destination+'/'+path.name,sha256=handoff.sha(path),bytes=path.stat().st_size,
+                        independent_sha256_readback=True)
+        with patch('run_shift_sm_postprocessing.publish', side_effect=publish):
+            prepared = handoff.prepare(self.config, 'e'*64)
+        output = Path(prepared['working_directory'])
+        self.assertTrue(publications)
+        self.assertFalse(list((output/'response_authority').rglob('selection_ledger.json')))
+        self.assertTrue((output/'census_ledger_archive.json').is_file())
+        self.assertEqual(prepared['full_original_saved_events'], 7)
+
     def test_global_comparison_handoff_never_redraws_or_changes_q(self):
         first = dict(self.record, result_sha256=handoff.sha(self.root/'result.json'),
             fresh_census=True, first_sim_source=True, preparation_mask_unused=True)

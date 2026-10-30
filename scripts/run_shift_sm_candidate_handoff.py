@@ -66,12 +66,20 @@ def reserve_budget(path, source_id, plan_sha256, count):
         reservations = state['reservations']
         record = dict(plan_sha256=plan_sha256, detector_jobs=count)
         if source_id in reservations:
-            if reservations[source_id] != record:
+            previous = reservations[source_id]
+            if {key: previous[key] for key in record} != record:
                 raise ValueError('Existing source admission reservation differs')
-            return record
+            return previous
         used = sum(row['detector_jobs'] for row in reservations.values())
         if used+count > state['maximum_detector_jobs']:
             raise ValueError('Global detector budget exhausted; preserve this complete source draw')
+        if 'next_detector_job' in state:
+            base, limit = state['next_detector_job'], state['detector_job_limit']
+            if (type(base) is not int or type(limit) is not int
+                    or not 100000 <= base <= base+count < limit <= 6600000):
+                raise ValueError('Reserved detector identity pool is exhausted or invalid')
+            record['detector_job_base'] = base
+            state['next_detector_job'] = base+max(count, 1)
         reservations[source_id] = record
         save(path, state)
         return record
@@ -79,8 +87,11 @@ def reserve_budget(path, source_id, plan_sha256, count):
 
 def feature_record(config, result, temporary):
     """Use hash-bound local/returned features, or download the published census."""
+    family = result['source']['stratum'].split('_', 1)[0]
+    if family not in ('qcd', 'dy', 'jpsi'):
+        raise ValueError('Require a supported ordinary SM source family')
     published = [row for row in result['prepared_publications']
-        if row.get('name') == 'qcd_features.json.gz']
+        if row.get('name') == family+'_features.json.gz']
     if len(published) != 1 or published[0]['bytes'] > 32*MIB:
         raise ValueError('Require one bounded published full feature census')
     expected = published[0]
@@ -125,7 +136,10 @@ def validate_preparation(config):
     for record in (result, status):
         if record.get('complete') is not True or record.get('exit_code') != 0:
             raise ValueError('GEN preparation did not complete successfully')
-    if result.get('request_sha256') != sha(request) or not result.get('selected_source'):
+    empty = (result.get('empty_source') is True and result.get('selected_events') == 0
+             and result.get('source', {}).get('saved_events') == 0
+             and result['source'].get('full_source_trials', 0) > 0)
+    if result.get('request_sha256') != sha(request) or not (result.get('selected_source') or empty):
         raise ValueError('GEN preparation result belongs to another request or lacks admission')
     return directory, result
 
@@ -216,7 +230,23 @@ def prepare(config, config_sha256):
     maximum = config.get('maximum_events', 1000)
     if type(maximum) is not int or not 1 <= maximum <= 1000:
         raise ValueError('Each source draw must have an explicit bound of at most 1000 originals')
-    if config.get('frozen_response_draw'):
+    if result.get('empty_source') is True:
+        source = result['source']
+        original = dict(source_id=result['source_id'],stratum=source['stratum'],
+            original_raw_gen_sha256=source['gen_sha256'],prepared_gen_sha256=source['gen_sha256'],
+            original_result_path=str(directory/'result.json'),original_result_sha256=sha(directory/'result.json'),
+            original_full_exposure=source,original_saved_events=0,old_selected_events=0)
+        draw = dict(plan=dict(schema='shift-sm-prospective-response-benchmark-v1',
+            selected=[],selected_events=0,population_events=0,maximum_events=maximum,
+            selection_seed=config['selection_seed'],draw_frozen=True,strata=[]),
+            exposure=dict(schema='shift-sm-response-full-population-exposure-v1',
+                sources=[original],original_saved_GEN_events=0,
+                includes_sources_with_no_benchmark_event_drawn=True),
+            source_pins=dict(schema='shift-sm-prospective-source-pins-v1',sources=[]),
+            missed_candidates=[],fresh_authorities={})
+        verify_exposure(draw['exposure'],draw['plan'])
+        features = dict(published_feature=None)
+    elif config.get('frozen_response_draw'):
         draw, features = frozen_source_draw(config['frozen_response_draw'], result, maximum)
     else:
         with tempfile.TemporaryDirectory(prefix='shift-sm-candidate-') as temporary:
@@ -229,11 +259,32 @@ def prepare(config, config_sha256):
                     raise ValueError('Fresh census requires an explicitly unused pre-SIM source')
                 record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
             draw = prepare_draw([record], config['selection_seed'],
-                controls_per_cell=config.get('controls_per_cell', 1), maximum_events=maximum)
+                controls_per_cell=config.get('controls_per_cell', 1), maximum_events=maximum,
+                maximum_candidates_per_source=config.get('maximum_candidates_per_source'))
     if draw['missed_candidates']:
         raise ValueError('Original frozen admission omitted credible candidates; review before handoff')
     output.mkdir(parents=True)
-    materialize_fresh_authorities(draw, output/'response_authority')
+    if config.get('archive_census_ledgers_to'):
+        from run_shift_sm_postprocessing import publish
+        destination = config['archive_census_ledgers_to']
+        if not destination.startswith(eos+'/'):
+            raise ValueError('Census archive must remain inside this source output')
+        with tempfile.TemporaryDirectory(prefix='sm-census-ledger-') as temporary:
+            ledger_dir = Path(temporary)/'ledgers'
+            materialize_fresh_authorities(draw, output/'response_authority', ledger_dir)
+            archive = Path(temporary)/'full_census_ledgers.tar.gz'
+            members = []
+            with tarfile.open(archive, 'w:gz') as stream:
+                for path in sorted(ledger_dir.glob('*/selection_ledger.json')):
+                    name = str(path.relative_to(ledger_dir))
+                    members.append(dict(name=name,bytes=path.stat().st_size,sha256=sha(path)))
+                    stream.add(path,arcname=name,recursive=False)
+            if archive.stat().st_size > 4*MIB:
+                raise ValueError('Census archive exceeds its source storage allowance')
+            publication = publish(archive,destination)
+            save(output/'census_ledger_archive.json',dict(publication=publication,members=members))
+    else:
+        materialize_fresh_authorities(draw, output/'response_authority')
     save(output/'plan.json', draw['plan'])
     plan_pin = pin(output/'plan.json')
     save(output/'full_population_exposure.json', draw['exposure'])
@@ -243,6 +294,8 @@ def prepare(config, config_sha256):
     reservation = reserve_budget(config['admission_budget_path'], source_id,
         plan_pin['sha256'], len(selected))
     jobs, detectors, frozen_files = [], [], []
+    if (output/'census_ledger_archive.json').exists():
+        frozen_files.append(pin(output/'census_ledger_archive.json'))
     if config.get('frozen_response_draw'):
         frozen_files.extend(config['frozen_response_draw'].values())
         frozen_files.extend(dict(path=source['original_result_path'], sha256=source['original_result_sha256'])
@@ -272,7 +325,7 @@ def prepare(config, config_sha256):
             raise ValueError('Source-independent handoff received another cohort')
         source = sources[0]
         gate = add('PREFLIGHT', preflight_request(plan_pin, source, frozen), 100)
-        base = config['detector_job_base']
+        base = reservation.get('detector_job_base', config['detector_job_base'])
         if type(base) is not int or base < 100000 or base+len(selected) >= 6600000:
             raise ValueError('Invalid reserved detector job/seed domain')
         for number, row in enumerate(selected):

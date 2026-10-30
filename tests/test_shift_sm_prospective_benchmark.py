@@ -152,16 +152,40 @@ class ProspectiveBenchmarkTest(unittest.TestCase):
         self.assertEqual(prepare_benchmark([row],'soft')['selected_events'],1)
         self.assertEqual(prepare_benchmark([],'empty')['selected_events'],0)
 
-    def test_duplicate_or_non_qcd_or_invalid_probability_is_rejected(self):
+    def test_duplicate_or_unsupported_process_or_invalid_probability_is_rejected(self):
         row=event(1)
         with self.assertRaisesRegex(ValueError,'Duplicate'):
             prepare_benchmark([row,copy.deepcopy(row)],'duplicate')
-        row['stratum']='dy_20toinf'
-        with self.assertRaisesRegex(ValueError,'ordinary QCD'):
+        row['stratum']='bsm_20toinf'
+        with self.assertRaisesRegex(ValueError,'ordinary SM'):
             prepare_benchmark([row],'wrong-process')
         row=event(1,probability=0.)
         with self.assertRaisesRegex(ValueError,'frozen admission'):
             prepare_benchmark([row],'bad-p')
+
+    def test_dy_and_jpsi_unknown_parents_are_protected_without_changing_qcd(self):
+        for family, expected in [('qcd', 10), ('dy', 30), ('jpsi', 30)]:
+            rows = [event(i, 'unknown_parent', native=2.) for i in range(1, 31)]
+            for row in rows:
+                row.update(stratum=family+'_20toinf', source_id=family+'_source')
+            result = prepare_benchmark(rows, 'fixed-before-response')
+            self.assertEqual(result['selected_events'], expected)
+            self.assertTrue(all(r['benchmark_inclusion_probability'] == expected/30
+                                for r in result['selected']))
+            self.assertTrue(all(r['diagnostic_analysis_weight'] == 2.*30/expected
+                                for r in result['selected']))
+
+    def test_candidate_cap_keeps_exact_probability_and_unknown_parent_protection(self):
+        rows = [event(i, native=2.) for i in range(1, 101)]
+        rows += [event(i, 'unknown_parent') for i in range(101, 121)]
+        for row in rows:
+            row['stratum'] = 'dy_20toinf'
+        result = prepare_benchmark(rows, 'before-response', maximum_candidates=10)
+        candidates = [r for r in result['selected'] if r['benchmark_region']=='credible_shallow_pointing']
+        self.assertEqual(len(candidates),10)
+        self.assertTrue(all(r['benchmark_inclusion_probability']==.1 and
+                            r['diagnostic_analysis_weight']==20. for r in candidates))
+        self.assertEqual(sum(r['benchmark_region']=='unknown_parent' for r in result['selected']),20)
 
     def test_over_budget_and_zero_control_support_are_rejected(self):
         with self.assertRaisesRegex(ValueError,'event budget'):

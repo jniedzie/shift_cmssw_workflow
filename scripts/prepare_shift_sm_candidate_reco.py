@@ -134,11 +134,12 @@ def source_rows(record):
     features = load_record(record['feature_path'], record['feature_sha256'])
     descriptor = authority['selected_source']
     exposure = authority['source']
-    if not exposure['stratum'].startswith('qcd_'):
-        raise ValueError('This response draw is for QCD sources only')
+    family = exposure['stratum'].split('_', 1)[0]
+    if family not in ('qcd', 'dy', 'jpsi'):
+        raise ValueError('This response draw is for ordinary SM sources only')
     publications = authority['prepared_publications']
     feature_pin = next((row for row in publications
-        if row['sha256'] == record['feature_sha256'] and row.get('name') == 'qcd_features.json.gz'), None)
+        if row['sha256'] == record['feature_sha256'] and row.get('name') == family+'_features.json.gz'), None)
     gen_pin = next((row for row in publications if row['sha256'] == descriptor['gen_sha256']
         and row['path'] == descriptor['gen']), None)
     if feature_pin is None or gen_pin is None or descriptor['normalization_record'] != exposure:
@@ -192,7 +193,8 @@ def source_rows(record):
     return rows, missed, pin, fresh
 
 
-def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, comparison=None):
+def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, comparison=None,
+                 maximum_candidates_per_source=None):
     """Retain every genuine candidate and positive support in each source cell."""
     if type(controls_per_cell) is not int or controls_per_cell < 1:
         raise ValueError('Require a positive control count per source/region cell')
@@ -216,7 +218,8 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
         if comparison is not None:
             comparison_rows.extend(rows)
         draw = (prepare_benchmark(rows, seed, maximum_events,
-            controls={name: controls_per_cell for name in CONTROL_COUNTS})
+            controls={name: controls_per_cell for name in CONTROL_COUNTS},
+            maximum_candidates=maximum_candidates_per_source)
             if comparison is None else dict(selected=[], strata=[]))
         selected.extend(draw['selected'])
         strata.extend(dict(cell, source_id=sid) for cell in draw['strata'])
@@ -259,7 +262,7 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
         fresh_authorities=fresh_authorities)
 
 
-def materialize_fresh_authorities(result, directory):
+def materialize_fresh_authorities(result, directory, ledger_directory=None):
     """Persist new first-SIM authorities; never overwrite original preparation."""
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
@@ -270,7 +273,9 @@ def materialize_fresh_authorities(result, directory):
         target.mkdir(exist_ok=True)
         for name, value in [('result.json', fresh['authority']), ('selection_ledger.json', fresh['ledger'])]:
             data = json.dumps(value, indent=2, allow_nan=False)+'\n'
-            path = target/name
+            path = (Path(ledger_directory)/sid/name
+                    if name == 'selection_ledger.json' and ledger_directory is not None else target/name)
+            path.parent.mkdir(parents=True, exist_ok=True)
             if path.exists() and path.read_text() != data:
                 raise ValueError('Refuse to overwrite a frozen response authority')
             path.write_text(data)
