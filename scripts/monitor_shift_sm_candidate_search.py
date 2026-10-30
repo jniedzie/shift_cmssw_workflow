@@ -22,6 +22,7 @@ from shift_condor_native import NativeCondorError, query
 
 
 SCHEMA = 'shift-sm-candidate-search-watchdog-v1'
+MAXIMUM_WALL_SECONDS = 7*86400
 ATTRIBUTES = ['ClusterId','ProcId','Owner','Iwd','JobStatus','JobUniverse',
     'JobBatchName','GlobalJobId','DAGManJobId','DAG_Status','DAG_NodesFailed','HoldReason','ExitCode','ExitBySignal']
 
@@ -67,8 +68,9 @@ def validate(config):
         raise ValueError('Aggregate polls must be separated by 30 to 60 seconds')
     if not 60 <= config.get('transition_grace_seconds', 900) <= 7200:
         raise ValueError('Use an explicit bounded transition grace')
-    if not 60 <= config.get('maximum_wall_seconds', 86400) <= 172800:
-        raise ValueError('Use an explicit monitor lifetime of at most two days')
+    wall_seconds = config.get('maximum_wall_seconds', 86400)
+    if type(wall_seconds) is not int or not 60 <= wall_seconds <= MAXIMUM_WALL_SECONDS:
+        raise ValueError('Use an explicit integer monitor lifetime of at most seven days')
     pin = config['plan']
     persistent(pin['path'])
     if digest(pin['path']) != pin['sha256']:

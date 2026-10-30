@@ -304,6 +304,20 @@ class CandidateHandoffTest(unittest.TestCase):
         self.assertTrue(all((self.root/sid/'shared_wave_ownership.json').exists()
             for sid in ('sourceA','sourceB')))
 
+    def test_weekend_manager_runtime_does_not_change_worker_lifetimes(self):
+        source = self.wave_source('sourceA')
+        config = self.wave_config([source])
+        config['manager_max_runtime_seconds'] = 96*3600
+        original = {str(p):p.read_bytes() for p in (self.root/'sourceA'/'jobs').rglob('*')
+                    if p.is_file()}
+        handoff.prepare_wave(config, 'f'*64)
+        self.assertEqual(handoff.manager_runtime_seconds(config), 96*3600)
+        self.assertEqual(original, {name:Path(name).read_bytes() for name in original})
+        self.assertEqual(handoff.manager_runtime_seconds({}), 86400)
+        for invalid in (True, 3599, 96*3600., 7*86400+1):
+            with self.assertRaisesRegex(ValueError, 'integer manager lifetime'):
+                handoff.manager_runtime_seconds(dict(manager_max_runtime_seconds=invalid))
+
     def test_wave_refuses_individual_owner_or_uncertain_submit(self):
         source = self.wave_source('owned')
         config = self.wave_config([source])

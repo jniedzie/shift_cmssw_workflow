@@ -547,10 +547,19 @@ def prefixed_dag(path, prefix, expected_jobs):
     return lines, mapping
 
 
+def manager_runtime_seconds(config):
+    """Allow a weekend owner without copying that lifetime to physics workers."""
+    seconds = config.get('manager_max_runtime_seconds', 86400)
+    if type(seconds) is not int or not 3600 <= seconds <= 7*86400:
+        raise ValueError('Use an integer manager lifetime between one hour and seven days')
+    return seconds
+
+
 def prepare_wave(config, config_sha256):
     """Group frozen source DAGs under one manager, preserving their ownership."""
     if config.get('schema') != WAVE_SCHEMA:
         raise ValueError('Unsupported candidate wave configuration')
+    manager_runtime_seconds(config)
     output = persistent_directory(config['output_directory'])
     wave_id, batch = config['wave_id'], config['job_batch_name']
     if not all(re.fullmatch(r'[A-Za-z0-9_.-]+', value) for value in (wave_id, batch)):
@@ -609,6 +618,7 @@ def prepare_wave(config, config_sha256):
 def submit_wave(config, manifest):
     """Submit one manager; recover only source receipts from its known proof."""
     verify_prepared(manifest, manifest['configuration_sha256'])
+    maximum_runtime = manager_runtime_seconds(config)
     rows = wave_sources(config)
     output = Path(manifest['working_directory'])
     for row in rows:
@@ -628,7 +638,7 @@ def submit_wave(config, manifest):
     if not manager.exists():
         run_condor(['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','2000','-maxidle','2000',
             '-autorescue','0','-notification','Never','-batch-name',config['job_batch_name'],
-            '-append','+MaxRuntime = 86400','-append','initialdir = '+str(output),
+            '-append','+MaxRuntime = '+str(maximum_runtime),'-append','initialdir = '+str(output),
             '-append','+SendCredential = True',
             '-append','on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
             '-append','periodic_release = False',str(output/'response.dag')], cwd=output, timeout=60)

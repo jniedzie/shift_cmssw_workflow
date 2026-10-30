@@ -169,6 +169,21 @@ class CandidateSearchMonitorTest(unittest.TestCase):
         self.assertFalse(result['terminal'])
         self.assertEqual(observer.call_count,0)
 
+    def test_weekend_lifetime_is_explicit_bounded_and_does_not_expire_on_sunday(self):
+        self.config['maximum_wall_seconds'] = 96*3600
+        with patch.object(monitor, 'persistent', side_effect=Path):
+            monitor.validate(self.config)
+        observer = Mock(return_value=dict(phase='running', terminal=False, problems=[]))
+        result = monitor.run_once(self.config, dict(started_epoch=1000),
+            now=1000+72*3600, observer=observer, writer=lambda path,value:None)
+        self.assertEqual(result['phase'], 'running')
+        self.assertEqual(observer.call_count, 1)
+        for invalid in (True, 96*3600., 7*86400+1):
+            self.config['maximum_wall_seconds'] = invalid
+            with patch.object(monitor, 'persistent', side_effect=Path):
+                with self.assertRaisesRegex(ValueError, 'integer monitor lifetime'):
+                    monitor.validate(self.config)
+
     def native_collection(self, shared=False):
         persistence = patch.object(monitor, 'persistent', side_effect=Path)
         persistence.start()
