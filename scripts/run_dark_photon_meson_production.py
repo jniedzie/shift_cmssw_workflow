@@ -2787,9 +2787,60 @@ def committed_direct_detector_credit(authority, live_ids):
     return amount
 
 
+def reviewed_registered_peer_storage(config, observation, state, authority):
+    """Reuse the account gate, releasing only sealed never-submitted sources."""
+    fresh = fresh_production_authority(config, reader=storage_pinned_read)
+    registration = fresh['storage_registration']
+    original = Path(config['directory'])/'config.json'
+    if (authority.get('science_configuration') != dict(path=str(original), sha256=durable.sha(original))
+            or authority.get('original_storage_registration') != fresh['authority']['storage_registration']
+            or config['minimum_eos_free_bytes'] != 50000000000):
+        raise ValueError('Shared storage reconciliation changed science or the safety floor')
+    snapshot = storage_pinned_read(registration['remaining_claim_authority'])
+    direct = durable.configuration(pinned_path(authority['direct_controller_configuration']))
+    previous = snapshot['state']['supplement_admission']
+    shared = direct['shared_registered_storage']
+    claims = {row['name']:row['reserved_bytes'] for row in registration['peer_reservations']}
+    if (snapshot['original_state_path'] != str(Path(direct['directory'])/'state.json')
+            or previous.get('whole_account_registration') is not True
+            or previous.get('shared_configuration') != shared['configuration']
+            or claims != dict(existing_verified_SM_and_BSM_remaining_writes=
+                              previous['required_free_bytes']-50000000000,
+                              bounded_9_mass_GEN_qualification=500000000)):
+        raise ValueError('Shared storage reconciliation lost its original protected peer scope')
+    _, evidence = durable.shared_registered_admission(direct, observation, shared)
+    if 'required_free_bytes' not in evidence:
+        raise RuntimeError('Shared account storage remains unknown')
+    closure = storage_pinned_read(authority['source_closure'])
+    peer_pin = closure['peer_configuration']
+    peer = storage_pinned_read(peer_pin)
+    if peer['directory'] != storage_pinned_read(shared['configuration'])['directory']:
+        raise ValueError('Source closure belongs to another account reservation')
+    canceled = reviewed_source_closure(config, authority['source_closure'], peer_pin)
+    gate = storage_ledger(peer['bulk_storage_gate'])
+    peer_state = storage_ledger(Path(peer['directory'])/'state.json')
+    if (gate['worklist_sha256'] != peer_pin['sha256']
+            or any(peer_state['batches'].get(name,{}).get('published') for name in canceled)
+            or not set(canceled) <= set(gate.get('allowed_batches',gate['per_batch_forecast_bytes']))):
+        raise ValueError('Source cancellation overlaps completed or unreserved storage')
+    credit = sum(gate['per_batch_forecast_bytes'][name] for name in canceled)
+    if not 0 < credit <= evidence['meson_forecast_bytes']:
+        raise ValueError('Source cancellation exceeds the still-protected source claim')
+    reservation = evidence['required_free_bytes']-50000000000-credit+500000000
+    own_gate = storage_ledger(config['bulk_storage_gate'])
+    # Keep the entire new-grid allocation protected until its ordinary publication.
+    future = sum(value for name,value in own_gate['per_batch_forecast_bytes'].items()
+                 if not state.get('batches',{}).get(name,{}).get('published'))
+    return reservation, future, dict(shared_account_gate=evidence,
+        canceled_unsubmitted_source_bytes=credit, canceled_source_batches=len(canceled),
+        qualification_reservation_bytes=500000000, remaining_own_bytes=future)
+
+
 def reviewed_remaining_storage(config, observation, state, persist_terminal_cache=True):
     """Count remaining writes of a closed GEN census; quota already paid for GEN."""
     authority = storage_pinned_read(config['reviewed_remaining_storage_authority'])
+    if authority.get('schema') == 'shift-dp-reviewed-registered-peer-storage-v1':
+        return reviewed_registered_peer_storage(config, observation, state, authority)
     fresh = fresh_production_authority(config, reader=storage_pinned_read)
     original = Path(config['directory'])/'config.json'
     if (authority.get('schema') != 'shift-dp-reviewed-remaining-storage-v1'

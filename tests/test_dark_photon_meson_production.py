@@ -15,6 +15,43 @@ import prepare_dark_photon_meson_controller as replacement
 import audit_dark_photon_meson_coverage as coverage_audit
 
 
+class RegisteredStorage(unittest.TestCase):
+    def test_closed_sources_release_only_their_forecast_and_keep_the_new_grid(self):
+        config = dict(directory='/new', minimum_eos_free_bytes=50000000000,
+                      bulk_storage_gate='/new/gate')
+        shared = dict(configuration=dict(path='/old/owner/config',sha256='owner'), seal={})
+        snapshot = dict(original_state_path='/direct/state.json',state=dict(supplement_admission=dict(
+            whole_account_registration=True,shared_configuration=shared['configuration'],
+            required_free_bytes=136000000000)))
+        registration = dict(remaining_claim_authority={'path':'snapshot'},peer_reservations=[
+            dict(name='existing_verified_SM_and_BSM_remaining_writes',reserved_bytes=86000000000),
+            dict(name='bounded_9_mass_GEN_qualification',reserved_bytes=500000000)])
+        fresh = dict(storage_registration=registration,authority=dict(storage_registration={'path':'registration'}))
+        authority = dict(science_configuration=dict(path='/new/config.json',sha256='science'),
+            original_storage_registration={'path':'registration'},direct_controller_configuration={'path':'/direct/config'},
+            source_closure={'path':'closure'})
+        closure = dict(peer_configuration={'path':'/old/config','sha256':'old'})
+        records = {'snapshot':snapshot,'closure':closure,'/old/config':dict(directory='/old',bulk_storage_gate='/old/gate'),
+                   '/old/owner/config':dict(directory='/old')}
+        ledgers = {'/old/gate':dict(worklist_sha256='old',per_batch_forecast_bytes={'unused':12000000000}),
+                   '/old/state.json':dict(batches={}),'/new/gate':dict(per_batch_forecast_bytes={'new':19500000000})}
+        with patch.object(production,'fresh_production_authority',return_value=fresh), \
+             patch.object(production,'storage_pinned_read',side_effect=lambda p:records[p['path']]), \
+             patch.object(production,'pinned_path',side_effect=lambda p:Path(p['path'])), \
+             patch.object(production.durable,'sha',return_value='science'), \
+             patch.object(production.durable,'configuration',return_value=dict(directory='/direct',shared_registered_storage=shared)), \
+             patch.object(production.durable,'shared_registered_admission',return_value=(True,dict(required_free_bytes=135000000000,meson_forecast_bytes=12000000000))), \
+             patch.object(production,'storage_ledger',side_effect=lambda p:ledgers[str(p)]), \
+             patch.object(production,'reviewed_source_closure',return_value=['unused']):
+            peer,own,evidence=production.reviewed_registered_peer_storage(config,{}, {},authority)
+            self.assertEqual(peer,73500000000)
+            self.assertEqual(own,19500000000)
+            self.assertEqual(evidence['canceled_unsubmitted_source_bytes'],12000000000)
+            ledgers['/old/state.json']['batches']['unused']={'published':True}
+            with self.assertRaisesRegex(ValueError,'overlaps completed'):
+                production.reviewed_registered_peer_storage(config,{}, {},authority)
+
+
 class FixedExposure(unittest.TestCase):
     def test_new_meson_topup_passes_old_and_new_populations_to_the_merger(self):
         with tempfile.TemporaryDirectory() as temporary:
