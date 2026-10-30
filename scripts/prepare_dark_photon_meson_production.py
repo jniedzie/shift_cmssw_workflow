@@ -411,6 +411,20 @@ def prepare(configuration, output, scripts=None):
         files[str(target)] = sha(target)
     dependencies = [*config['prior_inventories'], config['darkcast_source_receipt'],
                     str(Path(config['qualified_template']) / 'seal.json')]
+    if config.get('baseline_sources') is not None:
+        from run_dark_photon_meson_production import baseline_sources
+        authority = config['baseline_sources']
+        source = pinned_path(authority)
+        target = output / 'baseline_sources.json'
+        shutil.copy2(source, target)
+        config['baseline_sources'] = dict(path=str(target), sha256=sha(target))
+        dependencies.append(str(target))
+        for point in {row['point'] for row in batches}:
+            for baseline in baseline_sources(config, point):
+                dependencies.extend([baseline['plan_path'],
+                    str(Path(baseline['plan_path']).parent / 'seal.json'), baseline['completed_point_path']])
+                if baseline.get('producer_configuration') is not None:
+                    dependencies.append(str(pinned_path(baseline['producer_configuration'])))
     if config.get('fresh_production_authority'):
         authority = config['fresh_production_authority']
         registration = fresh_production_authority(config)['authority']['storage_registration']
@@ -482,6 +496,9 @@ queue
         worker_disk=config.get('source_worker_disk_mb',64000)
         if type(worker_disk) is not int or not 4000<=worker_disk<=64000:
             raise ValueError('Source disk reservation must cover the qualified runtime and bounded source bank')
+        worker_memory = config.get('source_worker_memory_mb', 4000)
+        if type(worker_memory) is not int or not 1000 <= worker_memory <= 4000:
+            raise ValueError('Source memory reservation must be between 1000 and 4000 MB')
         text = f'''# Code style: AI-code. AI-generated fixed-M meson GEN worker.
 universe = vanilla
 executable = /usr/bin/python3
@@ -491,7 +508,7 @@ getenv = False
 environment = "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1"
 should_transfer_files = NO
 request_cpus = 1
-request_memory = 4000MB
+request_memory = {worker_memory}MB
 request_disk = {worker_disk}MB
 {requirements}+JobFlavour = "tomorrow"
 +MaxRuntime = {worker_runtime}

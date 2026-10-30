@@ -13,6 +13,46 @@ SPEC.loader.exec_module(admission)
 
 
 class AutomaticAdmissionTest(unittest.TestCase):
+    def test_reference_source_gate_uses_reference_runtime_and_rejects_a_changed_capsule(self):
+        import sys
+        sys.path.insert(0, str(SCRIPT.parent))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            batch = dict(batch='source', mass_gev=.7)
+            gen = root / 'batches/source/gen'
+            gen.mkdir(parents=True)
+            (gen.parent/'source_status.json').write_text(json.dumps(dict(complete=True, metadata_sha256={}, publication={})))
+            (gen/'contract.json').write_text(json.dumps(dict(source_placement=dict(profile_sha256='jaw'))))
+            (gen/'validation.json').write_text('{}')
+            manifest = dict(detector_runtime_profile=dict(runtime_sha256='reference-runtime'))
+            (gen/'manifest.json').write_text(json.dumps(manifest))
+            config = dict(directory=str(root), production_mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+                          detector_runtime=dict(runtime_sha256='reference-runtime'), jaw_source_profile=dict(sha256='jaw'))
+            with patch('run_dark_photon_meson_production.qualify_gen_source', return_value=dict(complete=True)) as qualify:
+                self.assertTrue(admission.source_evidence(config, batch)['complete'])
+                qualify.assert_called_once()
+                manifest['detector_runtime_profile']['runtime_sha256'] = 'wrong-runtime'
+                (gen/'manifest.json').write_text(json.dumps(manifest))
+                with self.assertRaisesRegex(ValueError, 'runtime or source placement'):
+                    admission.source_evidence(config, batch)
+                qualify.assert_called_once()
+
+    def test_reference_control_compares_its_mass_profile_not_unrelated_grid_points(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            model = Path(temporary) / 'model.json'
+            model.write_text('{}')
+            previous = dict(model_card=str(model), production_mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+                jaw_source_profile=dict(path='/old/jaw', sha256='jaw'),
+                detector_runtime=dict(runtime_sha256='runtime'),
+                reference_source=dict(runtime_profile=dict(path='/old/source', sha256='source'),
+                    bremsstrahlung_profiles={'0.7':dict(path='/old/profile', sha256='profile')}))
+            current = json.loads(json.dumps(previous))
+            current['reference_source']['bremsstrahlung_profiles']['0.22'] = dict(path='/new/other', sha256='other')
+            admission.matching_reference_physics(previous, current, dict(mass_gev=.7))
+            current['reference_source']['bremsstrahlung_profiles']['0.7']['sha256'] = 'changed'
+            with self.assertRaisesRegex(ValueError, 'source model or runtime'):
+                admission.matching_reference_physics(previous, current, dict(mass_gev=.7))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -73,6 +113,24 @@ class AutomaticAdmissionTest(unittest.TestCase):
         before = Path(self.config['bulk_storage_gate']).read_bytes()
         self.assertEqual(admission.maybe_create_bulk_gate(self.config, {}), gate)
         self.assertEqual(Path(self.config['bulk_storage_gate']).read_bytes(), before)
+
+    def test_external_fullchain_controls_require_prompt_displaced_and_real_passes(self):
+        controls = []
+        for index, prompt in enumerate([True, False]):
+            path = self.directory / ('control'+str(index)+'.json')
+            batch = dict(batch='control', point='prompt' if prompt else 'displaced', prompt=prompt)
+            path.write_text(json.dumps(dict(batches=[batch])))
+            controls.append(dict(batch='control', configuration=dict(path=str(path), sha256=admission.sha(path))))
+        self.config['automatic_bulk_admission']['qualified_controls'] = controls
+        with patch.object(admission, 'source_evidence', return_value={'GEN':'verified'}), \
+             patch.object(admission, 'reference_response', return_value=dict(effective_passing_events=0)):
+            with self.assertRaisesRegex(ValueError, 'measured passing events'):
+                admission.maybe_create_bulk_gate(self.config, self.state)
+        self.assertFalse(Path(self.config['bulk_storage_gate']).exists())
+        with patch.object(admission, 'source_evidence', return_value={'GEN':'verified'}), \
+             patch.object(admission, 'reference_response', return_value=dict(effective_passing_events=2)):
+            gate = admission.maybe_create_bulk_gate(self.config, self.state)
+        self.assertEqual(set(gate['allowed_batches']), {b['batch'] for b in self.config['batches']})
 
     def test_existing_gate_from_different_request_is_rejected(self):
         Path(self.config['bulk_storage_gate']).write_text(json.dumps(dict(

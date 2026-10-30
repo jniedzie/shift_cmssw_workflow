@@ -1442,7 +1442,8 @@ def qualify_gen_source(config, batch):
         full_gen_events=row['full_gen_events'], selected_events=row['events'],
         model_card_sha256=durable.sha(config['model_card']),
         detector_runtime_sha256=config['detector_runtime']['runtime_sha256'],
-        gen_runtime_sha256=config['gen_runtime']['sha256'],
+        gen_runtime_sha256=(config['detector_runtime']['runtime_sha256']
+            if source_mechanism(config) in REFERENCE_MECHANISMS else config['gen_runtime']['sha256']),
         source_qualification_only=True, zero_admission_is_valid=row['events'] == 0)
     path = directory/'gen_qualification.json'
     if path.exists():
@@ -3353,8 +3354,46 @@ def poll_storage_gate(config, state, decisions, bulk):
     return result
 
 
+def baseline_sources(config, point):
+    """Keep compatible completed populations when topping up another campaign."""
+    if config.get('baseline_sources') is None:
+        return []
+    inventory = read_pinned(config['baseline_sources'])
+    if inventory.get('schema') != 'shift-dp-compatible-baseline-sources-v1':
+        raise ValueError('Unknown baseline source inventory')
+    result = inventory.get('points', {}).get(point, [])
+    batch = next(row for row in config['batches'] if row['point'] == point)
+    seen = set()
+    for source in result:
+        plan_path = Path(source['plan_path'])
+        directory = plan_path.parent
+        if (not plan_path.is_absolute() or plan_path.resolve() != plan_path
+                or str(plan_path) in seen or source['point'] != point
+                or durable.authority(directory, point, config['conditions']['sha256']) !=
+                   {key: source[key] for key in ('plan_path', 'plan_sha256', 'seal_sha256', 'point', 'conditions_sha256')}):
+            raise ValueError('Baseline source changed, repeats, or belongs to another point')
+        seen.add(str(plan_path))
+        plan = read(plan_path)
+        conditions = plan.get('conditions')
+        if conditions is None:
+            producer = read_pinned(source['producer_configuration'])
+            conditions = producer['conditions']
+            if plan['detector_runtime']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']:
+                raise ValueError('Baseline reconstruction runtime differs from this production')
+        rows = [row for row in plan['points'] if row['point'] == point]
+        report = directory / 'completed_points' / (point + '.json')
+        if (conditions['sha256'] != config['conditions']['sha256']
+                or len(rows) != 1 or any(rows[0][key] != batch[key] for key in ('mass_gev', 'epsilon'))
+                or rows[0].get('production_mechanism') != source_mechanism(config)
+                or source.get('completed_point_path') != str(report)
+                or durable.sha(report) != source.get('completed_point_sha256')
+                or read(report).get('complete') is not True):
+            raise ValueError('Baseline requires the same physics and complete pinned response')
+    return result
+
+
 def cumulative_result(config,state,batch,transport,primitive):
-    """Keep the independent canary population when the bulk batch completes."""
+    """Keep completed populations from this campaign and its pinned baselines."""
     point=batch['point']
     condition=config['conditions']['sha256']
     for other in config['batches']:
@@ -3369,7 +3408,8 @@ def cumulative_result(config,state,batch,transport,primitive):
                     reason='Empty frozen admission retains its full GEN denominator and needs explicit rate-only completion',
                     batch=other['batch'], material_descriptor_sha256=durable.sha(selected))
                 return None
-    sources=[]
+    sources=list(baseline_sources(config, point))
+    baseline_count = len(sources)
     for other in config['batches']:
         production=batch_directory(config,other)/'production'
         report=production/'completed_points'/(point+'.json')
@@ -3378,7 +3418,7 @@ def cumulative_result(config,state,batch,transport,primitive):
         sources.append(durable.authority(production,point,condition))
     if config.get('regroup_complete_points') is True:
         expected=sum(other['point']==point and not other.get('gen_qualification_only') for other in config['batches'])
-        if len(sources) != expected:
+        if len(sources) != expected + baseline_count:
             if batch.get('operational_canary'):
                 return primitive
             state.setdefault('point_grouping',{}).setdefault(point,{}).update(
@@ -3601,6 +3641,7 @@ def histogram_promotion_floor(config, batch, result):
     if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
         expected={str(batch_directory(config,other)/'production/plan.json') for other in config['batches']
             if other['point']==batch['point'] and not other.get('gen_qualification_only')}
+        expected.update(source['plan_path'] for source in baseline_sources(config, batch['point']))
         if events > 0 and set(result.get('source_plans',[])) == expected:
             return dict(minimum_events=minimum,validated_histogram_events=events,eligible=True,
                 final_planned_point_complete=True,reason='Complete new-campaign point supersedes the legacy count floor')
@@ -4343,6 +4384,7 @@ def step(config,state):
             if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
                 expected={str(batch_directory(config,other)/'production/plan.json') for other in config['batches']
                     if other['point']==batch['point'] and not other.get('gen_qualification_only')}
+                expected.update(source['plan_path'] for source in baseline_sources(config, batch['point']))
                 if set(published.get('source_plans',[])) != expected:
                     raise ValueError('Final grouped histogram does not include every frozen source cohort')
                 for other in config['batches']:

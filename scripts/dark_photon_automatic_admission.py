@@ -39,6 +39,14 @@ def source_evidence(config, batch):
     audit = read(gen / 'validation.json')
     manifest = read(gen / 'manifest.json')
     publication = status['publication']
+    from dark_photon_senscalc import REFERENCE_MECHANISMS
+    if config.get('production_mechanism') in REFERENCE_MECHANISMS:
+        from run_dark_photon_meson_production import qualify_gen_source
+        if (manifest['detector_runtime_profile']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']
+                or contract['source_placement']['profile_sha256'] != config['jaw_source_profile']['sha256']):
+            raise ValueError('Reference GEN changed its runtime or source placement')
+        proof = qualify_gen_source(config, batch)
+        return dict(proof, batch=batch['batch'], mass_gev=batch['mass_gev'])
     if (not audit.get('runtime_validated')
             or contract.get('meson_model_card_sha256') != sha(config['model_card'])
             or contract['source_placement']['profile_sha256'] != config['jaw_source_profile']['sha256']
@@ -116,6 +124,31 @@ def fullchain_evidence(config, batch, entry, transport_factory=None):
         events=row['events'], full_gen_events=row['full_gen_events'], histogram_sumw=expected_sumw)
 
 
+def matching_reference_physics(previous, config, batch):
+    """Compare the physical point's recipe, allowing other masses in a new grid."""
+    def content(value):
+        if isinstance(value, dict):
+            if 'path' in value and 'sha256' in value:
+                return dict(sha256=value['sha256'])
+            return {k: content(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [content(v) for v in value]
+        return value
+    for key in ('production_mechanism', 'jaw_source_profile'):
+        if content(previous[key]) != content(config[key]):
+            raise ValueError('Reference control changes source physics: ' + key)
+    def source(settings):
+        result = dict(settings)
+        profiles = result.pop('bremsstrahlung_profiles', {})
+        if profiles:
+            result['bremsstrahlung_profile'] = profiles[str(batch['mass_gev'])]
+        return content(result)
+    if (source(previous['reference_source']) != source(config['reference_source'])
+            or sha(previous['model_card']) != sha(config['model_card'])
+            or previous['detector_runtime']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']):
+        raise ValueError('Reference control changes the source model or runtime')
+
+
 def reference_response(config, authority):
     """Use an exact completed same-point main-histogram control, without replay."""
     from watch_dark_photon_production import EosRpc, completed_histogram
@@ -125,22 +158,10 @@ def reference_response(config, authority):
     previous = read(pin['path'])
     if sha(pin['path']) != pin['sha256']:
         raise ValueError('Reference response configuration changed')
-    def content(value):
-        if isinstance(value,dict):
-            if 'path' in value and 'sha256' in value:
-                return dict(sha256=value['sha256'])
-            return {k:content(v) for k,v in value.items()}
-        if isinstance(value,list):
-            return [content(v) for v in value]
-        return value
-    for key in ('production_mechanism', 'reference_source', 'jaw_source_profile'):
-        if content(previous[key]) != content(config[key]):
-            raise ValueError('Reference response changes source physics: '+key)
-    if (sha(previous['model_card']) != sha(config['model_card'])
-            or previous['detector_runtime']['runtime_sha256'] != config['detector_runtime']['runtime_sha256']
-            or read(previous['main_histogrammer']['path'])['runtime'] != read(config['main_histogrammer']['path'])['runtime']):
-        raise ValueError('Reference response changes model, detector or histogram runtime')
     batch, = [b for b in previous['batches'] if b['batch'] == authority['batch']]
+    matching_reference_physics(previous, config, batch)
+    if read(previous['main_histogrammer']['path'])['runtime'] != read(config['main_histogrammer']['path'])['runtime']:
+        raise ValueError('Reference response changes model, detector or histogram runtime')
     matches = [b for b in config['batches'] if b['point'] == batch['point']]
     if not matches or any(any(b[k] != batch[k] for k in ('mass_gev','epsilon','target_mean_lab_flight_m')) for b in matches):
         raise ValueError('Reference response differs from requested physical point')
@@ -265,33 +286,63 @@ def maybe_create_bulk_gate(config, state):
             raise ValueError('Reference target and point budgets must stay inside the frozen allocation')
         return reference_gate(config,state,settings,forecasts)
     entries = state.get('batches', {})
-    gen_batches = [b for b in batches if b.get('gen_qualification_only')]
+    source_config = config
+    if settings.get('qualified_source_configuration') is not None:
+        pin = settings['qualified_source_configuration']
+        if sha(pin['path']) != pin['sha256']:
+            raise ValueError('External GEN qualification configuration changed')
+        source_config = read(pin['path'])
+    gen_batches = [b for b in source_config['batches'] if b.get('gen_qualification_only')]
     expected_masses = set(config['coverage_audit']['masses_gev'])
     if {b['mass_gev'] for b in gen_batches} != expected_masses:
         raise ValueError('Automatic admission needs native source qualification at every requested mass')
     sources = []
     for batch in gen_batches:
-        if not entries.get(batch['batch'], {}).get('gen_qualification', {}).get('complete'):
+        if source_config is config:
+            proof = entries.get(batch['batch'], {}).get('gen_qualification', {})
+        else:
+            matching_reference_physics(source_config, config, batch)
+            path = Path(source_config['directory']) / 'batches' / batch['batch'] / 'gen_qualification.json'
+            proof = read(path) if path.exists() else {}
+        if not proof.get('complete'):
             return None
-        evidence = source_evidence(config, batch)
+        evidence = source_evidence(source_config, batch)
         if evidence is None:
             return None
-        proof = entries[batch['batch']]['gen_qualification']
         for key in ('source_status_sha256', 'material_receipt_sha256'):
             if key in evidence and proof.get(key) != evidence[key]:
                 raise ValueError('Native qualification changed before automatic admission')
         sources.append(evidence)
-    canaries = [b for b in batches if b['operational_canary'] and not b.get('gen_qualification_only')]
-    if len(canaries) < 2 or not any(b['prompt'] for b in canaries) or not any(not b['prompt'] for b in canaries):
-        raise ValueError('Need separate prompt and displaced full-chain canaries')
+    external_controls = settings.get('qualified_controls')
     chains = []
-    for batch in canaries:
-        if source_evidence(config, batch) is None:
-            return None
-        result = fullchain_evidence(config, batch, entries.get(batch['batch'], {}))
-        if result is None:
-            return None
-        chains.append(result)
+    if external_controls is not None:
+        points = []
+        for authority in external_controls:
+            pin = authority['configuration']
+            previous = read(pin['path'])
+            if sha(pin['path']) != pin['sha256']:
+                raise ValueError('External full-chain control changed')
+            batch, = [b for b in previous['batches'] if b['batch'] == authority['batch']]
+            points.append(batch)
+            result = reference_response(config, authority)
+            if result is None:
+                return None
+            chains.append(result)
+        if (len({b['point'] for b in points}) < 2 or not any(b['prompt'] for b in points)
+                or not any(not b['prompt'] for b in points)
+                or not any(row['effective_passing_events'] > 0 for row in chains)):
+            raise ValueError('External controls need distinct prompt/displaced points and measured passing events')
+    else:
+        canaries = [b for b in batches if b['operational_canary'] and not b.get('gen_qualification_only')]
+        if len(canaries) < 2 or not any(b['prompt'] for b in canaries) or not any(not b['prompt'] for b in canaries):
+            raise ValueError('Need separate prompt and displaced full-chain canaries')
+        for batch in canaries:
+            if source_evidence(config, batch) is None:
+                return None
+            result = fullchain_evidence(config, batch, entries.get(batch['batch'], {}))
+            if result is None:
+                return None
+            chains.append(result)
     gate = dict(schema='shift-meson-bulk-storage-gate-v1', complete=True,
         automatic_canary_admission=True, all_requested_mass_GEN_audits_passed=True,
         worklist_sha256=config_sha, model_card_sha256=sha(config['model_card']),
@@ -299,6 +350,8 @@ def maybe_create_bulk_gate(config, state):
         source_qualification=sources, fullchain_qualification=chains,
         created_utc=datetime.now(timezone.utc).isoformat(),
         storage_remains_checked_before_each_admission=True)
+    if external_controls is not None:
+        gate['allowed_batches'] = [b['batch'] for b in batches]
     store_gate(gate_path,gate)
     return gate
 

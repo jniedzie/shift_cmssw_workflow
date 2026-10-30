@@ -16,6 +16,81 @@ import audit_dark_photon_meson_coverage as coverage_audit
 
 
 class FixedExposure(unittest.TestCase):
+    def test_new_meson_topup_passes_old_and_new_populations_to_the_merger(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            point = 'm0p7_prompt'
+            batch = dict(batch='new', point=point)
+            directory = root / 'batches/new/production'
+            (directory / 'completed_points').mkdir(parents=True)
+            (directory / 'completed_points' / (point+'.json')).write_text('{"complete":true}')
+            old = dict(plan_path='/old/plan.json', point=point)
+            new = dict(plan_path=str(directory/'plan.json'), point=point)
+            config = dict(directory=str(root), batches=[batch], conditions=dict(sha256='conditions'))
+            pending = dict(directory=str(root/'aggregate'))
+            with patch.object(production, 'baseline_sources', return_value=[old]), \
+                 patch.object(production.durable, 'authority', return_value=new), \
+                 patch.object(production.durable, 'reconcile_aggregate', return_value=pending) as merge, \
+                 patch.object(production.durable, 'submission', return_value=dict(cluster=10)), \
+                 patch.object(production, 'native_status', return_value='active'):
+                self.assertIsNone(production.cumulative_result(config, {}, batch, None, {}))
+            self.assertEqual(merge.call_args.args[3], [old, new])
+
+    def test_baselines_require_complete_unchanged_same_physics_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'completed_points').mkdir()
+            point = 'm0p7_prompt'
+            batch = dict(point=point, mass_gev=.7, epsilon=.001)
+            mechanism = 'senscalc-meson-fragmentation-bremsstrahlung'
+            plan = dict(conditions=dict(sha256='conditions'),
+                        points=[dict(batch, production_mechanism=mechanism)])
+            (root / 'plan.json').write_text(json.dumps(plan))
+            (root / 'seal.json').write_text('{}')
+            report = root / 'completed_points' / (point + '.json')
+            report.write_text(json.dumps(dict(complete=True)))
+            source = production.durable.authority(root, point, 'conditions')
+            source.update(completed_point_path=str(report), completed_point_sha256=production.durable.sha(report))
+            inventory = root / 'baseline_sources.json'
+            def configuration(sources):
+                inventory.write_text(json.dumps(dict(schema='shift-dp-compatible-baseline-sources-v1',
+                                                    points={point:sources})))
+                return dict(batches=[batch], conditions=dict(sha256='conditions'), production_mechanism=mechanism,
+                            baseline_sources=dict(path=str(inventory), sha256=production.durable.sha(inventory)))
+            config = configuration([source])
+            self.assertEqual(production.baseline_sources(config, point), [source])
+            with self.assertRaisesRegex(ValueError, 'repeats'):
+                production.baseline_sources(configuration([source, source]), point)
+            config = configuration([source])
+            config['batches'] = [dict(batch, epsilon=.002)]
+            with self.assertRaisesRegex(ValueError, 'same physics'):
+                production.baseline_sources(config, point)
+            config = configuration([source])
+            report.write_text(json.dumps(dict(complete=False)))
+            with self.assertRaisesRegex(ValueError, 'complete pinned response'):
+                production.baseline_sources(config, point)
+
+    def test_reference_GEN_qualification_records_the_actual_CMSSW_capsule(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            gen = root / 'gen'
+            gen.mkdir()
+            (root / 'source_status.json').write_text(json.dumps(dict(complete=True, metadata_sha256={}, parent={})))
+            (gen / 'material_selection_receipt.json').write_text('{}')
+            config = dict(production_mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+                          model_card=str(root / 'card.json'),
+                          detector_runtime=dict(runtime_sha256='actual-reference-GEN-runtime'))
+            (root / 'card.json').write_text('{}')
+            row = dict(full_gen_events=2, events=1)
+            with patch.object(production, 'batch_directory', return_value=root), \
+                 patch.object(production, 'adopted_row', return_value=row), \
+                 patch.object(production, 'prepare_material_admission', return_value={}), \
+                 patch('dark_photon_material_selection.bind', return_value=row):
+                proof = production.qualify_gen_source(config, {})
+            self.assertEqual(proof['gen_runtime_sha256'], 'actual-reference-GEN-runtime')
+            self.assertEqual(proof['full_gen_events'], 2)
+            self.assertEqual(proof['selected_events'], 1)
+
     def test_cleanup_recovery_is_optin_and_unrelated_jobs_keep_native_checks(self):
         self.assertIsNone(production.reviewed_main_cleanup_terminal({},dict(task='/other',cluster=10)))
         guard=dict(directory='/guard',no_GEN_or_detector_rerun=True,
