@@ -48,21 +48,24 @@ class CandidateRecoTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def record(self):
+    def record(self, source_id='supply_qcd_20toinf_test', raw_hash='a'*64, prepared_hash='b'*64):
         count = len(self.events)
-        source = dict(source_id='supply_qcd_20toinf_test', stratum='qcd_20toinf',
-            gen_sha256='a'*64, saved_events=count, full_source_trials=1000,
+        events = copy.deepcopy(self.events)
+        for row in events:
+            row.update(source_id=source_id, original_source_sha256=raw_hash, source_file_sha256=prepared_hash)
+        source = dict(source_id=source_id, stratum='qcd_20toinf',
+            gen_sha256=raw_hash, saved_events=count, full_source_trials=1000,
             physics_normalization_ready=False)
-        features = dict(schema='shift-gen-material-features-v1', events=self.events,
+        features = dict(schema='shift-gen-material-features-v1', events=events,
             maximum_events_per_source=None, prefix_requested=False,
             zero_GEN_muon_records_retained=True,
-            sources=[dict(sha256='b'*64, source_file_event_count=count)],
-            summary=dict(events=count, source_read_counts=[dict(source_file_sha256='b'*64,
+            sources=[dict(sha256=prepared_hash, source_file_event_count=count)],
+            summary=dict(events=count, source_read_counts=[dict(source_file_sha256=prepared_hash,
                 entire_input_file_read=True, events_read=count, source_file_event_count=count)]))
         feature_path = self.directory/'features.json.gz'
         with gzip.open(feature_path, 'wt') as stream:
             json.dump(features, stream)
-        descriptor = dict(gen='/eos/prepared.root', gen_sha256='b'*64, stratum='qcd_20toinf',
+        descriptor = dict(gen='/eos/prepared.root', gen_sha256=prepared_hash, stratum='qcd_20toinf',
             event_ids=[row['event_id'] for row in self.events],
             weights=[row['native_weight'] for row in self.events], selected_indices=self.indices,
             sampling_probabilities=[.25]*len(self.indices), normalization_record=source,
@@ -73,7 +76,7 @@ class CandidateRecoTest(unittest.TestCase):
             selected_source=descriptor, prepared_publications=[
                 dict(name='qcd_features.json.gz', path='/eos/features.json.gz',
                      sha256=checksum(feature_path), bytes=feature_path.stat().st_size),
-                dict(name='qcd_full_GEN.root', path=descriptor['gen'], sha256='b'*64, bytes=123)])
+                dict(name='qcd_full_GEN.root', path=descriptor['gen'], sha256=prepared_hash, bytes=123)])
         result_path = self.directory/'result.json'
         result_path.write_text(json.dumps(authority))
         return dict(result_path=str(result_path), result_sha256=checksum(result_path),
@@ -194,6 +197,36 @@ class CandidateRecoTest(unittest.TestCase):
         second = subprocess.run([sys.executable, str(script), str(config), str(output)], capture_output=True, text=True)
         self.assertNotEqual(second.returncode, 0)
         self.assertIn('Refuse to overwrite', second.stderr)
+
+    def test_cli_comparison_freezes_both_source_authorities_and_exposures(self):
+        original_directory = self.directory
+        records = []
+        for source in range(2):
+            self.directory = original_directory/str(source)
+            self.directory.mkdir()
+            record = self.record(source_id='source_'+str(source), raw_hash=str(source+1)*64,
+                                 prepared_hash=str(source+3)*64)
+            record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+            records.append(record)
+        self.directory = original_directory
+        config = self.directory/'comparison.json'
+        config.write_text(json.dumps(dict(sources=records, seed='fixed', maximum_events=32,
+            comparison=dict(maximum_per_bin_arm=16, control_fraction=.1))))
+        output = self.directory/'comparison'
+        script = Path(__file__).resolve().parents[1]/'scripts/prepare_shift_sm_candidate_reco.py'
+        result = subprocess.run([sys.executable, str(script), str(config), str(output)],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = json.loads((output/'plan.json').read_text())
+        exposure = json.loads((output/'exposure.json').read_text())
+        pins = json.loads((output/'source_pins.json').read_text())
+        self.assertEqual(plan['population_events'], 14)
+        self.assertEqual(exposure['original_saved_GEN_events'], 14)
+        self.assertEqual({s['comparison_arm'] for s in exposure['sources']}, {'smart', 'random'})
+        for pin in pins['sources']:
+            self.assertEqual(checksum(Path(pin['original_result_path'])), pin['original_result_sha256'])
+            self.assertEqual(pin['original_selected_source']['sampling_probabilities'], [1.]*7)
+        self.assertNotIn('controls_per_source_region', plan)
 
 
 if __name__ == '__main__':

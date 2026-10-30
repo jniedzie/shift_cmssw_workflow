@@ -74,7 +74,7 @@ def study_row(label, selected, result):
             or result['sampling_probabilities'] != [selected['existing_sampling_probability']]):
         raise ValueError('Detector result does not cover exactly the selected original')
     old = selected['existing_sampling_probability']
-    return dict(gen_sha256=selected['gen_sha256'], event_id=selected['event_id'],
+    row = dict(gen_sha256=selected['gen_sha256'], event_id=selected['event_id'],
         source_id=selected['source_id'], stratum=selected['stratum'],
         native_weight=selected['native_weight'], original_sampling_probability=old,
         benchmark_sampling_probability=q, sampling_probability=old*q,
@@ -86,6 +86,11 @@ def study_row(label, selected, result):
         cost=dict(sim_wall_seconds_per_event=result['stages']['1']['seconds'],
                   payload_wall_seconds_per_event=result['wall_seconds'],
                   cost_kind='single_event_actual'))
+    if 'comparison_arm' in selected:
+        if selected['comparison_arm'] not in ('smart', 'random'):
+            raise ValueError('Unknown frozen selection-comparison arm')
+        row['comparison_arm'] = selected['comparison_arm']
+    return row
 
 
 def verify_exposure(exposure, plan):

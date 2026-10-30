@@ -7,7 +7,8 @@ import sys
 import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from prepare_shift_sm_prospective_benchmark import benchmark_region, prepare_benchmark, validate_population
+from prepare_shift_sm_prospective_benchmark import (benchmark_region, prepare_benchmark,
+    prepare_selection_comparison, validate_population)
 
 
 def event(number, region='credible', native=1., probability=1.):
@@ -54,6 +55,51 @@ def authority_fixture():
 
 
 class ProspectiveBenchmarkTest(unittest.TestCase):
+    def comparison_population(self):
+        rows = []
+        for source in range(20):
+            for number in range(1, 101):
+                row = event(number, 'credible' if number <= 3 else ('deep' if number % 2 else 'miss'))
+                row.update(source_id='qcd_source_'+str(source), gen_sha256=hashlib.sha256(
+                    str(source).encode()).hexdigest(), event_id=[source+1, 1, number])
+                rows.append(row)
+        return rows
+
+    def test_comparison_uses_one_control_budget_and_equal_disjoint_arms(self):
+        rows = self.comparison_population()
+        result = prepare_selection_comparison(rows, 'predeclared')
+        budget = result['comparison_budgets'][0]
+        self.assertEqual(budget['smart_candidates'], 30)
+        self.assertEqual(budget['smart_controls'], 4)
+        arms = {arm: [row for row in result['selected'] if row['comparison_arm'] == arm]
+                for arm in ('smart', 'random')}
+        self.assertEqual(len(arms['smart']), len(arms['random']))
+        self.assertFalse({r['source_id'] for r in arms['smart']} &
+                         {r['source_id'] for r in arms['random']})
+        self.assertTrue(all(r['benchmark_inclusion_probability'] == 34/1000 for r in arms['random']))
+        controls = [r for r in arms['smart'] if r['benchmark_region'] != 'credible_shallow_pointing']
+        self.assertTrue(all(r['benchmark_inclusion_probability'] in (2/480, 2/490) for r in controls))
+        self.assertEqual(result, prepare_selection_comparison(list(reversed(rows)), 'predeclared'))
+
+    def test_comparison_rejects_old_masks_missing_sources_and_overlaps(self):
+        rows = self.comparison_population()
+        rows[0]['existing_sampling_probability'] = .5
+        with self.assertRaisesRegex(ValueError, 'untouched'):
+            prepare_selection_comparison(rows, 'old-mask')
+        with self.assertRaisesRegex(ValueError, 'Duplicate'):
+            prepare_selection_comparison([event(1), event(1)], 'overlap')
+        with self.assertRaisesRegex(ValueError, 'two independent'):
+            prepare_selection_comparison([event(1)], 'one-source')
+
+    def test_comparison_keeps_positive_support_when_candidates_exceed_budget(self):
+        rows = self.comparison_population()
+        result = prepare_selection_comparison(rows, 'small', maximum_per_bin_arm=8)
+        self.assertEqual(result['selected_events'], 16)
+        self.assertEqual(result['comparison_budgets'][0]['smart_candidates'], 6)
+        self.assertTrue(all(0 < c['benchmark_inclusion_probability'] <= 1 for c in result['strata']))
+        self.assertTrue(any(c['benchmark_region'] == 'credible_shallow_pointing'
+                            and c['benchmark_inclusion_probability'] < 1 for c in result['strata']))
+
     def test_complete_parent_unknown_muon_column_still_retained(self):
         row=event(1, 'unknown_column')
         self.assertEqual(benchmark_region(row), 'credible_shallow_pointing')

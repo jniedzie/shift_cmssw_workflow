@@ -7,6 +7,7 @@ weights stay unchanged; the additional candidate/control draw keeps q separate.
 Submission intents are durable: an uncertain submission is never repeated.
 """
 import argparse
+import copy
 from contextlib import ExitStack
 import fcntl
 import hashlib
@@ -27,6 +28,7 @@ from prepare_shift_sm_candidate_reco import materialize_fresh_authorities, prepa
 from prepare_shift_sm_response_jobs import (detector_request, envelope, persistent_directory,
     preflight_request, read, sha, submit_text)
 from shift_condor_native import native_env, query, run_condor
+from run_shift_sm_response_collection import verify_exposure
 
 
 MIB = 1048576
@@ -149,6 +151,52 @@ def verify_prepared(record, config_sha256):
     return record
 
 
+def frozen_source_draw(bundle, preparation, maximum):
+    """Project a globally frozen comparison onto one source without redrawing q."""
+    data = {name: read(checked(value['path'], value['sha256'])) for name, value in bundle.items()}
+    plan, exposure, pins = data['plan'], data['exposure'], data['source_pins']
+    if (plan.get('comparison_kind') != 'disjoint-source-smart-versus-random-v1'
+            or plan.get('draw_frozen') is not True
+            or pins.get('frozen_benchmark_sha256') != bundle['plan']['sha256']):
+        raise ValueError('Require an intact globally frozen selection comparison')
+    verify_exposure(exposure, plan)
+    sid = preparation['source_id']
+    sources = [row for row in pins['sources'] if row['source_id'] == sid]
+    originals = [row for row in exposure['sources'] if row['source_id'] == sid]
+    if len(sources) != 1 or len(originals) != 1:
+        raise ValueError('Global comparison does not uniquely cover this original source')
+    source, original = sources[0], originals[0]
+    descriptor = source['original_selected_source']
+    authority = read(checked(source['original_result_path'], source['original_result_sha256']))
+    if (source['full_original_exposure'] != preparation['source']
+            or authority['selected_source'] != descriptor
+            or descriptor['gen_sha256'] != preparation['selected_source']['gen_sha256']
+            or descriptor['event_ids'] != preparation['selected_source']['event_ids']
+            or descriptor['weights'] != preparation['selected_source']['weights']
+            or descriptor['selected_indices'] != list(range(preparation['source']['saved_events']))
+            or descriptor['sampling_probabilities'] != [1.]*preparation['source']['saved_events']):
+        raise ValueError('Globally frozen source differs from the actual complete GEN preparation')
+    selected = [row for row in plan['selected'] if row['source_id'] == sid]
+    if len(selected) > maximum:
+        raise ValueError('Frozen source exceeds the detector event budget')
+    if any(row['comparison_arm'] != plan['source_assignments'][sid] for row in selected):
+        raise ValueError('Frozen comparison arm differs from its source assignment')
+    # The arm budget and global cell counts describe the global experiment,
+    # not a new per-source draw. Keep that immutable authority by reference.
+    local_plan = copy.deepcopy({name: value for name, value in plan.items() if name not in
+        ('comparison_kind', 'comparison_budgets', 'source_assignments', 'strata', 'selected')})
+    local_plan.update(population_events=original['old_selected_events'], selected=selected,
+        selected_events=len(selected), maximum_events=maximum, strata=[],
+        global_comparison_plan=bundle['plan'], source_projection_does_not_redraw=True)
+    local_exposure = dict(exposure, sources=[original],
+                          original_saved_GEN_events=original['original_saved_events'])
+    verify_exposure(local_exposure, local_plan)
+    feature = next(row for row in preparation['prepared_publications'] if row['name']=='qcd_features.json.gz')
+    return dict(plan=local_plan, exposure=local_exposure,
+        source_pins=dict(schema='shift-sm-prospective-source-pins-v1', sources=[source]),
+        missed_candidates=[], fresh_authorities={}), dict(published_feature=feature)
+
+
 def prepare(config, config_sha256):
     if config.get('schema') != SCHEMA:
         raise ValueError('Unsupported candidate handoff configuration')
@@ -168,17 +216,20 @@ def prepare(config, config_sha256):
     maximum = config.get('maximum_events', 1000)
     if type(maximum) is not int or not 1 <= maximum <= 1000:
         raise ValueError('Each source draw must have an explicit bound of at most 1000 originals')
-    with tempfile.TemporaryDirectory(prefix='shift-sm-candidate-') as temporary:
-        features = feature_record(config, result, temporary)
-        record = dict(result_path=str(directory/'result.json'),
-            result_sha256=sha(directory/'result.json'), **features)
-        if config.get('fresh_census'):
-            if (config.get('first_sim_source') is not True
-                    or config.get('preparation_mask_unused') is not True):
-                raise ValueError('Fresh census requires an explicitly unused pre-SIM source')
-            record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
-        draw = prepare_draw([record], config['selection_seed'],
-            controls_per_cell=config.get('controls_per_cell', 1), maximum_events=maximum)
+    if config.get('frozen_response_draw'):
+        draw, features = frozen_source_draw(config['frozen_response_draw'], result, maximum)
+    else:
+        with tempfile.TemporaryDirectory(prefix='shift-sm-candidate-') as temporary:
+            features = feature_record(config, result, temporary)
+            record = dict(result_path=str(directory/'result.json'),
+                result_sha256=sha(directory/'result.json'), **features)
+            if config.get('fresh_census'):
+                if (config.get('first_sim_source') is not True
+                        or config.get('preparation_mask_unused') is not True):
+                    raise ValueError('Fresh census requires an explicitly unused pre-SIM source')
+                record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+            draw = prepare_draw([record], config['selection_seed'],
+                controls_per_cell=config.get('controls_per_cell', 1), maximum_events=maximum)
     if draw['missed_candidates']:
         raise ValueError('Original frozen admission omitted credible candidates; review before handoff')
     output.mkdir(parents=True)
@@ -192,6 +243,10 @@ def prepare(config, config_sha256):
     reservation = reserve_budget(config['admission_budget_path'], source_id,
         plan_pin['sha256'], len(selected))
     jobs, detectors, frozen_files = [], [], []
+    if config.get('frozen_response_draw'):
+        frozen_files.extend(config['frozen_response_draw'].values())
+        frozen_files.extend(dict(path=source['original_result_path'], sha256=source['original_result_sha256'])
+                            for source in draw['source_pins']['sources'])
     dag = ['# Code style: AI-code. Complete original GEN gate before independent candidate/control jobs.',
         'CONFIG '+str(output/'dagman.config')]
 

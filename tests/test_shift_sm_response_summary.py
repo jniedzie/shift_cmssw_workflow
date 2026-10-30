@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from shift_sm_response_labels import event_labels
 from summarize_shift_sm_response import (benchmark_report, candidate_regions, candidate_response_report,
     representative_candidate_pair, response_statistics, sampling_forecast, summarize, wilson_interval,
-    zero_success_population_upper)
+    zero_success_population_upper, selection_comparison_report)
 from prepare_shift_sm_prospective_benchmark import prepare_benchmark
 
 
@@ -28,6 +28,34 @@ def pair():
 
 
 class ResponseSummaryTest(unittest.TestCase):
+    def test_selection_comparison_requires_complete_arms_and_preserves_weighted_errors(self):
+        rows = []
+        selected = []
+        for number, arm in [(1, 'smart'), (2, 'random')]:
+            row = event(number, [pair(), pair()] if arm == 'smart' else [])
+            row.update(source_id=arm, comparison_arm=arm, native_weight=2.,
+                       benchmark_sampling_probability=.25, sampling_probability=.25,
+                       cost=dict(sim_wall_seconds_per_event=3600.))
+            row['labels']['retained_pairs'] = [dict(pair(), vz=0.), dict(pair(), vz=0.)] if arm == 'smart' else []
+            rows.append(row)
+            selected.append(dict(row, benchmark_inclusion_probability=.25,
+                                 cumulative_study_probability=.25))
+        plan = dict(comparison_kind='disjoint-source-smart-versus-random-v1', selected=selected,
+            selected_events=2, source_assignments={'smart':'smart','random':'random'},
+            comparison_budgets=[dict(stratum='qcd_20toinf',events_per_arm=1)])
+        result = selection_comparison_report(rows, plan)
+        group = result['groups'][0]
+        stats = group['arms']['smart']['targets']['both_both_good']
+        self.assertEqual(stats['weighted_pair_sum'], 16.)
+        self.assertEqual(stats['event_level_pair_second_moment'], 256.)
+        self.assertEqual(stats['effective_pairs_per_SIM_hour'], 1.)
+        self.assertIsNone(group['measured_information_per_SIM_hour_ratio']['both_both_good'])
+        with self.assertRaisesRegex(ValueError, 'every frozen response'):
+            selection_comparison_report(rows[:1], plan)
+        rows[0]['benchmark_sampling_probability'] = .5
+        with self.assertRaisesRegex(ValueError, 'sampling probability'):
+            selection_comparison_report(rows, plan)
+
     def test_zero_successes_have_nonzero_upper_limit(self):
         result = response_statistics([event(i) for i in range(100)], 'both_both')
         self.assertGreater(result['raw_event_probability_interval95'][1], 0.)

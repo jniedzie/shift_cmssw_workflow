@@ -122,6 +122,112 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None):
         detector_jobs_submitted=False, actual_primary_converter_preflight_complete=False)
 
 
+def prepare_selection_comparison(rows, seed, maximum_per_bin_arm=256, control_fraction=.1):
+    """Freeze disjoint source arms before outcomes, with equal event budgets.
+
+    The source split is balanced within each generator bin. Smart selection
+    reserves a fraction of workers for controls across the whole arm, rather
+    than multiplying a control count by the number of input files. The random
+    arm samples uniformly from its complete saved population. Exact q is
+    conditional on the recorded source assignment; source assignment is not
+    another thinning probability in the arm's own full GEN exposure.
+    """
+    if (not isinstance(seed, str) or not seed or type(maximum_per_bin_arm) is not int
+            or maximum_per_bin_arm < 8 or not math.isfinite(control_fraction)
+            or not 0 < control_fraction < .5):
+        raise ValueError('Require a seed, at least eight events per arm and a positive control fraction below .5')
+    seen, by_bin, sources, raw_owners = set(), defaultdict(list), {}, {}
+    for row in rows:
+        if (not row['stratum'].startswith('qcd_') or row.get('unclassified_physical_model')
+                or row['existing_sampling_probability'] != 1.):
+            raise ValueError('Comparison requires untouched full-census ordinary QCD with p=1')
+        if identity(row) in seen or not math.isfinite(row['native_weight']):
+            raise ValueError('Duplicate identity or invalid native weight in comparison')
+        seen.add(identity(row))
+        sid = row['source_id']
+        authority = row['stratum'], row['gen_sha256']
+        if sid in sources and sources[sid] != authority:
+            raise ValueError('One source ID has conflicting original GEN authority')
+        sources[sid] = authority
+        if row['gen_sha256'] in raw_owners and raw_owners[row['gen_sha256']] != sid:
+            raise ValueError('One original GEN source cannot belong to two comparison source IDs')
+        raw_owners[row['gen_sha256']] = sid
+        by_bin[row['stratum']].append(row)
+    if not rows:
+        raise ValueError('Comparison requires a nonempty original population')
+    assignments, selected, cells, budgets = {}, [], [], []
+
+    def take(population, number, arm, stratum, region):
+        probability = number/len(population)
+        chosen = sorted(population, key=lambda row: draw_hash(seed+':'+arm, row))[:number]
+        cells.append(dict(stratum=stratum, comparison_arm=arm, benchmark_region=region,
+            population_events=len(population), selected_events=number,
+            benchmark_inclusion_probability=probability))
+        for row in chosen:
+            selected.append(dict(row, comparison_arm=arm, benchmark_region=benchmark_region(row),
+                benchmark_inclusion_probability=probability, cumulative_study_probability=probability,
+                diagnostic_analysis_weight=row['native_weight']/probability,
+                original_worker_analysis_weight=row['native_weight'],
+                draw_hash=draw_hash(seed+':'+arm, row)))
+
+    for stratum, population in sorted(by_bin.items()):
+        source_ids = sorted({row['source_id'] for row in population}, key=lambda sid:
+            hashlib.sha256(json.dumps([seed, 'source-arm', sid, sources[sid]],
+                                     separators=(',', ':')).encode()).hexdigest())
+        if len(source_ids) < 2:
+            raise ValueError('Each comparison bin needs at least two independent GEN sources')
+        assignments.update({sid: ('smart' if number % 2 == 0 else 'random')
+                            for number, sid in enumerate(source_ids)})
+        smart = [row for row in population if assignments[row['source_id']] == 'smart']
+        random = [row for row in population if assignments[row['source_id']] == 'random']
+        groups = defaultdict(list)
+        for row in smart:
+            groups[benchmark_region(row)].append(row)
+        candidates = groups.pop('credible_shallow_pointing', [])
+        capacity = min(maximum_per_bin_arm, len(smart), len(random))
+        control_minimum = len(groups)
+        candidate_count = min(len(candidates), max(0, capacity-control_minimum))
+        control_population = sum(len(group) for group in groups.values())
+        control_count = min(control_population, max(control_minimum,
+            math.ceil(candidate_count*control_fraction/(1-control_fraction))))
+        if candidate_count+control_count > capacity:
+            candidate_count = min(candidate_count, math.floor(capacity*(1-control_fraction)))
+            control_count = min(control_population, max(control_minimum,
+                math.ceil(candidate_count*control_fraction/(1-control_fraction))))
+        if candidate_count+control_count > capacity or (candidates and candidate_count == 0):
+            raise ValueError('Comparison budget cannot retain positive support in every smart region')
+        allocations = {region: 1 for region in groups}
+        # Largest remaining population per next slot; every region keeps q>0.
+        for _ in range(control_count-control_minimum):
+            region = max((name for name in groups if allocations[name] < len(groups[name])),
+                         key=lambda name: ((len(groups[name])-1)/(allocations[name]), name))
+            allocations[region] += 1
+        if candidates:
+            take(candidates, candidate_count, 'smart', stratum, 'credible_shallow_pointing')
+        for region, group in sorted(groups.items()):
+            take(group, allocations[region], 'smart', stratum, region)
+        number = candidate_count+control_count
+        if number == 0:
+            raise ValueError('Comparison produced an empty arm')
+        take(random, number, 'random', stratum, 'uniform_complete_population')
+        budgets.append(dict(stratum=stratum, events_per_arm=number,
+            smart_candidates=candidate_count, smart_controls=control_count,
+            actual_smart_control_fraction=control_count/number,
+            smart_population_events=len(smart), random_population_events=len(random)))
+    return dict(schema=SCHEMA, proposal_only=True, comparison_kind='disjoint-source-smart-versus-random-v1',
+        selection_seed=seed, population_events=len(rows), selected_events=len(selected),
+        maximum_events=2*maximum_per_bin_arm*len(by_bin), selected=selected, strata=cells,
+        source_assignments=assignments, comparison_budgets=budgets,
+        target_control_fraction=control_fraction, controls_budgeted_across_sources=True,
+        equal_event_budgets_do_not_imply_equal_CPU_cost=True,
+        source_assignment_is_not_an_extra_sampling_weight=True,
+        original_worker_weights_unchanged=True, benchmark_q_is_separate_from_original_frozen_p=True,
+        no_muon_energy_or_pt_cut=True, positive_q_for_every_nonempty_population_stratum=True,
+        full_original_GEN_exposure_must_be_preserved=True,
+        ordinary_campaign_publication_qualified=False, bulk_production_policy_qualified=False,
+        detector_jobs_submitted=False, actual_primary_converter_preflight_complete=False)
+
+
 def sha256(path):
     result = hashlib.sha256()
     with Path(path).open('rb') as source:

@@ -16,7 +16,8 @@ import json
 import math
 from pathlib import Path
 
-from prepare_shift_sm_prospective_benchmark import CONTROL_COUNTS, prepare_benchmark
+from prepare_shift_sm_prospective_benchmark import (CONTROL_COUNTS, prepare_benchmark,
+                                                  prepare_selection_comparison)
 from run_shift_sm_response_collection import verify_exposure
 from scan_shift_sm_muon_opportunities import parent_union_description, validate_census
 from shift_sm_response_features import _column_ratio, _station_misses, feature_values
@@ -191,15 +192,19 @@ def source_rows(record):
     return rows, missed, pin, fresh
 
 
-def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
+def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, comparison=None):
     """Retain every genuine candidate and positive support in each source cell."""
     if type(controls_per_cell) is not int or controls_per_cell < 1:
         raise ValueError('Require a positive control count per source/region cell')
     if type(maximum_events) is not int or maximum_events < 1 or not isinstance(seed, str) or not seed:
         raise ValueError('Require an explicit seed and positive event budget')
     selected, strata, exposures, pins, missed = [], [], [], [], []
+    comparison_rows = []
     source_ids, raw_hashes, fresh_authorities = set(), set(), {}
     for record in records:
+        if comparison is not None and not all(record.get(key) is True for key in
+                ('fresh_census', 'first_sim_source', 'preparation_mask_unused')):
+            raise ValueError('Comparison requires an untouched first-SIM full census for every source')
         rows, omitted, pin, fresh = source_rows(record)
         sid, raw = pin['source_id'], pin['original_raw_gen_sha256']
         if sid in source_ids or raw in raw_hashes:
@@ -208,12 +213,15 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
         raw_hashes.add(raw)
         if fresh is not None:
             fresh_authorities[sid] = fresh
-        draw = prepare_benchmark(rows, seed, maximum_events,
+        if comparison is not None:
+            comparison_rows.extend(rows)
+        draw = (prepare_benchmark(rows, seed, maximum_events,
             controls={name: controls_per_cell for name in CONTROL_COUNTS})
+            if comparison is None else dict(selected=[], strata=[]))
         selected.extend(draw['selected'])
         strata.extend(dict(cell, source_id=sid) for cell in draw['strata'])
         missed.extend(omitted)
-        if draw['selected']:
+        if draw['selected'] or comparison is not None:
             pins.append(pin)
         exposure = pin['full_original_exposure']
         exposures.append(dict(source_id=sid, stratum=pin['stratum'],
@@ -221,6 +229,12 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
             original_result_path=pin['original_result_path'], original_result_sha256=pin['original_result_sha256'],
             original_full_exposure=exposure, original_saved_events=exposure['saved_events'],
             old_selected_events=len(rows)))
+    comparison_plan = None
+    if comparison is not None:
+        comparison_plan = prepare_selection_comparison(comparison_rows, seed, **comparison)
+        selected, strata = comparison_plan['selected'], comparison_plan['strata']
+        for source in exposures:
+            source['comparison_arm'] = comparison_plan['source_assignments'][source['source_id']]
     if len(selected) > maximum_events:
         raise ValueError('All candidates and controls exceed the declared event budget')
     plan = dict(schema='shift-sm-prospective-response-benchmark-v1', proposal_only=True,
@@ -233,6 +247,9 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000):
         no_muon_energy_or_pt_cut=True, positive_q_for_every_nonempty_population_stratum=True,
         full_original_GEN_exposure_must_be_preserved=True, detector_jobs_submitted=False,
         ordinary_campaign_publication_qualified=False, bulk_production_policy_qualified=False)
+    if comparison_plan is not None:
+        plan.update(comparison_plan, maximum_events=maximum_events, draw_frozen=True)
+        plan.pop('controls_per_source_region')
     exposure = dict(schema='shift-sm-response-full-population-exposure-v1', sources=exposures,
         original_saved_GEN_events=sum(s['original_saved_events'] for s in exposures),
         includes_sources_with_no_benchmark_event_drawn=True)
@@ -273,7 +290,7 @@ def main():
     if args.output_directory.exists() and any(args.output_directory.iterdir()):
         raise ValueError('Refuse to overwrite or redraw a frozen response cohort')
     result = prepare_draw(config['sources'], config['seed'], config.get('controls_per_cell', 4),
-        config.get('maximum_events', 2000))
+        config.get('maximum_events', 2000), comparison=config.get('comparison'))
     args.output_directory.mkdir(parents=True, exist_ok=True)
     materialize_fresh_authorities(result, args.output_directory/'response_authority')
     plan = args.output_directory/'plan.json'

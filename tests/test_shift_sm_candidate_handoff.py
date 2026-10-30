@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_shift_sm_candidate_handoff as handoff
 import test_shift_sm_candidate_reco as candidate_fixture
+from prepare_shift_sm_candidate_reco import prepare_draw, materialize_fresh_authorities
 
 
 class CandidateHandoffTest(unittest.TestCase):
@@ -92,6 +93,47 @@ class CandidateHandoffTest(unittest.TestCase):
             handoff.prepare(self.config, 'e'*64)
         self.assertEqual(handoff.read(self.budget)['reservations'], {})
         self.assertFalse((Path(self.config['output_directory'])/'prepared.json').exists())
+
+    def test_global_comparison_handoff_never_redraws_or_changes_q(self):
+        first = dict(self.record, result_sha256=handoff.sha(self.root/'result.json'),
+            fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+        self.fixture.directory = self.root/'second'
+        self.fixture.directory.mkdir()
+        second = self.fixture.record(source_id='other_source', raw_hash='e'*64, prepared_hash='f'*64)
+        second.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+        self.fixture.directory = self.root
+        draw = prepare_draw([first, second], 'before-outcomes', maximum_events=32,
+                            comparison=dict(maximum_per_bin_arm=16, control_fraction=.1))
+        global_dir = self.root/'global'
+        materialize_fresh_authorities(draw, global_dir/'authority')
+        handoff.save(global_dir/'plan.json', draw['plan'])
+        draw['source_pins'].update(frozen_benchmark_sha256=handoff.sha(global_dir/'plan.json'))
+        bundle = {}
+        for name, data in [('plan', draw['plan']), ('exposure', draw['exposure']),
+                           ('source_pins', draw['source_pins'])]:
+            file = global_dir/(name+'.json')
+            handoff.save(file, data)
+            bundle[name] = handoff.pin(file)
+        self.config['frozen_response_draw'] = bundle
+        with patch.object(handoff, 'prepare_draw', side_effect=AssertionError('Must not redraw')):
+            result = handoff.prepare(self.config, 'e'*64)
+        expected = [row for row in draw['plan']['selected']
+                    if row['source_id'] == 'supply_qcd_20toinf_test']
+        self.assertEqual([job['selected'] for job in result['detector_jobs']], expected)
+        local = handoff.read(Path(result['working_directory'])/'plan.json')
+        self.assertTrue(local['source_projection_does_not_redraw'])
+        self.assertEqual(local['global_comparison_plan'], bundle['plan'])
+        # Projection counts only its own original source, preserving the global q.
+        exposure = handoff.read(Path(result['working_directory'])/'full_population_exposure.json')
+        self.assertEqual(exposure['original_saved_GEN_events'], 7)
+        for job in result['detector_jobs']:
+            request = handoff.read(Path(job['job_directory'])/'request.json')
+            self.assertEqual(request['detector_source']['sampling_probabilities'], [1.]*7)
+            self.assertEqual(request['benchmark_inclusion_probability'],
+                             job['selected']['benchmark_inclusion_probability'])
+        handoff.save(global_dir/'plan.json', dict(draw['plan'], selected=[]))
+        with self.assertRaisesRegex(ValueError, 'Frozen input changed'):
+            handoff.prepare(self.config, 'e'*64)
 
     def test_reservation_is_idempotent_and_binding_cannot_change(self):
         handoff.reserve_budget(self.budget, 'source', 'a'*64, 7)

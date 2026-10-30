@@ -589,12 +589,79 @@ def candidate_response_report(complete_rows, partial_rows, scope, historical_row
     return result
 
 
+def selection_comparison_report(rows, plan):
+    """Compare complete frozen arms, keeping generator bins and errors separate."""
+    if plan.get('comparison_kind') != 'disjoint-source-smart-versus-random-v1':
+        raise ValueError('Require a frozen smart-versus-random comparison plan')
+    def key(row):
+        return row['gen_sha256'], tuple(row['event_id'])
+    expected = {key(row): row for row in plan['selected']}
+    actual = {key(row): row for row in rows}
+    if (len(expected) != plan['selected_events'] or len(actual) != len(rows)
+            or set(expected) != set(actual)):
+        raise ValueError('Require every frozen response exactly once; pending/failed events are not zero')
+    for event_key, row in actual.items():
+        original = expected[event_key]
+        arm = plan['source_assignments'][row['source_id']]
+        if (row.get('comparison_arm') != arm or original['comparison_arm'] != arm
+                or row['source_id'] != original['source_id'] or row['stratum'] != original['stratum']
+                or row['native_weight'] != original['native_weight']
+                or row['benchmark_sampling_probability'] != original['benchmark_inclusion_probability']
+                or row['sampling_probability'] != original['cumulative_study_probability']):
+            raise ValueError('Response changed frozen arm, original weight or sampling probability')
+    groups = []
+    for budget in plan['comparison_budgets']:
+        stratum, arms = budget['stratum'], {}
+        for arm in ('smart', 'random'):
+            sample = [row for row in rows if row['stratum'] == stratum and row['comparison_arm'] == arm]
+            if len(sample) != budget['events_per_arm']:
+                raise ValueError('Comparison arms differ from their frozen equal event budget')
+            hours = math.fsum(row['cost']['sim_wall_seconds_per_event'] for row in sample)/3600
+            if not math.isfinite(hours) or hours <= 0:
+                raise ValueError('Require measured positive simulation costs in both comparison arms')
+            targets = {category: response_statistics(sample, category) for category in CATEGORIES}
+            for value in targets.values():
+                value['effective_pairs_per_SIM_hour'] = value['effective_pair_contributions']/hours
+            histograms = []
+            for category in MAP_CATEGORIES:
+                for field, edges in DEFAULT_HISTOGRAM_EDGES.items():
+                    vectors = [(row['native_weight']/row['sampling_probability'],
+                        pair_histograms(row['labels']['retained_pairs'])[category][field]['counts'])
+                        for row in sample]
+                    total = [math.fsum(w*v[i] for w, v in vectors) for i in range(len(edges)+1)]
+                    second = [math.fsum((w*v[i])**2 for w, v in vectors) for i in range(len(edges)+1)]
+                    histograms.append(dict(category=category, field=field, edges=list(edges),
+                        raw_counts=[sum(v[i] for _, v in vectors) for i in range(len(edges)+1)],
+                        event_weighted_sum=total, event_weighted_second_moment=second,
+                        effective_pairs_per_SIM_hour=[a*a/b/hours if b else 0.
+                                                     for a, b in zip(total, second)]))
+            arms[arm] = dict(events=len(sample), total_SIM_hours=hours, targets=targets,
+                tails={category: {tail: response_statistics(sample, category, tail) for tail in TAILS}
+                       for category in MAP_CATEGORIES}, histograms=histograms)
+        ratios = {}
+        for category in MAP_CATEGORIES:
+            smart = arms['smart']['targets'][category]['effective_pairs_per_SIM_hour']
+            random = arms['random']['targets'][category]['effective_pairs_per_SIM_hour']
+            ratios[category] = smart/random if random else None
+        groups.append(dict(stratum=stratum, arms=arms, measured_information_per_SIM_hour_ratio=ratios))
+    return dict(schema='shift-sm-selection-comparison-result-v1', groups=groups,
+        primary_category='both_both_good', secondary_category='both_both',
+        complete_frozen_draw=True, original_event_is_error_unit=True,
+        source_arms_are_disjoint=True, arms_must_not_be_merged_as_repeated_exposure=True,
+        ratios_are_point_estimates_not_significance_or_confidence_bounds=True,
+        zero_reference_ratio_is_unknown_not_infinite_gain=True,
+        physics_normalization_ready=False, production_policy_qualified=False,
+        tail_statistics_improvement_qualified=False)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('joined_jsonl', type=Path)
     parser.add_argument('output', type=Path)
     parser.add_argument('--population', type=Path)
     parser.add_argument('--benchmark-plan', type=Path)
+    parser.add_argument('--selection-comparison-plan', type=Path,
+                        help='Frozen disjoint-source comparison; require all planned responses')
     parser.add_argument('--candidate-scope', type=Path,
                         help='Snapshot coverage JSON; compare whole-source candidates and controls')
     parser.add_argument('--policy-scopes', type=Path,
@@ -604,6 +671,8 @@ def main():
     parser.add_argument('--historical-jsonl', type=Path,
                         help='Separate historical comparison; never pooled with current responses')
     args = parser.parse_args()
+    if args.selection_comparison_plan and (args.population or args.benchmark_plan or args.candidate_scope):
+        parser.error('Selection comparison is separate from candidate snapshots and older benchmarks')
     if bool(args.population) != bool(args.benchmark_plan):
         parser.error('--population and --benchmark-plan are required together')
     if (args.partial_jsonl or args.historical_jsonl or args.policy_scopes) and not args.candidate_scope:
@@ -619,7 +688,9 @@ def main():
             return [json.loads(line) for line in stream if line.strip()]
 
     rows = load_rows(args.joined_jsonl)
-    if args.candidate_scope:
+    if args.selection_comparison_plan:
+        result = selection_comparison_report(rows, json.loads(args.selection_comparison_plan.read_text()))
+    elif args.candidate_scope:
         scope = json.loads(args.candidate_scope.read_text())
         policy_scopes = json.loads(args.policy_scopes.read_text()) if args.policy_scopes else None
         historical = load_rows(args.historical_jsonl) if args.historical_jsonl else None

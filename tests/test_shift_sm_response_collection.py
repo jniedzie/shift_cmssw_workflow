@@ -28,6 +28,10 @@ class ResponseCollectionTest(unittest.TestCase):
         self.assertEqual(row['native_weight']/row['sampling_probability'],40.)
         self.assertEqual(row['labels']['sampling_probability'],.5)
         self.assertTrue(row['prospective_holdout'])
+        selected['comparison_arm'] = 'random'
+        comparison = study_row(label, selected, result)
+        self.assertEqual(comparison.pop('comparison_arm'), 'random')
+        self.assertEqual(comparison, row)
 
     def test_mismatched_original_or_q_fails(self):
         selected=self.selected()
