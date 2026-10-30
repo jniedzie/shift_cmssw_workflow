@@ -75,6 +75,10 @@ def validate(config):
     persistent(pin['path'])
     if digest(pin['path']) != pin['sha256']:
         raise ValueError('Candidate search plan changed')
+    if config.get('global_draw_completion_path'):
+        completion = persistent(config['global_draw_completion_path'])
+        if not within(str(completion), config['root_directory']):
+            raise ValueError('Global draw completion must belong to this campaign')
     for path, expected in config.get('helper_sha256s', {}).items():
         if digest(persistent(path)) != expected:
             raise ValueError('Frozen aggregate watchdog helper changed: '+path)
@@ -223,7 +227,7 @@ def native_collector_closure(source_id, output, prepared, submission, collector,
         collector_status_sha256=digest(directory/'status.json'))
 
 
-def source_status(source, config, state, ads, now):
+def source_status(source, config, state, ads, now, global_draw_pending=False):
     sid = source['source_id']
     preparation = Path(source['preparation_directory'])
     output = Path(source['reconstruction_directory'])
@@ -248,9 +252,11 @@ def source_status(source, config, state, ads, now):
     handoff_live = any(within(ad.get('Iwd'), handoff_directory)
         and ad.get('JobStatus') in (1,2,6,7) for ad in local)
     grace = config.get('transition_grace_seconds',900)
-    if prepared_ok and submission is None and not handoff_live:
+    if prepared_ok and submission is None and not handoff_live and not global_draw_pending:
         if elapsed(state, 'handoff:'+sid, now) > grace:
             failures.append('Successful GEN preparation has no downstream handoff after grace')
+    elif global_draw_pending:
+        state.setdefault('transition_started', {}).pop('handoff:'+sid, None)
     if prepared is not None and submission is None and not handoff_live:
         if elapsed(state, 'submission:'+sid, now) > grace:
             failures.append('Frozen response draw has no submitted detector DAG after grace')
@@ -360,6 +366,11 @@ def observe(config, state, now=None, query_jobs=query):
                 problems.append('Manager '+manager['name']+' terminated unsuccessfully')
         managers.append(dict(name=manager['name'], live=bool(live), terminal=terminal))
     plan = read(config['plan']['path'])
+    draw_path = config.get('global_draw_completion_path')
+    draw_completion = optional(draw_path) if draw_path else None
+    if draw_completion is not None and draw_completion.get('complete') is not True:
+        raise ValueError('Global draw completion record is not successful')
+    global_draw_pending = bool(draw_path) and draw_completion is None
     sources = [dict(source_id=row['source_id'],preparation_directory=row['directory'],
         preparation_request_sha256=row['request_sha256'],
         reconstruction_directory=str(root/'reconstruction'/row['source_id']),
@@ -370,7 +381,8 @@ def observe(config, state, now=None, query_jobs=query):
     rows = []
     for source in sources:
         cached = state.setdefault('collected_sources',{}).get(source['source_id'])
-        row = cached or source_status(source,config,state,ads,now)
+        row = cached or source_status(source,config,state,ads,now,
+                                     global_draw_pending=global_draw_pending)
         rows.append(row)
         prep_closed = any(manager['directory'] == str(root/'preparation')
             and observed['terminal'] is not None for manager,observed in zip(config['managers'],managers))
@@ -383,7 +395,7 @@ def observe(config, state, now=None, query_jobs=query):
     science = [ad for ad in ads if ad.get('JobUniverse') == 5
         and (within(ad.get('Iwd'),root/'preparation'/'sources')
              or (within(ad.get('Iwd'),root/'reconstruction') and '/jobs/' in ad.get('Iwd','')))]
-    complete = (len(rows)>0 and all(row['collector_complete'] for row in rows)
+    complete = (not global_draw_pending and len(rows)>0 and all(row['collector_complete'] for row in rows)
         and not science and not problems and all(m['terminal'] and m['terminal']['successful'] for m in managers))
     counts = dict(expected_sources=len(rows), prepared_sources=sum(r['preparation_complete'] for r in rows),
         submitted_sources=sum(r['handoff_submitted'] for r in rows),
@@ -395,6 +407,7 @@ def observe(config, state, now=None, query_jobs=query):
     return dict(schema=SCHEMA,checked_epoch=now,terminal=complete,
         phase='complete' if complete else ('attention_required' if problems else 'running'),
         problems=problems,counts=counts,managers=managers,sources=rows,
+        global_draw_pending=global_draw_pending,
         physics_rates_measured=False,job_mutations=False)
 
 

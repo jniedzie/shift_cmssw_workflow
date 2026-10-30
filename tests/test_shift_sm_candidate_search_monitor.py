@@ -104,6 +104,32 @@ class CandidateSearchMonitorTest(unittest.TestCase):
         self.assertEqual(first['problems'],[])
         self.assertTrue(any('no downstream handoff' in row for row in last['problems']))
 
+    def test_global_draw_wait_does_not_hide_a_later_lost_handoff(self):
+        self.prepared()
+        completion = self.root/'draw/complete.json'
+        self.config['global_draw_completion_path'] = str(completion)
+        ads = [self.ad(101,self.root/'preparation'),self.ad(102,self.root/'handoff'),
+               self.ad(104,self.root/'preparation/sources/another_source',1,5,101)]
+        state = {}
+        query = Mock(return_value=ads)
+        monitor.observe(self.config,state,now=1000,query_jobs=query)
+        pending = monitor.observe(self.config,state,now=10000,query_jobs=query)
+        self.assertTrue(pending['global_draw_pending'])
+        self.assertFalse(any('no downstream handoff' in row for row in pending['problems']))
+        save(completion,dict(complete=True))
+        opened = monitor.observe(self.config,state,now=10010,query_jobs=query)
+        self.assertFalse(opened['global_draw_pending'])
+        self.assertFalse(any('no downstream handoff' in row for row in opened['problems']))
+        lost = monitor.observe(self.config,state,now=10071,query_jobs=query)
+        self.assertTrue(any('no downstream handoff' in row for row in lost['problems']))
+
+    def test_failed_global_draw_marker_is_not_successful_admission(self):
+        completion = self.root/'draw/complete.json'
+        self.config['global_draw_completion_path'] = str(completion)
+        save(completion,dict(complete=False))
+        with self.assertRaisesRegex(ValueError, 'not successful'):
+            monitor.observe(self.config,{},query_jobs=Mock(return_value=[]))
+
     def test_complete_requires_collector_native_manager_closure_and_no_science_workers(self):
         self.collected()
         self.close_managers()
