@@ -166,10 +166,12 @@ def verify_prepared(record, config_sha256):
 
 
 def frozen_source_draw(bundle, preparation, maximum):
-    """Project a globally frozen comparison onto one source without redrawing q."""
+    """Project a frozen cohort draw onto one source without redrawing q."""
     data = {name: read(checked(value['path'], value['sha256'])) for name, value in bundle.items()}
     plan, exposure, pins = data['plan'], data['exposure'], data['source_pins']
-    if (plan.get('comparison_kind') != 'disjoint-source-smart-versus-random-v1'
+    comparison = plan.get('comparison_kind') == 'disjoint-source-smart-versus-random-v1'
+    cohort = plan.get('controls_scope') == 'cohort' and plan.get('comparison_kind') is None
+    if (not (comparison or cohort)
             or plan.get('draw_frozen') is not True
             or pins.get('frozen_benchmark_sha256') != bundle['plan']['sha256']):
         raise ValueError('Require an intact globally frozen selection comparison')
@@ -193,7 +195,7 @@ def frozen_source_draw(bundle, preparation, maximum):
     selected = [row for row in plan['selected'] if row['source_id'] == sid]
     if len(selected) > maximum:
         raise ValueError('Frozen source exceeds the detector event budget')
-    if any(row['comparison_arm'] != plan['source_assignments'][sid] for row in selected):
+    if comparison and any(row['comparison_arm'] != plan['source_assignments'][sid] for row in selected):
         raise ValueError('Frozen comparison arm differs from its source assignment')
     # The arm budget and global cell counts describe the global experiment,
     # not a new per-source draw. Keep that immutable authority by reference.
@@ -201,7 +203,8 @@ def frozen_source_draw(bundle, preparation, maximum):
         ('comparison_kind', 'comparison_budgets', 'source_assignments', 'strata', 'selected')})
     local_plan.update(population_events=original['old_selected_events'], selected=selected,
         selected_events=len(selected), maximum_events=maximum, strata=[],
-        global_comparison_plan=bundle['plan'], source_projection_does_not_redraw=True)
+        source_projection_does_not_redraw=True)
+    local_plan['global_comparison_plan' if comparison else 'global_response_plan'] = bundle['plan']
     local_exposure = dict(exposure, sources=[original],
                           original_saved_GEN_events=original['original_saved_events'])
     verify_exposure(local_exposure, local_plan)

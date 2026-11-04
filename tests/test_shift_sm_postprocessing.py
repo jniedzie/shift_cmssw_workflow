@@ -168,12 +168,20 @@ class ResponsePublicationTest(unittest.TestCase):
                           selected_events=2) for r in self.plan['strata']]
             for row in cells:
                 row.pop('source_id')
-        global_pin = self.write('global.json',dict(draw_frozen=True,
+        global_plan = dict(draw_frozen=True,
             comparison_kind='disjoint-source-smart-versus-random-v1',
             source_assignments=dict(response=arm,other=arm),population_events=6,
-            selected_events=4,selected=global_rows,strata=cells))
-        local = dict(self.plan,selected=selected,strata=[],global_comparison_plan=global_pin,
+            selected_events=4,selected=global_rows,strata=cells)
+        if arm == 'cohort':
+            global_plan.pop('comparison_kind')
+            global_plan.pop('source_assignments')
+            global_plan['controls_scope'] = 'cohort'
+            for row in selected + global_rows + cells:
+                row.pop('comparison_arm', None)
+        global_pin = self.write('global.json', global_plan)
+        local = dict(self.plan,selected=selected,strata=[],
                      source_projection_does_not_redraw=True)
+        local['global_response_plan' if arm == 'cohort' else 'global_comparison_plan'] = global_pin
         plan_pin = self.write('plan.json',local)
         request = copy.deepcopy(self.collector_request)
         request['benchmark_plan'] = plan_pin
@@ -191,6 +199,13 @@ class ResponsePublicationTest(unittest.TestCase):
         self.install_global_projection('smart')
         source = self.discover()['selected']
         rows,_,_ = post.response_sampling_contract(source)
+        self.assertEqual([r['response_population_events'] for r in rows],[4,2])
+        self.assertEqual([r['response_selected_events'] for r in rows],[2,2])
+        self.assertEqual([r['response_sampling_probability'] for r in rows],[.5,1.])
+
+    def test_cohort_control_counts_are_not_repeated_for_each_published_source(self):
+        self.install_global_projection('cohort')
+        rows,_,_ = post.response_sampling_contract(self.discover()['selected'])
         self.assertEqual([r['response_population_events'] for r in rows],[4,2])
         self.assertEqual([r['response_selected_events'] for r in rows],[2,2])
         self.assertEqual([r['response_sampling_probability'] for r in rows],[.5,1.])

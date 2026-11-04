@@ -194,17 +194,20 @@ def source_rows(record):
 
 
 def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, comparison=None,
-                 maximum_candidates_per_source=None):
+                 maximum_candidates_per_source=None, controls_scope='source'):
     """Retain every genuine candidate and positive support in each source cell."""
     if type(controls_per_cell) is not int or controls_per_cell < 1:
         raise ValueError('Require a positive control count per source/region cell')
+    if controls_scope not in ('source', 'cohort') or (comparison is not None and controls_scope != 'source'):
+        raise ValueError('Use source controls, cohort controls, or the separate comparison design')
+    pooled = comparison is not None or controls_scope == 'cohort'
     if type(maximum_events) is not int or maximum_events < 1 or not isinstance(seed, str) or not seed:
         raise ValueError('Require an explicit seed and positive event budget')
     selected, strata, exposures, pins, missed = [], [], [], [], []
     comparison_rows = []
     source_ids, raw_hashes, fresh_authorities = set(), set(), {}
     for record in records:
-        if comparison is not None and not all(record.get(key) is True for key in
+        if pooled and not all(record.get(key) is True for key in
                 ('fresh_census', 'first_sim_source', 'preparation_mask_unused')):
             raise ValueError('Comparison requires an untouched first-SIM full census for every source')
         rows, omitted, pin, fresh = source_rows(record)
@@ -215,16 +218,16 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
         raw_hashes.add(raw)
         if fresh is not None:
             fresh_authorities[sid] = fresh
-        if comparison is not None:
+        if pooled:
             comparison_rows.extend(rows)
         draw = (prepare_benchmark(rows, seed, maximum_events,
             controls={name: controls_per_cell for name in CONTROL_COUNTS},
             maximum_candidates=maximum_candidates_per_source)
-            if comparison is None else dict(selected=[], strata=[]))
+            if not pooled else dict(selected=[], strata=[]))
         selected.extend(draw['selected'])
         strata.extend(dict(cell, source_id=sid) for cell in draw['strata'])
         missed.extend(omitted)
-        if draw['selected'] or comparison is not None:
+        if draw['selected'] or pooled:
             pins.append(pin)
         exposure = pin['full_original_exposure']
         exposures.append(dict(source_id=sid, stratum=pin['stratum'],
@@ -233,6 +236,13 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
             original_full_exposure=exposure, original_saved_events=exposure['saved_events'],
             old_selected_events=len(rows)))
     comparison_plan = None
+    cohort_plan = None
+    if controls_scope == 'cohort':
+        if maximum_candidates_per_source is not None:
+            raise ValueError('Cohort controls retain all candidates; no per-source candidate cap')
+        cohort_plan = prepare_benchmark(comparison_rows, seed, maximum_events,
+            controls={name: controls_per_cell for name in CONTROL_COUNTS})
+        selected, strata = cohort_plan['selected'], cohort_plan['strata']
     if comparison is not None:
         comparison_plan = prepare_selection_comparison(comparison_rows, seed, **comparison)
         selected, strata = comparison_plan['selected'], comparison_plan['strata']
@@ -252,6 +262,9 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
         ordinary_campaign_publication_qualified=False, bulk_production_policy_qualified=False)
     if comparison_plan is not None:
         plan.update(comparison_plan, maximum_events=maximum_events, draw_frozen=True)
+        plan.pop('controls_per_source_region')
+    if cohort_plan is not None:
+        plan.update(cohort_plan, controls_scope='cohort', draw_frozen=True)
         plan.pop('controls_per_source_region')
     exposure = dict(schema='shift-sm-response-full-population-exposure-v1', sources=exposures,
         original_saved_GEN_events=sum(s['original_saved_events'] for s in exposures),
@@ -295,7 +308,8 @@ def main():
     if args.output_directory.exists() and any(args.output_directory.iterdir()):
         raise ValueError('Refuse to overwrite or redraw a frozen response cohort')
     result = prepare_draw(config['sources'], config['seed'], config.get('controls_per_cell', 4),
-        config.get('maximum_events', 2000), comparison=config.get('comparison'))
+        config.get('maximum_events', 2000), comparison=config.get('comparison'),
+        controls_scope=config.get('controls_scope', 'source'))
     args.output_directory.mkdir(parents=True, exist_ok=True)
     materialize_fresh_authorities(result, args.output_directory/'response_authority')
     plan = args.output_directory/'plan.json'

@@ -190,6 +190,36 @@ class CandidateHandoffTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'budget exhausted'):
             handoff.reserve_budget(self.budget, 'second', 'b'*64, 4)
 
+    def test_cohort_controls_keep_one_draw_and_global_probabilities(self):
+        first = dict(self.record, result_sha256=handoff.sha(self.root/'result.json'),
+            fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+        self.fixture.directory = self.root/'second'
+        self.fixture.directory.mkdir()
+        second = self.fixture.record(source_id='other_source', raw_hash='e'*64, prepared_hash='f'*64)
+        second.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
+        self.fixture.directory = self.root
+        draw = prepare_draw([first, second], 'cohort-before-outcomes', maximum_events=32,
+                            controls_per_cell=1, controls_scope='cohort')
+        self.assertTrue(all(cell['selected_events'] == 1 for cell in draw['plan']['strata']
+                            if cell['benchmark_region'] != 'credible_shallow_pointing'))
+        directory = self.root/'global'
+        materialize_fresh_authorities(draw, directory/'authority')
+        handoff.save(directory/'plan.json', draw['plan'])
+        draw['source_pins']['frozen_benchmark_sha256'] = handoff.sha(directory/'plan.json')
+        bundle = {}
+        for name, value in [('plan', draw['plan']), ('exposure', draw['exposure']),
+                            ('source_pins', draw['source_pins'])]:
+            path = directory/(name+'.json')
+            handoff.save(path, value)
+            bundle[name] = handoff.pin(path)
+        self.config['frozen_response_draw'] = bundle
+        with patch.object(handoff, 'prepare_draw', side_effect=AssertionError('Must not redraw')):
+            result = handoff.prepare(self.config, 'e'*64)
+        local = handoff.read(Path(result['working_directory'])/'plan.json')
+        self.assertEqual(local['global_response_plan'], bundle['plan'])
+        expected = [r for r in draw['plan']['selected'] if r['source_id'] == 'supply_qcd_20toinf_test']
+        self.assertEqual([j['selected'] for j in result['detector_jobs']], expected)
+
     def test_failed_or_changed_preparation_is_not_reconstructed(self):
         result = handoff.read(self.root/'result.json')
         result['complete'] = False
