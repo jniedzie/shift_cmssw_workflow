@@ -350,6 +350,55 @@ class ResponseDiscoveryControllerTest(unittest.TestCase):
                 controller.response_source_cache(self.config,self.state,[])
 
 
+class PublisherDeploymentTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.helpers = self.root / 'helpers'
+        self.helpers.mkdir()
+        self.config = dict(frozen_files={}, refresh_quota=True, response_monitor_config={})
+        for name in ('run_shift_sm_postprocessing', 'shift_condor_native',
+                     'shift_event_weights', 'shift_nano_integrity',
+                     'run_shift_smart_sm_controller'):
+            path = self.helpers / (name + '.py')
+            path.write_text('# frozen helper\n')
+            self.config['frozen_files'][str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        self.worker = self.root / 'worker.sh'
+        self.worker.write_text('#!/bin/sh\n')
+        self.archive = self.root / 'frozen_tools.tar.gz'
+        self.archive.write_bytes(b'frozen archive')
+        checksum = hashlib.sha256(self.archive.read_bytes()).hexdigest()
+        self.config['worker_template'] = (
+            f'executable = {self.worker}\narguments = @REQUEST_SHA@ {checksum} publication\n'
+            f'transfer_input_files = @DIRECTORY@/request.json,{self.archive}\n')
+
+    def validate(self):
+        from run_shift_sm_postprocessing_controller import validate_deployment_inputs
+        validate_deployment_inputs(self.root, self.config, self.helpers)
+
+    def test_complete_closure_and_literal_worker_paths_pass(self):
+        self.validate()
+
+    def test_omitted_delayed_import_fails_before_any_source_arrives(self):
+        path = self.helpers / 'shift_event_weights.py'
+        del self.config['frozen_files'][str(path)]
+        path.unlink()
+        with self.assertRaisesRegex(ValueError, 'Missing pinned publication helper'):
+            self.validate()
+
+    def test_date_replacement_in_worker_path_is_rejected(self):
+        self.config['worker_template'] = self.config['worker_template'].replace(
+            str(self.worker), str(self.root / 'wrong_campaign' / 'worker.sh'))
+        with self.assertRaisesRegex(ValueError, 'worker executable is missing'):
+            self.validate()
+
+    def test_changed_archive_cannot_reuse_the_qualified_hash(self):
+        self.archive.write_bytes(b'another archive')
+        with self.assertRaisesRegex(ValueError, 'archive differs from its argument hash'):
+            self.validate()
+
+
 class PublisherQuotaTest(unittest.TestCase):
     def setUp(self):
         self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)

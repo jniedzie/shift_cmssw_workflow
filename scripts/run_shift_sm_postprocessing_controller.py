@@ -536,6 +536,46 @@ def poll(root, config, state):
     save(root / 'state.json', state)
 
 
+def validate_deployment_inputs(deployment, config, helpers_directory):
+    """Check the actual helper closure and worker paths before submitting work."""
+    deployment, helpers = Path(deployment), Path(helpers_directory)
+    pinned = {}
+    for name, checksum in config['frozen_files'].items():
+        path = deployment / name
+        if digest(path) != checksum:
+            raise ValueError('Frozen postprocessing deployment changed: ' + name)
+        pinned[path.resolve()] = checksum
+    required = ['run_shift_sm_postprocessing', 'shift_condor_native',
+                'shift_event_weights', 'shift_nano_integrity']
+    if config.get('refresh_quota'):
+        required.append('run_shift_smart_sm_controller')
+    if config.get('response_monitor_config'):
+        required.append('monitor_shift_sm_candidate_search')
+    for name in required:
+        path = helpers / (name + '.py')
+        if not path.is_file() or path.resolve() not in pinned:
+            raise ValueError('Missing pinned publication helper: ' + str(path))
+    fields = {}
+    for line in config['worker_template'].splitlines():
+        name, separator, value = line.partition('=')
+        if separator:
+            fields[name.strip().lower()] = value.strip()
+    executable = Path(fields.get('executable', '').strip('"'))
+    if not executable.is_absolute() or not executable.is_file():
+        raise ValueError('Publication worker executable is missing: ' + str(executable))
+    arguments = fields.get('arguments', '')
+    capsule_hashes = re.findall(r'(?<!\S)[0-9a-f]{64}(?!\S)', arguments)
+    for name in fields.get('transfer_input_files', '').split(','):
+        name = name.strip().strip('"')
+        if not name or '@DIRECTORY@' in name:
+            continue  # Each immutable job supplies its own request later.
+        path = Path(name)
+        if not path.is_absolute() or not path.is_file():
+            raise ValueError('Publication worker input is missing: ' + name)
+        if path.name.endswith('.tar.gz') and digest(path) not in capsule_hashes:
+            raise ValueError('Publication worker archive differs from its argument hash: ' + name)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('directory', type=Path)
@@ -575,9 +615,7 @@ def main():
             time.sleep(60)
     with (root / 'controller.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        for name, checksum in config['frozen_files'].items():
-            if digest(deployment / name) != checksum:
-                raise ValueError('Frozen postprocessing deployment changed: ' + name)
+        validate_deployment_inputs(deployment, config, Path(__file__).resolve().parent)
         state = read(root / 'state.json') if (root / 'state.json').exists() else dict(
             sources={}, nanos={}, tasks={}, latest={})
         while True:
