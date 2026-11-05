@@ -128,5 +128,58 @@ class TerminalStorage(unittest.TestCase):
                 self.assertEqual(meson.adaptive_reservation(config), 2000000000+20*326000)
 
 
+class TerminalMesonPeerClosure(unittest.TestCase):
+    def fixture(self, root):
+        def write(path, record):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(record))
+            return dict(path=str(path), sha256=statistics.sha(path))
+        self.write = write
+        self.current = root/'current'
+        science = write(self.current/'config.json', {})
+        self.config = dict(directory=str(self.current), bulk_storage_gate=str(root/'gate.json'))
+        write(root/'gate.json', dict(per_batch_forecast_bytes=dict(new_bank=100)))
+        peer = root/'previous'
+        plan = write(peer/'batches/old/production/plan.json',
+                     dict(points=[dict(point='signal', events=4, full_gen_events=20)]))
+        seal = write(peer/'batches/old/production/seal.json', dict(files={plan['path']:plan['sha256']}))
+        self.report = peer/'batches/old/production/completed_points/signal.json'
+        write(self.report, dict(point='signal', complete=True, events=4, full_gen_events=20,
+            plan_sha256=plan['sha256'], seal_sha256=seal['sha256']))
+        producer = write(peer/'config.json', dict(schema='shift-dp-meson-production-v1',
+            directory=str(peer), batches=[dict(batch='old', point='signal')], maximum_meson_forecast_bytes=1000))
+        write(peer/'seal.json', dict(files={producer['path']:producer['sha256']}))
+        self.authority = dict(science_configuration=science, original_storage_registration=dict(path='registered'),
+            closed_peer_claims=[dict(name='completed_test',configurations=[producer],completed_points=[
+                dict(path=str(self.report),sha256=statistics.sha(self.report))])])
+        self.fresh = dict(authority=dict(storage_registration=dict(path='registered')),
+            storage_registration=dict(peer_reservations=[dict(name='completed_test',reserved_bytes=1000),
+                dict(name='active_SM',reserved_bytes=2000)]), reserved_peer_bytes=3000)
+        self.observation = dict(observed_utc=datetime.now(timezone.utc).isoformat())
+
+    def test_only_future_claim_is_closed_and_active_peer_is_preserved(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.fixture(Path(folder))
+            with patch.object(meson,'fresh_production_authority',return_value=self.fresh), patch.object(statistics,'jobs',return_value=[]):
+                reserved, future, evidence = meson.reviewed_terminal_peer_storage(self.config,self.observation,{},self.authority)
+                self.assertEqual((reserved,future),(2000,100))
+                self.assertEqual(evidence['physical_disk_credit_bytes'],0)
+
+    def test_live_incomplete_changed_or_unregistered_peers_cannot_release_claims(self):
+        for failure in ('live','incomplete','changed_pin','duplicate','unknown','wrong_budget'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as folder:
+                self.fixture(Path(folder))
+                live=[]
+                if failure=='live':live=[dict(ClusterId=123)]
+                elif failure=='incomplete':self.report.write_text('{}')
+                elif failure=='changed_pin':self.authority['closed_peer_claims'][0]['configurations'][0]['sha256']='0'*64
+                elif failure=='duplicate':self.authority['closed_peer_claims']*=2
+                elif failure=='unknown':self.authority['closed_peer_claims'][0]['name']='unregistered'
+                elif failure=='wrong_budget':self.fresh['storage_registration']['peer_reservations'][0]['reserved_bytes']=999
+                with patch.object(meson,'fresh_production_authority',return_value=self.fresh), patch.object(statistics,'jobs',return_value=live):
+                    with self.assertRaises((ValueError,OSError)):
+                        meson.reviewed_terminal_peer_storage(self.config,self.observation,{},self.authority)
+
+
 if __name__ == '__main__':
     unittest.main()

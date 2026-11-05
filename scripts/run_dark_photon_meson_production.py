@@ -2836,9 +2836,71 @@ def reviewed_registered_peer_storage(config, observation, state, authority):
         qualification_reservation_bytes=500000000, remaining_own_bytes=future)
 
 
+def reviewed_terminal_peer_storage(config, observation, state, authority):
+    """Close a finished meson peer's future writes without crediting disk twice."""
+    fresh = fresh_production_authority(config, reader=storage_pinned_read)
+    original = Path(config['directory'])/'config.json'
+    if (authority.get('science_configuration') != dict(path=str(original), sha256=durable.sha(original))
+            or authority.get('original_storage_registration') != fresh['authority']['storage_registration']):
+        raise ValueError('Terminal peer closure changed its science or original registration')
+    claims = {row['name']: row['reserved_bytes'] for row in fresh['storage_registration']['peer_reservations']}
+    observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
+    closed, roots = set(), set()
+    credit = 0
+    for closure in authority['closed_peer_claims']:
+        name = closure['name']
+        if name in closed or name not in claims or not closure['configurations']:
+            raise ValueError('Terminal closure repeats or invents a registered peer')
+        reports = {pin['path']: pin for pin in closure['completed_points']}
+        checked_reports = set()
+        if len(reports) != len(closure['completed_points']):
+            raise ValueError('Terminal closure repeats a completed-point receipt')
+        amount = 0
+        for pin in closure['configurations']:
+            peer = storage_pinned_read(pin)
+            root = Path(peer['directory'])
+            if (peer.get('schema') != 'shift-dp-meson-production-v1'
+                    or root in roots or not root.is_absolute() or root.resolve() != root
+                    or Path(pin['path']) != root/'config.json'
+                    or storage_ledger(root/'seal.json')['files'].get(pin['path']) != pin['sha256']
+                    or not peer.get('batches') or any(b.get('gen_qualification_only') for b in peer['batches'])):
+                raise ValueError('Terminal closure requires distinct sealed physical meson worklists')
+            roots.add(root)
+            if durable.jobs(config, directory_condition(root)):
+                raise OSError('Terminal peer still has a live producer: '+str(root))
+            for batch in peer['batches']:
+                stage = root/'batches'/batch['batch']/'production'
+                report_path = str(stage/'completed_points'/(batch['point']+'.json'))
+                if report_path not in reports:
+                    raise ValueError('Terminal closure lacks a pinned completed-point receipt')
+                storage_pinned_read(reports[report_path])
+                checked_reports.add(report_path)
+                plan = storage_ledger(stage/'plan.json')
+                row, = [row for row in plan['points'] if row['point'] == batch['point']]
+                if not durable.closed_primitive(stage, batch['point'], row.get('full_gen_events', row['events']), observed):
+                    raise ValueError('Terminal peer has an unfinished physical population')
+            amount += peer['maximum_meson_forecast_bytes']
+        if amount != claims[name]:
+            raise ValueError('Terminal peer allocations do not equal their registered claim')
+        if checked_reports != set(reports):
+            raise ValueError('Terminal closure includes unrelated completed points')
+        closed.add(name)
+        credit += amount
+    if not closed:
+        raise ValueError('Terminal peer closure must identify a completed allocation')
+    gate = storage_ledger(config['bulk_storage_gate'])
+    future = sum(value for name,value in gate['per_batch_forecast_bytes'].items()
+                 if not state.get('batches',{}).get(name,{}).get('published'))
+    return fresh['reserved_peer_bytes']-credit, future, dict(
+        closed_peer_claims=sorted(closed), retired_future_write_bytes=credit,
+        physical_disk_credit_bytes=0, remaining_own_bytes=future)
+
+
 def reviewed_remaining_storage(config, observation, state, persist_terminal_cache=True):
     """Count remaining writes of a closed GEN census; quota already paid for GEN."""
     authority = storage_pinned_read(config['reviewed_remaining_storage_authority'])
+    if authority.get('schema') == 'shift-dp-reviewed-terminal-peer-closure-v1':
+        return reviewed_terminal_peer_storage(config, observation, state, authority)
     if authority.get('schema') == 'shift-dp-reviewed-registered-peer-storage-v1':
         return reviewed_registered_peer_storage(config, observation, state, authority)
     fresh = fresh_production_authority(config, reader=storage_pinned_read)
