@@ -1,6 +1,42 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Preparing the smart-selection comparison
+
+The October30 QCD comparison is a preparation, not an authorized submission.
+Its current worklist, storage bounds and launch gates are recorded in
+`../SHIFT_RECONSTRUCTION.md`, under "30 October cleanup and next comparison".
+
+After complete first-SIM GEN preparation, freeze the complete source census with
+`prepare_shift_sm_candidate_reco.py`. In its normal JSON configuration, set:
+
+```json
+{
+  "maximum_events": 1536,
+  "comparison": {"maximum_per_bin_arm": 256, "control_fraction": 0.1}
+}
+```
+
+This assigns disjoint whole sources to smart/random arms within each generator
+bin, with matched event counts and a control budget across sources. It keeps
+exact original weights, full GEN exposure and positive sampling support. The
+control fraction is a worker-budget target for this ordinary-QCD experiment;
+it does not change the shared production control floor or BSM protection.
+
+For each source, give `run_shift_sm_candidate_handoff.py` a
+`frozen_response_draw` object containing SHA-256 pins named `plan`, `exposure`
+and `source_pins` from that global freeze. Never call the old per-source draw
+again: this path copies the original selected IDs and q into the existing
+source workers/collectors, preserving per-source publication exposure. Freeze
+the updated planner, handoff, collector and summary helpers coherently.
+
+Use `summarize_shift_sm_response.py joined_rows.jsonl comparison.json
+--selection-comparison-plan frozen_plan.json` for the completed comparison.
+It rejects missing/duplicated responses and keeps generator bins separate.
+Compare useful weighted statistics per measured SIM hour across the full mass
+range. Zero reference events mean unknown gain, not infinite improvement.
+Resolve the recorded storage/runtime qualification gates before submission.
+
 ## Required histogram runtime for new productions
 
 Freeze the current main `shift_histogrammer_config.py` together with its rebuilt
