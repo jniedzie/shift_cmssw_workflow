@@ -611,8 +611,9 @@ def recover_transfer_jobs(config, ads):
         try:
             report=json.loads(Path(path).read_text())
             age=time.time()-datetime.datetime.fromisoformat(report['checked_utc']).timestamp()
-            finished.append(report.get('controller_finished') is True and report.get('health') == 'ok')
-            if report.get('health') != 'ok' or age>1200 and not finished[-1]:
+            acceptable=report.get('health') in ('ok','warning')
+            finished.append(report.get('controller_finished') is True and acceptable)
+            if not acceptable or age>1200 and not finished[-1]:
                 summary['blocked'].append(dict(report=path,reason='Production watchdog reports failure or stale progress',issues=report.get('issues'),age_seconds=age))
         except (OSError,ValueError,KeyError) as error:
             finished.append(False)

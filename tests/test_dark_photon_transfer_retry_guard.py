@@ -130,6 +130,24 @@ class TransferRetry(unittest.TestCase):
         result=guard.recover_transfer_jobs(self.config,[])
         self.assertEqual(result['blocked'][0]['issues'][0]['code'],'supervisor_error')
 
+    def test_reviewed_monitor_warning_allows_progress_and_completion_but_not_stale_or_critical(self):
+        report=self.root/'health.json'
+        self.config['watchdog_reports']=[str(report)]
+        cases=[('warning',False,0,False,False),('warning',True,0,False,True),
+               ('critical',False,0,True,False),('unknown',True,0,True,False),
+               ('warning',False,1201,True,False),('warning',True,1201,False,True),
+               ('ok',True,1201,False,True),('critical',True,1201,True,False)]
+        for health,finished,age,blocked,complete in cases:
+            with self.subTest(health=health,finished=finished,age=age):
+                checked=datetime.fromtimestamp(time.time()-age,timezone.utc).isoformat()
+                self.write(report,dict(checked_utc=checked,health=health,controller_finished=finished,
+                    issues=[dict(code='reviewed_original_failure_retained')]))
+                with patch.object(guard.native,'run_condor') as run:
+                    result=guard.recover_transfer_jobs(self.config,[])
+                self.assertEqual(bool(result['blocked']),blocked)
+                self.assertEqual(result['watched_productions_finished'],complete)
+                run.assert_not_called()
+
     def test_ambiguous_release_after_archive_stays_blocked_without_repeating_action(self):
         after=dict(self.ad,TransferOutput='',PeriodicRelease=False)
         with patch.object(guard,'output_absent',side_effect=lambda p:dict(path=p)), \
