@@ -42,19 +42,25 @@ def same_physics(original, replay):
         raise ValueError('Control replay changed inputs, seeds, weights or sampling')
 
 
-def terminal(control):
+def terminal(control, endpoint=None):
     """Wait only for this exact native attempt, never adopt a stale failure."""
     cluster = control['cluster_id']
     directory = str(Path(control['replay_request']['path']).parent)
-    ads = query('ClusterId == ' + str(cluster),
-                ['ClusterId', 'ProcId', 'Iwd', 'JobStatus'], timeout=45)
+    location = [] if endpoint is None else ['-name', endpoint['schedd'], '-pool', endpoint['pool']]
+    if location:
+        text = run_condor(['/usr/bin/condor_q', *location, str(cluster), '-json',
+                          '-attributes', 'ClusterId,ProcId,Iwd,JobStatus'], timeout=45)
+        ads = json.loads(text) if text.strip() else []
+    else:
+        ads = query('ClusterId == ' + str(cluster),
+                    ['ClusterId', 'ProcId', 'Iwd', 'JobStatus'], timeout=45)
     if ads:
         if len(ads) != 1 or ads[0]['Iwd'] != directory or ads[0]['ProcId'] != 0:
             raise ValueError('Control native job identity changed')
         if ads[0]['JobStatus'] == 5:
             raise ValueError('Control is held; preserve failure instead of admitting production')
         return None
-    rows = json.loads(run_condor(['/usr/bin/condor_history', str(cluster), '-limit', '1',
+    rows = json.loads(run_condor(['/usr/bin/condor_history', *location, str(cluster), '-limit', '1',
         '-json', '-attributes', 'ClusterId,ProcId,Iwd,ExitCode,ExitBySignal'], timeout=45))
     if (len(rows) != 1 or rows[0].get('Iwd') != directory or rows[0].get('ExitCode') != 0
             or rows[0].get('ExitBySignal')):
@@ -125,8 +131,10 @@ def main():
     if len(controls) < 2 or len({c['cluster_id'] for c in controls}) != len(controls):
         raise ValueError('Require at least two independent native control jobs')
     deadline = time.time() + request['wait_seconds']
+    endpoint_path = Path(__file__).resolve().parents[1] / 'native_endpoint.json'
+    endpoint = read(endpoint_path) if endpoint_path.exists() else None
     while True:
-        native = [terminal(control) for control in controls]
+        native = [terminal(control, endpoint) for control in controls]
         if all(native):
             break
         if time.time() >= deadline:

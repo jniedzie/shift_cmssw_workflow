@@ -71,6 +71,18 @@ def fixture(root):
 
 
 class ResponseJobsTest(unittest.TestCase):
+    def test_vanilla_control_queries_use_the_explicit_remote_scheduler(self):
+        import validate_shift_sm_detector_replay as replay
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root/'events.log').write_text('005 (12.000.000) Job terminated.\nNormal termination (return value 0)\n')
+            control = dict(cluster_id=12, replay_request=dict(path=str(root/'request.json')))
+            native = dict(ClusterId=12, ProcId=0, Iwd=str(root), ExitCode=0, ExitBySignal=False)
+            with patch.object(replay, 'run_condor', side_effect=['[]', json.dumps([native])]) as command:
+                self.assertEqual(replay.terminal(control, dict(schedd='schedd.example', pool='pool.example')), native)
+                for call in command.call_args_list:
+                    self.assertEqual(call.args[0][1:5], ['-name', 'schedd.example', '-pool', 'pool.example'])
+
     def test_replay_qualification_rejects_changed_science_or_original_output_paths(self):
         from validate_shift_sm_detector_replay import same_physics
         original = dict(cohort_id='original', detector_job=42,
