@@ -25,6 +25,10 @@ def main(path):
         for name in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME'):
             environment.pop(name, None)
         environment['PATH'] = '/usr/bin:/bin'
+        peers=None
+        if request.get('peer_storage_authority'):
+            from shift_sm_peer_storage import read_peer_commitments
+            peers=read_peer_commitments(request['peer_storage_authority'])
         text = subprocess.run(['/usr/bin/eos', '-b', 'root://eoshome-j.cern.ch',
             'quota', 'ls', '-m', '/eos/user/j/jniedzie'], check=True, timeout=60,
             capture_output=True, text=True, env=environment).stdout
@@ -32,7 +36,8 @@ def main(path):
         row = next(row for row in rows if row.get('space') == '/eos/user/j/jniedzie/')
         Path('report.json').write_text(json.dumps(dict(complete=True, checked_epoch=time.time(),
             free_bytes=int(row['maxlogicalbytes'])-int(row['usedlogicalbytes']),
-            free_files=int(row['maxfiles'])-int(row['usedfiles'])))+'\n')
+            free_files=int(row['maxfiles'])-int(row['usedfiles']),
+            **(dict(peer_storage=peers) if peers is not None else {})))+'\n')
         return
     source = request['detector_source']
     # Source paths are already the audited immutable canonical EOS paths.

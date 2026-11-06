@@ -191,7 +191,12 @@ def single_response_source_cache(config, state, ads):
         source = response_closed_source(pins[0], pins[2])
         if source['normalization']['source_id'] != sid:
             raise ValueError('Response source normalization differs from its frozen worklist')
-        cache[sid] = dict(pins=pins, native_closure=closure, source=source, closed_epoch=time.time())
+        paid=[]
+        if config.get('account_paid_outputs'):
+            paid, paid_pins = response_paid_objects(prepared,source)
+            pins.extend(paid_pins)
+        cache[sid] = dict(pins=pins, native_closure=closure, source=source,
+                          verified_paid_objects=paid,closed_epoch=time.time())
         groups[source['normalization']['stratum']].append(source)
     return groups
 
@@ -346,6 +351,54 @@ def snapshot(root, config, stratum, sources):
 
 
 
+def response_paid_objects(prepared, source):
+    """Bind retained Nano sizes to the collector's already read-back producers."""
+    objects=[]; pins=[]
+    expected={row['path']:row['sha256'] for row in source['nano_inputs']}
+    for job in prepared['detector_jobs']:
+        directory=Path(job['job_directory']);path=directory/'result.json';result=read(path)
+        if (result.get('complete') is not True or result.get('exit_code') != 0
+                or result.get('request_sha256') != job['request_sha256']
+                or result.get('nano_sha256') != result.get('nano_readback_sha256')
+                or expected.get(result.get('nano_path')) != result.get('nano_sha256')
+                or type(result.get('nano_bytes')) is not int or result['nano_bytes']<=0):
+            raise ValueError('Paid Nano lacks its exact terminal collector/readback authority')
+        objects.append(dict(kind='Nano',path=result['nano_path'],sha256=result['nano_sha256'],
+                            bytes=result['nano_bytes']))
+        pins.append(dict(path=str(path),sha256=digest(path)))
+    preparation_pin=prepared.get('original_preparation_result')
+    if preparation_pin:
+        result=read_response_pin(preparation_pin)
+        if result.get('complete') is not True or result.get('exit_code') != 0:
+            raise ValueError('Paid preparation is not complete')
+        for row in result.get('prepared_publications',[]):
+            if row.get('independent_sha256_readback') is not True:
+                raise ValueError('Paid preparation lacks independent retained readback')
+            objects.append(dict(kind='preparation',**{key:row[key] for key in ('path','sha256','bytes')}))
+        pins.append(preparation_pin)
+    return objects,pins
+
+
+def verified_science_credit(parent_config, state, quota_epoch):
+    """Deduct disjoint paid bytes only, preserving unused allocation headroom."""
+    allowed=set(parent_config['paid_science_source_ids'])
+    preparations=set(parent_config.get('paid_preparation_source_ids',[]))
+    objects={}
+    for sid,source in state.get('response_sources',{}).items():
+        if sid not in allowed or source.get('closed_epoch',float('inf'))>quota_epoch:
+            continue
+        for item in source.get('verified_paid_objects',[]):
+            if item['kind']=='preparation' and sid not in preparations:
+                continue  # Previously paid GEN must never be credited a second time.
+            path=item['path']; previous=objects.setdefault(path,item)
+            if previous != item or type(item['bytes']) is not int or item['bytes']<=0:
+                raise ValueError('Conflicting or invalid paid science object')
+    credit=sum(item['bytes'] for item in objects.values())
+    if credit>parent_config['reserved_science_bytes']:
+        raise ValueError('Paid science exceeds its unchanged registered allocation')
+    return credit
+
+
 def science_write_reservation(parent_config, state, quota_epoch):
     """Keep full allocation; credit future writes only after whole-source closure.
 
@@ -354,6 +407,11 @@ def science_write_reservation(parent_config, state, quota_epoch):
     cohorts, missing bounds and closures newer than quota keep their full claim.
     """
     total = parent_config.get('reserved_science_bytes', 0)
+    if type(total) is not int or total<0:
+        raise ValueError('Invalid full science allocation')
+    if 'paid_science_source_ids' in parent_config:
+        credit=verified_science_credit(parent_config,state,quota_epoch)
+        return total,total-credit
     bounds = parent_config.get('science_source_write_bounds', {})
     if (type(total) is not int or total < 0 or not isinstance(bounds, dict)
             or any(not isinstance(sid,str) or type(value) is not int or value < 0
@@ -385,6 +443,16 @@ def refresh_quota(root, config, ads):
     for task in tasks:
         observe(task, ads)
     save_ledger(path, parent)
+    expected_peer=config.get('peer_storage_authority')
+    if expected_peer:
+        compatible=[]
+        for task in tasks:
+            request_path=Path(task['directory'])/'request.json'
+            if digest(request_path)!=task['request_sha256']:
+                raise ValueError('Quota request authority changed')
+            if read(request_path).get('peer_storage_authority')==expected_peer:
+                compatible.append(task)
+        tasks=compatible  # Old receipts cannot authorize this new peer scope.
     if any(task['phase'] == 'failed' for task in tasks):
         raise ValueError('Native quota worker failed; review before retry')
     completed = [task for task in tasks if task['phase'] == 'done']
@@ -392,11 +460,13 @@ def refresh_quota(root, config, ads):
     quota = read(Path(latest['directory'])/'result.json') if latest else {}
     if (time.time()-quota.get('checked_epoch', 0) >= 900
             and not any(task['phase'] in ('ready','submitted','submitting') for task in tasks)):
-        name = 'quota_'+str(len(tasks)).zfill(5)
+        name = 'quota_'+str(len(parent['tasks'])).zfill(5)
         request = dict(schema='shift-stream-payload-v1', environment='cmssw', stage='smart_sm_quota',
             cohort_id=config['campaign'], argv=['python3','@TOOLS@/scripts/run_shift_smart_sm_detector.py',
             'request.json'], application_timeout_seconds=300, result_path='report.json',
             return_files=[], status_fields={}, reservation_bytes=0)
+        if expected_peer:
+            request.update(peer_storage_authority=expected_peer,application_timeout_seconds=600)
         parent['tasks'][name] = make_task(directory, parent_config, name, request, 'quota', '')
         save_ledger(path, parent)
     for task in parent['tasks'].values():
@@ -508,6 +578,10 @@ def poll(root, config, state):
     # authenticated quota worker and its pinned native-success receipt.
     observations = [t for t in parent['tasks'].values()
                     if t['kind'] == 'quota' and t['phase'] == 'done']
+    if config.get('peer_storage_authority'):
+        observations=[t for t in observations if read_response_pin(dict(
+            path=str(Path(t['directory'])/'request.json'),sha256=t['request_sha256'])).get(
+                'peer_storage_authority')==config['peer_storage_authority']]
     if not observations:
         save(root / 'state.json', state)
         save(root / 'heartbeat.json', dict(checked_epoch=time.time(), phase='waiting_for_quota',
@@ -540,7 +614,20 @@ def poll(root, config, state):
     # writes for exact, wholly completed source cohorts.
     parent_future = parent_in_flight + science_future
     parent_remaining = max(0, parent_config['own_reservation_bytes'] - parent_committed)
-    floor = parent_config['external_future_reservation_bytes'] + parent_config['safety_floor_bytes']
+    external=parent_config['external_future_reservation_bytes']
+    if config.get('peer_storage_authority'):
+        peer=quota.get('peer_storage',{})
+        if (peer.get('schema')!='shift-SM-verified-peer-remaining-storage-v1'
+                or peer.get('complete') is not True
+                or peer.get('authority_sha256')!=config['peer_storage_authority']['sha256']
+                or peer.get('fresh_native_queue_verified') is not True
+                or peer.get('total_reserved_bytes')!=parent_config['peer_storage_reserved_bytes']
+                or type(peer.get('verified_paid_bytes')) is not int
+                or not 0<=peer['verified_paid_bytes']<=peer['total_reserved_bytes']
+                or peer.get('remaining_bytes')!=peer['total_reserved_bytes']-peer['verified_paid_bytes']):
+            raise ValueError('Fresh peer paid-output authority is missing or inconsistent')
+        external-=peer['verified_paid_bytes']
+    floor = external + parent_config['safety_floor_bytes']
     account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
     for task in sorted(state['tasks'].values(), key=lambda t: t['events']):
         if task['phase'] != 'ready':
