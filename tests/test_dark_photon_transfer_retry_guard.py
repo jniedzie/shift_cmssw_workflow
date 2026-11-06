@@ -146,5 +146,36 @@ class TransferRetry(unittest.TestCase):
             self.assertEqual(state['infrastructure_recovery']['blocked'][0]['code'],'ambiguous_retry_transaction')
             self.assertEqual(run.call_count,2)
 
+    def test_EOS_timeout_keeps_attempt_and_later_poll_can_recover(self):
+        original=guard.digest(self.status)
+        with patch.object(guard.subprocess,'run',side_effect=guard.subprocess.TimeoutExpired(['xrdfs'],45)),patch.object(guard.native,'run_condor') as run:
+            result=guard.recover_transfer_jobs(self.config,self.ads)
+            self.assertTrue(result['blocked']);self.assertIn('timed out',result['blocked'][0]['reason'])
+            self.assertEqual(guard.digest(self.status),original);run.assert_not_called()
+            self.assertEqual(list((self.root/'transfer_recovery').glob('*/intent.json')),[])
+        absent=guard.subprocess.CompletedProcess(['xrdfs'],54,stdout='',stderr='[3011] Unable to stat: No such file or directory')
+        after=dict(self.ad,TransferOutput='',PeriodicRelease=False)
+        with patch.object(guard.subprocess,'run',return_value=absent),patch.object(guard.native,'query',side_effect=[[self.ad],[after],[after]]),patch.object(guard.native,'run_condor',return_value='1matchingjob') as run:
+            result=guard.recover_transfer_jobs(self.config,self.ads)
+            self.assertEqual(len(result['recovered']),1);self.assertEqual(run.call_count,2)
+
+    def test_transient_released_response_read_is_blocked_then_observed_without_action(self):
+        candidate=guard.transfer_retry_candidate(self.config,self.ad,self.ads)
+        directory=self.root/'transfer_recovery/saved';directory.mkdir(parents=True)
+        self.write(directory/'intent.json',dict(ad=self.ad))
+        self.write(directory/'released.json',dict(job=str(self.ad['ClusterId'])+'.0',candidate=candidate))
+        self.write(self.status,dict(complete=True,plan_sha256=candidate['plan_sha256'],seal_sha256=candidate['seal_sha256'],payload=dict(complete=True,source_descriptor_sha256=candidate['source_sha256'])))
+        read=Path.read_text
+        def outage(path,*args,**kwargs):
+            if path==self.status:raise OSError(errno.EIO,'Transient AFS response read')
+            return read(path,*args,**kwargs)
+        ads=[dict(self.ad,JobStatus=2),self.manager]
+        with patch.object(Path,'read_text',outage),patch.object(guard.native,'run_condor') as run:
+            result=guard.recover_transfer_jobs(self.config,ads)
+            self.assertEqual(result['blocked'][0]['code'],'retry_response_read_unknown');run.assert_not_called()
+        with patch.object(guard.native,'run_condor') as run:
+            result=guard.recover_transfer_jobs(self.config,ads)
+            self.assertEqual(result['blocked'],[]);self.assertTrue(result['observations'][0]['response_complete']);run.assert_not_called()
+
 
 if __name__=='__main__':unittest.main()

@@ -320,8 +320,11 @@ def transfer_restart_signature(events, error, cluster, proc=0):
 
 
 def output_absent(path):
-    result = subprocess.run(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'stat', path],
-                            capture_output=True, text=True, timeout=45)
+    try:
+        result = subprocess.run(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'stat', path],
+                                capture_output=True, text=True, timeout=45)
+    except subprocess.TimeoutExpired as error:
+        raise OSError(errno.ETIMEDOUT,'EOS stat timed out; output state remains unknown: '+path) from error
     text = result.stdout+result.stderr
     if result.returncode == 0:
         raise ValueError('Canonical output already exists; adoption requires review: '+path)
@@ -409,26 +412,39 @@ def recover_transfer_jobs(config, ads):
     policy = config.get('infrastructure_recovery')
     if policy is None:
         return dict(recovered=[], blocked=[])
-    base = Path(config['directory'])/'transfer_recovery'; base.mkdir(exist_ok=True)
-    summary = dict(recovered=[],blocked=[],observations=[],dry_run=policy['dry_run'])
-    for path in base.glob('*/intent.json'):
-        if not (path.parent/'released.json').exists():
-            intent=json.loads(path.read_text());ad=intent['ad']
-            summary['blocked'].append(dict(code='ambiguous_retry_transaction',
-                job=str(ad['ClusterId'])+'.'+str(ad['ProcId']),receipt=str(path),
-                reason='Incomplete native retry transaction; inspect archived status, queue and EOS before any further action'))
-    for path in base.glob('*/released.json'):
-        receipt = json.loads(path.read_text()); candidate = receipt['candidate']
-        current = next((a for a in ads if str(a['ClusterId'])+'.'+str(a['ProcId']) == receipt['job']),None)
-        status = Path(candidate['status_path'])
-        response = json.loads(status.read_text()) if status.exists() else {}
-        complete = (response.get('complete') is True and response.get('payload',{}).get('complete') is True
-            and response.get('plan_sha256') == candidate['plan_sha256']
-            and response.get('seal_sha256') == candidate['seal_sha256']
-            and response['payload'].get('source_descriptor_sha256') == candidate['source_sha256'])
-        summary['observations'].append(dict(job=receipt['job'],receipt=str(path),
-            response_complete=complete,native_status=current.get('JobStatus') if current else None,
-            current_start_epoch=current.get('JobCurrentStartDate') if current else None))
+    base = Path(config['directory'])/'transfer_recovery'
+    summary = dict(recovered=[],blocked=[],observations=[],dry_run=policy['dry_run'],
+                   watched_productions_finished=False)
+    try:
+        base.mkdir(exist_ok=True)
+        intents=list(base.glob('*/intent.json')); released=list(base.glob('*/released.json'))
+    except OSError as error:
+        summary['blocked'].append(dict(code='recovery_ledger_unavailable',receipt=str(base),reason=str(error)))
+        return summary
+    for path in intents:
+        try:
+            if not (path.parent/'released.json').exists():
+                intent=json.loads(path.read_text());ad=intent['ad']
+                summary['blocked'].append(dict(code='ambiguous_retry_transaction',
+                    job=str(ad['ClusterId'])+'.'+str(ad['ProcId']),receipt=str(path),
+                    reason='Incomplete native retry transaction; inspect archived status, queue and EOS before any further action'))
+        except (OSError,ValueError,KeyError) as error:
+            summary['blocked'].append(dict(code='recovery_intent_read_unknown',receipt=str(path),reason=str(error)))
+    for path in released:
+        try:
+            receipt = json.loads(path.read_text()); candidate = receipt['candidate']
+            current = next((a for a in ads if str(a['ClusterId'])+'.'+str(a['ProcId']) == receipt['job']),None)
+            status = Path(candidate['status_path'])
+            response = json.loads(status.read_text()) if status.exists() else {}
+            complete = (response.get('complete') is True and response.get('payload',{}).get('complete') is True
+                and response.get('plan_sha256') == candidate['plan_sha256']
+                and response.get('seal_sha256') == candidate['seal_sha256']
+                and response['payload'].get('source_descriptor_sha256') == candidate['source_sha256'])
+            summary['observations'].append(dict(job=receipt['job'],receipt=str(path),
+                response_complete=complete,native_status=current.get('JobStatus') if current else None,
+                current_start_epoch=current.get('JobCurrentStartDate') if current else None))
+        except (OSError,ValueError,KeyError) as error:
+            summary['blocked'].append(dict(code='retry_response_read_unknown',receipt=str(path),reason=str(error)))
     held = [a for a in ads if a.get('JobStatus') == 5 and
             any(a.get('Iwd','') == root or a.get('Iwd','').startswith(root+'/') for root in config['namespaces'])]
     for ad in held:
