@@ -1,6 +1,8 @@
 # Code style: AI-code.
 """Exercise weighted source handoff, complete admission and single submission."""
 import json
+import io
+import hashlib
 from pathlib import Path
 import sys
 import tarfile
@@ -33,7 +35,16 @@ class CandidateHandoffTest(unittest.TestCase):
         for name in names:
             (self.helpers/name).write_text('# frozen helper\n')
         capsule = self.root/'tools.tar.gz'
-        capsule.write_bytes(b'qualified-tools')
+        plugin=b'qualified-addon'
+        plugin_sha=hashlib.sha256(plugin).hexdigest()
+        runtime=dict(sha256='c'*64)
+        receipt=json.dumps(dict(runtime_sha256='c'*64,plugin_sha256=plugin_sha)).encode()
+        members={'runtimes.json':json.dumps(dict(cmssw=runtime)).encode(),
+                 'plugin/frozen.so':plugin,'plugin/build.json':receipt}
+        with tarfile.open(capsule,'w:gz') as archive:
+            for name,data in members.items():
+                record=tarfile.TarInfo(name);record.size=len(data)
+                archive.addfile(record,io.BytesIO(data))
         bootstrap = self.root/'worker.sh'
         bootstrap.write_text('#!/bin/bash\nexit 0\n')
         self.budget = self.root/'budget.json'
@@ -50,13 +61,25 @@ class CandidateHandoffTest(unittest.TestCase):
             helper_sha256s={name:handoff.sha(self.helpers/name) for name in names},
             frozen=dict(capsule=str(capsule), capsule_sha256=handoff.sha(capsule),
                 bootstrap=str(bootstrap), bootstrap_sha256=handoff.sha(bootstrap),
-                runtime=dict(sha256='c'*64), preflight_addon=dict(path='plugin/frozen.so',sha256='d'*64)))
+                runtime=runtime, preflight_addon=dict(path='plugin/frozen.so',sha256=plugin_sha,
+                    build_receipt=dict(path='plugin/build.json',sha256=hashlib.sha256(receipt).hexdigest()))))
         self.persistent = patch.object(handoff, 'persistent_directory', side_effect=Path)
         self.persistent.start()
 
     def tearDown(self):
         self.persistent.stop()
         self.fixture.tearDown()
+
+    def test_stale_frozen_runtime_and_receipt_fail_before_any_draw(self):
+        self.config['frozen']['runtime']['sha256']='e'*64
+        with self.assertRaisesRegex(ValueError,'runtime differs'):
+            handoff.prepare(self.config,'a'*64)
+        self.assertFalse(Path(self.config['output_directory']).exists())
+        self.config['frozen']['runtime']['sha256']='c'*64
+        self.config['frozen']['preflight_addon']['build_receipt']['sha256']='e'*64
+        with self.assertRaisesRegex(ValueError,'build receipt differs'):
+            handoff.prepare(self.config,'a'*64)
+        self.assertFalse(Path(self.config['output_directory']).exists())
 
     def test_fresh_census_rejects_an_inherited_old_draw_before_any_io(self):
         with self.assertRaisesRegex(ValueError, 'cannot inherit'):

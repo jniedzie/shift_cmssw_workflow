@@ -148,6 +148,28 @@ def validate_frozen(config):
     frozen = config['frozen']
     checked(frozen['capsule'], frozen['capsule_sha256'])
     checked(frozen['bootstrap'], frozen['bootstrap_sha256'])
+    # A valid archive hash does not establish that inherited labels describe it.
+    addon = frozen['preflight_addon']
+    receipt_pin = addon['build_receipt']
+    for name in (addon['path'], receipt_pin['path']):
+        if Path(name).is_absolute() or '..' in Path(name).parts:
+            raise ValueError('Unsafe preflight member in frozen descriptor')
+    with tarfile.open(frozen['capsule']) as capsule:
+        def member(name, limit):
+            record = capsule.getmember(name)
+            if not record.isfile() or record.size > limit:
+                raise ValueError('Invalid bounded preflight capsule member: '+name)
+            return capsule.extractfile(record).read()
+        runtime = json.loads(member('runtimes.json', 65536))['cmssw']
+        receipt_bytes = member(receipt_pin['path'], 1048576)
+        receipt = json.loads(receipt_bytes)
+        plugin_sha = hashlib.sha256(member(addon['path'], 16*MIB)).hexdigest()
+    if runtime['sha256'] != frozen['runtime']['sha256']:
+        raise ValueError('Frozen descriptor runtime differs from actual capsule')
+    if (hashlib.sha256(receipt_bytes).hexdigest() != receipt_pin['sha256']
+            or receipt['runtime_sha256'] != runtime['sha256']
+            or receipt['plugin_sha256'] != addon['sha256'] or plugin_sha != addon['sha256']):
+        raise ValueError('Frozen descriptor preflight build receipt differs from actual capsule')
     helpers = persistent_directory(config['helpers_directory'])
     for name, expected in config['helper_sha256s'].items():
         checked(helpers/name, expected)
