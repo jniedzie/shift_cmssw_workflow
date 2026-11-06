@@ -71,6 +71,34 @@ def fixture(root):
 
 
 class ResponseJobsTest(unittest.TestCase):
+    def test_exact_HTXS_exception_cannot_hide_changed_physics_or_normalization(self):
+        from validate_shift_sm_detector_replay import compare_control_data
+        original = dict(Events=dict(entries=1, branches=dict(
+            HTXS_V_pt=dict(typename='float', sha256='a'*64),
+            ShiftMuon_pt=dict(typename='float', sha256='m'*64))),
+            Runs=dict(entries=1, branches=dict(genEventSumw='normalization')),
+            MetaData=dict(entries=1, branches=dict(history='old')),
+            ParameterSets=dict(entries=1, branches=dict(history='old')))
+        replay = copy.deepcopy(original)
+        replay['MetaData']['branches']['history'] = 'new'
+        replay['Events']['branches']['HTXS_V_pt']['sha256'] = 'b'*64
+        reviewed = dict(baseline=original['Events']['branches']['HTXS_V_pt'],
+                        replay=replay['Events']['branches']['HTXS_V_pt'])
+        result = compare_control_data(original, replay, reviewed)
+        self.assertTrue(result['all_other_data_exact'])
+        self.assertFalse(result['full_Nano_equivalence'])
+        with self.assertRaisesRegex(ValueError, 'changed typed data'):
+            compare_control_data(original, replay)
+        for tree, branch in [('Events', 'ShiftMuon_pt'), ('Runs', 'genEventSumw')]:
+            changed = copy.deepcopy(replay)
+            changed[tree]['branches'][branch] = 'changed'
+            with self.assertRaisesRegex(ValueError, 'changed typed data'):
+                compare_control_data(original, changed, reviewed)
+        changed = copy.deepcopy(replay)
+        changed['Events']['branches']['HTXS_V_pt']['sha256'] = 'c'*64
+        with self.assertRaisesRegex(ValueError, 'exact reviewed HTXS'):
+            compare_control_data(original, changed, reviewed)
+
     def test_vanilla_control_queries_use_the_explicit_remote_scheduler(self):
         import validate_shift_sm_detector_replay as replay
         with tempfile.TemporaryDirectory() as temporary:

@@ -72,8 +72,40 @@ def terminal(control, endpoint=None):
     return rows[0]
 
 
+def compare_control_data(expected, actual, reviewed_difference=None):
+    """Compare all data; scope the known unused HTXS anomaly to exact file bytes.
+
+    Full Nano equivalence remains false when this explicit exception applies.
+    No SHIFT, weight, ID, Run/Lumi or normalization field can be exempted here.
+    """
+    left, right = copy.deepcopy(expected), copy.deepcopy(actual)
+    for inventory in (left, right):
+        for name in ('MetaData', 'ParameterSets'):
+            row = inventory.pop(name)
+            if not row['entries'] or not row['branches']:
+                raise ValueError('Control has empty EDM provenance: ' + name)
+    exception = None
+    if reviewed_difference is not None:
+        if set(reviewed_difference) != {'baseline', 'replay'}:
+            raise ValueError('Require both exact reviewed HTXS branch inventories')
+        observed = dict(baseline=left['Events']['branches']['HTXS_V_pt'],
+                        replay=right['Events']['branches']['HTXS_V_pt'])
+        if observed != reviewed_difference or observed['baseline'] == observed['replay']:
+            raise ValueError('Control differs from the exact reviewed HTXS anomaly')
+        for inventory in (left, right):
+            del inventory['Events']['branches']['HTXS_V_pt']
+        exception = dict(branch='Events.HTXS_V_pt', exact_reviewed_inventories=observed,
+                         used_by_SHIFT_analysis=False, full_Nano_equivalence=False)
+    if left != right:
+        raise ValueError('Control changed typed data, schema, rows or normalization metadata')
+    return dict(complete=True, all_other_data_exact=True,
+        full_Nano_equivalence=exception is None, reviewed_auxiliary_difference=exception,
+        compared_data_inventory_sha256=hashlib.sha256(json.dumps(
+            right, sort_keys=True, separators=(',', ':')).encode()).hexdigest())
+
+
 def validate(control, expected_library_sha256):
-    from shift_nano_integrity import compare_replay_values
+    from shift_nano_integrity import compare_replay_values, semantic_inventory
     from shift_sm_response_labels import read_nano
     original_request = checked(control['original_request'])
     replay_request = checked(control['replay_request'])
@@ -112,7 +144,17 @@ def validate(control, expected_library_sha256):
             download(result['nano_path'], path, result['nano_sha256'])
             paths.append(path)
             labels.append(read_nano(path, expected, result['nano_sha256']))
-        equivalence = compare_replay_values(*paths)
+        reviewed = control.get('reviewed_unused_HTXS_V_pt_difference')
+        if reviewed is None:
+            equivalence = compare_replay_values(*paths)
+        else:
+            if not source['stratum'].startswith('qcd_'):
+                raise ValueError('The reviewed HTXS anomaly applies only to its pinned QCD control')
+            for name, result in (('baseline', original), ('replay', replay)):
+                if result['nano_sha256'] != reviewed[name + '_nano_sha256']:
+                    raise ValueError('Reviewed HTXS exception belongs to different Nano bytes')
+            equivalence = compare_control_data(
+                *[semantic_inventory([p]) for p in paths], reviewed['branch_inventories'])
         if labels[0] != labels[1] or not any(row['event_pass']['both_both_good'] for row in labels[0]):
             raise ValueError('Known good Both-Both control or its kinematics changed')
     return dict(source_id=source['normalization_record']['source_id'],
