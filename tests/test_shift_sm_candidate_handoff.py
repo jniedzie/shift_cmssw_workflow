@@ -58,6 +58,11 @@ class CandidateHandoffTest(unittest.TestCase):
         self.persistent.stop()
         self.fixture.tearDown()
 
+    def test_fresh_census_rejects_an_inherited_old_draw_before_any_io(self):
+        with self.assertRaisesRegex(ValueError, 'cannot inherit'):
+            handoff.prepare(dict(schema=handoff.SCHEMA, fresh_census=True,
+                frozen_response_draw=dict(plan='old')), 'a'*64)
+
     def test_real_draw_builds_full_gen_gate_and_preserves_p_q_and_exposure(self):
         result = handoff.prepare(self.config, 'e'*64)
         self.assertEqual(len(result['detector_jobs']), 3)

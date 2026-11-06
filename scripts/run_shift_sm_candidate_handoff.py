@@ -217,6 +217,8 @@ def frozen_source_draw(bundle, preparation, maximum):
 def prepare(config, config_sha256):
     if config.get('schema') != SCHEMA:
         raise ValueError('Unsupported candidate handoff configuration')
+    if config.get('fresh_census') and config.get('frozen_response_draw'):
+        raise ValueError('Fresh first-SIM census cannot inherit an older frozen response draw')
     output = persistent_directory(config['output_directory'])
     if (output/'prepared.json').exists():
         return verify_prepared(read(output/'prepared.json'), config_sha256)
