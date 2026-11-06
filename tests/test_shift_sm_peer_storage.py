@@ -67,6 +67,30 @@ class PeerStorageTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'original seal'):
             peer.closed_primitive(self.root,'new',[])
 
+    def test_own_evidence_requires_frozen_request_native_success_and_real_path(self):
+        request=self.write('job/request.json',dict(detector_job=1,detector_source=dict(
+            storage_contract='shift-process-bin-detector-v1',
+            nano_base='/eos/user/j/jniedzie/shift_cmssw_support/current/nano',
+            metadata_base='/eos/user/j/jniedzie/shift_cmssw_support/current/meta')))
+        prepared=self.write('prepared.json',dict(detector_jobs=[dict(
+            job_directory=str(request.parent),request_sha256=peer.sha(request))]))
+        result=self.write('job/result.json',dict(complete=True,exit_code=0,job=1,
+            request_sha256=peer.sha(request),nano_path='/eos/user/j/jniedzie/shift_cmssw_support/current/nano/nano_job0000001.root',
+            nano_bytes=10,publication_bytes_before_receipt=18,evidence_sha256='a'*64))
+        events=request.parent/'events.log'
+        events.write_text('005 (12.000.000) Job terminated.\nNormal termination (return value 0)\n...\n')
+        authority=dict(own_prepared_sources=[dict(path=str(prepared),sha256=peer.sha(prepared))],
+            own_evidence_prefix='/eos/user/j/jniedzie/shift_cmssw_support/current',cache_directory=str(self.root/'cache'))
+        with patch.object(peer,'verify_group',side_effect=lambda group,*a,**kw:group['objects']) as verify:
+            objects,groups=peer.read_own_evidence(authority,[])
+            self.assertEqual(objects[0]['bytes'],8)
+            self.assertEqual(objects[0]['path'],authority['own_evidence_prefix']+'/meta/job0000001/evidence.tar.gz')
+            self.assertEqual(len(groups),1)
+            self.assertEqual(peer.read_own_evidence(authority,[dict(Iwd=str(request.parent))]),([],[]))
+            events.write_text('009 (12.000.000) Job removed.\n...\n')
+            self.assertEqual(peer.read_own_evidence(authority,[]),([],[]))
+            self.assertEqual(verify.call_count,1)
+
     def test_science_credit_preserves_unused_headroom_and_does_not_recredit_old_GEN(self):
         config=dict(reserved_science_bytes=1000,paid_science_source_ids=['new'],paid_preparation_source_ids=[])
         nano=dict(kind='Nano',path='/new/nano',bytes=50,sha256='n'*64)

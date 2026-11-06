@@ -627,6 +627,14 @@ def poll(root, config, state):
                 or peer.get('remaining_bytes')!=peer['total_reserved_bytes']-peer['verified_paid_bytes']):
             raise ValueError('Fresh peer paid-output authority is missing or inconsistent')
         external-=peer['verified_paid_bytes']
+        evidence=peer.get('own_verified_evidence_bytes',0)
+        objects=peer.get('own_verified_evidence_objects',[])
+        if (type(evidence) is not int or evidence<0 or evidence>science_future
+                or len({row['path'] for row in objects})!=len(objects)
+                or evidence!=sum(row['bytes'] for row in objects)):
+            raise ValueError('Own evidence paid-byte authority is inconsistent')
+        science_future-=evidence
+        parent_future=parent_in_flight+science_future
     floor = external + parent_config['safety_floor_bytes']
     account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
     for task in sorted(state['tasks'].values(), key=lambda t: t['events']):

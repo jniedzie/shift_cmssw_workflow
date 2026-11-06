@@ -112,12 +112,13 @@ def retained_identity(item):
     return fields
 
 
-def verify_group(group, cache_directory):
+def verify_group(group, cache_directory, allowed_prefixes=None):
     """Read each unchanged retained object independently once, preserving claims on missing groups."""
+    allowed_prefixes = allowed_prefixes or ['/eos/user/j/jniedzie/shift_cmssw/']
     unique={}
     for row in group['objects']:
         item={key:row[key] for key in ('path','bytes','sha256')}
-        if (not item['path'].startswith('/eos/user/j/jniedzie/shift_cmssw/')
+        if (not any(within(item['path'], prefix) for prefix in allowed_prefixes)
                 or '..' in Path(item['path']).parts or type(item['bytes']) is not int
                 or item['bytes']<=0 or not re.fullmatch('[0-9a-f]{64}',item['sha256'])):
             raise ValueError('Invalid peer published object')
@@ -144,6 +145,63 @@ def verify_group(group, cache_directory):
             raise ValueError('Peer output changed during independent readback')
         write_snapshot(cache,evidence)
     return [dict(item,retained_identity=identities[path]) for path,item in unique.items()]
+
+
+
+def read_own_evidence(authority, ads):
+    """Credit only independently read-back evidence of terminal pinned workers.
+
+    This changes storage claims, never source closure or scientific exposure.
+    Work not examined within this poll's bound keeps its full reservation.
+    """
+    from run_shift_gen_to_nano import publication_paths
+    objects = {}; groups = []; deadline = time.monotonic() + 300
+    new_bytes = 0
+    for pin in authority.get('own_prepared_sources', []):
+        prepared = pinned(pin)
+        for job in prepared['detector_jobs']:
+            if time.monotonic() > deadline:
+                return list(objects.values()), groups
+            directory = Path(job['job_directory'])
+            if any(within(ad.get('Iwd'), directory) for ad in ads):
+                continue
+            result_path = directory/'result.json'; event_path = directory/'events.log'
+            if not result_path.exists() or not event_path.exists():
+                continue
+            result = read(result_path)
+            if result.get('complete') is not True or result.get('exit_code') != 0:
+                continue
+            request_pin = dict(path=str(directory/'request.json'),sha256=job['request_sha256'])
+            request = pinned(request_pin)
+            if (result.get('request_sha256') != request_pin['sha256']
+                    or result.get('job') != request['detector_job']):
+                raise ValueError('Own paid evidence differs from its frozen request')
+            blocks = event_path.read_text().split('\n...\n')[:-1]
+            terminals = [b for b in blocks if b.startswith(('005 (','009 ('))]
+            if not terminals or not terminals[-1].startswith('005 (') or 'Normal termination (return value 0)' not in terminals[-1]:
+                continue
+            nano, metadata = publication_paths(request['detector_source'],request['detector_job'])
+            if nano != result.get('nano_path'):
+                raise ValueError('Own evidence publisher path differs from its actual request')
+            item = dict(path=metadata+'/evidence.tar.gz',sha256=result['evidence_sha256'],
+                        bytes=result['publication_bytes_before_receipt']-result['nano_bytes'])
+            prefix = authority['own_evidence_prefix']
+            proof = dict(directory=str(directory),prepared=pin,request=request_pin,
+                         result_sha256=sha(result_path),terminal_event=terminals[-1])
+            key=hashlib.sha256(json.dumps(proof,sort_keys=True).encode()).hexdigest()
+            cached=(Path(authority['cache_directory'])/(key+'.json')).exists()
+            if not cached and new_bytes >= 256*1024*1024:
+                continue
+            rows = verify_group(dict(proof=proof,objects=[item]),
+                authority['cache_directory'],allowed_prefixes=[prefix])
+            groups.append(proof)
+            for row in rows:
+                if row['path'] in objects and objects[row['path']] != row:
+                    raise ValueError('Conflicting own evidence object')
+                objects[row['path']] = row
+                if not cached:
+                    new_bytes += row['bytes']
+    return list(objects.values()), groups
 
 
 def read_peer_commitments(authority_pin):
@@ -199,6 +257,8 @@ def read_peer_commitments(authority_pin):
             raise ValueError('Verified peer writes exceed their unchanged allocation')
         peers.append(dict(name=peer['name'],reserved_bytes=peer['reserved_bytes'],
                           verified_paid_bytes=paid,remaining_bytes=peer['reserved_bytes']-paid))
+    own_objects, own_groups = read_own_evidence(authority, ads)
+    groups.extend(own_groups)
     # A restarted producer invalidates this observation before any credit is used.
     final=queue()
     if any(within(ad.get('Iwd'),g['directory']) for ad in final for g in groups):
@@ -208,6 +268,8 @@ def read_peer_commitments(authority_pin):
     return dict(schema='shift-SM-verified-peer-remaining-storage-v1',complete=True,
         authority_sha256=authority_pin['sha256'],checked_epoch=time.time(),
         total_reserved_bytes=total,verified_paid_bytes=paid,remaining_bytes=total-paid,
+        own_verified_evidence_bytes=sum(row['bytes'] for row in own_objects),
+        own_verified_evidence_objects=own_objects,
         fixed_uncredited_guard_bytes=authority['fixed_uncredited_guard_bytes'],peers=peers,
         verified_groups=groups,objects=list(objects.values()),fresh_native_queue_verified=True,
         unused_headroom_and_unfinished_writes_preserved=True)
