@@ -142,6 +142,57 @@ class StatisticsControllerRollover(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     replacement.validate_policy(previous, candidate)
 
+    def test_reviewed_credit_pin_and_empty_transfer_policy_are_frozen(self):
+        for transfer in ('legacy', 'empty', 'unsafe'):
+            with self.subTest(transfer=transfer),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary)
+                template,_,policy,previous,_,_=self.fixture(root)
+                descriptor=template/'controller.sub'
+                if transfer != 'legacy':
+                    descriptor.write_text(descriptor.read_text().replace('should_transfer_files = NO',
+                        'should_transfer_files = YES\ntransfer_output_files = '+
+                        ('""' if transfer=='empty' else 'unexpected.root')+'\nwhen_to_transfer_output = ON_EXIT'))
+                freeze=self.pin(template/'freeze.json',dict(files={str(path):statistics.sha(path)
+                    for path in template.rglob('*') if path.is_file() and path.name!='freeze.json'}))
+                proof=root/'paid.json';proof.write_text('{"reviewed": true}')
+                output=root/'replacement'
+                if transfer=='unsafe':
+                    with self.assertRaisesRegex(ValueError,'scratch output'):
+                        replacement.prepare(template,freeze['sha256'],policy,output,current_SM_remaining_storage=proof)
+                    continue
+                replacement.prepare(template,freeze['sha256'],policy,output,current_SM_remaining_storage=proof)
+                current=statistics.configuration(output/'config.json')
+                authority=dict(path=str(proof),sha256=statistics.sha(proof))
+                self.assertEqual(current['current_SM_remaining_storage'],authority)
+                self.assertEqual(current['dependencies'][str(proof)],authority['sha256'])
+                deployed=(output/'controller.sub').read_text()
+                self.assertIn('should_transfer_files = YES',deployed)
+                self.assertIn('transfer_output_files = ""',deployed)
+                self.assertIn('when_to_transfer_output = ON_EXIT',deployed)
+                self.assertEqual(current['directory'],previous['directory'])
+
+    def test_unchanged_gen_execution_paths_keep_their_actual_original_pins(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            template,_,policy,config,_,_=self.fixture(root)
+            source=template/'execution_scripts/source.py';source.parent.mkdir()
+            source.write_text('# frozen physics source\n')
+            config['gen_execution_scripts']=str(source.parent)
+            config['dependencies'][str(source)]=statistics.sha(source)
+            self.pin(template/'config.json',config)
+            freeze=self.pin(template/'freeze.json',dict(files={str(path):statistics.sha(path)
+                for path in template.rglob('*') if path.is_file() and path.name!='freeze.json'}))
+            output=root/'replacement'
+            replacement.prepare(template,freeze['sha256'],policy,output)
+            current=statistics.configuration(output/'config.json')
+            self.assertEqual(current['gen_execution_scripts'],str(source.parent))
+            self.assertEqual(current['dependencies'][str(source)],statistics.sha(source))
+            copied=output/'execution_scripts/source.py'
+            self.assertEqual(current['dependencies'][str(copied)],statistics.sha(copied))
+            source.write_text('# changed original physics source\n')
+            with self.assertRaisesRegex(ValueError,'dependency changed'):
+                statistics.configuration(output/'config.json')
+
     def test_template_foreign_dependencies_and_output_are_protected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

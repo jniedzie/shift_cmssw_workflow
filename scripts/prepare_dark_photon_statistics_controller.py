@@ -49,7 +49,7 @@ def relocated(path, previous, output):
     return output/value.relative_to(previous)
 
 
-def prepare(template, template_freeze, policy, output, meson_peer_controllers=()):
+def prepare(template, template_freeze, policy, output, meson_peer_controllers=(), current_SM_remaining_storage=None):
     template, policy, output = [Path(path).resolve() for path in (template, policy, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -72,9 +72,15 @@ def prepare(template, template_freeze, policy, output, meson_peer_controllers=()
     descriptor = (template/'controller.sub').read_text()
     required = ('universe = vanilla', 'initialdir = '+str(template), '+MaxRuntime = 604800',
                 '+SendCredential = True', 'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
-                'periodic_release = False', 'should_transfer_files = NO')
+                'periodic_release = False')
     if any(line not in descriptor for line in required):
         raise ValueError('Template lacks the required persistent credential and failure-hold policy')
+    if 'should_transfer_files = NO' in descriptor:
+        descriptor = descriptor.replace('should_transfer_files = NO',
+            'should_transfer_files = YES\ntransfer_output_files = ""\nwhen_to_transfer_output = ON_EXIT')
+    elif any(line not in descriptor for line in ('should_transfer_files = YES',
+            'transfer_output_files = ""', 'when_to_transfer_output = ON_EXIT')):
+        raise ValueError('Template must disable scratch output transfer explicitly')
     sources = {}
     for source in sorted(old_tools.iterdir()):
         if source.name == '__pycache__':
@@ -118,7 +124,10 @@ def prepare(template, template_freeze, policy, output, meson_peer_controllers=()
             locators[name] = str(Path(owner).resolve())
         meson.validate_meson_peer_locators(current,
             [row['name'] for row in candidate_policy['campaigns'] if row['kind'] == 'meson'])
-    dependencies = {}
+    # Scientific paths such as gen_execution_scripts and baseline_sources keep
+    # their original owner. Preserve those exact pins as well as the relocated
+    # operational copies; copying a helper does not move its consumers.
+    dependencies = dict(previous['dependencies'])
     for name, expected in previous['dependencies'].items():
         source = Path(name)
         if source.is_relative_to(template):
@@ -138,8 +147,13 @@ def prepare(template, template_freeze, policy, output, meson_peer_controllers=()
         peer = statistics.pinned_json(row['worklist'])
         dependencies[peer['model_card']] = statistics.sha(peer['model_card'])
     current['dependencies'] = dependencies
+    if current_SM_remaining_storage is not None:
+        path = Path(current_SM_remaining_storage).resolve()
+        current['current_SM_remaining_storage'] = dict(path=str(path),sha256=statistics.sha(path))
+        meson.storage_pinned_read(current['current_SM_remaining_storage'])
+        dependencies[str(path)] = current['current_SM_remaining_storage']['sha256']
     allowed = {'tools', 'lcg_wrapper', 'handoff_operations', 'supplement_admission', 'dependencies',
-               'meson_peer_controller_directories'}
+               'meson_peer_controller_directories', 'current_SM_remaining_storage'}
     if set(previous.get('meson_peer_controller_directories', {}))-set(current.get('meson_peer_controller_directories', {})):
         raise ValueError('Statistics rollover removed a protected meson completion owner')
     if any(current[key] != previous[key] for key in previous if key not in allowed):
@@ -184,9 +198,11 @@ def main():
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--meson-peer-controller', action='append', nargs=2, default=[],
         metavar=('NAME', 'DIRECTORY'), help='Exact terminal owner of a protected meson peer')
+    parser.add_argument('--current-SM-remaining-storage',type=Path,
+        help='Reviewed disjoint paid increment against the unchanged current SM envelope')
     args = parser.parse_args()
     print(json.dumps(prepare(args.template, args.template_freeze, args.policy, args.output,
-                             args.meson_peer_controller), sort_keys=True))
+                             args.meson_peer_controller,args.current_SM_remaining_storage), sort_keys=True))
 
 
 if __name__ == '__main__':

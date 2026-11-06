@@ -664,10 +664,18 @@ def supplement_admission(config, observation):
         {'controller_directory': config['meson_peer_controller_directories'][row['name']]}
         if row['kind'] == 'meson' and row['name'] in config.get('meson_peer_controller_directories', {}) else {})),
         observed,policy.get('maximum_peer_age_seconds',1200), config) for row in campaigns]
-    required = policy['minimum_free_bytes']+sum(row['remaining_bytes'] for row in claims)
+    from run_dark_photon_meson_production import current_SM_storage_release
+    try:
+        current_SM_credit, current_SM_accounting = current_SM_storage_release(config, observation)
+    except (OSError, RuntimeError) as error:
+        return False,dict(reason='waiting_for_verified_current_SM_storage', native_or_storage_error=repr(error))
+    if current_SM_credit > policy['minimum_free_bytes']-config.get('minimum_free_bytes',0):
+        raise ValueError('Current SM credit exceeds the protected supplement reservation')
+    required = policy['minimum_free_bytes']-current_SM_credit+sum(row['remaining_bytes'] for row in claims)
     evidence = dict(reason='admitted' if observation['free_bytes'] >= required else 'waiting_for_shared_storage',
                     observed_utc=observation['observed_utc'],free_bytes=observation['free_bytes'],
-                    required_free_bytes=required,claims=claims,retirement_credit_bytes=0)
+                    required_free_bytes=required,claims=claims,retirement_credit_bytes=0,
+                    **({'current_SM_storage':current_SM_accounting} if current_SM_accounting is not None else {}))
     return observation['free_bytes'] >= required and observation['free_files'] >= policy['minimum_free_files'],evidence
 
 
@@ -714,7 +722,13 @@ def production_budget(config, preparation):
         points=len(preparation['points']), external_reservations=[],
         fixed_reservation_bytes=config['fixed_publication_bytes'],
         gen_group_file_allowance=4000, safety_free_floor_files=5000)
-    budget['fixed_reservation_breakdown'] = config['fixed_publication_breakdown']
+    budget['fixed_reservation_breakdown'] = copy.deepcopy(config['fixed_publication_breakdown'])
+    if config.get('current_SM_remaining_storage') is not None:
+        from run_dark_photon_meson_production import current_SM_storage_release
+        credit, evidence = current_SM_storage_release(config, quota(config))
+        budget['fixed_reservation_bytes'] -= credit
+        budget['fixed_reservation_breakdown']['SM_remaining'] -= credit
+        budget['current_SM_storage'] = evidence
     budget['publication_reservation_scope'] = 'One adaptive wave plus protected peer-wave and analysis headroom'
     return budget
 

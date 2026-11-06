@@ -50,7 +50,8 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             close_source_admission=False, reviewed_coverage_recovery=None, closed_source_forecasts=(),
             operational_handoffs=False, reviewed_handoff_failures=(),
             regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None, absolute_detector_stage_budgets=False,
-            reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None, reviewed_nano_integrity_relocation=None):
+            reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None, reviewed_nano_integrity_relocation=None,
+            current_SM_remaining_storage=None):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -87,6 +88,10 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
         if required not in descriptor:
             raise ValueError('Template is missing its reviewed detached-worker policy: '+required)
     config = scheduling_configuration(original, previous, sources, detector_points)
+    if current_SM_remaining_storage is not None:
+        path = Path(current_SM_remaining_storage).resolve()
+        config['current_SM_remaining_storage'] = dict(path=str(path),sha256=production.durable.sha(path))
+        production.storage_pinned_read(config['current_SM_remaining_storage'])
     if relocation is not None:
         moved=production.nano_integrity_relocation(directory,original_seal,relocation)
         config.update(reviewed_nano_integrity_relocation=relocation,
@@ -286,6 +291,8 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         retirement_pins.append(config['aggregation_storage_registration'])
     if config.get('reviewed_regrouping_canary_recovery'):
         retirement_pins.append(config['reviewed_regrouping_canary_recovery'])
+    if config.get('current_SM_remaining_storage'):
+        retirement_pins.append(config['current_SM_remaining_storage'])
     for pin in retirement_pins:
         seal_files[str(production.pinned_path(pin))] = pin['sha256']
     if relocation is not None:
@@ -342,6 +349,8 @@ def main():
     parser.add_argument('--reviewed-regrouping-canary-recovery',type=Path)
     parser.add_argument('--reviewed-source-accounting',type=Path)
     parser.add_argument('--reviewed-nano-integrity-relocation',type=Path)
+    parser.add_argument('--current-SM-remaining-storage',type=Path,
+        help='Reviewed disjoint paid increment against the unchanged current SM envelope')
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -352,7 +361,8 @@ def main():
                              args.operational_handoffs,args.reviewed_handoff_failure,
                              args.regroup_complete_points,args.aggregation_storage_registration,
                              args.historical_anchor_calibration,args.absolute_detector_stage_budgets,
-                             args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting,args.reviewed_nano_integrity_relocation), sort_keys=True))
+                             args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting,args.reviewed_nano_integrity_relocation,
+                             args.current_SM_remaining_storage), sort_keys=True))
 
 
 if __name__ == '__main__':

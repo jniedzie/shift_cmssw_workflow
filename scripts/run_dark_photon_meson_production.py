@@ -988,6 +988,7 @@ def operational_configuration(original,path,expected,_reservation_chain=(), revi
                                    'qualified_global_detector_canary', 'maximum_new_detector_handoffs_per_poll',
                                    'main_cleanup_recovery_guard', 'additional_main_cleanup_recovery_guards', 'eos_executable',
                                    'committed_direct_storage_peer', 'committed_SM_preparation_peer', 'additional_SM_preparation_peer',
+                                   'current_SM_remaining_storage',
                                    'reviewed_source_accounting',
                                    'reviewed_source_recovery_receipts', 'reviewed_nano_integrity_relocation'}:
         raise ValueError('Replacement controller added unreviewed production settings')
@@ -3382,6 +3383,178 @@ def committed_SM_preparation_bytes(config, observed):
     return original+amount
 
 
+def current_SM_storage_release(config, observation):
+    """Release one reviewed, disjoint paid increment from the existing SM claim.
+
+    This immutable proof never discovers new producers or spends another SM
+    allocation. Later credit requires another reviewed controller rollover.
+    Native queue absence and retained object identities are checked each time;
+    successful producer contents are read once per unchanged authority.
+    """
+    authority = config.get('current_SM_remaining_storage')
+    if authority is None:
+        return 0, None
+    if any(config.get(key) for key in ('committed_SM_preparation_peer',
+            'additional_SM_preparation_peer', 'reviewed_remaining_storage_authority')):
+        raise ValueError('Current SM storage credit cannot be combined with another SM credit')
+    proof = storage_pinned_read(authority)
+    baseline = storage_pinned_read(proof['original_remaining_authority'])
+    registration = storage_pinned_read(proof['registration'])
+    reserved = proof.get('reserved_bytes')
+    paid = proof.get('paid_bytes')
+    observed = datetime.fromisoformat(observation['observed_utc']).timestamp()
+    root = Path(proof['scope_directory'])
+    if (proof.get('schema') != 'shift-reviewed-current-SM-paid-storage-v1'
+            or proof.get('complete') is not True or proof.get('raw_GEN_excluded') is not True
+            or proof.get('prior_preparation_bytes_not_recredited') is not True
+            or not root.is_absolute() or '..' in root.parts
+            or type(reserved) is not int or reserved != 16717291177
+            or type(paid) is not int or not 0 < paid <= reserved
+            or baseline.get('total_SM_remaining_bytes') != reserved
+            or baseline.get('new_paid_credit') != proof['prior_preparation_credit']
+            or registration.get('schema') != 'shift-SM-weekend-first-increment-registration-v1'
+            or registration.get('SM_shared_envelope_bytes') != reserved
+            or registration.get('SM_total_remaining_bound_including_new_increment', reserved+1) > reserved
+            or proof.get('checked_epoch', float('inf')) > observed):
+        raise ValueError('Current SM paid increment differs from its unchanged shared envelope')
+    if config.get('schema') == 'shift-dp-statistics-controller-v1':
+        if (config.get('fixed_publication_breakdown', {}).get('SM_remaining') != reserved
+                or config.get('dependencies', {}).get(authority['path']) != authority['sha256']):
+            raise ValueError('Current SM credit is outside the frozen statistics reservation')
+    else:
+        fresh = fresh_production_authority(config, reader=storage_pinned_read)
+        peer = fresh['storage_registration'] if fresh is not None else {}
+        claims = {row['name']:row['reserved_bytes'] for row in peer.get('peer_reservations', [])}
+        if (claims.get('SM_remaining_verified_20261106') != reserved
+                or peer.get('remaining_SM_authority') != proof['original_remaining_authority']):
+            raise ValueError('Current SM credit is outside the frozen meson reservation')
+    native_ids = [proof['manager']['native_closure']['cluster_id'], *[row['cluster'] for row in proof['rows']]]
+    live = durable.jobs(config, '('+directory_condition(root/'preparation')+') || '
+        'member(ClusterId, {'+','.join(str(cluster) for cluster in native_ids)+'})')
+    if any(row.get('Iwd') == str(root/'preparation')
+           or row.get('Iwd', '').startswith(str(root/'preparation')+'/') for row in live):
+        raise RuntimeError('Reviewed SM preparation still has active native producers')
+    live_ids = {row['ClusterId'] for row in live}
+    if set(native_ids) & live_ids:
+        raise RuntimeError('Reviewed SM preparation has a live native identity')
+    def identity(path):
+        stamp = Path(path).stat()
+        return (stamp.st_dev, stamp.st_ino, stamp.st_size, stamp.st_mtime_ns, stamp.st_ctime_ns)
+    cache_key = 'current_SM_paid:'+authority['sha256']
+    cached = _REVIEWED_STORAGE_CACHES.get(cache_key)
+    if cached is not None:
+        if any(identity(path) != stamp for path,stamp in cached.items()):
+            raise ValueError('Cached current SM producer proof changed')
+    objects, stamps, sources, clusters = {}, {}, set(), set()
+    if cached is None:
+        previous = storage_pinned_read(proof['prior_preparation_credit'])
+        previous_paths = {item['path'] for row in previous['rows'] for item in row['objects']}
+        plan = storage_pinned_read(proof['plan'])
+        planned = {row['source_id']:row['directory'] for row in plan['sources']}
+        if (len(planned) != len(plan['sources']) or len(planned) != proof['producers']
+                or {row['source_id']:row['directory'] for row in proof['rows']} != planned):
+            raise ValueError('Current SM paid proof changed its original source census')
+        manager = proof['manager']
+        closure = manager['native_closure']
+        manager_pins = list(manager[name] for name in ('submission', 'dag', 'dagman_output'))
+        manager_pins.append(dict(path=closure['event_log'],sha256=closure['event_log_sha256']))
+        for pin in manager_pins:
+            stamp = identity(pin['path'])
+            if hashlib.sha256(storage_payload(pin['path'])).hexdigest() != pin['sha256'] or identity(pin['path']) != stamp:
+                raise ValueError('Current SM preparation manager proof changed')
+            stamps[pin['path']] = stamp
+        submission = storage_ledger(manager['submission']['path'])
+        terminal = next((block for block in reversed(storage_payload(closure['event_log']).decode().split('\n...\n'))
+            if re.match(r'005 \('+str(closure['cluster_id'])+r'\.000\.',block)), '')
+        if (closure.get('successful') is not True or closure.get('exit_code') != 0
+                or closure['cluster_id'] != submission['cluster_id']
+                or submission['directory'] != str(root/'preparation')
+                or 'Normal termination (return value 0)' not in terminal
+                or closure['cluster_id'] in live_ids):
+            raise ValueError('Current SM preparation lost its successful native manager')
+        dag = storage_payload(manager['dag']['path']).decode()
+        manager_output = storage_payload(manager['dagman_output']['path']).decode()
+    for row in proof['rows']:
+        sid, cluster = row['source_id'], row['cluster']
+        work = root/'preparation/sources'/sid
+        if (not re.fullmatch(r'[A-Za-z0-9_.-]+', sid) or sid in ('.','..') or row['directory'] != str(work)
+                or sid in sources or type(cluster) is not int or cluster <= 0 or cluster in clusters):
+            raise ValueError('Current SM paid proof repeats or changes a producer')
+        sources.add(sid); clusters.add(cluster)
+        for name in ('request.json', 'result.json', 'status.json', 'events.log', 'worker.sub'):
+            pin = row['pins'][name]
+            path = work/name
+            if pin['path'] != str(path):
+                raise ValueError('Current SM producer proof changed its exact path')
+            if cached is None:
+                stamp = identity(path)
+                if hashlib.sha256(storage_payload(path)).hexdigest() != pin['sha256'] or identity(path) != stamp:
+                    raise ValueError('Current SM producer proof changed: '+str(path))
+                stamps[str(path)] = stamp
+        if cached is None:
+            result, request = storage_ledger(work/'result.json'), storage_ledger(work/'request.json')
+            request_hash = row['pins']['request.json']['sha256']
+            descriptor = storage_payload(work/'worker.sub').decode()
+            if (not re.search(r'(?m)^arguments\s*=\s*'+re.escape(request_hash)+r'\s', descriptor)
+                    or not re.search(r'(?m)^initialdir\s*=\s*'+re.escape(str(work))+r'\s*$', descriptor)
+                    or result.get('source_id') != sid or result.get('new_GEN_exposure') != 0
+                    or result.get('finished_epoch', float('inf')) > proof['checked_epoch']):
+                raise ValueError('Current SM credit changed its actual submitted source request')
+            if (not re.search(r'(?m)^JOB '+re.escape(row['native_node'])+r' '+re.escape(str(work/'worker.sub'))+r'\s',dag)
+                    or not re.search(r'ULOG_(?:SUBMIT|EXECUTE|TERMINATED) for HTCondor Node '
+                        +re.escape(row['native_node'])+r' \('+str(cluster)+r'\.0\.0\)',manager_output)):
+                raise ValueError('Current SM producer is outside its actual native DAG node')
+            task = dict(directory=str(work), phase='done', native_exit_code=0, cluster=cluster,
+                request_sha256=request_hash, result_sha256=row['pins']['result.json']['sha256'],
+                finished_epoch=result['finished_epoch'])
+            producer = committed_sm_storage_entry(task, root)
+            prefix = request['publication_directory'].rstrip('/')+'/'
+            expected = [item for item in producer['objects'] if item['path'].startswith(prefix)]
+            actual = [{key:item[key] for key in ('path','bytes','sha256')} for item in row['objects']]
+            if expected != actual or sum(item['bytes'] for item in actual) != row['bytes']:
+                raise ValueError('Current SM credit differs from its independently read-back publications')
+            if any(item['path'] in previous_paths for item in actual):
+                raise ValueError('Current SM credit would count prior preparation outputs again')
+        for item in row['objects']:
+            path = item['path']
+            if (not path.startswith('/eos/user/j/jniedzie/shift_cmssw_support/')
+                    or '..' in Path(path).parts or path in objects
+                    or type(item['bytes']) is not int or item['bytes'] <= 0
+                    or not re.fullmatch(r'[0-9a-f]{64}', item['sha256'])
+                    or type(item['current_mtime_ns']) is not int):
+                raise ValueError('Current SM paid output changed, overlaps or lacks current readback identity')
+            objects[path] = item
+    if len(objects) != proof['objects'] or sum(item['bytes'] for item in objects.values()) != paid:
+        raise ValueError('Current SM paid proof has inconsistent unique object totals')
+    # Vanilla controllers need not have EOS mounted. Reuse the existing native
+    # RPC adapter; producer SHA readback is pinned above, current size and mtime
+    # prove those same immutable objects remain present without bulk downloads.
+    from watch_dark_photon_production import EosRpc
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import Decimal, InvalidOperation
+    with tempfile.TemporaryDirectory(prefix='dp-SM-paid-stat-',
+            dir=os.environ.get('_CONDOR_SCRATCH_DIR', '/tmp')) as scratch:
+        transport = EosRpc('root://eosuser.cern.ch', scratch,
+                           config.get('eos_executable', '/usr/bin/eos'))
+        def verify_object(item):
+            metadata = transport.metadata(item['path'])
+            try:
+                # EOS versions differ in mtime precision. Require the same
+                # second together with exact bytes and pinned SHA256 readback.
+                valid = (metadata is not None and int(metadata['size']) == item['bytes']
+                    and int(Decimal(metadata['mtime'])) == item['current_mtime_ns']//1000000000)
+            except (KeyError, ValueError, InvalidOperation):
+                valid = False
+            if not valid:
+                raise ValueError('Current SM paid output metadata changed: '+item['path'])
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(verify_object, objects.values()))
+    if cached is None:
+        _REVIEWED_STORAGE_CACHES[cache_key] = stamps
+    return paid, dict(authority=authority, registered_bytes=reserved, paid_bytes=paid,
+        remaining_bytes=reserved-paid, producers=len(sources), objects=len(objects), raw_GEN_excluded=True)
+
+
 def storage_gate(config, observation, bulk=False, state=None, persist_terminal_cache=True):
     reviewed = bulk and config.get('reviewed_remaining_storage_authority')
     reservation = 0 if reviewed else adaptive_reservation(config)
@@ -3450,6 +3623,13 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
                                evidence_traceback=traceback.format_exc(limit=8))
     reserved, claims = additional_reservations(config)
     regrouping=aggregation_reservation(config)
+    try:
+        current_SM_credit, current_SM_accounting = current_SM_storage_release(config, observation)
+    except (OSError, RuntimeError) as error:
+        return False, dict(reason='waiting_for_verified_current_SM_storage', native_or_storage_error=repr(error))
+    if current_SM_credit > reservation:
+        raise ValueError('Current SM credit exceeds its protected peer reservation')
+    reservation -= current_SM_credit
     required = config['minimum_eos_free_bytes'] + reservation + additional + reserved + regrouping
     return observation['free_bytes'] >= required and observation['free_files'] >= config['minimum_eos_free_files'], dict(
         free_bytes=observation['free_bytes'], protected_adaptive_bytes=reservation,
@@ -3457,6 +3637,7 @@ def storage_gate(config, observation, bulk=False, state=None, persist_terminal_c
         committed_source_bytes=source_credit,
         committed_direct_peer_bytes=peer_credit,
         committed_SM_preparation_bytes=SM_preparation_credit,
+        **({'current_SM_storage': current_SM_accounting} if current_SM_accounting is not None else {}),
         aggregate_storage_reservation_bytes=regrouping,
         additional_reserved_worklists=claims, required_free_bytes=required,
         **({'reviewed_remaining_storage': accounting} if accounting is not None else {}))
