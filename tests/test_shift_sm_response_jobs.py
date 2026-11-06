@@ -71,6 +71,19 @@ def fixture(root):
 
 
 class ResponseJobsTest(unittest.TestCase):
+    def test_outer_limits_allow_the_existing_twelve_hour_detector_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            request = jobs.envelope('smart_sm_detector', dict(sha256='a'*64), 4*1024*1024)
+            json_file(root/'request.json', request)
+            frozen = dict(bootstrap='/persistent/worker.sh', capsule='/persistent/frozen_tools.tar.gz',
+                          capsule_sha256='b'*64)
+            text = jobs.submit_text(root, request, frozen, 0)
+            maximum = int(next(line.split('=', 1)[1] for line in text.splitlines()
+                               if line.startswith('+MaxRuntime')))
+            self.assertGreaterEqual(request['application_timeout_seconds'], 12*3600)
+            self.assertGreaterEqual(maximum, request['application_timeout_seconds'] + 600)
+
     def test_native_dependencies_census_weights_and_limits(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);config=fixture(root);output=root/'deployment'

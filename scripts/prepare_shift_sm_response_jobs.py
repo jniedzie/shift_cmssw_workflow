@@ -165,7 +165,8 @@ def freeze_tools(config, directory):
 def envelope(stage, plan_pin, reservation):
     return dict(schema='shift-stream-payload-v1', environment='cmssw', stage=stage,
         cohort_id='sm-response-prospective-20261027-v1',
-        application_timeout_seconds=10000 if stage == 'smart_sm_detector' else 2700,
+        application_timeout_seconds=(45000 if stage == 'smart_sm_detector' else
+                                     3600 if stage == 'sm_primary_preflight' else 2700),
         result_path='report.json', return_files=[], status_fields=dict(
             benchmark_plan_sha256=plan_pin['sha256'], response_study_only=True),
         reservation_bytes=reservation)
@@ -204,7 +205,9 @@ def preflight_request(plan_pin, source_pin, frozen):
 
 
 def submit_text(directory, request, frozen, priority):
-    maximum = 10800 if request['stage']=='smart_sm_detector' else 3600
+    # The detector entry already allows a 12-hour chain. Runtime extraction and
+    # output transfer need their own margin outside that application deadline.
+    maximum = request['application_timeout_seconds'] + 1800
     memory = 6000 if request['stage']=='smart_sm_detector' else 4000
     return '\n'.join(['# Code style: AI-code. AI-generated frozen response-study worker.',
         'universe = vanilla', 'initialdir = '+str(directory),
