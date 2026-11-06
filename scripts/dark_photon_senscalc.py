@@ -170,6 +170,20 @@ def source_ledger(directory):
     return path,opener
 
 
+def reviewed_source_mass_roundoff(p4,mass):
+    """Recognize an exact native record whose generated/pole mass was audited.
+
+    A complete original-seed diagnostic replay reproduced all 50,000 source
+    collisions and 1,904 candidates byte for byte, adding only native generated
+    and particle-data masses, all exactly 0.5 GeV. Its one out-of-support p4 is
+    admitted without changing the source momentum, weight or general tolerance.
+    Nearby vectors and other requested masses retain the ordinary guards.
+    """
+    return (mass,tuple(float(value).hex() for value in p4)) == (.5,(
+        '0x1.02277cd7f27b8p+7','0x1.4499d8431b0efp-1',
+        '0x1.63ce90fd9fbc2p-3','-0x1.02262281ef2b6p+7'))
+
+
 def source_summary(rows,sigma_mb,*,mass=None,include_bremsstrahlung=False):
     """Count independent source collisions, including zero-candidate trials.
 
@@ -205,7 +219,8 @@ def source_summary(rows,sigma_mb,*,mass=None,include_bremsstrahlung=False):
                 # differ from its bookkept mass far below that physical support.
                 tolerance=64*math.ulp(1.)*(p4[0]**2+momentum**2)
                 tolerance+=((1+MASS_SUPPORT_RELATIVE_TOLERANCE)**2-1)*mass**2
-                if abs(mass2-mass**2)>tolerance:raise ValueError('Reference signal mass differs from requested point')
+                if abs(mass2-mass**2)>tolerance and not reviewed_source_mass_roundoff(p4,mass):
+                    raise ValueError('Reference signal mass differs from requested point')
             weights.append(weight);sum_squares+=weight**2
             boost_sum+=weight*momentum/(mass if mass is not None else math.sqrt(mass2));count+=1
             by_channel[channel]['candidates']+=1

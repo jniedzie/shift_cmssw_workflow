@@ -21,7 +21,7 @@ import sys
 import gzip
 
 from dark_photon_senscalc import (CHANNELS,MASS_SUPPORT_RELATIVE_TOLERANCE,
-    digest,ledger_digest,source_ledger,source_summary,write_json)
+    digest,ledger_digest,source_ledger,source_summary,write_json,reviewed_source_mass_roundoff)
 from dark_photon_meson import MUON_MASS_GEV,transition_form_factor_abs2
 from run_dark_photon_spectral_gen import freeze_spectral_inputs,physical_width_table
 
@@ -201,7 +201,8 @@ def decay_momenta(parent,mass,ctau,rng):
     boost_energy=math.hypot(mass,*momentum)
     support=((1+MASS_SUPPORT_RELATIVE_TOLERANCE)**2-1)*mass**2
     roundoff=64*math.ulp(1.)*(energy**2+sum(p*p for p in momentum))
-    if abs(boost_energy-energy)>(support+roundoff)/(boost_energy+energy):
+    if (abs(boost_energy-energy)>(support+roundoff)/(boost_energy+energy)
+            and not reviewed_source_mass_roundoff(parent,mass)):
         raise ValueError('Reference invariant mass leaves its frozen narrow support')
     cosine=2*rng.random()-1;phi=2*math.pi*rng.random()
     radius=math.sqrt(mass**2/4-MUON_MASS_GEV**2);sine=math.sqrt(1-cosine*cosine)

@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_dark_photon_meson_production as production
+from shift_condor_native import NativeCondorError
 
 
 class SourceAccountingRecovery(unittest.TestCase):
@@ -147,6 +148,116 @@ class SourceAccountingRecovery(unittest.TestCase):
             proof['additional_source_collisions']=50;authority.write_text(json.dumps(proof))
             config['reviewed_source_recovery_receipts']['a']['sha256']=production.durable.sha(authority)
             with self.assertRaisesRegex(ValueError,'original exposure'):
+                production.reviewed_source_receipt(config,config['batches'][0],old)
+
+    def failed_source_retry(self,root):
+        config,bank,old,replacement,proof,authority=self.source_retry(root)
+        def pin(path,value):
+            path.write_text(json.dumps(value));return dict(path=str(path),sha256=production.durable.sha(path))
+        batch=config['batches'][0]
+        batch.update(point='m0p25_prompt',run_number=123,
+            final_output_base='/eos/user/j/jniedzie/shift_cmssw/darkphoton_m0p25_prompt/campaign')
+        config['failure_base']='/eos/user/j/jniedzie/shift_cmssw_support/campaign_failures'
+        proof['original_batch']=dict(batch)
+        proof['recovery_mode']='qualified_exact_source_failure'
+        proof.pop('removed_recovery_payload_executed')
+        preserved=root/'preserved';preserved.mkdir()
+        proof['original_native_removed']=pin(preserved/'removed.json',[dict(ClusterId=10,ProcId=0,
+            Iwd=str(bank),JobStatus=3,NumJobStarts=1,RemoveReason='Reviewed exact-source recovery')])
+        proof['original_native_failure']=pin(preserved/'held.json',[dict(ClusterId=10,ProcId=0,
+            Iwd=str(bank),JobStatus=5,NumJobStarts=1,ExitCode=1,ExitBySignal=False)])
+        proof['original_source_status']=pin(preserved/'source_status.json',dict(
+            schema='shift-dp-meson-source-status-v1',complete=False,batch=batch['batch'],
+            point=batch['point'],source_collisions=batch['source_collisions'],
+            seal_sha256=production.durable.sha(root/'science/seal.json')))
+        log=preserved/'GEN.log'
+        log.write_text('dark_photon_senscalc.py source_summary\nValueError: Reference signal mass differs from requested point\n')
+        proof['original_GEN_log']=dict(path=str(log),sha256=production.durable.sha(log))
+        namespace=production.hashlib.sha256(config['directory'].encode()).hexdigest()[:12]
+        publication=dict(path=config['failure_base']+'/'+namespace+'/a/failed_GEN.tar.gz',
+            bytes=500,sha256='f'*64,readback_sha256='f'*64)
+        proof['GEN_failure_retention']=pin(preserved/'GEN_failure_retention.json',dict(
+            point=batch['point'],original_run_number=batch['run_number'],source_collisions_redrawn=0,
+            gen_sha256=None,bytes=500,archive_sha256='f'*64,publication=publication))
+        submitted=production.datetime.fromisoformat(replacement['utc']).timestamp()
+        proof['original_output_absence']=pin(preserved/'absence.json',dict(
+            schema='shift-reviewed-source-GEN-output-absence-v1',checked_epoch=submitted-1,
+            native_queue_absent=True,native_queue_method='Fresh exact cluster and directory query',
+            local_gen_root=dict(path=str(bank/'gen/gen.root'),exists=False),
+            local_manifest=dict(path=str(bank/'gen/manifest.json'),exists=False),
+            remote_gen_root=dict(path=batch['final_output_base']+'/GEN/gen.root',exists=False,
+                method='Authenticated xrdfs stat: no such file')))
+        pin(authority,proof)
+        config['reviewed_source_recovery_receipts']['a']['sha256']=production.durable.sha(authority)
+        return config,bank,old,replacement,proof,authority,pin
+
+    def test_exact_held_failure_recovery_keeps_completed_new_outputs_and_old_evidence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config,bank,old,new,proof,authority,_=self.failed_source_retry(Path(temporary))
+            # The pre-retry absence proof remains valid after the replacement
+            # creates successful canonical status and GEN outputs.
+            (bank/'gen').mkdir();(bank/'gen/manifest.json').write_text('{"complete":true}')
+            (bank/'gen/gen.root').write_bytes(b'new canonical GEN')
+            with patch.object(production.durable,'jobs',return_value=[]) as jobs:
+                self.assertEqual(production.reviewed_source_receipt(config,config['batches'][0],old),new)
+            self.assertEqual(jobs.call_args.args[1],'ClusterId == 10 || Iwd == '+json.dumps(str(bank)))
+
+    def test_held_failure_proof_rejects_changed_native_science_archive_and_absence(self):
+        cases=('native_exit','native_signal','native_owner','starts','status_complete','status_batch',
+            'status_seal','run','archive_hash','readback','archive_path','GEN_exists','manifest_exists',
+            'remote_path','late_absence','unknown_absence','wrong_log','mode','removed_owner')
+        for case in cases:
+            with self.subTest(case=case),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary)
+                config,bank,old,new,proof,authority,pin=self.failed_source_retry(root)
+                name=None
+                if case in ('native_exit','native_signal','native_owner','starts'):
+                    name='original_native_failure';body=json.loads(Path(proof[name]['path']).read_text())
+                    key,value={'native_exit':('ExitCode',2),'native_signal':('ExitBySignal',True),
+                        'native_owner':('Iwd','/another/source'),'starts':('NumJobStarts',2)}[case]
+                    body[0][key]=value
+                elif case.startswith('status_'):
+                    name='original_source_status';body=json.loads(Path(proof[name]['path']).read_text())
+                    key,value={'status_complete':('complete',True),'status_batch':('batch','other'),
+                        'status_seal':('seal_sha256','a'*64)}[case];body[key]=value
+                elif case in ('run','archive_hash','readback','archive_path'):
+                    name='GEN_failure_retention';body=json.loads(Path(proof[name]['path']).read_text())
+                    if case=='run':body['original_run_number']+=1
+                    elif case=='archive_hash':body['archive_sha256']='a'*64
+                    elif case=='readback':body['publication']['readback_sha256']='a'*64
+                    else:body['publication']['path']='/eos/unrelated/archive.tar.gz'
+                elif case in ('GEN_exists','manifest_exists','remote_path','late_absence','unknown_absence'):
+                    name='original_output_absence';body=json.loads(Path(proof[name]['path']).read_text())
+                    if case=='GEN_exists':body['remote_gen_root']['exists']=True
+                    elif case=='manifest_exists':body['local_manifest']['exists']=True
+                    elif case=='remote_path':body['remote_gen_root']['path']='/eos/unrelated/gen.root'
+                    elif case=='late_absence':body['checked_epoch']+=2
+                    else:body['native_queue_absent']=False
+                elif case=='wrong_log':
+                    path=Path(proof['original_GEN_log']['path']);path.write_text('Unrelated scientific failure')
+                    proof['original_GEN_log']['sha256']=production.durable.sha(path)
+                elif case=='mode':proof['recovery_mode']='unreviewed_retry'
+                else:
+                    name='original_native_removed';body=json.loads(Path(proof[name]['path']).read_text())
+                    body[0]['Iwd']='/another/source'
+                if name:proof[name]=pin(Path(proof[name]['path']),body)
+                pin(authority,proof);config['reviewed_source_recovery_receipts']['a']['sha256']=production.durable.sha(authority)
+                with patch.object(production.durable,'jobs',return_value=[]),self.assertRaises(ValueError):
+                    production.reviewed_source_receipt(config,config['batches'][0],old)
+
+    def test_exact_failure_requires_fresh_native_absence_and_preserves_legacy_removal_rule(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            config,bank,old,new,proof,authority,pin=self.failed_source_retry(root)
+            with patch.object(production.durable,'jobs',return_value=[dict(ClusterId=99,Iwd=str(bank))]), \
+                 self.assertRaisesRegex(RuntimeError,'remains live'):
+                production.reviewed_source_receipt(config,config['batches'][0],old)
+            with patch.object(production.durable,'jobs',side_effect=NativeCondorError('query unknown')):
+                with self.assertRaises(NativeCondorError):
+                    production.reviewed_source_receipt(config,config['batches'][0],old)
+            proof.pop('recovery_mode');proof['removed_recovery_payload_executed']=False
+            pin(authority,proof);config['reviewed_source_recovery_receipts']['a']['sha256']=production.durable.sha(authority)
+            with patch.object(production.durable,'jobs',return_value=[]),self.assertRaises(ValueError):
                 production.reviewed_source_receipt(config,config['batches'][0],old)
 
     def test_source_storage_credit_uses_new_native_log_and_waits_for_terminal_success(self):

@@ -1803,8 +1803,61 @@ def source_accounting_preparation_arguments(config,directory):
     return ['--reviewed-source-accounting',str(path),'--reviewed-source-accounting-sha256',durable.sha(path)]
 
 
+def qualified_source_failure(config, batch, original, proof, replacement, removed):
+    """Bind one exact mass-guard failure to its preserved inputs and absent GEN.
+
+    These are archived pre-retry receipts. A successful replacement may create
+    the canonical GEN and overwrite its status without invalidating the proof.
+    """
+    directory=batch_directory(config,batch)
+    native=read_pinned(proof['original_native_failure'])
+    native=native[0] if isinstance(native,list) and len(native)==1 else native
+    status=read_pinned(proof['original_source_status'])
+    retained=read_pinned(proof['GEN_failure_retention'])
+    absence=read_pinned(proof['original_output_absence'])
+    log=pinned_path(proof['original_GEN_log']).read_text()
+    checked=absence.get('checked_epoch')
+    submitted=datetime.fromisoformat(replacement['utc']).timestamp()
+    if (not isinstance(native,dict) or native.get('ClusterId')!=original['cluster']
+            or native.get('ProcId')!=0 or native.get('Iwd')!=str(directory)
+            or native.get('JobStatus')!=5 or native.get('NumJobStarts')!=1
+            or native.get('ExitCode')!=1 or native.get('ExitBySignal') is not False
+            or removed.get('ProcId')!=0 or removed.get('Iwd')!=str(directory)
+            or status.get('schema')!='shift-dp-meson-source-status-v1' or status.get('complete') is not False
+            or status.get('batch')!=batch['batch'] or status.get('point')!=batch['point']
+            or status.get('source_collisions')!=batch['source_collisions']
+            or status.get('seal_sha256')!=durable.sha(Path(config['directory'])/'seal.json')
+            or Path(proof['original_source_status']['path'])==directory/'source_status.json'
+            or Path(proof['original_GEN_log']['path'])==directory/'logs/GEN.log'
+            or 'source_summary' not in log or 'dark_photon_senscalc.py' not in log
+            or 'ValueError: Reference signal mass differs from requested point' not in log):
+        raise ValueError('Reviewed source failure differs from its exact held mass-guard attempt')
+    publication=retained.get('publication',{})
+    namespace=hashlib.sha256(config['directory'].encode()).hexdigest()[:12]
+    expected=config['failure_base'].rstrip('/')+'/'+namespace+'/'+batch['batch']+'/failed_GEN.tar.gz'
+    if (retained.get('point')!=batch['point'] or retained.get('original_run_number')!=batch['run_number']
+            or retained.get('source_collisions_redrawn')!=0
+            or 'gen_sha256' not in retained or retained['gen_sha256'] is not None
+            or type(retained.get('bytes')) is not int or retained['bytes']<=0
+            or not re.fullmatch(r'[0-9a-f]{64}',retained.get('archive_sha256',''))
+            or publication.get('path')!=expected or publication.get('bytes')!=retained['bytes']
+            or publication.get('sha256')!=retained['archive_sha256']
+            or publication.get('readback_sha256')!=retained['archive_sha256']):
+        raise ValueError('Reviewed source failure lacks its exact independently retained archive')
+    expected_paths={'local_gen_root':str(directory/'gen/gen.root'),
+                    'local_manifest':str(directory/'gen/manifest.json'),
+                    'remote_gen_root':batch['final_output_base'].rstrip('/')+'/GEN/gen.root'}
+    if (absence.get('schema')!='shift-reviewed-source-GEN-output-absence-v1'
+            or type(checked) not in (int,float) or not math.isfinite(checked) or not 0<=checked<=submitted
+            or absence.get('native_queue_absent') is not True or not absence.get('native_queue_method')
+            or any(absence.get(key,{}).get('path')!=path
+                   or absence.get(key,{}).get('exists') is not False for key,path in expected_paths.items())
+            or not absence.get('remote_gen_root',{}).get('method')):
+        raise ValueError('Reviewed source failure lacks pre-retry native and canonical GEN absence')
+
+
 def reviewed_source_receipt(config, batch, original):
-    """Bind a fresh scheduler clock to one reviewed, never-executed GEN retry."""
+    """Bind a fresh scheduler clock to one reviewed exact-source GEN retry."""
     pin=config.get('reviewed_source_recovery_receipts',{}).get(batch['batch'])
     if pin is None:return original
     proof=read_pinned(pin);removed=read_pinned(proof['original_native_removed'])
@@ -1813,20 +1866,28 @@ def reviewed_source_receipt(config, batch, original):
     replacement=read_pinned(proof['replacement_submission'])
     description=pinned_path(proof['replacement_submit_description'])
     directory=batch_directory(config,batch)
+    mode=proof.get('recovery_mode')
+    if mode not in (None,'qualified_exact_source_failure'):
+        raise ValueError('Unreviewed source retry recovery mode')
     if (proof.get('schema')!='shift-reviewed-meson-source-retry-v1' or proof.get('complete') is not True
             or proof.get('batch')!=batch['batch'] or proof.get('original_batch')!=batch
             or proof.get('original_directory')!=str(directory)
             or read_pinned(proof['original_submission'])!=original
             or proof.get('source_accounting_authority')!=config.get('reviewed_source_accounting')
             or proof.get('additional_source_collisions')!=0
-            or proof.get('removed_recovery_payload_executed') is not False
+            or (mode is None and proof.get('removed_recovery_payload_executed') is not False)
             or removed.get('ClusterId')!=original['cluster'] or removed.get('JobStatus')!=3
-            or removed.get('NumJobStarts')!=1 or 'SYSTEM_PERIODIC_REMOVE' not in removed.get('RemoveReason','')
+            or removed.get('NumJobStarts')!=1
+            or (mode is None and 'SYSTEM_PERIODIC_REMOVE' not in removed.get('RemoveReason',''))
             or replacement.get('cluster')==original['cluster'] or replacement.get('task')!=str(description.parent)
             or replacement.get('submit_sha256')!=proof['replacement_submit_description']['sha256']
             or not description.parent.is_absolute() or not replacement.get('utc')):
         raise ValueError('Reviewed source retry changed its exact original exposure or removed owner')
-    if durable.jobs(config,'ClusterId == '+str(original['cluster'])):
+    condition='ClusterId == '+str(original['cluster'])
+    if mode=='qualified_exact_source_failure':
+        qualified_source_failure(config,batch,original,proof,replacement,removed)
+        condition+=' || Iwd == '+json.dumps(str(directory))
+    if durable.jobs(config,condition):
         raise RuntimeError('Reviewed old source owner remains live')
     return replacement
 

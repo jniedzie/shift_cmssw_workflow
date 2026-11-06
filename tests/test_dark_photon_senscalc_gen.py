@@ -18,6 +18,19 @@ from dark_photon_meson import MUON_MASS_GEV
 
 
 class SourceToGen(unittest.TestCase):
+    def test_exact_reviewed_parent_keeps_native_flight_and_on_shell_daughters(self):
+        parent=[129.07712435564986,.6339862424770483,.1737338378333942,-129.07448202175664]
+        first,second,flight=decay_momenta(parent,.5,300.,random.Random(7))
+        for child in (first,second):
+            self.assertAlmostEqual(child[0],math.hypot(MUON_MASS_GEV,*child[1:]),delta=1.e-11)
+        self.assertAlmostEqual(first[0]+second[0],math.hypot(.5,*parent[1:]),delta=1.e-11)
+        for index in range(1,4):self.assertAlmostEqual(first[index]+second[index],parent[index],delta=1.e-11)
+        rng=random.Random(7);rng.random();rng.random();length=rng.expovariate(1/300.)
+        self.assertEqual(flight,[length*x/.5 for x in parent[1:]]+[length*parent[0]/.5])
+        nearby=[math.nextafter(parent[0],math.inf),*parent[1:]]
+        with self.assertRaisesRegex(ValueError,'narrow support'):
+            decay_momenta(nearby,.5,300.,random.Random(7))
+
     def test_source_invariant_rounding_does_not_move_muons_off_shell(self):
         cases=[(.7,[1.1997162141804003,-.3688090380961767,-.7582806668419327,-.4881693540979676]),
                (.25,[44.65566272043899,.17600257873885927,-.2035493638763745,-44.654152144570894])]

@@ -51,7 +51,7 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
             operational_handoffs=False, reviewed_handoff_failures=(),
             regroup_complete_points=False, aggregation_storage_registration=None, historical_anchor_calibration=None, absolute_detector_stage_budgets=False,
             reviewed_regrouping_canary_recovery=None, reviewed_source_accounting=None, reviewed_nano_integrity_relocation=None,
-            current_SM_remaining_storage=None):
+            current_SM_remaining_storage=None, reviewed_source_recoveries=()):
     directory, template, output = [Path(path).resolve() for path in (directory, template, output)]
     if output.exists():
         raise ValueError('Replacement output already exists; preserve the previous attempt')
@@ -99,6 +99,16 @@ def prepare(directory, original_seal, template, template_seal, output, sources=7
     if reviewed_source_accounting is not None:
         path=Path(reviewed_source_accounting).resolve()
         config['reviewed_source_accounting']=dict(path=str(path),sha256=production.durable.sha(path))
+    if reviewed_source_recoveries:
+        batches={row['batch']:row for row in config['batches']}
+        recoveries=config.setdefault('reviewed_source_recovery_receipts',{})
+        for name,manifest in reviewed_source_recoveries:
+            if name not in batches or name in recoveries:
+                raise ValueError('Source recovery must name one unrecovered original batch: '+name)
+            path=Path(manifest).resolve()
+            recoveries[name]=dict(path=str(path),sha256=production.durable.sha(path))
+            original_receipt=production.read(production.batch_directory(config,batches[name])/'submission.json')
+            production.reviewed_source_receipt(config,batches[name],original_receipt)
     if reviewed_regrouping_canary_recovery is not None:
         path=Path(reviewed_regrouping_canary_recovery).resolve()
         config['reviewed_regrouping_canary_recovery']=dict(path=str(path),sha256=production.durable.sha(path))
@@ -293,6 +303,7 @@ exec python3 {quoted['script']} --directory {quoted['science']} --seal {original
         retirement_pins.append(config['reviewed_regrouping_canary_recovery'])
     if config.get('current_SM_remaining_storage'):
         retirement_pins.append(config['current_SM_remaining_storage'])
+    retirement_pins.extend(config.get('reviewed_source_recovery_receipts',{}).values())
     for pin in retirement_pins:
         seal_files[str(production.pinned_path(pin))] = pin['sha256']
     if relocation is not None:
@@ -351,6 +362,8 @@ def main():
     parser.add_argument('--reviewed-nano-integrity-relocation',type=Path)
     parser.add_argument('--current-SM-remaining-storage',type=Path,
         help='Reviewed disjoint paid increment against the unchanged current SM envelope')
+    parser.add_argument('--reviewed-source-recovery',action='append',nargs=2,default=[],
+        metavar=('BATCH','MANIFEST'),help='Adopt one qualified retry of the original retained source bank')
     args = parser.parse_args()
     print(json.dumps(prepare(args.directory, args.seal, args.template, args.template_seal,
                              args.output, args.simultaneous_sources, args.simultaneous_detector_points,
@@ -362,7 +375,7 @@ def main():
                              args.regroup_complete_points,args.aggregation_storage_registration,
                              args.historical_anchor_calibration,args.absolute_detector_stage_budgets,
                              args.reviewed_regrouping_canary_recovery,args.reviewed_source_accounting,args.reviewed_nano_integrity_relocation,
-                             args.current_SM_remaining_storage), sort_keys=True))
+                             args.current_SM_remaining_storage,args.reviewed_source_recovery), sort_keys=True))
 
 
 if __name__ == '__main__':
