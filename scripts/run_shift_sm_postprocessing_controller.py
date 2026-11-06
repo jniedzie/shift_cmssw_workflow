@@ -74,7 +74,51 @@ def response_closed_source(prepared_manifest, collector_result):
 
 
 
+def response_monitor_pins(config):
+    """Use one legacy authority or an explicit union of independent cohorts."""
+    single = config.get('response_monitor_config')
+    multiple = config.get('response_monitor_configs')
+    if single is not None and multiple is not None:
+        raise ValueError('Declare one response monitor or a list, not both')
+    if multiple is None:
+        return [] if not single else [single]
+    if not isinstance(multiple, list) or not multiple:
+        raise ValueError('Require a nonempty list of pinned response monitors')
+    if len({pin['path'] for pin in multiple}) != len(multiple):
+        raise ValueError('Repeated response monitor authority')
+    return multiple
+
+
 def response_source_cache(config, state, ads):
+    """Combine complete increments without changing any draw or source weight."""
+    pins = response_monitor_pins(config)
+    if len(pins) == 1:
+        return single_response_source_cache(dict(config, response_monitor_config=pins[0]), state, ads)
+    cache = state.setdefault('response_sources', {})
+    owners, inputs = {}, []
+    for pin in pins:
+        monitor = read_response_pin(pin)
+        plan = read_response_pin(monitor['plan'])
+        ids = [row['source_id'] for row in plan['sources'] + monitor.get('extra_sources', [])]
+        for sid in ids:
+            if sid in owners:
+                raise ValueError('Response cohorts repeat an original source: ' + sid)
+            owners[sid] = pin
+        inputs.append((pin, set(ids)))
+    if not set(cache) <= set(owners):
+        raise ValueError('A cached source disappeared from the cumulative worklist')
+    groups = defaultdict(list)
+    for pin, ids in inputs:
+        local = dict(response_sources={sid: value for sid, value in cache.items() if sid in ids},
+                     response_native=state.setdefault('response_native', {}))
+        found = single_response_source_cache(dict(config, response_monitor_config=pin), local, ads)
+        cache.update(local['response_sources'])
+        for stratum, sources in found.items():
+            groups[stratum].extend(sources)
+    return groups
+
+
+def single_response_source_cache(config, state, ads):
     """Discover complete sources from an explicitly pinned response monitor.
 
     One fresh account queue observation is shared with publication admission.
@@ -243,9 +287,11 @@ def worker_publication_bound(config, stratum, *, interim=False):
 
 def complete_bin_source_ids(config, stratum):
     """Read the pinned union worklist for optional final-only Nano publication."""
-    monitor = read_response_pin(config['response_monitor_config'])
-    plan = read_response_pin(monitor['plan'])
-    rows = plan['sources'] + monitor.get('extra_sources', [])
+    rows = []
+    for pin in response_monitor_pins(config):
+        monitor = read_response_pin(pin)
+        plan = read_response_pin(monitor['plan'])
+        rows.extend(plan['sources'] + monitor.get('extra_sources', []))
     if any('stratum' not in row for row in rows):
         raise ValueError('Final-bin publication requires explicit process/bin on every expected source')
     ids = [row['source_id'] for row in rows if row['stratum'] == stratum]
@@ -422,7 +468,7 @@ def poll(root, config, state):
             phase='waiting_for_publication_qualification',
             qualification_task=config['qualification_task']))
         return
-    if config.get('response_monitor_config') is not None:
+    if response_monitor_pins(config):
         groups = response_source_cache(config, state, ads)
     else:
         inventory = read(Path(config['parent_state']) / 'source_inventory.json')
@@ -549,7 +595,7 @@ def validate_deployment_inputs(deployment, config, helpers_directory):
                 'shift_event_weights', 'shift_nano_integrity']
     if config.get('refresh_quota'):
         required.append('run_shift_smart_sm_controller')
-    if config.get('response_monitor_config'):
+    if response_monitor_pins(config):
         required.append('monitor_shift_sm_candidate_search')
     for name in required:
         path = helpers / (name + '.py')

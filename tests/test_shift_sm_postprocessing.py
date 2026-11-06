@@ -295,7 +295,7 @@ class ResponseDiscoveryControllerTest(unittest.TestCase):
             ('jobs/collect/status.json',dict(complete=True,exit_code=0))]:
             self.write(self.output/name,value)
         (self.output/'jobs/collect/events.log').write_text('native terminal proof')
-        plan=self.write(self.root/'plan.json',dict(sources=[dict(source_id='source')]))
+        plan=self.write(self.root/'plan.json',dict(sources=[dict(source_id='source', stratum='qcd_20toinf')]))
         monitor=dict(schema='shift-sm-candidate-search-watchdog-v1',root_directory=str(self.root),
             plan=plan,individual_source_watchdogs=False)
         self.config=dict(response_monitor_config=self.write(self.root/'monitor.json',monitor))
@@ -363,6 +363,53 @@ class ResponseDiscoveryControllerTest(unittest.TestCase):
         with patch.object(monitor,'source_owner',return_value=dict(cluster_id=99)):
             with self.assertRaisesRegex(ValueError,'native owner changed'):
                 controller.response_source_cache(self.config,self.state,[])
+
+    def second_monitor(self, source_id='later'):
+        root = self.root / 'later_cohort'
+        output = root / 'reconstruction' / source_id
+        (output / 'jobs/collect').mkdir(parents=True)
+        for name in ('prepared.json', 'submission.json', 'jobs/collect/result.json',
+                     'jobs/collect/request.json', 'jobs/collect/status.json', 'jobs/collect/events.log'):
+            (output / name).write_bytes((self.output / name).read_bytes())
+        plan = self.write(root / 'plan.json', dict(sources=[dict(source_id=source_id, stratum='qcd_20toinf')]))
+        return self.write(root / 'monitor.json', dict(
+            schema='shift-sm-candidate-search-watchdog-v1', root_directory=str(root),
+            plan=plan, individual_source_watchdogs=False))
+
+    def test_independent_monitor_union_preserves_cached_and_later_exposure(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import monitor_shift_sm_candidate_search as monitor
+        self.discover()
+        first = self.config['response_monitor_config']
+        second = self.second_monitor()
+        self.config = dict(response_monitor_configs=[first, second])
+        later = dict(normalization=dict(source_id='later', stratum='qcd_20toinf'))
+        proof = dict(owner=dict(cluster_id=5), collector_terminal=dict(successful=True))
+        with patch.object(monitor, 'native_collector_closure', return_value=proof) as native, \
+             patch.object(monitor, 'source_owner', return_value=dict(cluster_id=5)), \
+             patch.object(controller, 'response_closed_source', return_value=later):
+            groups = controller.response_source_cache(self.config, self.state, [])
+            self.assertEqual(groups['qcd_20toinf'], [self.source, later])
+            self.assertEqual(native.call_count, 1)
+            self.assertEqual(set(self.state['response_sources']), {'source', 'later'})
+            self.assertEqual(controller.complete_bin_source_ids(self.config, 'qcd_20toinf'), ['later', 'source'])
+        self.config = dict(response_monitor_configs=[second])
+        with self.assertRaisesRegex(ValueError, 'disappeared'):
+            controller.response_source_cache(self.config, self.state, [])
+
+    def test_overlapping_or_changed_monitor_union_cannot_add_exposure(self):
+        import run_shift_sm_postprocessing_controller as controller
+        first = self.config['response_monitor_config']
+        second = self.second_monitor(source_id='source')
+        with self.assertRaisesRegex(ValueError, 'repeat an original source'):
+            controller.response_source_cache(dict(response_monitor_configs=[first, second]), {}, [])
+        with self.assertRaisesRegex(ValueError, 'not both'):
+            controller.response_monitor_pins(dict(response_monitor_config=first, response_monitor_configs=[second]))
+        with self.assertRaisesRegex(ValueError, 'Repeated response monitor'):
+            controller.response_monitor_pins(dict(response_monitor_configs=[first, first]))
+        self.write(Path(second['path']), {})
+        with self.assertRaisesRegex(ValueError, 'authority changed'):
+            controller.response_source_cache(dict(response_monitor_configs=[first, second]), {}, [])
 
 
 class PublisherDeploymentTest(unittest.TestCase):
