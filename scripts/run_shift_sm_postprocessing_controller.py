@@ -315,6 +315,7 @@ def snapshot(root, config, stratum, sources):
                 normalization_sources=normalizations,
                 selected_sources=[s['selected'] for s in sources], nano_inputs=inputs,
                 histogram_runtime=config['histogram_runtime'],
+                publish_merged_nano=config.get('publish_merged_nano', True),
                 maximum_publication_bytes=worker_publication_bound(config,stratum))
     if config.get('merged_nano_only_when_bin_complete') is True:
         expected = complete_bin_source_ids(config,stratum)

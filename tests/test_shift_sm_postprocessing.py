@@ -276,6 +276,17 @@ class ResponsePublicationTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'entire frozen bin'):
             post.merged_nano_publication(changed)
 
+    def test_explicit_histogram_only_snapshot_keeps_all_original_inputs(self):
+        source = self.discover()
+        config = dict(campaign='histogram_only', histogram_runtime=dict(path='runtime', sha256='a'*64),
+                      worker_publication_bound_bytes=10000000, output_base='/eos/synthetic',
+                      worker_template='', publish_merged_nano=False)
+        task = snapshot(self.root, config, 'qcd_20toinf', [source])
+        request = json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertFalse(post.merged_nano_publication(request))
+        self.assertEqual(request['nano_inputs'], source['nano_inputs'])
+        self.assertEqual(request['normalization_sources'], [self.normalization])
+
 
 class ResponseDiscoveryControllerTest(unittest.TestCase):
     def setUp(self):

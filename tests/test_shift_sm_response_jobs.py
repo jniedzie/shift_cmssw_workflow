@@ -71,6 +71,34 @@ def fixture(root):
 
 
 class ResponseJobsTest(unittest.TestCase):
+    def test_replay_qualification_rejects_changed_science_or_original_output_paths(self):
+        from validate_shift_sm_detector_replay import same_physics
+        original = dict(cohort_id='original', detector_job=42,
+            benchmark_inclusion_probability=.25, detector_source=dict(
+                nano_base='/old/nano', metadata_base='/old/metadata',
+                weights=[3.], sampling_probabilities=[.5], event_ids=[[1, 1, 2]]))
+        replay = copy.deepcopy(original)
+        replay['cohort_id'] = 'isolated_control'
+        replay['detector_source'].update(
+            nano_base='/eos/user/j/jniedzie/shift_cmssw_support/control/nano',
+            metadata_base='/eos/user/j/jniedzie/shift_cmssw_support/control/metadata')
+        same_physics(original, replay)
+        changes = [('weights', [4.]), ('sampling_probabilities', [.25]), ('event_ids', [[1, 1, 3]])]
+        for key, value in changes:
+            bad = copy.deepcopy(replay)
+            bad['detector_source'][key] = value
+            with self.subTest(field=key), self.assertRaisesRegex(ValueError, 'changed inputs'):
+                same_physics(original, bad)
+        for key, value in [('detector_job', 43), ('benchmark_inclusion_probability', .5)]:
+            bad = copy.deepcopy(replay)
+            bad[key] = value
+            with self.subTest(field=key), self.assertRaisesRegex(ValueError, 'changed inputs'):
+                same_physics(original, bad)
+        bad = copy.deepcopy(replay)
+        bad['detector_source']['nano_base'] = original['detector_source']['nano_base']
+        with self.assertRaisesRegex(ValueError, 'separate authorized namespace'):
+            same_physics(original, bad)
+
     def test_outer_limits_allow_the_existing_twelve_hour_detector_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
