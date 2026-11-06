@@ -214,6 +214,137 @@ class IdleHostGuard(unittest.TestCase):
             with self.assertRaises(ValueError):
                 guard.validate_config(dict(config, **{key:value}))
 
+    def priority_worker(self):
+        self.config['minimum_worker_priority']=50
+        self.config['excluded_hosts']=[]
+        return dict(self.ad, JobUniverse=5, JobPrio=0)
+
+    def test_priority_floor_is_explicit_and_bounded(self):
+        config=dict(self.config,directory='/afs/project/persistent_guard',excluded_hosts=[])
+        for priority in (0,50):
+            guard.validate_config(dict(config,minimum_worker_priority=priority))
+        for priority in (-1,51,True,'50'):
+            with self.subTest(priority=priority),self.assertRaises(ValueError):
+                guard.validate_config(dict(config,minimum_worker_priority=priority))
+        with patch.object(guard.native,'run_condor') as run:
+            self.assertEqual(guard.raise_idle_worker_priority(self.config,[dict(self.ad,JobPrio=0)],1),[])
+        run.assert_not_called()
+
+    def test_priority_edit_has_exact_idle_vanilla_owner_identity_and_old_value(self):
+        before=self.priority_worker()
+        after=dict(before,JobPrio=50)
+        foreign=[dict(before,ClusterId=101,Owner='other'),dict(before,ClusterId=102,JobStatus=2),
+            dict(before,ClusterId=103,JobUniverse=7),dict(before,ClusterId=104,JobPrio=50),
+            dict(before,ClusterId=105,JobPrio=75),dict(before,ClusterId=106,DAGManJobId=None),
+            dict(before,ClusterId=107,Iwd=self.namespace+'-unrelated'),
+            dict(before,ClusterId=108,Cmd='/some/other/worker.sh')]
+        with patch.object(guard.native,'query_account',return_value=[before,*foreign]), \
+             patch.object(guard.native,'run_condor',return_value='Set attribute for 1 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[after]):
+            result=guard.step(self.config,1)
+        self.assertEqual(run.call_count,1)
+        command=run.call_args.args[0]
+        self.assertEqual(command[-2:],['JobPrio','50'])
+        for condition in ('JobStatus == 1','JobUniverse == 5','JobPrio == 0','Owner == "jniedzie"',
+                          'ClusterId == 100','DAGManJobId == 50',
+                          'Iwd == '+json.dumps(before['Iwd']),'Cmd == '+json.dumps(before['Cmd'])):
+            self.assertIn(condition,command[-3])
+        self.assertNotIn('ClusterId == 101',command[-3])
+        receipt=json.loads(Path(result['priority_receipts'][0]).read_text())
+        self.assertTrue(receipt['complete'])
+        self.assertEqual(len(receipt['selected']),1)
+        self.assertEqual(receipt['actions'][0]['readback'][0]['JobPrio'],50)
+
+    def test_priority_race_to_running_or_stronger_value_never_repeats_edit(self):
+        for state in ('running','stronger','gone'):
+            with self.subTest(state=state):
+                before=self.priority_worker()
+                after=[] if state=='gone' else [dict(before,**(
+                    dict(JobStatus=2) if state=='running' else dict(JobPrio=75)))]
+                with patch.object(guard.native,'run_condor',return_value='0 matching jobs.') as run, \
+                     patch.object(guard.native,'query',return_value=after):
+                    paths=guard.raise_idle_worker_priority(self.config,[before],1)
+                self.assertEqual(run.call_count,1)
+                self.assertTrue(json.loads(Path(paths[0]).read_text())['complete'])
+                Path(paths[0]).unlink()
+
+    def test_finalizer_priority_uses_exact_worker_path_without_host_or_retry_scope(self):
+        before=self.priority_worker()
+        before['Cmd']=before['Iwd']+'/finalize_worker.sh'
+        self.config['excluded_hosts']=self.hosts
+        self.assertTrue(guard.priority_eligible(self.config,before))
+        self.assertFalse(guard.eligible(self.config,before))
+        for change in (dict(Owner='other'),dict(JobStatus=2),dict(JobUniverse=7),
+                       dict(DAGManJobId=None),dict(Iwd=self.namespace+'-other/production'),
+                       dict(Cmd=self.namespace+'/w001/finalize_worker.sh')):
+            self.assertFalse(guard.priority_eligible(self.config,dict(before,**change)))
+        with patch.object(guard.native,'query_account',return_value=[before]) as query_account, \
+             patch.object(guard.native,'run_condor',return_value='1 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[dict(before,JobPrio=50)]):
+            result=guard.step(self.config,1)
+        self.assertIn('/finalize_worker[.]sh$',query_account.call_args.args[1])
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(run.call_args.args[0][-2:],['JobPrio','50'])
+        self.assertIn('Cmd == '+json.dumps(before['Cmd']),run.call_args.args[0][-3])
+        self.assertEqual(result['eligible_idle_jobs'],0)
+        self.assertEqual(result['edits_planned'],0)
+
+    def test_finalizer_query_is_not_added_without_explicit_priority_policy(self):
+        with patch.object(guard.native,'query_account',return_value=[]) as query_account:
+            guard.step(self.config,1)
+        self.assertNotIn('finalize_worker',query_account.call_args.args[1])
+
+    def test_priority_unknown_edit_outcome_preserves_intent(self):
+        before=self.priority_worker()
+        def fail(command,**kwargs):
+            receipt=json.loads((self.directory/'receipts/priority_poll_000001.json').read_text())
+            self.assertEqual(receipt['selected'][0]['JobPrio'],0)
+            self.assertTrue(receipt['actions'][0]['intent_utc'])
+            self.assertIsNone(receipt['actions'][0]['output'])
+            raise guard.native.NativeCondorError('unknown priority edit outcome')
+        with patch.object(guard.native,'run_condor',side_effect=fail) as run, \
+             self.assertRaises(guard.native.NativeCondorError):
+            guard.raise_idle_worker_priority(self.config,[before],1)
+        self.assertEqual(run.call_count,1)
+        self.assertFalse(json.loads((self.directory/'receipts/priority_poll_000001.json').read_text())['complete'])
+
+    def test_priority_bad_readback_preserves_failure_and_running_controls(self):
+        for change in (dict(JobPrio=0),dict(Owner='other'),dict(Iwd='/another/source'),dict(JobStatus=99)):
+            with self.subTest(change=change):
+                before=self.priority_worker()
+                with patch.object(guard.native,'run_condor',return_value='1 matching jobs.'), \
+                     patch.object(guard.native,'query',return_value=[dict(before,**change)]), \
+                     self.assertRaises(ValueError):
+                    guard.raise_idle_worker_priority(self.config,[before],1)
+                path=self.directory/'receipts/priority_poll_000001.json'
+                self.assertFalse(json.loads(path.read_text())['complete'])
+                path.unlink()
+
+    def test_priority_floor_runs_despite_a_known_held_recovery_block(self):
+        before=self.priority_worker()
+        self.config['infrastructure_recovery']=dict(dry_run=False)
+        blocked=dict(blocked=[dict(job='999.0',reason='Unqualified scientific failure')])
+        with patch.object(guard.native,'query_account',return_value=[before,dict(before,ClusterId=999,JobStatus=5)]), \
+             patch.object(guard.native,'run_condor',return_value='1 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[dict(before,JobPrio=50)]), \
+             patch.object(guard,'recover_transfer_jobs',return_value=blocked):
+            result=guard.poll(self.config,1,{})
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(result['status'],'blocked')
+        self.assertEqual(result['infrastructure_recovery'],blocked)
+        self.assertTrue(json.loads(Path(result['priority_receipts'][0]).read_text())['complete'])
+
+    def test_priority_unknown_value_or_evidence_budget_blocks_before_edit(self):
+        before=self.priority_worker()
+        with patch.object(guard.native,'run_condor') as run, self.assertRaisesRegex(ValueError,'priority is unknown'):
+            guard.raise_idle_worker_priority(self.config,[dict(before,JobPrio=None)],1)
+        run.assert_not_called()
+        receipts=self.directory/'receipts';receipts.mkdir()
+        (receipts/'old.json').write_text('x'*self.config['maximum_receipt_bytes'])
+        with patch.object(guard.native,'run_condor') as run, self.assertRaisesRegex(ValueError,'receipt budget'):
+            guard.raise_idle_worker_priority(self.config,[before],1)
+        run.assert_not_called()
+
     def manager(self, remove='False'):
         directory=self.directory/'validation/bsm_campaign/waves/w001/production'
         directory.mkdir(parents=True)

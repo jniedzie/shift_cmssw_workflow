@@ -28,6 +28,7 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'Owner', 'JobStatus', 'Iwd', 'Cmd',
               'EnteredCurrentStatus', 'JobCurrentStartDate']
 ATTRIBUTES += ['Args', 'Err', 'Out', 'ExitCode', 'ExitBySignal', 'JobStartDate',
                'MaxRuntime', 'TransferOutput', 'PeriodicRelease']
+ATTRIBUTES += ['JobPrio']
 
 
 def utc():
@@ -73,11 +74,15 @@ def validate_config(config):
                 or namespace.endswith('/') or '..' in Path(namespace).parts):
             raise ValueError('Invalid exact DP production namespace')
     hosts = config['excluded_hosts']
-    if ((not hosts and not config.get('infrastructure_recovery'))
+    if ((not hosts and not config.get('infrastructure_recovery')
+            and config.get('minimum_worker_priority') is None)
             or len(hosts) > 8 or len(hosts) != len(set(hosts))):
         raise ValueError('A small explicit failed-host list is required')
     if any(not re.fullmatch(r'[A-Za-z0-9.-]+[.]cern[.]ch', host) for host in hosts):
         raise ValueError('Invalid failed execute machine')
+    priority = config.get('minimum_worker_priority')
+    if priority is not None and (type(priority) is not int or not 0 <= priority <= 50):
+        raise ValueError('Worker priority floor must be an integer between0 and50')
     if not 30 <= config['interval_seconds'] <= 300:
         raise ValueError('Guard poll interval is outside its reviewed bounds')
     if not 1 <= config['runtime_seconds'] <= 604800:
@@ -136,6 +141,89 @@ def eligible(config, ad):
                for root in config['namespaces']):
         return False
     return ad.get('Cmd') == directory + '/detector_worker.sh'
+
+
+def priority_eligible(config, ad):
+    """Include final grouping workers only in the idle priority policy."""
+    directory = ad.get('Iwd', '')
+    return (ad.get('Owner') == config['owner'] and ad.get('JobStatus') == 1
+        and ad.get('JobUniverse') == 5
+        and type(ad.get('DAGManJobId')) is int and ad['DAGManJobId'] > 0
+        and any(directory == root or directory.startswith(root+'/') for root in config['namespaces'])
+        and ad.get('Cmd') in (directory+'/detector_worker.sh', directory+'/finalize_worker.sh'))
+
+
+def raise_idle_worker_priority(config, ads, sequence):
+    """Raise exact owned idle detector/finalizer workers with native receipts."""
+    floor = config.get('minimum_worker_priority')
+    if floor is None:
+        return []
+    fields = ('ClusterId', 'ProcId', 'Owner', 'JobUniverse', 'Iwd', 'Cmd', 'DAGManJobId', 'JobPrio')
+    selected = []
+    for ad in ads:
+        if not priority_eligible(config, ad):
+            continue
+        if type(ad.get('JobPrio')) is not int:
+            raise ValueError('Idle worker priority is unknown; no priority edit')
+        if ad['JobPrio'] >= floor:
+            continue
+        schedd = ad.get('_queried_schedd', '')
+        if not re.fullmatch(r'[A-Za-z0-9_.@-]+', schedd):
+            raise ValueError('Priority candidate has no verified scheduler identity')
+        selected.append(dict({name: ad[name] for name in fields}, _queried_schedd=schedd))
+    if not selected:
+        return []
+    receipts = Path(config['directory'])/'receipts'
+    receipts.mkdir(exist_ok=True)
+    path = receipts/f'priority_poll_{sequence:06d}.json'
+    if path.exists():
+        raise FileExistsError('Preserve previous worker-priority edit receipts')
+    receipt = dict(schema='shift-dp-idle-worker-priority-receipt-v1', created_utc=utc(),
+        minimum_worker_priority=floor, selected=selected, actions=[], complete=False)
+    used = sum(item.stat().st_size for item in receipts.glob('*.json'))
+    if used+len(json.dumps(receipt).encode())*4 > config['maximum_receipt_bytes']:
+        raise ValueError('Guard receipt budget exhausted before priority edits')
+    save(path, receipt)
+    groups = {}
+    for ad in selected:
+        groups.setdefault(ad['_queried_schedd'], []).append(ad)
+    for schedd, rows in groups.items():
+        for index in range(0, len(rows), 100):
+            batch = rows[index:index+100]
+            identities = ['('+' && '.join(name+' == '+json.dumps(ad[name]) for name in fields)+')'
+                          for ad in batch]
+            constraint = 'JobStatus == 1 && ('+' || '.join(identities)+')'
+            command = ['/usr/bin/condor_qedit', '-pool', config['condor_pool'], '-name', schedd,
+                       '-constraint', constraint, 'JobPrio', str(floor)]
+            action = dict(schedd=schedd, constraint=constraint, intent_utc=utc(), output=None, readback=[])
+            receipt['actions'].append(action)
+            save(path, receipt)
+            output = native.run_condor(command, timeout=50)
+            action['output'] = output
+            save(path, receipt)
+            identity_constraint = ' || '.join(
+                f"(ClusterId == {ad['ClusterId']} && ProcId == {ad['ProcId']})" for ad in batch)
+            after = native.query(identity_constraint, ATTRIBUTES,
+                                 pool=config['condor_pool'], schedd=schedd, timeout=50)
+            expected = {(ad['ClusterId'], ad['ProcId']): ad for ad in batch}
+            seen = set()
+            for ad in after:
+                identity = (ad.get('ClusterId'), ad.get('ProcId'))
+                before = expected.get(identity)
+                if (before is None or identity in seen
+                        or any(ad.get(name) != before[name] for name in fields if name != 'JobPrio')):
+                    raise ValueError('Worker priority readback changed its exact native identity')
+                seen.add(identity)
+                if ad.get('JobStatus') not in (1,2,3,4,5,6,7):
+                    raise ValueError('Worker priority readback has unknown native state')
+                action['readback'].append({name:ad.get(name) for name in (*fields,'JobStatus')})
+                if ad.get('JobStatus') == 1 and (type(ad.get('JobPrio')) is not int or ad['JobPrio'] < floor):
+                    save(path, receipt)
+                    raise ValueError('Idle worker priority remains below the requested floor')
+            save(path, receipt)
+    receipt.update(complete=True, completed_utc=utc())
+    save(path, receipt)
+    return [str(path)]
 
 
 def requirements(ad, hosts):
@@ -542,8 +630,12 @@ def step(config, sequence, previous=None):
     if config.get('infrastructure_recovery'):
         constraint = ('(DAGManJobId > 0 && regexp("/detector_worker[.]sh$", Cmd)) '
                       '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))')
+    if config.get('minimum_worker_priority') is not None:
+        constraint += (' || (JobStatus == 1 && JobUniverse == 5 && DAGManJobId > 0 '
+                       '&& regexp("/finalize_worker[.]sh$", Cmd))')
     ads = native.query_account(config['owner'], constraint, ATTRIBUTES,
                                pool=config['condor_pool'], timeout=50)
+    priority_receipts = raise_idle_worker_priority(config, ads, sequence)
     manager_receipts = throttle_managers(config, ads, sequence)
     manager_observations = [dict(cluster=ad['ClusterId'], max_idle=ad.get('DAGMan_MaxIdle'),
                                  max_jobs=ad.get('DAGMan_MaxJobs'),
@@ -562,6 +654,7 @@ def step(config, sequence, previous=None):
     summary = dict(checked_utc=utc(), eligible_idle_jobs=len(selected),
                    edits_planned=len(changes), protected_idle_jobs=len(selected)-len(changes),
                    manager_receipts=manager_receipts, manager_observations=manager_observations,
+                   priority_receipts=priority_receipts,
                    pending_protection={})
     if config.get('infrastructure_recovery'):
         summary['infrastructure_recovery'] = recover_transfer_jobs(config,ads)
