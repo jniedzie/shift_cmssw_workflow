@@ -265,6 +265,30 @@ class SupplementAdmission(unittest.TestCase):
         (self.root/'state.json').unlink()
         self.assertEqual(controller.supplement_campaign_claim(self.authority,self.observed,1200)['remaining_bytes'],3260000)
 
+    def test_meson_peer_reservation_credits_only_published_original_increments(self):
+        import run_dark_photon_meson_production as meson
+        allocation=controller.read(self.worklist)
+        allocation['waves'].append(dict(wave_index=1,batches=[dict(
+            point='m2_prompt',events=10,seed=124,run_number=457)]))
+        allocation['total_additional_events']=20
+        controller.save(self.worklist,allocation)
+        authority=dict(self.authority,worklist=dict(path=str(self.worklist),sha256=controller.sha(self.worklist)))
+        config=dict(additional_reserved_worklists=[authority])
+        self.assertEqual(meson.additional_reservations(config)[0],6520000)
+        stage=self.root/'waves/w000/production';(stage/'completed_points').mkdir(parents=True)
+        controller.new(stage/'plan.json',dict(points=allocation['waves'][0]['batches']))
+        controller.new(stage/'seal.json',dict(files={str(stage/'plan.json'):controller.sha(stage/'plan.json')}))
+        report=stage/'completed_points/m2_prompt.json'
+        controller.new(report,dict(complete=True,point='m2_prompt',events=10,
+            plan_sha256=controller.sha(stage/'plan.json'),seal_sha256=controller.sha(stage/'seal.json')))
+        state=controller.read(self.root/'state.json')
+        state['published']['m2_prompt']['source_plans']=[str(stage/'plan.json')]
+        controller.save(self.root/'state.json',state)
+        # The primitive proves paid exposure; arbitrary aggregate counts do not.
+        self.assertEqual(meson.additional_reservations(config)[0],3260000)
+        report.unlink()
+        self.assertEqual(meson.additional_reservations(config)[0],6520000)
+
     def test_only_sealed_published_originals_before_quota_receive_credit(self):
         production=self.root/'waves/w000/production';production.mkdir(parents=True);(production/'completed_points').mkdir()
         controller.new(production/'plan.json',dict(points=[dict(point='m2_prompt',events=10,seed=123,run_number=456)]))

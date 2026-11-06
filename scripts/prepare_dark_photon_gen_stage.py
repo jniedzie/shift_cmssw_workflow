@@ -219,7 +219,9 @@ def prepare(args):
 executable = /usr/bin/python3
 arguments = {worker} --directory {output} --seal $(seal) --action $(action) --point $(point)
 initialdir = {output}
-should_transfer_files = NO
+should_transfer_files = YES
+transfer_output_files = ""
+when_to_transfer_output = ON_EXIT
 getenv = False
 environment = "PATH=/usr/bin:/bin"
 request_cpus = 1

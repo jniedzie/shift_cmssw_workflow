@@ -47,6 +47,19 @@ class MainHistogramHandoff(unittest.TestCase):
             original_inventory_sha256=sha256(root/'gen_inventory.json'),replacement_runtime_sha256='runtime',
             points={'m0p7_lab_100m':dict(gen_sha256='gen',full_count=2,converted_count=converted)}))
 
+    def test_scheduler_restart_preserves_existing_slice_until_reviewed_recovery(self):
+        for complete in (False,True):
+            with self.subTest(complete=complete),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);self.stage(root)
+                status=root/'statuses/chunk_0.json'
+                write(status,dict(complete=complete,original_attempt='preserve'))
+                original=status.read_bytes()
+                with patch('dark_photon_production_support.subprocess.run') as payload:
+                    with self.assertRaisesRegex(ValueError,'Preserve the existing attempt'):
+                        main_histogram_stage(root,'detector',0)
+                self.assertEqual(status.read_bytes(),original)
+                payload.assert_not_called()
+
     def test_partial_original_converter_census_cannot_start_a_selected_slice(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);self.stage(root,converted=1)

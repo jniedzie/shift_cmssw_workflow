@@ -1025,6 +1025,12 @@ def main_histogram_aggregate_plan(config,point,sources,directory):
     submit=re.sub(r'^arguments = .*$', 'arguments = '+point+' SEAL_DIGEST',submit,flags=re.MULTILINE)
     submit=re.sub(r'^\+JobBatchName = .*$', '+JobBatchName = '+json.dumps(
         'SHIFT_DP_'+point+'_'+config['campaign_prefix']+'_histogram_merge'),submit,flags=re.MULTILINE)
+    # Old compatible sources can carry the original implicit scratch-transfer
+    # policy. The new aggregate publishes explicitly to EOS instead.
+    submit=re.sub(r'^(transfer_output_files|when_to_transfer_output)\s*=.*\n','',submit,flags=re.MULTILINE)
+    submit=re.sub(r'^should_transfer_files\s*=.*$',
+        'should_transfer_files = YES\ntransfer_output_files = ""\nwhen_to_transfer_output = ON_EXIT',
+        submit,flags=re.MULTILINE)
     (directory/'aggregate.sub.in').write_text(submit)
     new(directory/'seal.json',dict(schema='shift-additive-signal-production-seal-v1',
         files={str(p):sha(p) for p in directory.iterdir() if p.is_file()}))

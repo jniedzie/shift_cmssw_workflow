@@ -165,6 +165,38 @@ def unique_populations(populations):
     return result
 
 
+def validated_bremsstrahlung_identity(directory, contract, sampling):
+    """Distinguish a validated physical profile from its JSON bytes and path."""
+    expected = contract.get('bremsstrahlung_profile_sha256')
+    if expected is None:
+        return None
+    profile_path = checked(Path(directory)/'bremsstrahlung.json', expected)
+    if sampling.get('bremsstrahlung_profile_sha256') != expected:
+        raise ValueError('Sampling provenance differs from its pinned bremsstrahlung profile')
+    profile = read(profile_path)
+    from dark_photon_bremsstrahlung import SourceSampler, TABLE_HASHES
+    tables = Path(profile['table_directory'])
+    if not tables.is_absolute():
+        tables = profile_path.parent/tables
+    for name, digest in TABLE_HASHES.items():
+        checked(tables/name, digest)
+    SourceSampler(profile, profile_path.parent)
+    physical = {key:value for key,value in profile.items() if key != 'table_directory'}
+    digest = hashlib.sha256(json.dumps(physical, sort_keys=True, separators=(',', ':'),
+                                     allow_nan=False).encode()).hexdigest()
+    return dict(raw_sha256=expected, physics_sha256=digest, physical_profile=physical)
+
+
+def reference_sampling_identity(record):
+    sampling = dict(record['source_sampling'])
+    profile = record.get('bremsstrahlung_profile_identity')
+    if profile is not None:
+        if sampling.get('bremsstrahlung_profile_sha256') != profile['raw_sha256']:
+            raise ValueError('Sampling provenance changed after physical-profile validation')
+        sampling['bremsstrahlung_profile_sha256'] = profile['physics_sha256']
+    return sampling
+
+
 def combined_rate(populations, *, point, campaign):
     """Average identical-proposal estimates by their phase-space trial counts.
 
@@ -184,8 +216,11 @@ def combined_rate(populations, *, point, campaign):
     # and source definition must agree; the measured means need not be equal.
     fields += ('meson_model_card', 'rate_scope') if meson else ('corrections',)
     if reference:
-        fields += ('rate_profile','radiative_model_sha256','source_graph_scope','polarization_model','rate_scope','source_sampling',
+        fields += ('rate_profile','radiative_model_sha256','source_graph_scope','polarization_model','rate_scope',
                    'source_vertex_approximation','decay_radiation_model')
+        sampling = reference_sampling_identity(first)
+        if any(reference_sampling_identity(population['rate']) != sampling for population in populations[1:]):
+            raise ValueError('Rate estimates require identical physics and generation proposals')
         banks=[p['rate']['source_ledger_sha256'] for p in populations]
         source_seeds=[p['rate']['source_seed'] for p in populations]
         if len(set(banks))!=len(banks) or len(set(source_seeds))!=len(source_seeds):
@@ -265,6 +300,7 @@ def combined_rate(populations, *, point, campaign):
                     'source_vertex_approximation','decay_radiation_model'):
             result[key]=first.get(key)
         result['source_sampling']=first['source_sampling']
+        result['source_sampling_physics_identity']=sampling
     return result
 
 
@@ -415,6 +451,10 @@ def load_source(source, expected_model, conditions_digest):
     rate = rate_record(contract, audit, point=source['point'], campaign=plan['campaign'],
         source_hashes={name: sha(gen / name) for name in ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log')},
         gen_path=parent['gen_path'], gen_sha256=parent['gen_sha256'], source_directory=gen)
+    if reference:
+        identity = validated_bremsstrahlung_identity(gen, contract, rate['source_sampling'])
+        if identity is not None:
+            rate['bremsstrahlung_profile_identity'] = identity
     report_path = Path(source.get('completed_point_path', directory / 'completed_points' / (source['point'] + '.json')))
     if source.get('completed_point_sha256'):
         checked(report_path, source['completed_point_sha256'])

@@ -18,7 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from aggregate_dark_photon_samples import (combined_rate, disjoint_parent_component_rates,
                                          completed_histogram_input, event_rows, execute, group_inputs,
                                          qualified_finalizer, sha, unique_populations,
-                                         validate_event_rows, verify_aggregate_seal)
+                                         validate_event_rows, verify_aggregate_seal,
+                                         validated_bremsstrahlung_identity)
 
 
 def population(run=10, events=2, trials=100, rate=2., error=.1):
@@ -256,6 +257,63 @@ class PopulationAccounting(unittest.TestCase):
         b['rate']['source_sampling']['bremsstrahlung_profile_sha256']='d'*64
         with self.assertRaisesRegex(ValueError,'identical physics'):
             combined_rate([a,b],point='test',campaign='test')
+
+    def bremsstrahlung_population(self, directory, run, *, pretty=False, scale=1.):
+        from dark_photon_bremsstrahlung import sampling_profile
+        directory.mkdir()
+        profile=sampling_profile(.3,lambda_p_gev=scale)
+        path=directory/'bremsstrahlung.json'
+        path.write_text(json.dumps(profile,sort_keys=pretty,indent=2 if pretty else None))
+        sample=self.reference(run,100 if run==10 else 300,999,2. if run==10 else 6.)
+        record=sample['rate'];record['mechanism']='senscalc-meson-fragmentation-bremsstrahlung'
+        record['source_sampling'].update(bremsstrahlung_profile_sha256=sha(path),
+                                         bremsstrahlung_sampler_sha256='c'*64)
+        record['bremsstrahlung_profile_identity']=validated_bremsstrahlung_identity(
+            directory,dict(bremsstrahlung_profile_sha256=sha(path)),record['source_sampling'])
+        return sample
+
+    def test_equivalent_profile_JSON_keeps_original_collision_weighting_and_raw_provenance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a=self.bremsstrahlung_population(Path(tmp)/'a',10)
+            b=self.bremsstrahlung_population(Path(tmp)/'b',20,pretty=True)
+            self.assertNotEqual(a['rate']['source_sampling']['bremsstrahlung_profile_sha256'],
+                                b['rate']['source_sampling']['bremsstrahlung_profile_sha256'])
+            result=combined_rate([a,b],point='test',campaign='test')
+            self.assertEqual(result['combination']['normalized_weights'],[.25,.75])
+            self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],5.)
+            self.assertEqual(result['full_gen']['source_collisions'],400)
+            self.assertEqual(result['full_gen']['sum_weights'],4.)
+            self.assertEqual(result['source_sampling'],a['rate']['source_sampling'])
+            self.assertEqual(result['source_sampling_physics_identity']['bremsstrahlung_profile_sha256'],
+                             a['rate']['bremsstrahlung_profile_identity']['physics_sha256'])
+
+    def test_canonical_profile_does_not_relax_physics_or_other_sampling_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            a=self.bremsstrahlung_population(Path(tmp)/'a',10)
+            b=self.bremsstrahlung_population(Path(tmp)/'b',20,pretty=True)
+            changed=self.bremsstrahlung_population(Path(tmp)/'changed',30,scale=.5)
+            with self.assertRaisesRegex(ValueError,'identical physics'):
+                combined_rate([a,changed],point='test',campaign='test')
+            for key,value in [('unweighting_envelope',5.),('proposal_probability',.02),
+                              ('settings_sha256','different'),('runtime_receipt_sha256','different'),
+                              ('bremsstrahlung_sampler_sha256','different')]:
+                with self.subTest(key=key):
+                    candidate=copy.deepcopy(b);candidate['rate']['source_sampling'][key]=value
+                    with self.assertRaisesRegex(ValueError,'identical physics'):
+                        combined_rate([a,candidate],point='test',campaign='test')
+
+    def test_profile_identity_requires_unchanged_pinned_profile_and_tables(self):
+        from dark_photon_bremsstrahlung import TABLE_HASHES,sampling_profile
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);profile=sampling_profile(.3);tables=root/'tables';tables.mkdir()
+            for name in TABLE_HASHES:shutil.copy2(Path(profile['table_directory'])/name,tables/name)
+            profile['table_directory']='tables';path=root/'bremsstrahlung.json';path.write_text(json.dumps(profile))
+            contract=dict(bremsstrahlung_profile_sha256=sha(path));sampling=dict(bremsstrahlung_profile_sha256=sha(path))
+            validated_bremsstrahlung_identity(root,contract,sampling)
+            (tables/next(iter(TABLE_HASHES))).write_text('corrupt')
+            with self.assertRaises(ValueError):validated_bremsstrahlung_identity(root,contract,sampling)
+            path.write_text('{}')
+            with self.assertRaises(ValueError):validated_bremsstrahlung_identity(root,contract,sampling)
 
     def test_recovery_cannot_replace_an_empty_frozen_draw_with_detected_events(self):
         first=population();first.update(selected_event_ids=[],sampling_probabilities=[],rate_only=True)

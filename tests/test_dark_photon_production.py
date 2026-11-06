@@ -4,9 +4,11 @@ import copy
 import ast
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 import subprocess
+import shutil
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -551,6 +553,59 @@ class PrivateDetectorProfile(unittest.TestCase):
             spec=importlib.util.spec_from_file_location('isolated_private_chunk',path)
             module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
             self.assertTrue(callable(module.run))
+
+
+class MainHistogramTransferPolicy(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('condor_submit'), 'HTCondor submit parser is unavailable')
+    def test_prepared_workers_explicitly_exclude_scratch_from_site_file_transfer(self):
+        # CERN may enable file transfer even when should_transfer_files is NO.
+        # Parse the real prepared entries, rather than searching Python source.
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);gen=root/'gen';gen.mkdir()
+            identity=[[123,1,1]]
+            write(gen/'material_selected_source.json',dict(event_ids=identity,
+                gen_sha256='GEN',selected_indices=[0]))
+            write(gen/'contract.json',dict(generated_mass_support_gev=[.49,.51]))
+            write(gen/'validation.json',dict(event_rows=[dict(full_graph_sha256='graph')]))
+            write(gen/'manifest.json',{})
+            helper=root/'integrity.py';helper.write_text('# synthetic qualified helper\n')
+            manifest=root/'manifest.json';write(manifest,{})
+            runtime=dict(path='/qualified/histograms.tar.gz',sha256='runtime',bytes=1)
+            qualification=root/'qualification.json'
+            write(qualification,dict(complete=True,histogram_runtime=runtime,
+                histogram_positive_control=dict(all_seven_logmass_categories_present=True,
+                    positive_logmass_filled=True)))
+            settings=dict(runtime=runtime,qualification=dict(path=str(qualification),sha256=sha256(qualification)),
+                nano_integrity=dict(path=str(helper),sha256=sha256(helper)),maximum_publication_bytes=1000,
+                maximum_detector_publication_bytes_per_job=1000)
+            write(root/'histogrammer.json',settings)
+            row=dict(point='signal',events=1,gen_directory=str(gen),mass_gev=.5,proper_ctau_mm=1.,
+                final_output_base='/eos/user/test/signal',chunks=[dict(chunk=0,count=1,skip=0,job=1)])
+            profile=dict(manifest=dict(path=str(manifest),sha256=sha256(manifest)))
+            write(root/'plan.json',dict(points=[row],events=1,group_events=4000,
+                detector_runtime=profile,frozen_dependencies=dict(sources={},templates={}),campaign='20261106_test'))
+            write(root/'inventory.json',dict(points=dict(signal=dict(event_ids=identity,gen_sha256='GEN',gen_path='/eos/test/GEN.root'))))
+            write(root/'publication.json',{})
+            args=SimpleNamespace(preparation=root/'plan.json',output=root/'stage',
+                gen_inventory=root/'inventory.json',gen_publication=root/'publication.json',
+                prior_inventories=[],main_histogrammer=root/'histogrammer.json',detector_workers=100)
+            with patch.object(production_preparation,'validate_physical_preflight'), \
+                 patch.object(production_preparation,'validate_plan'), \
+                 patch.object(production_preparation,'check_gen'), \
+                 patch('dark_photon_detector_runtime.validate_profile'), \
+                 patch('prepare_dark_photon_kinematics_preflight.prepare'):
+                production_preparation.prepare_main_histograms(args)
+            for action in ('detector','finalize'):
+                ads=root/(action+'.ads')
+                result=subprocess.run(['condor_submit','-dump',str(ads),'-append','chunk = 0',
+                    str(args.output/(action+'.sub'))],capture_output=True,text=True,
+                    env=dict(os.environ,CONDOR_CONFIG='/dev/null',
+                        _CONDOR_NETWORK_INTERFACE='127.0.0.1',_CONDOR_FULL_HOSTNAME='localhost'))
+                self.assertEqual(result.returncode,0,result.stdout+result.stderr)
+                parsed=ads.read_text()
+                self.assertRegex(parsed,r'(?m)^TransferOutput\s*=\s*""$')
+                self.assertRegex(parsed,r'(?m)^WhenToTransferOutput\s*=\s*"ON_EXIT"$')
+                self.assertRegex(parsed,r'(?m)^ShouldTransferFiles\s*=\s*"YES"$')
 
 
 if __name__=='__main__':

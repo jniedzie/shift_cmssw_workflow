@@ -124,9 +124,13 @@ def prepare_main_histograms(args):
         script.chmod(0o700);subprocess.run(['bash','-n',str(script)],check=True)
         files[str(script)]=sha256(script)
         submit=output/(action+'.sub')
+        # Science outputs use explicit EOS publication. CERN enables transfers;
+        # keep unregistered scratch out of both exit and eviction transfers.
         submit.write_text('universe = vanilla\nexecutable = '+str(script)+'\narguments = '+
             ('--chunk $(chunk)' if action=='detector' else '')+'\ninitialdir = '+str(output)+
-            '\ngetenv = False\nshould_transfer_files = NO\nrequest_cpus = 1\nrequest_memory = 4000MB\n'
+            '\ngetenv = False\nshould_transfer_files = YES\n'
+            'transfer_output_files = ""\nwhen_to_transfer_output = ON_EXIT\n'
+            'request_cpus = 1\nrequest_memory = 4000MB\n'
             'request_disk = 8000MB\n+MaxRuntime = '+str(settings.get('worker_runtime_seconds',43200))+
             '\n+SendCredential = True\n+WantIOProxy = True\n'
             '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n+JobBatchName = '+

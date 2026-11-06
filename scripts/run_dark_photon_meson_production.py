@@ -1881,6 +1881,7 @@ initialdir = {directory}
 getenv = False
 should_transfer_files = YES
 transfer_output_files = ""
+when_to_transfer_output = ON_EXIT
 request_cpus = 1
 request_memory = 3000MB
 request_disk = 4000MB
@@ -2345,12 +2346,20 @@ def additional_reservations(config):
                 or type(coefficient) is not int or coefficient < 326000):
             raise ValueError('Additional meson storage reservation is inconsistent')
         amount = events * coefficient
+        detail = {}
+        if authority.get('directory'):
+            # Use the shared primitive-publication ledger for incremental
+            # peers, rather than reserving paid writes again until campaign end.
+            detail = durable.supplement_campaign_claim(dict(authority, kind='statistics'),
+                time.time(), 1200, config)
+            amount = detail['remaining_bytes']
         completed = (terminal_peer_completion(config, authority['completion_authority'], authority['worklist'])
                      if authority.get('completion_authority') else False)
         if completed:
             amount = 0
         total += amount
-        claim = dict(name=authority['name'], events=events, reserved_bytes=amount)
+        claim = dict(name=authority['name'], events=events, reserved_bytes=amount,
+                     **{key:value for key,value in detail.items() if key != 'name'})
         if authority.get('completion_authority'):
             claim['terminal_completion_verified'] = completed
         claims.append(claim)

@@ -2475,6 +2475,26 @@ class HandoffStartPollReset(unittest.TestCase):
                 self.assertEqual(state['detector_handoff_starts_this_poll'],10)
 
 
+class FrozenPublicationTools(unittest.TestCase):
+    def test_prepared_tools_support_the_real_cumulative_lazy_imports(self):
+        import run_dark_photon_statistics as statistics
+        scripts = Path(preparation.__file__).resolve().parent
+        config = dict(production_mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+                      main_histogrammer=dict(path='/qualified/profile.json'))
+        with tempfile.TemporaryDirectory() as temporary:
+            tools = Path(temporary); files = {}
+            preparation.freeze_tools(config, scripts, tools, files)
+            names = statistics.aggregate_helper_names(dict(config, tools=str(tools)))
+            # This import occurs inside a rate-export function, after primitive
+            # histogram workers have already finished in a real campaign.
+            self.assertIn('dark_photon_spectral_widths.py', names)
+            for name in names:
+                self.assertEqual(files[str(tools/name)], statistics.sha(scripts/name))
+            (tools/'dark_photon_spectral_widths.py').unlink()
+            with self.assertRaisesRegex(FileNotFoundError, 'dark_photon_spectral_widths'):
+                statistics.aggregate_helper_names(dict(config, tools=str(tools)))
+
+
 class FrozenMainHistogramIntegrity(unittest.TestCase):
     def inputs(self, root):
         helper = root / 'analysis_integrity.py'

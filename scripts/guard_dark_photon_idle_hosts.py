@@ -1,19 +1,22 @@
 # Code style: AI-code. AI-generated narrow native scheduler operations helper.
-"""Exclude reviewed failed machines from idle DP detector jobs only.
+"""Guard DP scheduler operations and explicitly qualified transfer-only retries.
 
-The guard never releases, removes or submits a science job. Running jobs and
-immutable production files are untouched. Every payload edit has a durable exact
-job manifest and an atomic JobStatus == 1 constraint. Optional manager-only
+Without an explicit recovery authority this guard never releases a science job.
+Running jobs and immutable production files are untouched. Every payload edit
+has a durable exact job manifest and a held/idle compare-and-set. Manager-only
 queue and submitted-node ceilings reduce new starts without evicting payloads.
 """
 import argparse
+import ast
 import datetime
+import errno
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 import time
 
 import shift_condor_native as native
@@ -23,6 +26,8 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'Owner', 'JobStatus', 'Iwd', 'Cmd',
               'DAGManJobId', 'Requirements', 'JobUniverse', 'DAGMan_MaxIdle',
               'DAGMan_MaxJobs', 'DAG_AdUpdateTime', 'NumJobStarts',
               'EnteredCurrentStatus', 'JobCurrentStartDate']
+ATTRIBUTES += ['Args', 'Err', 'Out', 'ExitCode', 'ExitBySignal', 'JobStartDate',
+               'MaxRuntime', 'TransferOutput', 'PeriodicRelease']
 
 
 def utc():
@@ -36,11 +41,21 @@ def digest(path):
 def save(path, value):
     path = Path(path)
     temporary = path.with_suffix(path.suffix + '.tmp')
-    with temporary.open('w') as stream:
-        stream.write(json.dumps(value, indent=2, sort_keys=True) + '\n')
-        stream.flush()
-        os.fsync(stream.fileno())
-    os.replace(temporary, path)
+    body = json.dumps(value, indent=2, sort_keys=True) + '\n'
+    delay = 2
+    while True:
+        try:
+            with temporary.open('w') as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            return
+        except OSError as error:
+            if error.errno not in (errno.ETIMEDOUT,errno.ESTALE,errno.EIO):
+                raise
+            time.sleep(delay)
+            delay = min(30,delay*2)
 
 
 def validate_config(config):
@@ -58,7 +73,8 @@ def validate_config(config):
                 or namespace.endswith('/') or '..' in Path(namespace).parts):
             raise ValueError('Invalid exact DP production namespace')
     hosts = config['excluded_hosts']
-    if not hosts or len(hosts) > 8 or len(hosts) != len(set(hosts)):
+    if ((not hosts and not config.get('infrastructure_recovery'))
+            or len(hosts) > 8 or len(hosts) != len(set(hosts))):
         raise ValueError('A small explicit failed-host list is required')
     if any(not re.fullmatch(r'[A-Za-z0-9.-]+[.]cern[.]ch', host) for host in hosts):
         raise ValueError('Invalid failed execute machine')
@@ -84,6 +100,31 @@ def validate_config(config):
         raise ValueError('Native scheduler uncertainty grace must be bounded')
     if not 1 <= config.get('maximum_unprotected_polls', 3) <= 10:
         raise ValueError('Unprotected idle-job grace must be bounded')
+    recovery = config.get('infrastructure_recovery')
+    if recovery is not None:
+        if (recovery.get('schema') != 'shift-dp-transfer-restart-recovery-v1'
+                or type(recovery.get('maximum_recoveries')) is not int
+                or not 1 <= recovery['maximum_recoveries'] <= 1000
+                or type(recovery.get('dry_run')) is not bool):
+            raise ValueError('Transfer recovery requires an explicit bounded policy')
+        authority = recovery['qualification']
+        if digest(authority['path']) != authority['sha256']:
+            raise ValueError('Transfer recovery qualification changed')
+        proof = json.loads(Path(authority['path']).read_text())
+        if (proof.get('complete') is not True or proof.get('guard_code_sha256') != digest(__file__)
+                or proof.get('preserved_native_failure_controls_passed') is not True
+                or proof.get('negative_and_success_controls_passed') is not True):
+            raise ValueError('Transfer recovery needs qualification of this exact guard')
+        restart = proof['native_restart_qualification']
+        if digest(restart['path']) != restart['sha256']:
+            raise ValueError('Native restart qualification changed')
+        native_proof = json.loads(Path(restart['path']).read_text())
+        if (native_proof.get('complete') is not True
+                or native_proof.get('single_forced_eviction_verified') is not True
+                or native_proof.get('scratch_payload_transferred') is not False
+                or native_proof.get('native',{}).get('ExitCode') != 0
+                or native_proof.get('native',{}).get('NumJobStarts') != 2):
+            raise ValueError('Transfer recovery needs actual eviction/restart qualification')
 
 
 def eligible(config, ad):
@@ -266,11 +307,225 @@ def throttle_managers(config, ads, sequence):
     return [str(path)]
 
 
+def transfer_restart_signature(events, error, cluster, proc=0):
+    """Only the reviewed transfer eviction followed by the attempt guard qualifies."""
+    marker = re.compile(r'^\d{3} \('+str(cluster)+r'\.'+f'{proc:03d}'+r'\.', re.MULTILINE)
+    blocks = [b for b in events.split('\n...\n') if marker.match(b)]
+    evictions = [i for i,b in enumerate(blocks) if b.startswith('004 ') and
+        'Code 1007' in b and 'Repeated attempts to transfer output failed' in b]
+    return (bool(evictions)
+        and any(b.startswith('001 ') for b in blocks[evictions[-1]+1:])
+        and bool(blocks) and blocks[-1].startswith('012 ')
+        and error.strip().endswith('ValueError: Preserve the existing attempt; review its outputs before any retry'))
+
+
+def output_absent(path):
+    result = subprocess.run(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'stat', path],
+                            capture_output=True, text=True, timeout=45)
+    text = result.stdout+result.stderr
+    if result.returncode == 0:
+        raise ValueError('Canonical output already exists; adoption requires review: '+path)
+    if '[3011]' not in text or 'no such file or directory' not in text.lower():
+        raise OSError('EOS output state is unknown: '+text)
+    return dict(path=path, output=text, returncode=result.returncode)
+
+
+def native_output_paths(stage, source, job):
+    """Use the sealed publisher's path function without importing its runtime."""
+    helper = stage/'frozen/sources/run_shift_gen_to_nano.py'
+    function, = [node for node in ast.parse(helper.read_text()).body
+                 if isinstance(node,ast.FunctionDef) and node.name == 'publication_paths']
+    scope = dict(Path=Path)
+    exec(compile(ast.Module(body=[function],type_ignores=[]),str(helper),'exec'),scope)
+    return list(scope['publication_paths'](source,job))
+
+
+def transfer_retry_candidate(config, ad, ads):
+    """Bind one held chunk to its unchanged live DAG, source and empty attempt."""
+    if (ad.get('Owner') != config['owner'] or ad.get('JobStatus') != 5
+            or ad.get('ProcId') != 0 or ad.get('ExitCode') != 1 or ad.get('ExitBySignal')
+            or type(ad.get('NumJobStarts')) is not int or ad['NumJobStarts'] < 2):
+        raise ValueError('Held job is not the reviewed restarted infrastructure failure')
+    stage = Path(ad['Iwd'])
+    if (not any(str(stage) == root or str(stage).startswith(root+'/') for root in config['namespaces'])
+            or ad.get('Cmd') != str(stage/'detector_worker.sh')
+            or not re.fullmatch(r'--chunk [0-9]+', ad.get('Args',''))):
+        raise ValueError('Held job is outside the exact detector namespace')
+    manager, = [m for m in ads if m['ClusterId'] == ad.get('DAGManJobId') and m['ProcId'] == 0]
+    if (manager.get('JobStatus') != 2 or manager.get('JobUniverse') != 7
+            or manager.get('Iwd') != str(stage) or manager.get('Cmd') != '/usr/bin/condor_dagman'
+            or manager.get('_queried_schedd') != ad.get('_queried_schedd')):
+        raise ValueError('Held slice has no unchanged running DAG owner')
+    receipt = json.loads((stage/'submission.json').read_text())
+    if receipt.get('cluster') != manager['ClusterId'] or receipt.get('task') != str(stage):
+        raise ValueError('Detector DAG differs from its persistent submission receipt')
+    plan = json.loads((stage/'plan.json').read_text()); seal = json.loads((stage/'seal.json').read_text())
+    for path in (stage/'plan.json',stage/'source.json',stage/'frozen/sources/run_shift_gen_to_nano.py'):
+        if seal['files'].get(str(path)) != digest(path):
+            raise ValueError('Required retry source or publisher is outside its stage seal')
+    for path, expected in seal['files'].items():
+        if digest(path) != expected:
+            raise ValueError('Frozen stage changed before infrastructure retry: '+path)
+    chunk_id = int(ad['Args'].split()[-1])
+    row, = plan['points']; chunk, = [c for c in row['chunks'] if c['chunk'] == chunk_id]
+    status_path = stage/'statuses'/f'chunk_{chunk_id}.json'
+    status = json.loads(status_path.read_text())
+    if (status.get('complete') is not False or 'error' in status or 'payload' in status
+            or status.get('plan_sha256') != digest(stage/'plan.json')
+            or status.get('seal_sha256') != digest(stage/'seal.json')
+            or status.get('full_gen_events') != row.get('full_gen_events', row['events'])):
+        raise ValueError('Attempt contains physics, output or inconsistent source evidence')
+    if any(a.get('Iwd') == str(stage) and a.get('Cmd') == ad['Cmd'] and a.get('Args') == ad['Args']
+           and (a['ClusterId'],a['ProcId']) != (ad['ClusterId'],ad['ProcId']) for a in ads):
+        raise ValueError('Another native job owns this exact slice')
+    error_path = Path(ad['Err'])
+    if error_path.parent != stage/'logs' or error_path.stat().st_size > 65536:
+        raise ValueError('Held error log is not a bounded canonical worker log')
+    error = error_path.read_text(); events = (stage/'events.log').read_text()
+    if not transfer_restart_signature(events,error,ad['ClusterId']):
+        raise ValueError('Native history does not match the reviewed transfer/restart signature')
+    elapsed = time.time()-ad.get('JobStartDate',0)
+    runtime = max(ad.get('MaxRuntime',0), int(elapsed)+43200+900)
+    if not 0 <= elapsed or runtime > 604800:
+        raise ValueError('Original submission clock needs a reviewed fresh-clock replacement')
+    source = json.loads((stage/'source.json').read_text())
+    # Plan Nano/metadata names belong to the collector. The native publisher
+    # uses its own job directory; checking only collector names misses outputs.
+    outputs = list(dict.fromkeys([chunk['nano'],chunk['metadata'],
+        *native_output_paths(stage,source,chunk['job'])]))
+    if any(not path.startswith(row['final_output_base']+'/') for path in outputs):
+        raise ValueError('Retry output is outside this exact physical cohort')
+    return dict(stage=str(stage), chunk=chunk_id, job=chunk['job'], source_skip=chunk['skip'],
+        count=chunk['count'], status_path=str(status_path), status_sha256=digest(status_path),
+        plan_sha256=digest(stage/'plan.json'), seal_sha256=digest(stage/'seal.json'),
+        source_sha256=digest(stage/'source.json'), outputs=outputs, runtime=runtime,
+        successful_status_hashes={str(p):digest(p) for p in (stage/'statuses').glob('chunk_*.json')
+            if json.loads(p.read_text()).get('complete') is True},
+        error=error, events='\n...\n'.join(b for b in events.split('\n...\n')
+            if re.match(r'^\d{3} \('+str(ad['ClusterId'])+r'\.000\.',b)))
+
+
+def recover_transfer_jobs(config, ads):
+    policy = config.get('infrastructure_recovery')
+    if policy is None:
+        return dict(recovered=[], blocked=[])
+    base = Path(config['directory'])/'transfer_recovery'; base.mkdir(exist_ok=True)
+    summary = dict(recovered=[],blocked=[],observations=[],dry_run=policy['dry_run'])
+    for path in base.glob('*/intent.json'):
+        if not (path.parent/'released.json').exists():
+            intent=json.loads(path.read_text());ad=intent['ad']
+            summary['blocked'].append(dict(code='ambiguous_retry_transaction',
+                job=str(ad['ClusterId'])+'.'+str(ad['ProcId']),receipt=str(path),
+                reason='Incomplete native retry transaction; inspect archived status, queue and EOS before any further action'))
+    for path in base.glob('*/released.json'):
+        receipt = json.loads(path.read_text()); candidate = receipt['candidate']
+        current = next((a for a in ads if str(a['ClusterId'])+'.'+str(a['ProcId']) == receipt['job']),None)
+        status = Path(candidate['status_path'])
+        response = json.loads(status.read_text()) if status.exists() else {}
+        complete = (response.get('complete') is True and response.get('payload',{}).get('complete') is True
+            and response.get('plan_sha256') == candidate['plan_sha256']
+            and response.get('seal_sha256') == candidate['seal_sha256']
+            and response['payload'].get('source_descriptor_sha256') == candidate['source_sha256'])
+        summary['observations'].append(dict(job=receipt['job'],receipt=str(path),
+            response_complete=complete,native_status=current.get('JobStatus') if current else None,
+            current_start_epoch=current.get('JobCurrentStartDate') if current else None))
+    held = [a for a in ads if a.get('JobStatus') == 5 and
+            any(a.get('Iwd','') == root or a.get('Iwd','').startswith(root+'/') for root in config['namespaces'])]
+    for ad in held:
+        identity = str(ad['ClusterId'])+'.'+str(ad['ProcId'])
+        try:
+            candidate = transfer_retry_candidate(config,ad,ads)
+            key = hashlib.sha256(candidate['stage'].encode()).hexdigest()[:16]+'_chunk_'+str(candidate['chunk'])
+            directory = base/key
+            if directory.exists():
+                raise ValueError('This slice already has a retry intent; further release needs review')
+            if len(list(base.glob('*/intent.json'))) >= policy['maximum_recoveries']:
+                raise ValueError('Qualified infrastructure recovery budget exhausted')
+            used = sum(p.stat().st_size for p in base.glob('*/*') if p.is_file())
+            if used+4*len(json.dumps(candidate).encode())+65536 > config['maximum_receipt_bytes']:
+                raise ValueError('Infrastructure recovery evidence budget exhausted')
+            absence = [output_absent(path) for path in candidate['outputs']]
+            if policy['dry_run']:
+                summary['recovered'].append(dict(job=identity,would_recover=True,candidate=candidate,absence=absence))
+                continue
+            schedd = ad['_queried_schedd']
+            if not re.fullmatch(r'[A-Za-z0-9_.@-]+',schedd):
+                raise ValueError('Retry has no verified native scheduler')
+            constraint = ' && '.join(f'{k} == '+json.dumps(ad[k]) for k in
+                ('ClusterId','ProcId','Owner','JobStatus','Iwd','Cmd','DAGManJobId','Args','NumJobStarts'))
+            current = native.query(constraint,ATTRIBUTES,pool=config['condor_pool'],schedd=schedd,timeout=50)
+            if len(current) != 1:
+                raise ValueError('Held slice changed before retry; no action')
+            directory.mkdir()
+            save(directory/'intent.json',dict(ad=ad,candidate=candidate,output_absence=absence,created_utc=utc(),complete=False))
+            (directory/'original_error.log').write_text(candidate['error'])
+            (directory/'native_events.log').write_text(candidate['events'])
+            edits={'MaxRuntime':candidate['runtime'],'TransferOutput':'','PeriodicRelease':False}
+            command=['/usr/bin/condor_qedit','-pool',config['condor_pool'],'-name',schedd,'-constraint',constraint]
+            for name,value in edits.items():command.extend([name,json.dumps(value)])
+            native.run_condor(command,timeout=50)
+            after = native.query(constraint,ATTRIBUTES,pool=config['condor_pool'],schedd=schedd,timeout=50)
+            if len(after) != 1 or any(after[0].get(k) != v for k,v in edits.items()):
+                raise ValueError('Retry runtime/transfer readback differs; intent preserved')
+            status = Path(candidate['status_path'])
+            if digest(status) != candidate['status_sha256']:
+                raise ValueError('Attempt changed during retry review')
+            for name in ('plan','seal','source'):
+                if digest(Path(candidate['stage'])/(name+'.json')) != candidate[name+'_sha256']:
+                    raise ValueError('Scientific source authority changed during retry review')
+            if any(digest(p) != expected for p,expected in candidate['successful_status_hashes'].items()):
+                raise ValueError('Successful original responses changed during retry review')
+            owners = native.query(' && '.join(k+' == '+json.dumps(ad[k]) for k in
+                ('Owner','Iwd','Cmd','Args')),ATTRIBUTES,pool=config['condor_pool'],schedd=schedd,timeout=50)
+            if (len(owners) != 1 or any(owners[0].get(k) != ad[k]
+                    for k in ('ClusterId','ProcId','JobStatus','DAGManJobId'))):
+                raise ValueError('Another producer or state change appeared before attempt archival')
+            # Recheck storage immediately before archiving the exact empty attempt.
+            for path in candidate['outputs']:output_absent(path)
+            status.replace(directory/'original_status.json')
+            if digest(directory/'original_status.json') != candidate['status_sha256']:
+                raise ValueError('Archived original attempt failed checksum readback')
+            save(directory/'release_intent.json',dict(constraint=constraint,edits=edits,created_utc=utc()))
+            output=native.run_condor(['/usr/bin/condor_release','-pool',config['condor_pool'],
+                '-name',schedd,'-constraint',constraint],timeout=50)
+            save(directory/'released.json',dict(job=identity,output=output,released_utc=utc(),
+                completed_response=False,original_DAG=ad['DAGManJobId'],candidate=candidate))
+            summary['recovered'].append(dict(job=identity,receipt=str(directory/'released.json')))
+        except native.NativeCondorError as error:
+            summary['blocked'].append(dict(code='native_retry_outcome_unknown',job=identity,
+                reason=str(error),checked_utc=utc(),
+                action='Inspect any preserved transfer_recovery intent; never repeat a possibly completed native action'))
+        except (ValueError,OSError) as error:
+            summary['blocked'].append(dict(job=identity,reason=str(error),checked_utc=utc()))
+    finished = []
+    for specification in config.get('watchdog_reports',[]):
+        path = specification['path'] if isinstance(specification,dict) else specification
+        if (isinstance(specification,dict) and
+                not Path(specification['controller_receipt']).exists()):
+            finished.append(False)
+            continue  # The owning controller has not been submitted yet.
+        try:
+            report=json.loads(Path(path).read_text())
+            age=time.time()-datetime.datetime.fromisoformat(report['checked_utc']).timestamp()
+            finished.append(report.get('controller_finished') is True and report.get('health') == 'ok')
+            if report.get('health') != 'ok' or age>1200 and not finished[-1]:
+                summary['blocked'].append(dict(report=path,reason='Production watchdog reports failure or stale progress',issues=report.get('issues'),age_seconds=age))
+        except (OSError,ValueError,KeyError) as error:
+            finished.append(False)
+            summary['blocked'].append(dict(report=path,reason=str(error)))
+    summary['watched_productions_finished'] = bool(finished) and all(finished) and not summary['blocked']
+    return summary
+
+
 def step(config, sequence, previous=None):
     previous = previous or {}
     constraint = ('(JobStatus == 1 && DAGManJobId > 0 '
                   '&& regexp("/detector_worker[.]sh$", Cmd)) '
-                  '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))')
+                  '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))'
+                  + (' || JobStatus == 5' if config.get('infrastructure_recovery') else ''))
+    if config.get('infrastructure_recovery'):
+        constraint = ('(DAGManJobId > 0 && regexp("/detector_worker[.]sh$", Cmd)) '
+                      '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))')
     ads = native.query_account(config['owner'], constraint, ATTRIBUTES,
                                pool=config['condor_pool'], timeout=50)
     manager_receipts = throttle_managers(config, ads, sequence)
@@ -283,7 +538,7 @@ def step(config, sequence, previous=None):
     selected = [ad for ad in ads if eligible(config, ad)]
     changes = []
     for ad in selected:
-        updated = requirements(ad, config['excluded_hosts'])
+        updated = requirements(ad, config['excluded_hosts']) if config['excluded_hosts'] else None
         if updated is not None:
             if not re.fullmatch(r'[A-Za-z0-9_.@-]+', ad.get('_queried_schedd', '')):
                 raise ValueError('Selected job has no verified scheduler identity')
@@ -292,6 +547,8 @@ def step(config, sequence, previous=None):
                    edits_planned=len(changes), protected_idle_jobs=len(selected)-len(changes),
                    manager_receipts=manager_receipts, manager_observations=manager_observations,
                    pending_protection={})
+    if config.get('infrastructure_recovery'):
+        summary['infrastructure_recovery'] = recover_transfer_jobs(config,ads)
     if not changes:
         return summary
     receipts = Path(config['directory']) / 'receipts'
@@ -369,14 +626,14 @@ def poll(config, sequence, previous):
         result = step(config, sequence, previous)
     except native.NativeCondorError as error:
         failures = previous.get('consecutive_native_failures', 0) + 1
-        if failures >= config.get('maximum_consecutive_native_failures', 3):
+        if failures >= config.get('maximum_consecutive_native_failures', 3) and not config.get('infrastructure_recovery'):
             raise
         result = dict(previous, checked_utc=utc(), status='waiting_native_scheduler',
                       native_error=str(error), consecutive_native_failures=failures,
                       uncertain_poll=sequence)
     else:
-        result.update(status=('waiting_idle_protection' if result.get('pending_protection')
-                              else 'guarding'),
+        result.update(status=('blocked' if result.get('infrastructure_recovery',{}).get('blocked')
+                              else 'waiting_idle_protection' if result.get('pending_protection') else 'guarding'),
                       native_error=None, consecutive_native_failures=0)
     result.update(schema='shift-dp-idle-host-guard-state-v1', poll=sequence,
                   error=None, complete=False)
@@ -413,9 +670,12 @@ def main():
                 sequence += 1
                 result = poll(config, sequence, result)
                 save(root / 'state.json', result)
+                if result.get('infrastructure_recovery',{}).get('watched_productions_finished'):
+                    save(root/'state.json',dict(result,complete=True,reason='Watched production and publication finished'))
+                    return
                 time.sleep(config['interval_seconds'])
-            save(root / 'state.json', dict(checked_utc=utc(), complete=True, error=None,
-                                          reason='Reviewed seven-day runtime finished'))
+            save(root / 'state.json', dict(result,checked_utc=utc(),complete=not bool(config.get('infrastructure_recovery')),error=None,
+                                          reason='Guard runtime finished; preserve any pending or blocked production evidence'))
         except Exception as error:
             save(root / 'state.json', dict(result, checked_utc=utc(), complete=False,
                                           error=type(error).__name__ + ': ' + str(error), poll=sequence))

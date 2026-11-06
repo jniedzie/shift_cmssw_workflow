@@ -83,6 +83,18 @@ def meson_storage_limit(config):
     return maximum
 
 
+def freeze_tools(config, scripts, tools, files):
+    """Freeze the same dependency closure that cumulative publication consumes."""
+    from run_dark_photon_statistics import aggregate_helper_names
+    names = set(TOOLS)
+    if config.get('main_histogrammer') is not None:
+        names.update(aggregate_helper_names(dict(config, tools=str(scripts))))
+    for name in sorted(names):
+        target = tools/name
+        shutil.copy2(scripts/name, target)
+        files[str(target)] = sha(target)
+
+
 def freeze_main_histogrammer(authority, output, files):
     """Keep the qualified integrity helper independent of later analysis edits."""
     source = pinned_path(authority)
@@ -281,9 +293,7 @@ def prepare(configuration, output, scripts=None):
     tools = output / 'tools'
     tools.mkdir()
     files = {}
-    for name in TOOLS:
-        shutil.copy2(scripts / name, tools / name)
-        files[str(tools / name)] = sha(tools / name)
+    freeze_tools(config, scripts, tools, files)
     conditions=config['conditions']
     if sha(conditions['path'])!=conditions['sha256']:
         raise ValueError('Meson production conditions authority changed')
@@ -462,7 +472,9 @@ arguments = {tools}/run_dark_photon_meson_production.py --directory {output} --s
 initialdir = {directory}
 getenv = False
 environment = "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1"
-should_transfer_files = NO
+should_transfer_files = YES
+transfer_output_files = ""
+when_to_transfer_output = ON_EXIT
 request_cpus = 1
 request_memory = 1000MB
 request_disk = 1000MB
@@ -506,7 +518,9 @@ arguments = {tools}/run_dark_photon_meson_production.py --directory {output} --s
 initialdir = {directory}
 getenv = False
 environment = "PATH=/usr/bin:/bin PYTHONDONTWRITEBYTECODE=1"
-should_transfer_files = NO
+should_transfer_files = YES
+transfer_output_files = ""
+when_to_transfer_output = ON_EXIT
 request_cpus = 1
 request_memory = {worker_memory}MB
 request_disk = {worker_disk}MB
@@ -568,7 +582,9 @@ executable = {wrapper}
 arguments = {seal}
 initialdir = {output}
 getenv = False
-should_transfer_files = NO
+should_transfer_files = YES
+transfer_output_files = ""
+when_to_transfer_output = ON_EXIT
 request_cpus = 1
 request_memory = 2000MB
 request_disk = 4000MB
