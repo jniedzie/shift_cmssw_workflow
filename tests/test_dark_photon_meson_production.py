@@ -1354,6 +1354,42 @@ class Admission(unittest.TestCase):
 
 
 class PublicationSafety(unittest.TestCase):
+    def test_older_completed_aggregate_cannot_mark_later_primitive_published(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);point='m0p3_prompt';batch=dict(batch='later',point=point)
+            receipt=root/'aggregates'/point/'v0001/completed_points'/(point+'.json')
+            receipt.parent.mkdir(parents=True)
+            receipt.write_text(json.dumps(dict(complete=True,point=point)))
+            proof=dict(source_plans=[str(root/'batches/earlier/production/plan.json')],
+                point_receipt_path=str(receipt),point_receipt_sha256=production.durable.sha(receipt))
+            primitive=dict(complete=True,identity='later-original')
+            entry=dict(stage='published',published=proof,primitive_histograms=primitive,
+                detector_native_complete=True)
+            self.assertFalse(production.reconcile_batch_publication(dict(directory=str(root)),batch,entry))
+            self.assertEqual(entry['stage'],'histograms_ready')
+            self.assertNotIn('published',entry)
+            self.assertEqual(entry['excluded_cumulative_publications'],[proof])
+            self.assertEqual(entry['primitive_histograms'],primitive)
+            self.assertTrue(entry['detector_native_complete'])
+            self.assertTrue(production.reconcile_batch_publication(dict(directory=str(root)),batch,entry))
+            self.assertEqual(entry['excluded_cumulative_publications'],[proof])
+            # A later cumulative result containing this source closes it normally.
+            included=dict(proof,source_plans=[str(root/'batches/later/production/plan.json')])
+            entry.update(stage='published',published=included)
+            self.assertTrue(production.reconcile_batch_publication(dict(directory=str(root)),batch,entry))
+            self.assertEqual(entry['published'],included)
+
+    def test_stale_batch_label_with_changed_receipt_remains_an_error(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);point='m0p3_prompt';batch=dict(batch='later',point=point)
+            receipt=root/'aggregates'/point/'v0001/completed_points'/(point+'.json')
+            receipt.parent.mkdir(parents=True);receipt.write_text('{}')
+            proof=dict(source_plans=['earlier'],point_receipt_path=str(receipt),point_receipt_sha256='a'*64)
+            entry=dict(stage='published',published=proof)
+            with self.assertRaisesRegex(ValueError,'original receipt'):
+                production.reconcile_batch_publication(dict(directory=str(root)),batch,entry)
+            self.assertEqual(entry,dict(stage='published',published=proof))
+
     def publication_floor_fixture(self, root):
         batch = dict(batch='bulk', point='m0p3_prompt', operational_canary=False, mass_gev=.3,
             epsilon=.001, calibration_mean_beta_gamma=500., source_collisions=10000,

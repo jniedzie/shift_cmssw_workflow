@@ -357,6 +357,25 @@ class MainMesonPrimitiveCredit(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'ROOT receipt'):
                 controller.meson_published_batch(root,batch,changed,time.time()+2)
 
+            # An older aggregate may have completed while this primitive was
+            # finishing. Its stale batch label is not this population's proof.
+            authority=dict(name='meson',kind='meson',directory=str(root),
+                worklist=dict(path='worklist',sha256='worklist-sha'),forecast=dict(path='forecast'))
+            allocation=dict(directory=str(root),batches=[batch])
+            forecast=dict(worklist_sha256='worklist-sha',per_batch_forecast_bytes={'b000':123},
+                total_meson_forecast_bytes=123)
+            stale=dict(published,point_receipt_path=str(root/'older/aggregate.json'))
+            state=dict(batches={'b000':dict(published=stale,primitive_histograms=published)})
+            with patch.object(controller,'pinned_json',side_effect=[allocation,forecast]), \
+                 patch.object(controller,'healthy_peer_state',return_value=state):
+                claim=controller.supplement_campaign_claim(authority,time.time()+2,1200)
+            self.assertEqual((claim['remaining_bytes'],claim['credited_bytes']),(0,123))
+            state['batches']['b000']['primitive_histograms']=changed
+            with patch.object(controller,'pinned_json',side_effect=[allocation,forecast]), \
+                 patch.object(controller,'healthy_peer_state',return_value=state):
+                with self.assertRaisesRegex(ValueError,'ROOT receipt'):
+                    controller.supplement_campaign_claim(authority,time.time()+2,1200)
+
 
 class FreshMesonQualificationStorage(unittest.TestCase):
     def test_seven_source_checks_release_no_histogram_reservation_credit(self):

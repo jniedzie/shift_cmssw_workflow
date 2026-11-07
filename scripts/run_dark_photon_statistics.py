@@ -540,7 +540,7 @@ def supplement_campaign_claim(authority, observed, maximum_age, observer_config=
         live = jobs(observer_config, 'regexp(' + json.dumps(str(directory)) + ', Iwd)')
     for batch in allocation['batches'] if state else []:
         entry = state.get('batches', {}).get(batch['batch'], {})
-        published = entry.get('published') or entry.get('primitive_histograms')
+        published = entry.get('primitive_histograms') or entry.get('published')
         batch_root = directory / 'batches' / batch['batch']
         if any(row.get('Iwd', '').startswith(str(batch_root)) for row in live):
             continue

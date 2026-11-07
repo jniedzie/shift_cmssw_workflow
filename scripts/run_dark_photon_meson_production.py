@@ -4612,6 +4612,32 @@ def detector_reservations(config, entries):
     return claims
 
 
+def reconcile_batch_publication(config, batch, entry):
+    """A completed older aggregate need not contain this newly ready batch."""
+    published = entry.get('published')
+    if not published or 'source_plans' not in published:
+        return True
+    plan = str(batch_directory(config, batch)/'production/plan.json')
+    if plan in published['source_plans']:
+        return True
+    receipt = Path(published['point_receipt_path'])
+    root = Path(config['directory'])/'aggregates'/batch['point']
+    if (receipt.parent.parent.parent != root
+            or receipt.parent.name != 'completed_points'
+            or receipt.name != batch['point']+'.json'
+            or durable.sha(receipt) != published['point_receipt_sha256']):
+        raise ValueError('Excluded cumulative publication lost its original receipt')
+    report = read(receipt)
+    if report.get('complete') is not True or report.get('point') != batch['point']:
+        raise ValueError('Excluded cumulative publication is not a complete same-point result')
+    history = entry.setdefault('excluded_cumulative_publications', [])
+    if published not in history:
+        history.append(published)
+    entry.pop('published')
+    entry['stage'] = 'histograms_ready'
+    return False
+
+
 def step(config,state):
     state.update(checked_utc=datetime.now(timezone.utc).isoformat(),heartbeat=state.get('heartbeat',0)+1)
     state['detector_handoff_starts_this_poll']=0
@@ -4622,6 +4648,8 @@ def step(config,state):
         # physics programme recorded by the independently reviewed catalogue.
         state['physics_complete'] = False
     entries=state.setdefault('batches',{})
+    for batch in config['batches']:
+        reconcile_batch_publication(config, batch, entries.get(batch['batch'], {}))
     if scope is not None:
         for batch in config['batches']:
             entries.setdefault(batch['batch'], {})
@@ -4745,6 +4773,9 @@ def step(config,state):
         if published:
             stage = 'histograms_ready' if published.get('alias_published') is False else 'published'
             entry.update(stage=stage,published=published)
+            if not reconcile_batch_publication(config, batch, entry):
+                durable.save(Path(config['directory'])/'state.json',state)
+                continue
             if config.get('regroup_complete_points') is True and not batch.get('operational_canary'):
                 expected={str(batch_directory(config,other)/'production/plan.json') for other in config['batches']
                     if other['point']==batch['point'] and not other.get('gen_qualification_only')}
