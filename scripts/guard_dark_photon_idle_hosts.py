@@ -153,8 +153,10 @@ def priority_eligible(config, ad):
         and ad.get('Cmd') in (directory+'/detector_worker.sh', directory+'/finalize_worker.sh'))
 
 
-def raise_idle_worker_priority(config, ads, sequence):
+def raise_idle_worker_priority(config, ads, sequence, pending=None, previous=None):
     """Raise exact owned idle detector/finalizer workers with native receipts."""
+    pending = pending if pending is not None else {}
+    previous = previous or {}
     floor = config.get('minimum_worker_priority')
     if floor is None:
         return []
@@ -201,27 +203,54 @@ def raise_idle_worker_priority(config, ads, sequence):
             output = native.run_condor(command, timeout=50)
             action['output'] = output
             save(path, receipt)
+            count_match = re.search(r'(\d+)\s+matching jobs?[.]?', output)
+            matched = int(count_match.group(1)) if count_match else None
+            if matched is not None and not 0 <= matched <= len(batch):
+                raise ValueError('Native priority edit count exceeds its exact idle-job scope')
+            action['matched_jobs'] = matched
+            action['readbacks'] = []
+            save(path, receipt)
             identity_constraint = ' || '.join(
                 f"(ClusterId == {ad['ClusterId']} && ProcId == {ad['ProcId']})" for ad in batch)
-            after = native.query(identity_constraint, ATTRIBUTES,
-                                 pool=config['condor_pool'], schedd=schedd, timeout=50)
             expected = {(ad['ClusterId'], ad['ProcId']): ad for ad in batch}
-            seen = set()
-            for ad in after:
-                identity = (ad.get('ClusterId'), ad.get('ProcId'))
-                before = expected.get(identity)
-                if (before is None or identity in seen
-                        or any(ad.get(name) != before[name] for name in fields if name != 'JobPrio')):
-                    raise ValueError('Worker priority readback changed its exact native identity')
-                seen.add(identity)
-                if ad.get('JobStatus') not in (1,2,3,4,5,6,7):
-                    raise ValueError('Worker priority readback has unknown native state')
-                action['readback'].append({name:ad.get(name) for name in (*fields,'JobStatus')})
-                if ad.get('JobStatus') == 1 and (type(ad.get('JobPrio')) is not int or ad['JobPrio'] < floor):
-                    save(path, receipt)
-                    raise ValueError('Idle worker priority remains below the requested floor')
+            for attempt in range(3):
+                after = native.query(identity_constraint, ATTRIBUTES,
+                                     pool=config['condor_pool'], schedd=schedd, timeout=50)
+                seen = set()
+                unresolved = []
+                action['readback'] = []
+                for ad in after:
+                    identity = (ad.get('ClusterId'), ad.get('ProcId'))
+                    before = expected.get(identity)
+                    if (before is None or identity in seen
+                            or any(ad.get(name) != before[name] for name in fields if name != 'JobPrio')):
+                        raise ValueError('Worker priority readback changed its exact native identity')
+                    seen.add(identity)
+                    if ad.get('JobStatus') not in (1,2,3,4,5,6,7):
+                        raise ValueError('Worker priority readback has unknown native state')
+                    row = {name:ad.get(name) for name in (*fields,'JobStatus')}
+                    action['readback'].append(row)
+                    if ad.get('JobStatus') == 1:
+                        if type(ad.get('JobPrio')) is not int:
+                            raise ValueError('Idle worker priority is unknown after native edit')
+                        if ad['JobPrio'] < floor:
+                            unresolved.append(row)
+                action['readbacks'].append(dict(checked_utc=utc(), rows=action['readback']))
+                save(path, receipt)
+                if not unresolved:
+                    break
+                if attempt < 2:
+                    time.sleep(0.5)
+            for row in unresolved:
+                key = str(row['ClusterId'])+'.'+str(row['ProcId'])
+                prior = previous.get('pending_priority', {}).get(key, {})
+                pending[key] = dict(row, unraised_polls=prior.get('unraised_polls', 0)+1,
+                    reason='Priority readback unresolved; recheck current idle identity next poll')
+            action['pending_priority'] = {key:value for key,value in pending.items()
+                if (value['ClusterId'],value['ProcId']) in expected}
             save(path, receipt)
-    receipt.update(complete=True, completed_utc=utc())
+    receipt.update(complete=True, completed_utc=utc(), pending_priority=pending,
+                   all_selected_jobs_resolved=not bool(pending))
     save(path, receipt)
     return [str(path)]
 
@@ -636,7 +665,8 @@ def step(config, sequence, previous=None):
                        '&& regexp("/finalize_worker[.]sh$", Cmd))')
     ads = native.query_account(config['owner'], constraint, ATTRIBUTES,
                                pool=config['condor_pool'], timeout=50)
-    priority_receipts = raise_idle_worker_priority(config, ads, sequence)
+    pending_priority = {}
+    priority_receipts = raise_idle_worker_priority(config, ads, sequence, pending_priority, previous)
     manager_receipts = throttle_managers(config, ads, sequence)
     manager_observations = [dict(cluster=ad['ClusterId'], max_idle=ad.get('DAGMan_MaxIdle'),
                                  max_jobs=ad.get('DAGMan_MaxJobs'),
@@ -656,6 +686,9 @@ def step(config, sequence, previous=None):
                    edits_planned=len(changes), protected_idle_jobs=len(selected)-len(changes),
                    manager_receipts=manager_receipts, manager_observations=manager_observations,
                    priority_receipts=priority_receipts,
+                   pending_priority=pending_priority,
+                   priority_blocked=any(row['unraised_polls'] >= config.get('maximum_unprotected_polls',3)
+                                        for row in pending_priority.values()),
                    pending_protection={})
     if config.get('infrastructure_recovery'):
         summary['infrastructure_recovery'] = recover_transfer_jobs(config,ads)
@@ -742,8 +775,9 @@ def poll(config, sequence, previous):
                       native_error=str(error), consecutive_native_failures=failures,
                       uncertain_poll=sequence)
     else:
-        result.update(status=('blocked' if result.get('infrastructure_recovery',{}).get('blocked')
-                              else 'waiting_idle_protection' if result.get('pending_protection') else 'guarding'),
+        result.update(status=('blocked' if result.get('infrastructure_recovery',{}).get('blocked') or result.get('priority_blocked')
+                              else 'waiting_idle_protection' if result.get('pending_protection')
+                              else 'waiting_worker_priority' if result.get('pending_priority') else 'guarding'),
                       native_error=None, consecutive_native_failures=0)
     result.update(schema='shift-dp-idle-host-guard-state-v1', poll=sequence,
                   error=None, complete=False)

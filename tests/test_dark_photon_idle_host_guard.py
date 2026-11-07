@@ -309,7 +309,7 @@ class IdleHostGuard(unittest.TestCase):
         self.assertFalse(json.loads((self.directory/'receipts/priority_poll_000001.json').read_text())['complete'])
 
     def test_priority_bad_readback_preserves_failure_and_running_controls(self):
-        for change in (dict(JobPrio=0),dict(Owner='other'),dict(Iwd='/another/source'),dict(JobStatus=99)):
+        for change in (dict(JobPrio=None),dict(Owner='other'),dict(Iwd='/another/source'),dict(JobStatus=99)):
             with self.subTest(change=change):
                 before=self.priority_worker()
                 with patch.object(guard.native,'run_condor',return_value='1 matching jobs.'), \
@@ -319,6 +319,81 @@ class IdleHostGuard(unittest.TestCase):
                 path=self.directory/'receipts/priority_poll_000001.json'
                 self.assertFalse(json.loads(path.read_text())['complete'])
                 path.unlink()
+
+    def test_priority_readback_lag_rechecks_without_repeating_edit(self):
+        before=self.priority_worker()
+        for resolved in (dict(before,JobPrio=50),dict(before,JobStatus=2)):
+            with self.subTest(resolved=resolved), \
+                 patch.object(guard.native,'run_condor',return_value='0 matching jobs.') as run, \
+                 patch.object(guard.native,'query',side_effect=[[before],[resolved]]) as query:
+                paths=guard.raise_idle_worker_priority(self.config,[before],1)
+            receipt=json.loads(Path(paths[0]).read_text())
+            self.assertEqual(run.call_count,1)
+            self.assertEqual(query.call_count,2)
+            self.assertTrue(receipt['complete'])
+            self.assertTrue(receipt['all_selected_jobs_resolved'])
+            self.assertEqual(receipt['pending_priority'],{})
+            self.assertEqual(len(receipt['actions'][0]['readbacks']),2)
+            Path(paths[0]).unlink()
+
+    def test_priority_transition_race_remains_pending_until_fresh_poll(self):
+        before=self.priority_worker()
+        pending={}
+        with patch.object(guard.native,'run_condor',return_value='0 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[before]) as query:
+            paths=guard.raise_idle_worker_priority(self.config,[before],1,pending)
+        receipt=json.loads(Path(paths[0]).read_text())
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(query.call_count,3)
+        self.assertTrue(receipt['complete'])
+        self.assertFalse(receipt['all_selected_jobs_resolved'])
+        self.assertEqual(pending['100.0']['unraised_polls'],1)
+        self.assertEqual(pending['100.0']['JobPrio'],0)
+        with patch.object(guard.native,'query_account',return_value=[before]), \
+             patch.object(guard.native,'run_condor',return_value='1 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[dict(before,JobPrio=50)]):
+            result=guard.poll(self.config,2,dict(pending_priority=pending))
+        self.assertEqual(run.call_count,1)
+        self.assertEqual(result['pending_priority'],{})
+        self.assertEqual(result['status'],'guarding')
+
+    def test_persistent_priority_failure_reports_block_without_stopping_recovery(self):
+        before=self.priority_worker()
+        self.config['infrastructure_recovery']=dict(dry_run=False)
+        previous=dict(pending_priority={'100.0':dict(unraised_polls=2)})
+        recovered=dict(blocked=[],recovered=[dict(cluster=200)])
+        with patch.object(guard.native,'query_account',return_value=[before]), \
+             patch.object(guard.native,'run_condor',return_value='0 matching jobs.') as run, \
+             patch.object(guard.native,'query',return_value=[before]), \
+             patch.object(guard,'recover_transfer_jobs',return_value=recovered) as recovery:
+            result=guard.poll(self.config,3,previous)
+        self.assertEqual(run.call_count,1)
+        recovery.assert_called_once()
+        self.assertTrue(result['priority_blocked'])
+        self.assertEqual(result['pending_priority']['100.0']['unraised_polls'],3)
+        self.assertEqual(result['status'],'blocked')
+        self.assertEqual(result['infrastructure_recovery'],recovered)
+        self.assertIsNone(result['error'])
+
+    def test_priority_transition_is_visible_as_waiting_not_applied(self):
+        before=self.priority_worker()
+        with patch.object(guard.native,'query_account',return_value=[before]), \
+             patch.object(guard.native,'run_condor',return_value='0 matching jobs.'), \
+             patch.object(guard.native,'query',return_value=[before]):
+            result=guard.poll(self.config,1,{})
+        self.assertEqual(result['status'],'waiting_worker_priority')
+        self.assertFalse(result['priority_blocked'])
+
+    def test_priority_impossible_native_edit_count_is_preserved_and_rejected(self):
+        before=self.priority_worker()
+        with patch.object(guard.native,'run_condor',return_value='2 matching jobs.'), \
+             patch.object(guard.native,'query') as query, \
+             self.assertRaisesRegex(ValueError,'exceeds its exact idle-job scope'):
+            guard.raise_idle_worker_priority(self.config,[before],1)
+        query.assert_not_called()
+        receipt=json.loads((self.directory/'receipts/priority_poll_000001.json').read_text())
+        self.assertFalse(receipt['complete'])
+        self.assertEqual(receipt['actions'][0]['output'],'2 matching jobs.')
 
     def test_priority_floor_runs_despite_a_known_held_recovery_block(self):
         before=self.priority_worker()
