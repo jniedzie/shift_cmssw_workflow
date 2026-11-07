@@ -1,13 +1,17 @@
 # Code style: AI-code. AI-generated tests for the read-only benchmark watchdog.
 import copy
 import errno
+import fcntl
+import tempfile
+import threading
+import time
 from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
-from monitor_shift_sm_response_benchmark import observe, run_once, write_snapshot
+from monitor_shift_sm_response_benchmark import observe, run_once, write_snapshot, wait_for_lock
 from shift_condor_native import NativeCondorError
 
 
@@ -29,6 +33,33 @@ def child(status=2):
 
 def terminal():
     return dict(manager(4), ExitCode=0, ExitBySignal=False, DAG_Status=0, DAG_NodesFailed=0)
+
+
+class SupervisorLockTest(unittest.TestCase):
+    def test_new_attempt_waits_for_previous_owner_and_keeps_the_same_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'controller.lock';path.write_text('preserve this guard')
+            with path.open('r+') as old, path.open('r+') as new:
+                fcntl.flock(old,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                outcome=[];started=threading.Event()
+                def acquire():
+                    started.set();wait_for_lock(new,timeout_seconds=1,poll_seconds=.01);outcome.append('owned')
+                thread=threading.Thread(target=acquire);thread.start();started.wait(1)
+                time.sleep(.03);self.assertEqual(outcome,[])
+                fcntl.flock(old,fcntl.LOCK_UN);thread.join(1)
+                self.assertEqual(outcome,['owned'])
+                with self.assertRaises(BlockingIOError):fcntl.flock(old,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(path.read_text(),'preserve this guard')
+
+    def test_persistent_owner_times_out_without_breaking_its_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path=Path(directory)/'controller.lock';path.write_text('preserve this guard')
+            with path.open('r+') as old, path.open('r+') as new:
+                fcntl.flock(old,fcntl.LOCK_EX|fcntl.LOCK_NB)
+                with self.assertRaisesRegex(TimeoutError,'remains owned'):
+                    wait_for_lock(new,timeout_seconds=.03,poll_seconds=.01)
+                with self.assertRaises(BlockingIOError):fcntl.flock(new,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            self.assertEqual(path.read_text(),'preserve this guard')
 
 
 class ResponseMonitorTest(unittest.TestCase):

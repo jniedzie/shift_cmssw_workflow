@@ -21,6 +21,22 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'Owner', 'GlobalJobId', 'Iwd', 'JobStatus',
 TRANSIENT_STORAGE_ERRORS = (errno.EIO, errno.ESTALE, errno.ETIMEDOUT)
 
 
+def wait_for_lock(handle, timeout_seconds=300, poll_seconds=2):
+    """Wait through a retiring scheduler attempt without removing its lock."""
+    if not 0 < poll_seconds <= timeout_seconds:
+        raise ValueError('Use a positive bounded supervisor lock wait')
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Supervisor lock remains owned; preserve it and review: '+str(handle.name))
+            time.sleep(min(poll_seconds, remaining))
+
+
 def read_json(path):
     with Path(path).open('rb') as stream:
         return json.loads(b''.join(iter(lambda: stream.read(1048576), b'')))
@@ -213,7 +229,7 @@ def main():
     os.chdir(config['working_directory'])
     lock_path = Path(config['state_path']).with_suffix('.lock')
     with lock_path.open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        wait_for_lock(lock)
         try:
             state = read_json(config['state_path'])
         except FileNotFoundError:

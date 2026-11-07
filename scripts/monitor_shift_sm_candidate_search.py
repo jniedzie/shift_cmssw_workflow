@@ -17,7 +17,7 @@ import pwd
 import re
 import time
 
-from monitor_shift_sm_response_benchmark import write_snapshot
+from monitor_shift_sm_response_benchmark import write_snapshot, wait_for_lock
 from shift_condor_native import NativeCondorError, query
 
 
@@ -447,7 +447,7 @@ def main():
     validate(config)
     os.chdir(config['working_directory'])
     with Path(config['state_path']).with_suffix('.lock').open('a') as lock:
-        fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        wait_for_lock(lock)
         state = optional(config['state_path']) or {}
         if state.get('configuration_sha256',args.config_sha256) != args.config_sha256:
             raise ValueError('Aggregate watchdog state belongs to another configuration')

@@ -15,6 +15,7 @@ import time
 from run_shift_sm_postprocessing import (read, save, exposure, selected_rows, digest,
                                         read_response_pin, response_sampling_contract)
 from shift_condor_native import query, run_condor, NativeCondorError
+from monitor_shift_sm_response_benchmark import wait_for_lock
 
 
 def descriptor_hashes(source):
@@ -756,7 +757,7 @@ def main():
                 return
             time.sleep(60)
     with (root / 'controller.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        wait_for_lock(lock)
         validate_deployment_inputs(deployment, config, Path(__file__).resolve().parent)
         state = read(root / 'state.json') if (root / 'state.json').exists() else dict(
             sources={}, nanos={}, tasks={}, latest={})
