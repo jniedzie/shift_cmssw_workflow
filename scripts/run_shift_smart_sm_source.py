@@ -19,6 +19,7 @@ import time
 
 from run_shift_gen_to_nano import command
 from run_shift_weighted_gen import publish
+from shift_eos_storage import xrootd_url, eos_path
 from shift_jaw_source import checksum, source_position
 from shift_production_selection import bind_source, prepare_default_selection
 
@@ -257,7 +258,7 @@ def resume_source(request, directory):
             raise ValueError('Invalid recovery artifact or original readback proof')
         target = directory/name
         command(['xrdcp', '--silent', '--cksum', 'adler32',
-                 'root://eosuser.cern.ch/'+artifact['path'], str(target)], timeout=900)
+                 xrootd_url(artifact['path']), str(target)], timeout=900)
         if target.stat().st_size != artifact['bytes'] or sha(target) != artifact['sha256']:
             raise ValueError('Recovery raw artifact differs: '+name)
     audit = json.loads((directory/'validation.json').read_text())
@@ -284,8 +285,8 @@ def resume_source(request, directory):
                          or any(eid[0]!=row['run'] for eid in identities)):
         raise ValueError('Unweighted recovery lost its native count, run or unit weights')
     gen = next(row for row in publications if row['name'] == 'gen.root')
-    source.update(url='root://eosuser.cern.ch/'+gen['path'],
-        original_receipt=reference['url'].removeprefix('root://eosuser.cern.ch/'),
+    source.update(url=xrootd_url(gen['path']),
+        original_receipt=eos_path(reference['url']),
         original_receipt_sha256=reference['sha256'])
     return source, identities, weights, publications
 
@@ -385,8 +386,7 @@ def main(request_path):
         if prepared['prepared_event_ids'] != identities or prepared['prepared_native_weights'] != weights:
             raise ValueError('Prepared census differs from independently audited native GEN')
         feature_file = Path('features.json.gz')
-        command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/'+request['publication_directory']+
-                 '/prepared/'+row['family']+'_features.json.gz', str(feature_file)], timeout=900)
+        command(['xrdcp', '--silent', '--cksum', 'adler32', xrootd_url(request['publication_directory']+'/prepared/'+row['family']+'_features.json.gz'), str(feature_file)], timeout=900)
         with gzip.open(feature_file, 'rt') as stream:
             features = json.load(stream)
         authority_source = dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
@@ -404,7 +404,7 @@ def main(request_path):
             features=features, authority=dict(schema='shift-material-admission-authority-v1',
             population_scope='representative_census', sources=[authority_source], events=authorities))
         ledger = prepare_default_selection(bundle)
-        descriptor = dict(gen=prepared['url'].removeprefix('root://eosuser.cern.ch/'),
+        descriptor = dict(gen=eos_path(prepared['url']),
             gen_sha256=prepared['gen_sha256'], receipt=source['original_receipt'],
             receipt_sha256=source['original_receipt_sha256'], event_ids=identities, weights=weights,
             stratum=row['stratum'], normalization_record=source,

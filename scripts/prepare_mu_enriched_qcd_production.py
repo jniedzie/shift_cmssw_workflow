@@ -162,7 +162,7 @@ def prepare(directory, assets, reference, output_base, workers=200, resume_from=
         for asset in ('runtime.tar.gz', 'pluginShiftMpiWeightedProposalHook.so', 'libShiftMpiTailProposal.so'):
             shutil.copy2(assets/asset, base/asset)
         for script in ('run_shift_weighted_gen.py', 'audit_shift_weighted_gen.py',
-                       'qcd_mu_enrichment.py', 'generation_publication.py', 'soft_mpi_model.py'):
+                       'qcd_mu_enrichment.py', 'generation_publication.py', 'soft_mpi_model.py', 'shift_eos_storage.py'):
             shutil.copy2(SCRIPTS/script, base/script)
     ordinary, weighted = directory/'ordinary', directory/'weighted'
     for script in ('run_mu_enriched_qcd_gen.py', 'audit_mu_enriched_qcd_gen.py', 'control_mu_enriched_qcd_gen.py'):

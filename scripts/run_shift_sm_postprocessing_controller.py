@@ -466,6 +466,8 @@ def refresh_quota(root, config, ads):
             cohort_id=config['campaign'], argv=['python3','@TOOLS@/scripts/run_shift_smart_sm_detector.py',
             'request.json'], application_timeout_seconds=300, result_path='report.json',
             return_files=[], status_fields={}, reservation_bytes=0)
+        if parent_config.get('quota_path'):
+            request['quota_path'] = parent_config['quota_path']
         if expected_peer:
             request.update(peer_storage_authority=expected_peer,application_timeout_seconds=600)
         parent['tasks'][name] = make_task(directory, parent_config, name, request, 'quota', '')
@@ -534,13 +536,12 @@ def poll(root, config, state):
     if config.get('refresh_quota') is True:
         refresh_quota(root, config, ads)
     parent = read(Path(config['parent_state']) / 'ledger.json')
-    if not publication_qualification_ready(config,state):
-        save(root / 'state.json', state)
-        save(root / 'heartbeat.json', dict(checked_epoch=time.time(),
-            phase='waiting_for_publication_qualification',
-            qualification_task=config['qualification_task']))
-        return
-    if response_monitor_pins(config):
+    qualified = publication_qualification_ready(config,state)
+    if not qualified:
+        # The qualification itself still needs the ordinary quota-checked
+        # submission path. Returning here deadlocks a ready canary forever.
+        groups = {}
+    elif response_monitor_pins(config):
         groups = response_source_cache(config, state, ads)
     else:
         inventory = read(Path(config['parent_state']) / 'source_inventory.json')
@@ -640,6 +641,8 @@ def poll(root, config, state):
     account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
     for task in sorted(state['tasks'].values(), key=lambda t: t['events']):
         if task['phase'] != 'ready':
+            continue
+        if not qualified and task is not state['tasks'][config['qualification_task']]:
             continue
         bound = task.get('publication_bound_bytes',config['worker_publication_bound_bytes'])
         if spent + reserved + bound > config['maximum_publication_bytes']:

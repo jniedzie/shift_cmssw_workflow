@@ -194,13 +194,15 @@ def source_rows(record):
 
 
 def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, comparison=None,
-                 maximum_candidates_per_source=None, controls_scope='source'):
+                 maximum_candidates_per_source=None, controls_scope='source', control_fraction=None):
     """Retain every genuine candidate and positive support in each source cell."""
     if type(controls_per_cell) is not int or controls_per_cell < 1:
         raise ValueError('Require a positive control count per source/region cell')
     if controls_scope not in ('source', 'cohort') or (comparison is not None and controls_scope != 'source'):
         raise ValueError('Use source controls, cohort controls, or the separate comparison design')
     pooled = comparison is not None or controls_scope == 'cohort'
+    if pooled and control_fraction is not None:
+        raise ValueError('Per-source control fraction cannot alter a pooled comparison draw')
     if type(maximum_events) is not int or maximum_events < 1 or not isinstance(seed, str) or not seed:
         raise ValueError('Require an explicit seed and positive event budget')
     selected, strata, exposures, pins, missed = [], [], [], [], []
@@ -222,7 +224,7 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
             comparison_rows.extend(rows)
         draw = (prepare_benchmark(rows, seed, maximum_events,
             controls={name: controls_per_cell for name in CONTROL_COUNTS},
-            maximum_candidates=maximum_candidates_per_source)
+            maximum_candidates=maximum_candidates_per_source, control_fraction=control_fraction)
             if not pooled else dict(selected=[], strata=[]))
         selected.extend(draw['selected'])
         strata.extend(dict(cell, source_id=sid) for cell in draw['strata'])
@@ -253,7 +255,7 @@ def prepare_draw(records, seed, controls_per_cell=4, maximum_events=2000, compar
     plan = dict(schema='shift-sm-prospective-response-benchmark-v1', proposal_only=True,
         selection_seed=seed, population_events=sum(s['old_selected_events'] for s in exposures),
         selected_events=len(selected), maximum_events=maximum_events, selected=selected, strata=strata,
-        controls_per_source_region=controls_per_cell, draw_frozen=True,
+        controls_per_source_region=controls_per_cell, control_fraction_floor=control_fraction, draw_frozen=True,
         old_native_weights_and_sampling_probabilities_unchanged=True,
         benchmark_q_is_separate_from_original_frozen_p=True,
         worker_Nano_convention='Original W/p unchanged; diagnostic response uses W/(p*q) once.',

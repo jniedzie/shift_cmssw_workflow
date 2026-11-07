@@ -28,6 +28,7 @@ from prepare_shift_sm_candidate_reco import materialize_fresh_authorities, prepa
 from prepare_shift_sm_response_jobs import (detector_request, envelope, persistent_directory,
     preflight_request, read, sha, submit_text)
 from shift_condor_native import native_env, query, run_condor
+from shift_eos_storage import xrootd_url, is_support_path
 from run_shift_sm_response_collection import verify_exposure
 
 
@@ -76,7 +77,7 @@ def reserve_budget(path, source_id, plan_sha256, count):
         if 'next_detector_job' in state:
             base, limit = state['next_detector_job'], state['detector_job_limit']
             if (type(base) is not int or type(limit) is not int
-                    or not 100000 <= base <= base+count < limit <= 6600000):
+                    or not 100000 <= base <= base+count < limit <= 10000000):
                 raise ValueError('Reserved detector identity pool is exhausted or invalid')
             record['detector_job_base'] = base
             state['next_detector_job'] = base+max(count, 1)
@@ -117,10 +118,10 @@ def feature_record(config, result, temporary):
                         shutil.copyfileobj(source, output)
         if not target.exists():
             path = expected['path']
-            if not path.startswith('/eos/user/j/jniedzie/shift_cmssw_support/'):
+            if not is_support_path(path):
                 raise ValueError('Feature publication lies outside authorized support storage')
             subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
-                'root://eosuser.cern.ch/'+path, str(target)],
+                xrootd_url(path), str(target)],
                 env=native_env(), check=True, timeout=900, capture_output=True, text=True)
     checked(target, expected['sha256'])
     if target.stat().st_size != expected['bytes']:
@@ -252,7 +253,7 @@ def prepare(config, config_sha256):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+', batch):
         raise ValueError('Use a meaningful plain job batch name')
     eos = config['output_eos_directory'].rstrip('/')
-    if not eos.startswith('/eos/user/j/jniedzie/shift_cmssw_support/') or '..' in Path(eos).parts:
+    if not is_support_path(eos):
         raise ValueError('Candidate outputs must stay in authorized support storage')
     maximum = config.get('maximum_events', 1000)
     if type(maximum) is not int or not 1 <= maximum <= 1000:
@@ -287,7 +288,8 @@ def prepare(config, config_sha256):
                 record.update(fresh_census=True, first_sim_source=True, preparation_mask_unused=True)
             draw = prepare_draw([record], config['selection_seed'],
                 controls_per_cell=config.get('controls_per_cell', 1), maximum_events=maximum,
-                maximum_candidates_per_source=config.get('maximum_candidates_per_source'))
+                maximum_candidates_per_source=config.get('maximum_candidates_per_source'),
+                control_fraction=config.get('control_fraction'))
     if draw['missed_candidates']:
         raise ValueError('Original frozen admission omitted credible candidates; review before handoff')
     output.mkdir(parents=True)
@@ -333,9 +335,25 @@ def prepare(config, config_sha256):
     def add(node, request, priority=0):
         working = output/'jobs'/node.lower()
         request['cohort_id'] = config['campaign']+':'+source_id
+        if request['stage']=='smart_sm_detector' and config.get('compact_detector_requests'):
+            descriptor = request.pop('detector_source')
+            shared = output/'detector_source.json'
+            if shared.exists():
+                if read(shared) != descriptor:
+                    raise ValueError('Source descriptor differs between independent detector jobs')
+            else:
+                save(shared,descriptor)
+                frozen_files.append(pin(shared))
+            request['detector_source_ref'] = pin(shared)
         save(working/'request.json', request)
         text = submit_text(working, request, frozen, priority).replace(
             'SM_response_prospective_20261027_v1', batch+'_'+node)
+        if request['stage']=='smart_sm_detector' and config.get('compact_detector_requests'):
+            text=text.replace('output = worker.out','output = /dev/null')
+            # DAGMan's shared node log keeps native submits, starts, evictions
+            # and exits. Avoid a second per-event log full of Chirp updates.
+            # Collectors retain their own event log for publication ownership.
+            text=text.replace('log = events.log','log = /dev/null')
         (working/'worker.sub').write_text(text)
         entry = dict(node=node, stage=request['stage'], job_directory=str(working),
             request_sha256=sha(working/'request.json'))
@@ -353,10 +371,15 @@ def prepare(config, config_sha256):
         source = sources[0]
         gate = add('PREFLIGHT', preflight_request(plan_pin, source, frozen), 100)
         base = reservation.get('detector_job_base', config['detector_job_base'])
-        if type(base) is not int or base < 100000 or base+len(selected) >= 6600000:
+        if type(base) is not int or base < 100000 or base+len(selected) >= 10000000:
             raise ValueError('Invalid reserved detector job/seed domain')
         for number, row in enumerate(selected):
             request = detector_request(plan_pin, source, row, base+number, eos)
+            if 'detector_seed_base' in config:
+                seed = config['detector_seed_base'] + 100*(base+number-config['detector_seed_job_base'])
+                if not 0 < seed < 899990000:
+                    raise ValueError('New campaign detector seed domain exhausted')
+                request['detector_seed'] = seed
             bound = config.get('maximum_publication_bytes', 4*MIB)
             if type(bound) is not int or bound < 4*MIB:
                 raise ValueError('Detector publication bound must cover Nano and evidence')
@@ -640,6 +663,16 @@ def prepare_wave(config, config_sha256):
     if config.get('schema') != WAVE_SCHEMA:
         raise ValueError('Unsupported candidate wave configuration')
     manager_runtime_seconds(config)
+    running = config.get('maximum_running_jobs', 2000)
+    idle = config.get('maximum_idle_jobs', 2000)
+    starts = config.get('maximum_submits_per_interval', 20)
+    if any(type(value) is not int or value < 1 or value > 2000
+           for value in (running, idle, starts)):
+        raise ValueError('Wave resource limits must be positive bounded integers')
+    for name, maximum in (('initial_running_jobs',running),('initial_idle_jobs',idle)):
+        initial = config.get(name,maximum)
+        if type(initial) is not int or not 1 <= initial <= maximum:
+            raise ValueError('Initial wave admission must fit its configured ceiling')
     output = persistent_directory(config['output_directory'])
     wave_id, batch = config['wave_id'], config['job_batch_name']
     if not all(re.fullmatch(r'[A-Za-z0-9_.-]+', value) for value in (wave_id, batch)):
@@ -655,7 +688,9 @@ def prepare_wave(config, config_sha256):
         raise ValueError('Partial wave preparation requires review; never repeat ownership mutations')
     with ExitStack() as locks:
         for row in sorted(rows, key=lambda value: value['working_directory']):
-            lock = locks.enter_context(Path(row['working_directory']).with_suffix('.handoff.lock').open('a'))
+            # Source names contain decimal mass bounds. Replacing a suffix
+            # aliases different DY cohorts to the same lock and deadlocks a wave.
+            lock = locks.enter_context(Path(row['working_directory']+'.handoff.lock').open('a'))
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             check_source_owner(row, source_wave_claim(row, output, config_sha256, wave_id))
         output.mkdir(parents=True)
@@ -681,8 +716,8 @@ def prepare_wave(config, config_sha256):
             frozen.extend(row['manifest']['frozen_files'])
         (output/'response.dag').write_text('\n'.join(lines)+'\n')
         (output/'dagman.config').write_text('# Code style: AI-code. Independent source gates; pace starts.\n'
-            'DAGMAN_MAX_JOBS_SUBMITTED = 2000\nDAGMAN_MAX_JOBS_IDLE = 2000\n'
-            'DAGMAN_MAX_SUBMITS_PER_INTERVAL = 20\nDAGMAN_USER_LOG_SCAN_INTERVAL = 1\n'
+            'DAGMAN_MAX_JOBS_SUBMITTED = '+str(running)+'\nDAGMAN_MAX_JOBS_IDLE = '+str(idle)+'\n'
+            'DAGMAN_MAX_SUBMITS_PER_INTERVAL = '+str(starts)+'\nDAGMAN_USER_LOG_SCAN_INTERVAL = 1\n'
             'DAGMAN_SUBMIT_DELAY = 0\n')
         frozen.extend(pin(output/name) for name in ('response.dag','dagman.config','preparation_intent.json'))
         manifest = dict(schema=WAVE_SCHEMA, configuration_sha256=config_sha256,
@@ -716,7 +751,9 @@ def submit_wave(config, manifest):
             raise ValueError('A native job already occupies a shared source; review its owner')
     manager = output/'response.dag.condor.sub'
     if not manager.exists():
-        run_condor(['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','2000','-maxidle','2000',
+        run_condor(['/usr/bin/condor_submit_dag','-no_submit',
+            '-maxjobs',str(config.get('initial_running_jobs',config.get('maximum_running_jobs',2000))),
+            '-maxidle',str(config.get('initial_idle_jobs',config.get('maximum_idle_jobs',2000))),
             '-autorescue','0','-notification','Never','-batch-name',config['job_batch_name'],
             '-append','+MaxRuntime = '+str(maximum_runtime),'-append','initialdir = '+str(output),
             '-append','+SendCredential = True',

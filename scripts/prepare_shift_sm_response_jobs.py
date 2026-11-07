@@ -21,7 +21,7 @@ MIB = 1048576
 PLUGIN = 'pluginConfigurationShiftSMKinematicsValidationPlugins.so'
 REQUIRED_HELPERS = {'run_shift_sm_primary_preflight.py', 'run_shift_sm_response_collection.py',
                     'run_shift_sm_postprocessing.py', 'shift_sm_response_labels.py',
-                    'summarize_shift_sm_response.py'}
+                    'summarize_shift_sm_response.py', 'shift_eos_storage.py'}
 
 
 WRAPPER = '''#!/usr/bin/env python3
@@ -214,7 +214,8 @@ def submit_text(directory, request, frozen, priority):
         'executable = '+frozen['bootstrap'],
         'arguments = '+sha(directory/'request.json')+' '+frozen['capsule_sha256']+' request.json',
         'should_transfer_files = YES', 'when_to_transfer_output = ON_EXIT',
-        'transfer_input_files = '+str(directory/'request.json')+','+frozen['capsule'],
+        'transfer_input_files = '+str(directory/'request.json')+','+frozen['capsule']
+            +(','+request['detector_source_ref']['path'] if 'detector_source_ref' in request else ''),
         'transfer_output_files = status.json,result.json,return_payload.tar.gz',
         'getenv = False', 'request_cpus = 1', 'request_memory = '+str(memory),
         'request_disk = 12000000', '+WantIOProxy = True', '+SendCredential = True',

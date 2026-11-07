@@ -15,6 +15,7 @@ import math
 from pathlib import Path
 
 from run_shift_sm_postprocessing import download, publish
+from shift_eos_storage import is_support_path, detector_source
 from shift_sm_response_labels import read_nano
 from summarize_shift_sm_response import response_statistics, summarize
 
@@ -44,7 +45,7 @@ def identity(row):
 
 def verify_worker_request(request, selected):
     """Check the original selected offset, not a newly drawn production mask."""
-    source = request['detector_source']
+    source = detector_source(request)
     position = selected['selected_position']
     index = selected['original_index']
     if (request['selected_skip'] != position or request['selected_count'] != 1
@@ -55,7 +56,7 @@ def verify_worker_request(request, selected):
             or source['gen_sha256'] != selected['prepared_gen_sha256']
             or source['normalization_record']['gen_sha256'] != selected['gen_sha256']):
         raise ValueError('Worker changed an original event, weight or probability')
-    if not source['nano_base'].startswith('/eos/user/j/jniedzie/shift_cmssw_support/'):
+    if not is_support_path(source['nano_base']):
         raise ValueError('Diagnostic q must not leak into ordinary campaign publication')
 
 

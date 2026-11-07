@@ -20,6 +20,9 @@ import tarfile
 import time
 
 
+from shift_eos_storage import eos_endpoint, xrootd_url
+
+
 DIMUON_CATEGORIES = ('', 'Good', 'Near-Both', 'Near-Far', 'Both-Both', 'Both-Far', 'Other')
 
 
@@ -83,7 +86,7 @@ def transfer_env():
 def download(source, target, checksum=None):
     url = str(source)
     if url.startswith('/eos/'):
-        url = 'root://eosuser.cern.ch/' + url
+        url = xrootd_url(url)
     subprocess.run(['/usr/bin/xrdcp', '--silent', '--force', '--cksum', 'adler32', url, str(target)],
                    check=True, timeout=900, env=transfer_env())
     if checksum and digest(target) != checksum:
@@ -538,14 +541,14 @@ def publish(path, directory):
     path = Path(path)
     destination = directory.rstrip('/') + '/' + path.name
     env = transfer_env()
-    subprocess.run(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', directory],
+    subprocess.run(['/usr/bin/xrdfs', eos_endpoint(directory), 'mkdir', '-p', directory],
                    check=True, env=env, timeout=60)
-    existing = subprocess.run(['/usr/bin/xrdfs', 'root://eosuser.cern.ch', 'stat', destination],
+    existing = subprocess.run(['/usr/bin/xrdfs', eos_endpoint(destination), 'stat', destination],
                               capture_output=True, env=env, timeout=60)
     if existing.returncode == 0:
         raise ValueError('Refuse to overwrite an existing publication: ' + destination)
-    subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32', str(path),
-                    'root://eosuser.cern.ch/' + destination], check=True, env=env, timeout=900)
+    subprocess.run(['/usr/bin/xrdcp', '--silent', '--posc', '--cksum', 'adler32', str(path),
+                    xrootd_url(destination)], check=True, env=env, timeout=900)
     readback = path.with_suffix(path.suffix + '.readback')
     download(destination, readback, digest(path))
     if readback.stat().st_size != path.stat().st_size:

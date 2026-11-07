@@ -18,6 +18,7 @@ import tarfile
 import time
 
 from shift_storage_paths import resolve_storage_path
+from shift_eos_storage import eos_endpoint, xrootd_url, is_support_path
 
 
 def sha(path):
@@ -54,7 +55,7 @@ def copy_gen_input(descriptor, target):
     elif mode == 'xrootd':
         source = descriptor['gen'] if descriptor.get('gen_path_resolved') else resolve_storage_path(descriptor['gen'])
         command(['xrdcp', '--silent', '--cksum', 'adler32',
-                 'root://eosuser.cern.ch/' + source, str(target)], timeout=900)
+                 xrootd_url(source), str(target)], timeout=900)
     else:
         raise ValueError('Unsupported frozen GEN transport')
     if sha(target) != descriptor['gen_sha256']:
@@ -70,7 +71,7 @@ def publication_paths(descriptor, job, canary=False):
     if contract == 'shift-process-bin-detector-v1':
         for key in ('nano_base', 'metadata_base'):
             value = descriptor.get(key)
-            if not isinstance(value, str) or not value.startswith('/eos/user/') or '..' in Path(value).parts:
+            if not isinstance(value, str) or not (value.startswith('/eos/user/') or is_support_path(value)) or '..' in Path(value).parts:
                 raise ValueError('Invalid process-bin publication base: ' + key)
         metadata = descriptor['metadata_base'] + suffix + f'/job{job:07d}'
         nano = descriptor['nano_base'] + suffix + f'/nano_job{job:07d}.root'
@@ -80,6 +81,49 @@ def publication_paths(descriptor, job, canary=False):
         raise ValueError('Invalid legacy publication base')
     metadata = base + suffix + f'/job{job:07d}'
     return metadata + '/nano.root', metadata
+
+
+def remote_exists(path):
+    """Distinguish absence from an unavailable storage service."""
+    env = dict(os.environ)
+    for key in ('LD_LIBRARY_PATH', 'LD_PRELOAD', 'PYTHONPATH', 'PYTHONHOME', 'ROOTSYS'):
+        env.pop(key, None)
+    answer = subprocess.run(['/usr/bin/xrdfs', eos_endpoint(path), 'stat', path],
+        env=env, capture_output=True, text=True, timeout=120)
+    if answer.returncode == 0:
+        return True
+    if '3011' in answer.stderr or 'No such file' in answer.stderr:
+        return False
+    raise RuntimeError('Publication state is unknown: '+answer.stderr[-1000:])
+
+
+def adopt_completed_publication(descriptor, job, canary, expected, before, probabilities):
+    """Adopt a completed identical attempt, while preserving any partial writes."""
+    nano, metadata = publication_paths(descriptor, job, canary)
+    receipt = metadata+'/complete.json'
+    if not remote_exists(receipt):
+        if remote_exists(nano) or remote_exists(metadata+'/evidence.tar.gz'):
+            raise ValueError('Partial canonical publication requires reviewed recovery; never overwrite')
+        return None
+    local = Path('previous_complete.json')
+    command(['xrdcp', '--silent', '--cksum', 'adler32', xrootd_url(receipt), str(local)])
+    saved = json.loads(local.read_text())
+    keys = ('job', 'source_descriptor_sha256', 'source_gen_sha256', 'source_skip',
+            'events', 'seed', 'selected_event_ids_sha256')
+    if saved.get('complete') is not True or any(saved.get(k) != expected.get(k) for k in keys):
+        raise ValueError('Existing completion differs from the exact frozen event and seed')
+    if saved.get('nano_path') != nano or saved.get('nano_readback_sha256') != saved.get('nano_sha256'):
+        raise ValueError('Existing completion lacks its canonical Nano readback proof')
+    for path, filename, checksum in ((nano, 'previous_nano.root', saved['nano_sha256']),
+            (metadata+'/evidence.tar.gz', 'previous_evidence.tar.gz', saved['evidence_sha256'])):
+        target = Path(filename)
+        command(['xrdcp', '--silent', '--cksum', 'adler32', xrootd_url(path), str(target)])
+        if sha(target) != checksum:
+            raise ValueError('Completed publication changed during restart readback')
+        if filename.endswith('.root') and audit_nano(target, before, probabilities) != saved['nano']:
+            raise ValueError('Completed Nano no longer matches its event and weight audit')
+        target.unlink()
+    return saved
 
 
 def command(args, **kwargs):
@@ -528,6 +572,7 @@ def main():
     parser.add_argument('--skip', type=int, required=True)
     parser.add_argument('--count', type=int, required=True)
     parser.add_argument('--job', type=int, required=True)
+    parser.add_argument('--seed', type=int, help='Explicit frozen simulation seed for a new production domain')
     parser.add_argument('--templates', type=Path, default=Path('templates'))
     parser.add_argument('--publish', action='store_true')
     parser.add_argument('--canary', action='store_true')
@@ -590,12 +635,15 @@ def main():
                      descriptor['sampling_probabilities'][args.skip:args.skip + args.count])
     proposal = prepare_decay_annotation(descriptor, indices, publish=args.publish)
     work = Path.cwd()
+    seed = args.seed if args.seed is not None else 230000000 + args.job * 100
+    if not 0 < seed < 899990000:
+        raise ValueError('Frozen simulation seed is outside the supported domain')
     report = {'schema': 'shift-gen-to-nano-receipt-v1', 'complete': False,
               'job': args.job, 'source_descriptor_sha256': sha(args.source),
               'source_receipt': descriptor['receipt'], 'source_receipt_sha256': descriptor['receipt_sha256'],
               'source_gen': descriptor['gen'], 'source_gen_sha256': descriptor['gen_sha256'],
               'source_stratum': descriptor['stratum'], 'source_skip': args.skip, 'events': args.count,
-              'seed': 230000000 + args.job * 100, 'stages': {},
+              'seed': args.seed if args.seed is not None else 230000000 + args.job * 100, 'stages': {},
               'event_stall_timeout_seconds': args.event_stall_timeout,
               'first_event_stall_timeout_seconds': first_event_limit,
               'absolute_stage_timeouts': args.absolute_stage_timeouts,
@@ -643,6 +691,13 @@ def main():
             for row, weight in zip(before, (descriptor['weights'][i] for i in indices)):
                 if not math.isclose(row['weight'], weight, rel_tol=1e-12, abs_tol=0):
                     raise ValueError('GEN event weight differs from frozen weighted audit')
+        if args.publish and eos_endpoint(publication_paths(descriptor,args.job,args.canary)[0]) == 'root://eoscms.cern.ch':
+            previous = adopt_completed_publication(descriptor, args.job, args.canary,
+                report, before, probabilities)
+            if previous is not None:
+                report = previous
+                published_receipt = True
+                return
         input_file = gen
         selection = work / 'selected_event_ids.json'
         if probabilities is not None:
@@ -745,21 +800,21 @@ def main():
                 raise ValueError('Validated output exceeds its reserved publication space')
             report['nano_path'], metadata_destination = publication_paths(
                 descriptor, args.job, args.canary)
-            command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p', metadata_destination], timeout=120)
-            command(['xrdfs', 'root://eosuser.cern.ch', 'mkdir', '-p',
+            command(['xrdfs', eos_endpoint(metadata_destination), 'mkdir', '-p', metadata_destination], timeout=120)
+            command(['xrdfs', eos_endpoint(report['nano_path']), 'mkdir', '-p',
                      str(Path(report['nano_path']).parent)], timeout=120)
-            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(input_file), 'root://eosuser.cern.ch/' + report['nano_path']], timeout=900)
+            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', str(input_file), xrootd_url(report['nano_path'])], timeout=900)
             readback = work / 'nano_readback.root'
-            command(['xrdcp', '--silent', '--cksum', 'adler32', 'root://eosuser.cern.ch/' + report['nano_path'], str(readback)], timeout=900)
+            command(['xrdcp', '--silent', '--cksum', 'adler32', xrootd_url(report['nano_path']), str(readback)], timeout=900)
             if sha(readback) != report['nano_sha256'] or audit_nano(readback, before, probabilities) != report['nano']:
                 raise ValueError('Published NanoAOD does not match validated local output')
             report['nano_readback_sha256'] = sha(readback)
             readback.unlink()
-            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
-                     'root://eosuser.cern.ch/' + metadata_destination + '/evidence.tar.gz'], timeout=900)
+            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', str(work / 'evidence.tar.gz'),
+                     xrootd_url(metadata_destination + '/evidence.tar.gz')], timeout=900)
             progress(report, 'COMPLETE', validated)
-            command(['xrdcp', '--silent', '--force', '--posc', '--cksum', 'adler32', str(work / 'report.json'),
-                     'root://eosuser.cern.ch/' + metadata_destination + '/complete.json'], timeout=120)
+            command(['xrdcp', '--silent', '--posc', '--cksum', 'adler32', str(work / 'report.json'),
+                     xrootd_url(metadata_destination + '/complete.json')], timeout=120)
             published_receipt = True
         else:
             progress(report, 'COMPLETE', validated)

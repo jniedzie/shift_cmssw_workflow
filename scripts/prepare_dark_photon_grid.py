@@ -37,7 +37,7 @@ RUNTIME_HELPER_SOURCES = ('dark_photon_stage_budget.py', 'dark_photon_runtime_re
 SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'run_dark_photon_private_gen.py', 'dark_photon_gen_cfg.py',
            'dark_photon_generation.py', 'dark_photon_model.py', 'dark_photon_pythia.py',
            'fixed_target_generation.py', 'audit_dark_photon_gen.py', 'run_dark_photon_detector.py',
-           'run_shift_gen_to_nano.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
+           'run_shift_gen_to_nano.py', 'shift_eos_storage.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
            'run_dark_photon_senscalc_gen.py', 'dark_photon_senscalc.py', 'dark_photon_meson.py', 'dark_photon_bremsstrahlung.py',
            'run_dark_photon_spectral_gen.py', 'export_dark_photon_cross_sections.py', 'dark_photon_meson_gen_cfg.py',

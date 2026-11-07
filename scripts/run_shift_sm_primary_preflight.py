@@ -25,6 +25,9 @@ CACHE_LINES = [PLUGIN+' ShiftSMPrimaryKinematicsPreflight CMS%EDM%Framework%Modu
                PLUGIN+' ShiftSMPrimaryKinematicsPreflight CMS%EDM%Framework%ParameterSet%Description']
 
 
+from shift_eos_storage import xrootd_url
+
+
 def sha(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -201,7 +204,7 @@ def run(request_path, tools):
             local = Path.cwd()/f'original_{number:04d}.root'
             url = source['gen_path']
             if url.startswith('/eos/'):
-                url = 'root://eosuser.cern.ch/'+url
+                url = xrootd_url(url)
             subprocess.run(['xrdcp', '--silent', '--force', '--cksum', 'adler32', url, str(local)],
                            check=True, timeout=900)
             if sha(local) != source['gen_sha256']:

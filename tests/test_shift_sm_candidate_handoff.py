@@ -122,6 +122,25 @@ class CandidateHandoffTest(unittest.TestCase):
         self.assertEqual(handoff.read(self.budget)['reservations'], {})
         self.assertFalse((Path(self.config['output_directory'])/'prepared.json').exists())
 
+    def test_compact_requests_share_exact_descriptor_and_freeze_new_seed_domain(self):
+        self.config.update(compact_detector_requests=True, detector_job_base=7000000,
+            detector_seed_base=750000000, detector_seed_job_base=7000000)
+        result = handoff.prepare(self.config, 'e'*64)
+        output = Path(result['working_directory'])
+        reference = handoff.pin(output/'detector_source.json')
+        for index, job in enumerate(result['detector_jobs']):
+            directory = Path(job['job_directory'])
+            request = handoff.read(directory/'request.json')
+            self.assertNotIn('detector_source', request)
+            self.assertEqual(request['detector_source_ref'], reference)
+            self.assertEqual(request['detector_seed'], 750000000+100*index)
+            text = (directory/'worker.sub').read_text()
+            self.assertIn(','+reference['path'], text)
+            self.assertIn('output = /dev/null', text)
+            self.assertIn('log = /dev/null', text)
+        self.assertIn(reference, result['frozen_files'])
+        self.assertEqual(handoff.read(output/'detector_source.json')['sampling_probabilities'], [.25]*7)
+
     def test_detector_ids_are_reserved_once_and_do_not_overlap_sources(self):
         state = handoff.read(self.budget)
         state.update(next_detector_job=6000000, detector_job_limit=6600000)
@@ -407,6 +426,14 @@ class CandidateHandoffTest(unittest.TestCase):
         self.assertEqual(handoff.prepare_wave(config,'f'*64),manifest)
         self.assertTrue(all((self.root/sid/'shared_wave_ownership.json').exists()
             for sid in ('sourceA','sourceB')))
+
+    def test_decimal_mass_bin_names_keep_distinct_source_locks(self):
+        names = ('dy_0.5to1_source0000','dy_0.5to1_source0001',
+                 'dy_0.211317to0.5_source0000','dy_0.211317to0.5_source0001')
+        config = self.wave_config([self.wave_source(name) for name in names])
+        prepared = handoff.prepare_wave(config,'f'*64)
+        self.assertEqual(prepared['detector_jobs'],4)
+        self.assertTrue(all(Path(str(self.root/name)+'.handoff.lock').exists() for name in names))
 
     def test_weekend_manager_runtime_does_not_change_worker_lifetimes(self):
         source = self.wave_source('sourceA')

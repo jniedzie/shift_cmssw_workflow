@@ -345,9 +345,9 @@ class HandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);source=root/'source.json'
             payload=b'frozen GEN';gen=root/'gen.root';gen.write_bytes(payload)
-            source.write_text(json.dumps(dict(gen='/eos/gen.root',gen_sha256=worker.sha(gen),
+            source.write_text(json.dumps(dict(gen='/eos/user/j/jniedzie/shift_cmssw_support/synthetic/gen.root',gen_sha256=worker.sha(gen),
                 receipt='/eos/parent.json',receipt_sha256='parent',stratum='dy_2to5',
-                event_ids=[[1,1,1]],output_base='/eos/production')))
+                event_ids=[[1,1,1]],output_base='/eos/user/j/jniedzie/shift_cmssw_support/synthetic/production')))
             row=dict(id=[1,1,1],weight=1.0,hepmc_sha256='unchanged',timing_persisted_in_input=True)
             nano=dict(events=1,event_ids=[[1,1,1]],sumw=1.0,shift_muons=0,branches=2,compressed_event_bytes=10)
             remote={}
@@ -382,8 +382,8 @@ class HandoffTests(unittest.TestCase):
             self.assertTrue((root/'nano.root').is_file())
             self.assertFalse((root/'nano_readback.root').exists())
             self.assertEqual(data['nano_sha256'], data['nano_readback_sha256'])
-            self.assertEqual(remote['root://eosuser.cern.ch//eos/production/job0000007/complete.json'],receipt.read_bytes())
-            archived=remote['root://eosuser.cern.ch//eos/production/job0000007/evidence.tar.gz']
+            self.assertEqual(remote['root://eosuser.cern.ch//eos/user/j/jniedzie/shift_cmssw_support/synthetic/production/job0000007/complete.json'],receipt.read_bytes())
+            archived=remote['root://eosuser.cern.ch//eos/user/j/jniedzie/shift_cmssw_support/synthetic/production/job0000007/evidence.tar.gz']
             self.assertEqual(archived,(root/'evidence.tar.gz').read_bytes())
             self.assertEqual(data['evidence_sha256'],worker.sha(root/'evidence.tar.gz'))
 

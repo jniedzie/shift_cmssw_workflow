@@ -55,6 +55,20 @@ def authority_fixture():
 
 
 class ProspectiveBenchmarkTest(unittest.TestCase):
+    def test_fractional_controls_preserve_exact_support_and_all_candidates(self):
+        rows = [event(i, 'miss' if i <= 100 else 'credible') for i in range(1, 106)]
+        plan = prepare_benchmark(rows, 'larger-run', control_fraction=.1)
+        controls = [r for r in plan['selected'] if r['benchmark_region'] != 'credible_shallow_pointing']
+        candidates = [r for r in plan['selected'] if r['benchmark_region'] == 'credible_shallow_pointing']
+        self.assertEqual(len(controls), 10)
+        self.assertEqual(len(candidates), 5)
+        self.assertTrue(all(r['benchmark_inclusion_probability'] == .1 for r in controls))
+        self.assertTrue(all(r['benchmark_inclusion_probability'] == 1. for r in candidates))
+        self.assertEqual(plan, prepare_benchmark(list(reversed(rows)), 'larger-run', control_fraction=.1))
+        for fraction in (0, -1, 1.1, True, float('nan')):
+            with self.assertRaises(ValueError):
+                prepare_benchmark(rows, 'bad-fraction', control_fraction=fraction)
+
     def comparison_population(self):
         rows = []
         for source in range(20):

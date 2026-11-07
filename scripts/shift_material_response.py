@@ -15,6 +15,7 @@ import zipfile
 from bisect import bisect_right
 
 from shift_material_preselection import uniform, probability, sha256 as checked_sha256
+from shift_eos_storage import xrootd_url
 
 
 TARGETS = {'mass_gt20': ('mass', 20.), 'mass_gt50': ('mass', 50.),
@@ -645,7 +646,7 @@ def _prepared_source_fields(raw_source, receipt_json, expected_sha256):
     source = dict(raw_source)
     source.update(raw_source=json.loads(json.dumps(raw_source, allow_nan=False)),
         original_source_sha256=raw_source['gen_sha256'], original_saved_events=raw_source['saved_events'],
-        gen_sha256=unit['output_sha256'], url='root://eosuser.cern.ch/'+published['path'],
+        gen_sha256=unit['output_sha256'], url=xrootd_url(published['path']),
         saved_events=len(rows), prepared_event_ids=[row['event_id'] for row in rows],
         prepared_native_weights=[row['native_weight'] for row in rows],
         original_full_Run_Lumi_metadata=exposure, timing_input_label='shiftFullMuonDecays',

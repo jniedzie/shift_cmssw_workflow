@@ -61,7 +61,8 @@ def draw_hash(seed, row):
     return hashlib.sha256(json.dumps(key, separators=(',', ':')).encode()).hexdigest()
 
 
-def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_candidates=None):
+def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_candidates=None,
+                      control_fraction=None):
     """Make a deterministic fixed-size random draw within each bin/region.
 
     For a nonempty control cell, q=n/N. Every credible or explicitly protected
@@ -80,6 +81,10 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_can
         raise ValueError('Every control stratum needs positive sampling support')
     if maximum_candidates is not None and (type(maximum_candidates) is not int or maximum_candidates < 1):
         raise ValueError('Candidate cap must retain positive support')
+    if control_fraction is not None and (not isinstance(control_fraction,(int,float))
+            or isinstance(control_fraction,bool) or not math.isfinite(control_fraction)
+            or not 0 < control_fraction <= 1):
+        raise ValueError('Control fraction must provide positive bounded support')
     groups = defaultdict(list)
     seen = set()
     for row in rows:
@@ -101,6 +106,8 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_can
         protected = region == 'unknown_parent' and not stratum.startswith('qcd_')
         number = (min(counts[region], len(population))
                   if region in counts and not protected else len(population))
+        if control_fraction is not None and region in counts and not protected:
+            number = min(len(population),max(number,math.ceil(control_fraction*len(population))))
         if region == 'credible_shallow_pointing' and maximum_candidates is not None:
             number = min(number, maximum_candidates)
         probability = number/len(population)
@@ -120,7 +127,7 @@ def prepare_benchmark(rows, seed, maximum_events=400, controls=None, maximum_can
         raise ValueError('Credible/protected cases and controls exceed the declared event budget')
     return dict(schema=SCHEMA, proposal_only=True, selection_seed=seed,
         population_events=len(rows), selected_events=len(selected), maximum_events=maximum_events,
-        controls_per_bin=counts, strata=cells, selected=selected,
+        controls_per_bin=counts, control_fraction_floor=control_fraction, strata=cells, selected=selected,
         old_native_weights_and_sampling_probabilities_unchanged=True,
         benchmark_q_is_separate_from_original_frozen_p=True,
         worker_Nano_convention='Original W/p unchanged; diagnostic response uses W/(p*q) once.',

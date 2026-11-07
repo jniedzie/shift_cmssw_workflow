@@ -373,8 +373,8 @@ def observe(config, state, now=None, query_jobs=query):
     global_draw_pending = bool(draw_path) and draw_completion is None
     sources = [dict(source_id=row['source_id'],preparation_directory=row['directory'],
         preparation_request_sha256=row['request_sha256'],
-        reconstruction_directory=str(root/'reconstruction'/row['source_id']),
-        handoff_directory=str(root/'handoff'/row['source_id'])) for row in plan['sources']]
+        reconstruction_directory=row.get('reconstruction_directory',str(root/'reconstruction'/row['source_id'])),
+        handoff_directory=row.get('handoff_directory',str(root/'handoff'/row['source_id']))) for row in plan['sources']]
     sources.extend(config.get('extra_sources',[]))
     if len({row['source_id'] for row in sources}) != len(sources):
         raise ValueError('Duplicate expected source in aggregate supervision')

@@ -13,6 +13,9 @@ import time
 import zipfile
 
 
+from shift_eos_storage import eos_endpoint, xrootd_url
+
+
 def sha(path):
     h=hashlib.sha256()
     with Path(path).open('rb') as f:
@@ -70,15 +73,15 @@ def check_source_publication_size(manifest,names,record):
 
 def publish(files,destination):
     """Fresh node directory, payloads first and completion receipt last."""
-    subprocess.run(['xrdfs','root://eosuser.cern.ch','mkdir','-p',destination],check=True,timeout=120)
+    subprocess.run(['xrdfs',eos_endpoint(destination),'mkdir','-p',destination],check=True,timeout=120)
     metadata=[]
     for local,remote in files:
         target=destination+'/'+remote
         # Never force overwrite. A partial failed publication remains evidence.
-        subprocess.run(['xrdcp','--cksum','adler32',str(local),'root://eosuser.cern.ch/'+target],check=True,timeout=900)
-        stat=subprocess.run(['xrdfs','root://eosuser.cern.ch','stat',target],check=True,capture_output=True,text=True,timeout=120)
+        subprocess.run(['xrdcp','--posc','--cksum','adler32',str(local),xrootd_url(target)],check=True,timeout=900)
+        stat=subprocess.run(['xrdfs',eos_endpoint(target),'stat',target],check=True,capture_output=True,text=True,timeout=120)
         readback=Path('readback_'+remote)
-        subprocess.run(['xrdcp','--cksum','adler32','root://eosuser.cern.ch/'+target,str(readback)],check=True,timeout=900)
+        subprocess.run(['xrdcp','--cksum','adler32',xrootd_url(target),str(readback)],check=True,timeout=900)
         if readback.stat().st_size!=Path(local).stat().st_size or sha(readback)!=sha(local):raise ValueError('Published bytes differ on independent readback: '+remote)
         metadata.append(dict(name=remote,path=target,sha256=sha(local),bytes=Path(local).stat().st_size,remote_stat=stat.stdout,independent_sha256_readback=True))
         readback.unlink()
@@ -88,19 +91,19 @@ def publish(files,destination):
 def existing_publication(manifest,row,expected,env,manifest_path='manifest.json'):
     destination=row.get('output_base',manifest['eos_base'])+'/'+row['id']
     receipt=destination+'/publication_receipt.json'
-    stat=subprocess.run(['xrdfs','root://eosuser.cern.ch','stat',receipt],capture_output=True,text=True,timeout=120)
+    stat=subprocess.run(['xrdfs',eos_endpoint(receipt),'stat',receipt],capture_output=True,text=True,timeout=120)
     if stat.returncode:
         error=stat.stdout+stat.stderr
         if '[3011]' in error or 'No such file' in error:return None
         raise ValueError('Existing publication state is unknown: '+error)
-    subprocess.run(['xrdcp','--cksum','adler32','root://eosuser.cern.ch/'+receipt,'existing_publication.json'],check=True,timeout=120)
+    subprocess.run(['xrdcp','--cksum','adler32',xrootd_url(receipt),'existing_publication.json'],check=True,timeout=120)
     saved=json.loads(Path('existing_publication.json').read_text())
     if saved.get('schema')!='shift-weighted-gen-receipt-v3' or not saved.get('complete') or not saved.get('generated_edm') or not saved.get('publication_complete') or saved.get('request')!=row or saved.get('manifest_sha256')!=expected or saved.get('source_inputs')!=manifest['inputs'] or saved.get('algorithm')!=manifest['algorithm']:raise ValueError('Existing weighted completion receipt does not match frozen request')
     publications={item['name']:item for item in saved['publication']}
     for name in ['gen.root','resolved_gen_cfg.py','proposal_ledger.json','semantic_audit.json']+source_artifacts(manifest):
         item=publications[name]
         if item['path']!=destination+'/'+name or not item.get('independent_sha256_readback'):raise ValueError('Existing artifact publication contract differs')
-        subprocess.run(['xrdcp','--cksum','adler32','root://eosuser.cern.ch/'+item['path'],name],check=True,timeout=900)
+        subprocess.run(['xrdcp','--cksum','adler32',xrootd_url(item['path']),name],check=True,timeout=900)
         if Path(name).stat().st_size!=item['bytes'] or sha(name)!=item['sha256']:raise ValueError('Existing weighted artifact changed: '+name)
     audit_command=['python3','audit_shift_weighted_gen.py','--input','gen.root','--ledger','proposal_ledger.json','--config','resolved_gen_cfg.py','--output','resumption_audit.json','--generator-profile',manifest.get('generator_profile','ordinary')]
     command(audit_command,'resumption_audit.log',env,900)

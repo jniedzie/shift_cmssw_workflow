@@ -34,7 +34,7 @@ def prepare(output, assets, profile_path, trials, run, seed, lower, upper):
     for name in ('runtime.tar.gz', 'pluginShiftMpiWeightedProposalHook.so', 'libShiftMpiTailProposal.so'):
         shutil.copy2(assets/name, output/name)
     for name in ('run_shift_weighted_gen.py', 'audit_shift_weighted_gen.py', 'qcd_mu_enrichment.py',
-                 'generation_publication.py', 'soft_mpi_model.py'):
+                 'generation_publication.py', 'soft_mpi_model.py', 'shift_eos_storage.py'):
         shutil.copy2(scripts/name, output/name)
     shutil.copy2(profile_path, output/'generator_profile.json')
     inputs = {path.name: sha(path) for path in sorted(output.iterdir()) if path.is_file()}
