@@ -579,8 +579,87 @@ def merged_nano_publication(request):
     return publish
 
 
+
+def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_timeout):
+    """Combine disjoint, already qualified source groups without replaying Nano."""
+    import ROOT
+    expected_sources = {row['source_id']:row for row in request['normalization_sources']}
+    if len(expected_sources) != len(request['normalization_sources']):
+        raise ValueError('Repeated full source exposure')
+    observed, files, metas = set(), [], []
+    events, sumw, sumw2 = 0, [], []
+    for index, group in enumerate(request['histogram_groups']):
+        ids = group['source_ids']
+        if len(ids) != len(set(ids)) or observed.intersection(ids) or not set(ids) <= set(expected_sources):
+            raise ValueError('Overlapping or unknown source group exposure')
+        path=Path('histogram_group_%05d.root'%index)
+        download(group['histogram']['path'],path,group['histogram']['sha256'])
+        file=ROOT.TFile.Open(str(path))
+        if not file or file.IsZombie():raise ValueError('Unreadable qualified group histogram')
+        try:
+            validate_dimuon_histograms(file)
+            meta=json.loads(str(file.Get('ShiftFullGenNormalization').GetString()))
+            originals={row['source_id']:row for row in meta['original_sources']}
+            if originals != {sid:expected_sources[sid] for sid in ids}:
+                raise ValueError('Grouped histogram changed its full original exposure')
+            if (meta.get('histogram_weight') != 'native_gen_weight/(reco_inclusion_probability*response_sampling_probability)'
+                    or meta.get('response_correction_application_count') != 1
+                    or meta.get('material_survival_correction_applied') is not False
+                    or meta.get('complete_frozen_response_draws_only') is not True):
+                raise ValueError('Group is not a qualified once-weighted response snapshot')
+            if round(file.Get('rawEventsCutFlow').GetBinContent(1)) != group['events']:
+                raise ValueError('Group histogram event exposure differs')
+            metas.append(meta)
+        finally:file.Close()
+        observed.update(ids);files.append(path);events+=group['events']
+        sumw.append(group['sumw']);sumw2.append(group['sumw2'])
+    empty=set(expected_sources)-observed
+    empty_ids=set(request.get('zero_selected_source_ids',[]))
+    if empty != empty_ids:
+        raise ValueError('Cumulative groups do not cover every selected source exactly once')
+    expected_events=sum(len(selected_rows(source)) for source in request['selected_sources'])
+    if events != expected_events:raise ValueError('Cumulative groups changed the selected event count')
+    hist=Path('histograms.root')
+    with Path('merge.log').open('w') as log:
+        subprocess.run(hadd_command(hist,files,maximum_open_files),check=True,
+            stdout=log,stderr=subprocess.STDOUT,timeout=merge_timeout)
+    metadata=exposure(request['normalization_sources'],request['stratum'])
+    metadata.update(histogram_weight=metas[0]['histogram_weight'],
+        histogram_weight_branch='shiftResponseGenWeight',response_correction_application_count=1,
+        material_survival_correction_applied=False,complete_frozen_response_draws_only=True,
+        response_draw_authorities=[v for meta in metas for v in meta['response_draw_authorities']],
+        histogram_sumw2_is_pair_fills_not_sampling_design_variance=True)
+    root=ROOT.TFile.Open(str(hist),'UPDATE')
+    try:
+        validate_dimuon_histograms(root)
+        if round(root.Get('rawEventsCutFlow').GetBinContent(1))!=events:
+            raise ValueError('Cumulative histogram raw event count changed')
+        h=root.Get('event/Event_nShiftMuon')
+        actual=math.fsum(h.GetBinContent(i) for i in range(h.GetNcells()))
+        if not math.isclose(actual,math.fsum(sumw),rel_tol=1e-9,abs_tol=1e-300):
+            raise ValueError('Cumulative histogram W/(p*q) sum changed')
+        ROOT.TObjString(json.dumps(metadata,sort_keys=True)).Write('ShiftFullGenNormalization',ROOT.TObject.kOverwrite)
+    finally:root.Close()
+    if 2*hist.stat().st_size+1048576>request['maximum_publication_bytes']:
+        raise ValueError('Cumulative histogram output exceeds its reservation')
+    name=request['snapshot_name']+'.root';hist.rename(name)
+    published=dict(histogram=publish(name,request['sample_directory']+'/histograms'),
+        merged_histogram=publish(name,request['sample_directory']+'/histograms_merged'))
+    result=dict(schema='shift-smart-SM-postprocessing-complete-v1',complete=True,
+        campaign=request['campaign'],stratum=request['stratum'],request_sha256=digest(request_path),
+        events=events,sumw=math.fsum(sumw),sumw2=math.fsum(sumw2),source_ids=list(expected_sources),
+        full_original_exposure=metadata,published=published,merged_nano_published=False,
+        merged_nano_available_in_source_groups=True,source_group_histograms=request['histogram_groups'],
+        original_nano_retired=False,checked_epoch=time.time())
+    save('receipt.json',result)
+    publish('receipt.json',request['sample_directory']+'/metadata/postprocessing/'+request['snapshot_name'])
+    save('result.json',result)
+
+
 def run(request_path, maximum_open_files=50, merge_timeout=3600):
     request = read(request_path)
+    if request.get('histogram_groups') is not None:
+        return aggregate_histogram_groups(request_path,request,maximum_open_files,merge_timeout)
     publish_nano = merged_nano_publication(request)
     assert request['schema'] in ('shift-smart-SM-postprocessing-v1','shift-production-postprocessing-v1')
     assert request['complete_source_selections_only'] is True

@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 import time
 
@@ -93,6 +95,14 @@ def discover(config, state):
         launch = root/'factory_v2/wave_launch'/wid
         if not native_launch_failure(launch) or recovered_this_poll >= config.get('recoveries_per_poll',1):
             continue
+        if config.get('afs_quota_path'):
+            quota = subprocess.run(['/usr/bin/fs','listquota','-path',config['afs_quota_path']],
+                capture_output=True,text=True,check=True,timeout=30)
+            fields=quota.stdout.strip().splitlines()[-1].split()
+            free=(int(fields[1])-int(fields[2]))*1024
+            if free < config['minimum_afs_free_bytes']:
+                state['preparation_waiting_for_AFS']=dict(free_bytes=free,checked_epoch=time.time())
+                continue
         recovered_this_poll += 1
         directory = Path(config['working_directory'])/'recovery'/wid
         record = state.setdefault('recoveries',{}).get(wid)
@@ -181,6 +191,53 @@ def rebalance(config, waves):
         healthy_workers_evicted=0,held_physics_workers_released=0)
 
 
+def isolated_poll(configuration, config, command=None):
+    """Keep the native binding out of the persistent admission supervisor.
+
+    Only the observed CPython/native-binding abort is retried. A failed poll
+    cannot redraw events: the next process reconciles the same durable intents.
+    """
+    argv = command or [sys.executable, str(Path(__file__).resolve()),
+                       str(configuration), '--once']
+    result = subprocess.run(argv, capture_output=True, text=True,
+        timeout=config.get('maximum_poll_seconds',1800))
+    if result.returncode == 0:
+        return dict(complete=True,returncode=0)
+    error = result.stderr[-8000:]
+    known = result.returncode == -6 and 'none_dealloc' in error
+    return dict(complete=False,returncode=result.returncode,error=error,
+                reviewed_native_binding_abort=known)
+
+
+def supervise(configuration, config, command=None, maximum_polls=None):
+    """Restart a known crashed poll, with a separate durable supervisor lock."""
+    directory = Path(config['working_directory'])
+    with (directory/'admission_supervisor.lock').open('a') as lock:
+        wait_for_lock(lock)
+        started = time.monotonic()
+        failures = 0
+        polls = 0
+        while time.monotonic()-started < config.get('maximum_wall_seconds',604800):
+            result = isolated_poll(configuration,config,command)
+            polls += 1
+            if not result['complete']:
+                failures += 1
+                result.update(checked_epoch=time.time(),attempt=failures,
+                    phase='recovering_known_native_abort' if result['reviewed_native_binding_abort']
+                    else 'attention_required')
+                write_snapshot(directory/('native_abort_%02d.json'%failures),result)
+                if not result['reviewed_native_binding_abort'] or failures > config.get('maximum_native_abort_restarts',3):
+                    write_snapshot(config['failure_path'],result)
+                    raise RuntimeError('Admission poll failed; preserved durable failure: '+str(result))
+            write_snapshot(directory/'admission_supervisor_heartbeat.json',dict(
+                checked_epoch=time.time(),phase='running',completed_polls=polls,
+                reviewed_native_abort_restarts=failures,last_poll=result))
+            if maximum_polls is not None and polls >= maximum_polls:
+                return
+            time.sleep(config.get('recovery_poll_seconds',3) if not result['complete']
+                       else config.get('poll_seconds',60))
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('configuration',type=Path)
@@ -188,6 +245,9 @@ def main():
     args=parser.parse_args()
     config=read(args.configuration)
     os.chdir(config['working_directory'])
+    if not args.once:
+        supervise(args.configuration.resolve(),config)
+        return
     for path,digest in config['frozen_files'].items():
         if sha(path)!=digest:
             raise ValueError('Frozen supervisor helper changed: '+path)

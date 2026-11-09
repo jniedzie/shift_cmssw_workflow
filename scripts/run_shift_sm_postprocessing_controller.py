@@ -331,6 +331,14 @@ def snapshot(root, config, stratum, sources):
         body.update(publish_merged_nano=set(observed)==set(expected),expected_bin_source_ids=expected)
         body['maximum_publication_bytes'] = worker_publication_bound(config,stratum,
             interim=not body['publish_merged_nano'])
+    if config.get('source_group_only'):
+        body['source_group_only']=True
+    if (config.get('grouped_response_publication') and not config.get('source_group_only')
+            and stratum.split('_')[0] in config.get('grouped_response_processes',['qcd'])):
+        body['histogram_groups']=[source['histogram_group'] for source in sources if source['nano_inputs']]
+        body['zero_selected_source_ids']=[source['normalization']['source_id'] for source in sources if not source['nano_inputs']]
+        body['publish_merged_nano']=False
+        body['maximum_publication_bytes']=67108864
     checksum = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     directory = root / 'jobs' / (stratum + '_' + checksum[:12])
     timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -532,7 +540,8 @@ def poll(root, config, state):
         task.update(phase='done', native=terminal[0], result_sha256=digest(result),
                     published_bytes=sum(r['bytes'] for r in receipt['published'].values())
                     + result.stat().st_size + 65536, finished_epoch=time.time())
-        state['latest'][task['stratum']] = task['source_ids']
+        if task.get('kind') != 'source_group':
+            state['latest'][task['stratum']] = task['source_ids']
     if config.get('refresh_quota') is True:
         refresh_quota(root, config, ads)
     parent = read(Path(config['parent_state']) / 'ledger.json')
@@ -548,8 +557,41 @@ def poll(root, config, state):
         source_cache(parent, state)
         nano_cache(parent, inventory, state)
         groups = closed_sources(state['sources'].values(), state['nanos'].values())
-    busy = {t['stratum'] for t in state['tasks'].values() if t['phase'] in ('ready', 'submitted', 'submitting')}
-    failed = {t['stratum'] for t in state['tasks'].values() if t['phase'] == 'failed'}
+    if qualified and config.get('grouped_response_publication'):
+        ready=defaultdict(list)
+        group_tasks={t['source_ids'][0]:t for t in state['tasks'].values() if t.get('kind')=='source_group'}
+        for stratum,sources in groups.items():
+            if stratum.split('_')[0] not in config.get('grouped_response_processes',['qcd']):
+                ready[stratum].extend(sources);continue
+            for source in sources:
+                sid=source['normalization']['source_id']
+                if not source['nano_inputs']:
+                    ready[stratum].append(source);continue
+                task=group_tasks.get(sid)
+                if task is None:
+                    local=dict(config,source_group_only=True,grouped_response_publication=False,
+                        output_base=config['output_base']+'/_source_groups',publish_merged_nano=True,
+                        worker_publication_bounds_by_stratum={stratum:max(67108864,4194304*len(source['nano_inputs'])+16777216)})
+                    local.pop('merged_nano_only_when_bin_complete',None)
+                    task=snapshot(root,local,stratum,[source]);task['kind']='source_group'
+                    task['publication_bound_bytes']=max(67108864,4194304*task['events']+16777216)
+                    state['tasks'][Path(task['directory']).name]=task
+                    group_tasks[sid]=task
+                    save(root/'state.json',state)
+                if task['phase']=='done':
+                    result=Path(task['directory'])/'result.json'
+                    if digest(result)!=task['result_sha256']:raise ValueError('Qualified group receipt changed')
+                    receipt=read(result)
+                    source=dict(source,histogram_group=dict(source_ids=task['source_ids'],events=task['events'],
+                        sumw=receipt['sumw'],sumw2=receipt['sumw2'],histogram=receipt['published']['merged_histogram'],
+                        result_sha256=task['result_sha256']))
+                    ready[stratum].append(source)
+        # Never replace an existing cumulative snapshot with fewer sources while
+        # the first qualification of its source groups is still in progress.
+        groups={st:src for st,src in ready.items() if set(state['latest'].get(st,[]))<=
+            {row['normalization']['source_id'] for row in src}}
+    busy = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] in ('ready', 'submitted', 'submitting')}
+    failed = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] == 'failed'}
     # At most one immutable snapshot per bin at a time; meaningful changes only.
     for stratum, sources in groups.items():
         if stratum in busy or stratum in failed:
@@ -643,6 +685,9 @@ def poll(root, config, state):
         if task['phase'] != 'ready':
             continue
         if not qualified and task is not state['tasks'][config['qualification_task']]:
+            continue
+        if task.get('kind')=='source_group' and sum(t.get('kind')=='source_group' and
+                t['phase'] in ('submitted','submitting') for t in state['tasks'].values())>=config.get('maximum_group_workers',48):
             continue
         bound = task.get('publication_bound_bytes',config['worker_publication_bound_bytes'])
         if spent + reserved + bound > config['maximum_publication_bytes']:

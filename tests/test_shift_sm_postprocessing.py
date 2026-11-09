@@ -953,5 +953,55 @@ class NativeProposalPublicationTest(unittest.TestCase):
             self.assertEqual(before, [semantic_inventory([path]) for path in paths])
 
 
+@unittest.skipUnless(importlib.util.find_spec('ROOT'), 'Requires native ROOT')
+class GroupedHistogramPublicationTest(unittest.TestCase):
+    def test_disjoint_groups_preserve_weighted_bins_and_exposure_and_reject_overlap(self):
+        import ROOT,os,shutil
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);records=[];groups=[];selected=[]
+            for index,weight in enumerate((2.,5.)):
+                source=dict(source_id='source'+str(index),stratum='qcd_20toinf',
+                    gen_sha256=str(index+1)*64,denominator_kind='fixed_source_trials',
+                    full_source_trials=1000,sigma_nd_pb=123.)
+                records.append(source)
+                selected.append(dict(event_ids=[[index+1,1,1]],weights=[weight],selected_indices=[0],sampling_probabilities=[1.]))
+                meta=post.exposure([source],'qcd_20toinf')
+                meta.update(histogram_weight='native_gen_weight/(reco_inclusion_probability*response_sampling_probability)',
+                    histogram_weight_branch='shiftResponseGenWeight',response_correction_application_count=1,
+                    material_survival_correction_applied=False,complete_frozen_response_draws_only=True,
+                    response_draw_authorities=[dict(source_id=source['source_id'])])
+                path=root/('group'+str(index)+'.root');f=ROOT.TFile(str(path),'RECREATE')
+                h=ROOT.TH1D('rawEventsCutFlow','',1,0,1);h.SetBinContent(1,1);h.Write()
+                f.mkdir('event').cd();h=ROOT.TH1D('Event_nShiftMuon','',5,0,5);h.Sumw2();h.Fill(2,weight);h.Write()
+                f.mkdir('dimuon').cd()
+                for category in post.DIMUON_CATEGORIES:
+                    for variable in ('mass','pt','logMass'):
+                        h=ROOT.TH1D('ShiftDimuonVertex'+category+'_'+variable,'',10,0,10);h.Sumw2();h.Fill(3,weight);h.Write()
+                f.cd();ROOT.TObjString(json.dumps(meta)).Write('ShiftFullGenNormalization');f.Close()
+                groups.append(dict(source_ids=[source['source_id']],events=1,sumw=weight,sumw2=weight*weight,
+                    histogram=dict(path=str(path),sha256=post.digest(path))))
+            request=dict(campaign='test',stratum='qcd_20toinf',normalization_sources=records,
+                selected_sources=selected,histogram_groups=groups,maximum_publication_bytes=67108864,
+                snapshot_name='combined',sample_directory='/eos/user/j/jniedzie/shift_cmssw_support/test')
+            path=root/'request.json';path.write_text(json.dumps(request));old=Path.cwd()
+            def local_download(source,target,checksum=None):
+                shutil.copyfile(source,target)
+                if checksum:self.assertEqual(post.digest(target),checksum)
+            def local_publish(path,directory):
+                return dict(path=str(path),sha256=post.digest(path),bytes=Path(path).stat().st_size)
+            try:
+                os.chdir(root)
+                with patch.object(post,'download',side_effect=local_download),patch.object(post,'publish',side_effect=local_publish):
+                    post.aggregate_histogram_groups(path,request,50,60)
+                    f=ROOT.TFile.Open('combined.root');h=f.Get('dimuon/ShiftDimuonVertexBoth-Both_mass')
+                    self.assertEqual(h.GetEntries(),2);self.assertEqual(h.Integral(),7)
+                    self.assertAlmostEqual(sum(h.GetBinError(i)**2 for i in range(h.GetNcells())),29)
+                    meta=json.loads(str(f.Get('ShiftFullGenNormalization').GetString()))
+                    self.assertEqual(meta['full_source_sumw'],2000);f.Close()
+                    bad=dict(request,histogram_groups=[groups[0],groups[0]])
+                    with self.assertRaisesRegex(ValueError,'Overlapping'):
+                        post.aggregate_histogram_groups(path,bad,50,60)
+            finally:os.chdir(old)
+
 if __name__ == '__main__':
     unittest.main()
