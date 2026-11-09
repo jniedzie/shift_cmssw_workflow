@@ -360,14 +360,16 @@ class ResponseDiscoveryControllerTest(unittest.TestCase):
     def test_json_completion_without_native_closure_has_no_exposure(self):
         import run_shift_sm_postprocessing_controller as controller
         import monitor_shift_sm_candidate_search as monitor
-        with patch.object(monitor,'native_collector_closure',return_value=None):
+        with patch.object(monitor,'native_collector_closure',return_value=None), \
+                patch.object(monitor,'source_owner',return_value=dict(cluster_id=5)):
             self.assertEqual(dict(controller.response_source_cache(self.config,self.state,[])),{})
         self.assertEqual(self.state['response_sources'],{})
 
     def test_changed_owner_and_failed_native_proof_stop_discovery(self):
         import run_shift_sm_postprocessing_controller as controller
         import monitor_shift_sm_candidate_search as monitor
-        with patch.object(monitor,'native_collector_closure',side_effect=ValueError('wrong native DAG owner')):
+        with patch.object(monitor,'native_collector_closure',side_effect=ValueError('wrong native DAG owner')), \
+                patch.object(monitor,'source_owner',return_value=dict(cluster_id=5)):
             with self.assertRaisesRegex(ValueError,'wrong native DAG owner'):
                 controller.response_source_cache(self.config,self.state,[])
         self.discover()

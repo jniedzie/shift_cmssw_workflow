@@ -133,7 +133,7 @@ def complete_result(value):
     return value is not None and value.get('complete') is True and value.get('exit_code') == 0
 
 
-def source_owner(source_id, output, prepared, submission, config, ads):
+def source_owner(source_id, output, prepared, submission, config, ads, wave_cache=None):
     """Bind either a private DAG or an explicitly declared shared wave."""
     manager = submission['manager']
     cluster = manager['cluster_id']
@@ -152,10 +152,16 @@ def source_owner(source_id, output, prepared, submission, config, ads):
         source_pin, wave_pin = submission['source_prepared_manifest'], submission['wave_prepared_manifest']
         if (source_pin['path'] != str(output/'prepared.json')
                 or digest(source_pin['path']) != source_pin['sha256']
-                or Path(wave_pin['path']).parent != directory
-                or digest(wave_pin['path']) != wave_pin['sha256']):
+                or Path(wave_pin['path']).parent != directory):
             raise ValueError('Shared wave frozen source/manifest changed')
-        wave = read(wave_pin['path'])
+        key=(wave_pin['path'],wave_pin['sha256'])
+        if wave_cache is not None and key in wave_cache:
+            wave=wave_cache[key]
+        else:
+            if digest(wave_pin['path']) != wave_pin['sha256']:
+                raise ValueError('Shared wave frozen source/manifest changed')
+            wave=read(wave_pin['path'])
+            if wave_cache is not None:wave_cache[key]=wave
         members = [row for row in wave['sources'] if row['source_id'] == source_id]
         if (len(members) != 1 or members[0]['prepared_manifest'] != source_pin
                 or members[0]['source_job_nodes'] != submission['source_job_nodes']

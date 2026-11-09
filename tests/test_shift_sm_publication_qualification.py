@@ -37,3 +37,19 @@ class QualificationAdmissionTest(unittest.TestCase):
             self.assertEqual(state['tasks']['science']['phase'],'ready')
             self.assertEqual(submit.call_count,1)
             self.assertIn('positive_control',submit.call_args.args[0][-1])
+
+
+class BatchedPublicationHistoryTest(unittest.TestCase):
+    def test_one_bounded_native_query_for_all_new_completions(self):
+        import run_shift_sm_postprocessing_controller as controller
+        rows=[dict(ClusterId=i,ProcId=0,Iwd='/persistent/'+str(i),ExitCode=0,ExitBySignal=False) for i in (10,20)]
+        tasks={str(i):dict(phase='submitted',cluster=i) for i in (10,20,30)}
+        tasks['old']=dict(phase='done',cluster=40)
+        with patch.object(controller,'run_condor',return_value=json.dumps(rows)) as call:
+            result=controller.publication_history(tasks,{30:{}})
+        self.assertEqual(set(result),{10,20});self.assertEqual(call.call_count,1)
+        self.assertIn('member(ClusterId,{10,20})',call.call_args.args[0][2])
+        with patch.object(controller,'run_condor',return_value='[]'):
+            self.assertEqual(controller.publication_history(tasks,{30:{}}),{})
+        with patch.object(controller,'run_condor',side_effect=AssertionError('No historical rescans')):
+            self.assertEqual(controller.publication_history({'old':tasks['old']},{}),{})

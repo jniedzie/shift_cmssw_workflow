@@ -62,7 +62,8 @@ def read(path):
 
 def save(path, value):
     path = Path(path)
-    data = json.dumps(value, indent=2, allow_nan=False) + '\n'
+    data = (json.dumps(value,separators=(',', ':'),allow_nan=False) if path.name=='state.json'
+            else json.dumps(value,indent=2,allow_nan=False)) + '\n'
     while True:
         try:
             temporary = path.with_suffix(path.suffix + '.tmp')

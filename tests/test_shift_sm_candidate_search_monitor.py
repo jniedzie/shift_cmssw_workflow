@@ -274,6 +274,19 @@ class CandidateSearchMonitorTest(unittest.TestCase):
         self.assertFalse(failed['sources'][0]['collector_complete'])
         self.assertTrue(any('not bound to its source DAG node' in value for value in failed['problems']))
 
+    def test_wave_cache_is_one_poll_only_and_preserves_frozen_hash_checks(self):
+        manager_dir,_=self.native_collection(shared=True)
+        prepared=monitor.read(self.reconstruction/'prepared.json')
+        submission=monitor.read(self.reconstruction/'submission.json')
+        path=Path(submission['wave_prepared_manifest']['path']);cache={}
+        with patch.object(monitor,'read',wraps=monitor.read) as reads:
+            for _ in range(2):
+                monitor.source_owner(self.sid,self.reconstruction,prepared,submission,self.config,[],wave_cache=cache)
+            self.assertEqual(sum(Path(call.args[0])==path for call in reads.call_args_list),1)
+        save(path,dict(sources=[]))
+        with self.assertRaisesRegex(ValueError,'frozen source/manifest'):
+            monitor.source_owner(self.sid,self.reconstruction,prepared,submission,self.config,[],wave_cache={})
+
     def test_wrong_wave_membership_or_queued_payload_owner_cannot_be_credited(self):
         manager_dir,_ = self.native_collection(shared=True)
         active = self.ad(104,self.reconstruction/'jobs/collect',2,5,999)

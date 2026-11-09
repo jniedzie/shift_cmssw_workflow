@@ -146,6 +146,7 @@ def single_response_source_cache(config, state, ads):
     if not set(cache) <= set(ids):
         raise ValueError('A cached response source disappeared from the frozen worklist')
     groups = defaultdict(list)
+    wave_cache = {}  # Frozen manifests are checked once per fresh queue poll.
     for row in expected:
         sid = row['source_id']; output = Path(row['reconstruction_directory'])
         if (not output.is_absolute() or str(output).startswith(('/tmp/', '/pool/'))
@@ -165,7 +166,7 @@ def single_response_source_cache(config, state, ads):
                 if digest(pin['path']) != pin['sha256']:
                     raise ValueError('Cached response native closure changed: '+pin['path'])
             prepared = read(output/'prepared.json'); submission = read(output/'submission.json')
-            owner = source_owner(sid, output, prepared, submission, monitor, ads)
+            owner = source_owner(sid, output, prepared, submission, monitor, ads, wave_cache=wave_cache)
             if owner != cached['native_closure']['owner']:
                 raise ValueError('Cached response source native owner changed')
             groups[cached['source']['normalization']['stratum']].append(cached['source'])
@@ -182,8 +183,9 @@ def single_response_source_cache(config, state, ads):
                 or collector.get('complete_frozen_draw_collected') is not True
                 or collector.get('events') != len(prepared['detector_jobs'])):
             raise ValueError('Response collector does not close its entire frozen source: '+sid)
+        owner=source_owner(sid,output,prepared,submission,monitor,ads,wave_cache=wave_cache)
         closure = native_collector_closure(sid, output, prepared, submission, collector,
-            monitor, state.setdefault('response_native', {}), ads)
+            monitor, state.setdefault('response_native', {}), ads,owner=owner)
         if closure is None:
             continue
         pins = [dict(path=str(path), sha256=digest(path)) for path in paths]
@@ -510,10 +512,27 @@ def publication_qualification_ready(config, state):
     return task['phase'] == 'done'
 
 
+
+def publication_history(tasks, live):
+    """Read new terminal ads once, keeping the established native-ad format."""
+    ids=sorted({t['cluster'] for t in tasks.values() if t['phase']=='submitted' and t['cluster'] not in live})
+    if not ids:return {}
+    constraint='Owner == "jniedzie" && member(ClusterId,{'+','.join(map(str,ids))+'})'
+    rows=json.loads(run_condor(['/usr/bin/condor_history','-constraint',constraint,
+        '-limit',str(len(ids)),'-json','-attributes','ClusterId,ProcId,Iwd,ExitCode,ExitBySignal'],timeout=45) or '[]')
+    result={}
+    for row in rows:
+        if row.get('ClusterId') not in ids or row.get('ProcId')!=0 or row['ClusterId'] in result:
+            raise ValueError('Unexpected or repeated native publication history record')
+        result[row['ClusterId']]=row
+    return result
+
+
 def poll(root, config, state):
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
                 'Iwd', 'DAGManJobId', 'Owner', 'GlobalJobId', 'NumJobStarts', 'HoldReason'], timeout=45)
     live = {a['ClusterId']: a for a in ads}
+    terminals=publication_history(state['tasks'],live)
     for name, task in state['tasks'].items():
         if task['phase'] not in ('submitted', 'submitting'):
             continue
@@ -526,25 +545,24 @@ def poll(root, config, state):
         result = Path(task['directory']) / 'result.json'
         if not result.exists():
             raise ValueError('Absent worker lacks returned result: ' + name)
-        terminal = json.loads(run_condor(['/usr/bin/condor_history', str(task['cluster']),
-            '-limit', '1', '-json', '-attributes', 'ClusterId,ProcId,Iwd,ExitCode,ExitBySignal'], timeout=45))
-        if (len(terminal) != 1 or terminal[0].get('ClusterId') != task['cluster']
-                or terminal[0].get('ProcId') != 0 or terminal[0].get('Iwd') != task['directory']
-                or terminal[0].get('ExitCode') != 0 or terminal[0].get('ExitBySignal')):
-            task.update(phase='failed', error='Native terminal failure retained', native=terminal)
+        terminal=terminals.get(task['cluster'])
+        if terminal is None:
+            # Fresh queue absence can precede history publication. Keep this
+            # response pending, never treat missing evidence as a failed event.
+            continue
+        if (terminal.get('Iwd')!=task['directory'] or terminal.get('ExitCode')!=0
+                or terminal.get('ExitBySignal')):
+            task.update(phase='failed',error='Native terminal failure retained',native=[terminal])
             continue
         receipt = read(result)
         if (not receipt['complete'] or receipt['request_sha256'] != task['request_sha256']
                 or receipt['events'] != task['events']):
             raise ValueError('Returned worker receipt differs from frozen request')
-        task.update(phase='done', native=terminal[0], result_sha256=digest(result),
+        task.update(phase='done', native=terminal, result_sha256=digest(result),
                     published_bytes=sum(r['bytes'] for r in receipt['published'].values())
                     + result.stat().st_size + 65536, finished_epoch=time.time())
         if task.get('kind') != 'source_group':
             state['latest'][task['stratum']] = task['source_ids']
-    if config.get('refresh_quota') is True:
-        refresh_quota(root, config, ads)
-    parent = read(Path(config['parent_state']) / 'ledger.json')
     qualified = publication_qualification_ready(config,state)
     if not qualified:
         # The qualification itself still needs the ordinary quota-checked
@@ -620,6 +638,11 @@ def poll(root, config, state):
                    if t['phase'] in ('submitted', 'submitting'))
     # Scheduler hosts have no EOS client. Reuse the main production's actual
     # authenticated quota worker and its pinned native-success receipt.
+    if config.get('refresh_quota') is True:
+        ads=query('Owner == "jniedzie"',['ClusterId','ProcId','JobStatus','JobUniverse',
+            'Iwd','DAGManJobId','Owner','GlobalJobId','NumJobStarts','HoldReason'],timeout=45)
+        refresh_quota(root,config,ads)
+    parent=read(Path(config['parent_state'])/'ledger.json')
     observations = [t for t in parent['tasks'].values()
                     if t['kind'] == 'quota' and t['phase'] == 'done']
     if config.get('peer_storage_authority'):
