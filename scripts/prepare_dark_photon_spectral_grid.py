@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # Code style: AI-code. AI-generated spectral-width GEN and detector grid preparation.
-"""Freeze a complete 2--12 GeV spectral-width DY grid without submitting jobs."""
+"""Freeze a spectral-width DY grid, optionally including the PBC BC1 overlap."""
 import argparse
 import copy
 import json
@@ -20,14 +20,23 @@ from run_dark_photon_spectral_gen import (
 )
 
 
+def low_mass_dy_enabled(mass, benchmark):
+    if benchmark not in (None, 'pbc-bc1'):
+        raise ValueError('Unknown spectral preparation benchmark')
+    if benchmark == 'pbc-bc1' and mass < 1.5:
+        raise ValueError('PBC BC1 DY preparation requires mass >=1.5 GeV')
+    return benchmark == 'pbc-bc1' and 1.5 <= mass < 2.
+
+
 def plan_points(reference, masses, flights, events, seed_base, detector_job_base,
-                sampling_epsilon=.01, prompt_epsilon=.001, epsilons=None):
+                sampling_epsilon=.01, prompt_epsilon=.001, epsilons=None, benchmark=None):
     if reference.get('schema') != grid.REFERENCE_SCHEMA or reference.get('sample_kind') != 'simulation_only':
         raise ValueError('Require explicit simulation width/boost references')
     refs = {}
     for row in reference['references']:
         mass = float(row['mass_gev'])
-        validate_point(mass, float(row['epsilon']), sampling_epsilon)
+        validate_point(mass, float(row['epsilon']), sampling_epsilon,
+                       experimental_low_mass_dy=low_mass_dy_enabled(mass, benchmark))
         if mass in refs or not math.isfinite(row['mean_beta_gamma']) or row['mean_beta_gamma'] <= 0:
             raise ValueError('Require distinct reference masses and positive unfiltered GEN boosts')
         if row['width_authority']['schema'] != 'shift-dark-photon-spectral-width-v1' or not row.get('boost_source'):
@@ -58,21 +67,27 @@ def plan_points(reference, masses, flights, events, seed_base, detector_job_base
             if target is not None:
                 epsilon = ref['epsilon'] * math.sqrt(
                     ref['width_authority']['ctau_mm'] * ref['mean_beta_gamma'] / (1000 * target))
-            validate_point(mass, epsilon, sampling_epsilon)
+            experimental = low_mass_dy_enabled(mass, benchmark)
+            validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=experimental)
             index = len(rows)
             rows.append(dict(point='m'+format(mass,'.8g').replace('.','p')+'_'+name,
                 mass_gev=mass, epsilon=epsilon, target_mean_lab_flight_m=target,
                 mean_beta_gamma_reference=ref['mean_beta_gamma'], boost_reference_source=ref['boost_source'],
                 sampling_epsilon=sampling_epsilon, events=events, detector_count=min(2, events),
                 seed=seed_base+index, run_number=seed_base+index, detector_job=detector_job_base+index))
+            if experimental:
+                rows[-1]['experimental_low_mass_dy'] = True
     if len({row['point'] for row in rows}) != count:
         raise ValueError('Spectral point names collide')
-    return dict(grid_mode=mode, points=rows,
+    result = dict(grid_mode=mode, points=rows,
                 lab_flight_is_fixed=False, event_budget_mode='outputAccepted',
                 reference_content_sha256=grid.content_digest(reference),
                 width_provider='DarkCast2.1-visible-spectral',
                 prompt_definition='physical epsilon '+format(prompt_epsilon,'.8g')+'; full spectral lifetime',
                 assumption='Displaced columns are unfiltered reference mean lab flights; actual boosts and flights fluctuate')
+    if benchmark is not None:
+        result['benchmark'] = benchmark
+    return result
 
 
 def main():
@@ -82,6 +97,8 @@ def main():
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--darkcast-path',type=Path,required=True)
     parser.add_argument('--darkcast-source-receipt',type=Path,required=True)
+    parser.add_argument('--benchmark',choices=['pbc-bc1'],
+        help='Prepare the DY component from 1.5 GeV, including its 1.5--2 GeV overlap; no production qualification implied')
     parser.add_argument('--masses',nargs='+',type=float,default=[2.,5.,10.])
     columns=parser.add_mutually_exclusive_group()
     columns.add_argument('--mean-lab-flights-m',nargs='+',type=float)
@@ -103,7 +120,8 @@ def main():
         parser.error('GEN timeout must be 1..21600 seconds')
     reference=json.loads(args.references.read_text())
     plan=plan_points(reference,args.masses,args.mean_lab_flights_m or [5.,30.,100.,1000.],
-        args.events,args.seed_base,args.detector_job_base,args.sampling_epsilon,epsilons=args.epsilons)
+        args.events,args.seed_base,args.detector_job_base,args.sampling_epsilon,epsilons=args.epsilons,
+        benchmark=args.benchmark)
     if args.reuse_physical_plan is not None:
         plan=grid.reuse_physical_points(plan,json.loads(args.reuse_physical_plan.read_text()),args.reuse_physical_plan)
     plan['gen_timeout_seconds']=args.gen_timeout
@@ -121,10 +139,12 @@ def main():
     from dark_photon_pythia import _native_inspect
     for row in plan['points']:
         options=SimpleNamespace(mass=row['mass_gev'],epsilon=row['epsilon'],sampling_epsilon=row['sampling_epsilon'],
-                                events=row['events'],seed=row['seed'],run_number=row['run_number'])
+                                events=row['events'],seed=row['seed'],run_number=row['run_number'],
+                                experimental_low_mass_dy=low_mass_dy_enabled(row['mass_gev'], args.benchmark))
         width=physical_width_table(model,options.mass,options.epsilon,authority)
         grid.check_reused_lifetime(row,width['ctau_mm'])
-        native=_native_inspect(common+tune+native_proposal_settings(options.mass,options.epsilon,options.sampling_epsilon)+beam_settings(6800.))
+        native=_native_inspect(common+tune+native_proposal_settings(options.mass,options.epsilon,options.sampling_epsilon,
+            experimental_low_mass_dy=options.experimental_low_mass_dy)+beam_settings(6800.))
         contract=build_contract(options,width,native,common,tune)
         lab=row['mean_beta_gamma_reference']*width['ctau_mm']/1000
         target=row['target_mean_lab_flight_m']

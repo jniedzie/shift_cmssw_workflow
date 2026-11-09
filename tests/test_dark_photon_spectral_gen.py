@@ -1,11 +1,14 @@
 # Code style: AI-code. AI-generated spectral GEN contract and provenance tests.
 import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from run_dark_photon_spectral_gen import (
@@ -13,6 +16,7 @@ from run_dark_photon_spectral_gen import (
     freeze_spectral_inputs, physical_width_table, validate_point,
 )
 from prepare_dark_photon_spectral_grid import plan_points
+import prepare_dark_photon_spectral_grid as spectral_grid
 
 
 class SpectralGenerationTest(unittest.TestCase):
@@ -127,6 +131,117 @@ class SpectralGenerationTest(unittest.TestCase):
         for invalid in [[], [1.e-6, 1.e-6], [0.], [float('nan')], [.02]]:
             with self.subTest(epsilons=invalid), self.assertRaises(ValueError):
                 plan_points(reference, [2.], None, 50, 251013801, 2800001, epsilons=invalid)
+
+
+class PBCSpectralPreparation(unittest.TestCase):
+    @staticmethod
+    def reference(masses, boost=200.):
+        return dict(schema='shift-dark-photon-grid-reference-v1', sample_kind='simulation_only',
+            references=[dict(mass_gev=mass, epsilon=1.e-7, mean_beta_gamma=boost,
+                boost_source={'events':100},
+                width_authority=dict(schema='shift-dark-photon-spectral-width-v1', ctau_mm=1000.))
+                for mass in masses])
+
+    def test_default_plan_bytes_are_unchanged(self):
+        plan = plan_points(self.reference([2.]), [2.], [5.,30.,100.,1000.], 50, 251013701, 2700001)
+        encoded = (json.dumps(plan, indent=2, allow_nan=False) + '\n').encode()
+        # Captured from the default planner before adding the named profile.
+        self.assertEqual(hashlib.sha256(encoded).hexdigest(),
+                         'b1338d400060a4e7533141485f90d27a3ae600003ed43c904715b1ed3ee21da7')
+
+    def test_overlap_requires_named_profile_and_never_opens_lower_masses(self):
+        for mass in [1.5, 1.8]:
+            with self.subTest(mass=mass), self.assertRaises(ValueError):
+                plan_points(self.reference([mass]), [mass], [5.], 50, 251013701, 2700001)
+        plan = plan_points(self.reference([1.5,1.8,2.]), [1.5,1.8,2.], [5.],
+                           50, 251013701, 2700001, benchmark='pbc-bc1')
+        self.assertEqual(plan['benchmark'], 'pbc-bc1')
+        for row in plan['points']:
+            self.assertEqual(row.get('experimental_low_mass_dy', False), row['mass_gev'] < 2.)
+        for mass in [.22, 1., 1.4, 1.499999, 12., float('nan')]:
+            with self.subTest(mass=mass), self.assertRaises(ValueError):
+                plan_points(self.reference([mass]), [mass], [5.], 50, 251013701, 2700001,
+                            benchmark='pbc-bc1')
+
+    def test_profile_survives_native_preflight_freezing_and_physical_point_reuse(self):
+        # Synthetic replies exercise the real planner/contracts, never physics qualification.
+        model = SimpleNamespace(
+            width=lambda state,mass,epsilon: .01973269804*epsilon**2 *
+                {'total':1., 'e_e':.5, 'mu_mu':.25, 'hadrons':.25}.get(state, 0.),
+            bfrac=lambda state,mass: .25,
+            xfs={'e':(lambda mass:0., lambda mass:-.302822)})
+        inspected_masses = []
+
+        def native_inspect(settings):
+            mass = float(next(value.split(' = ')[1] for value in settings if value.startswith('32:m0 = ')))
+            inspected_masses.append(mass)
+            return dict(pythia_version=8.317, mass_gev=mass, m_width_gev=2.e-6,
+                m_min_gev=.99*mass, m_max_gev=1.01*mass,
+                channels=[dict(on_shell_width_gev=1.e-6, branching_fraction=.5, products=[13,-13]),
+                          dict(on_shell_width_gev=1.e-6, branching_fraction=.5, products=[11,-11])])
+
+        modules = {
+            'Configuration.Generator.Pythia8CommonSettings_cfi': SimpleNamespace(
+                pythia8CommonSettingsBlock=SimpleNamespace(pythia8CommonSettings=[])),
+            'Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi': SimpleNamespace(
+                pythia8CP5SettingsBlock=SimpleNamespace(pythia8CP5Settings=[])),
+            'darkcast': SimpleNamespace(Model=lambda name:model),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            package = root/'source/darkcast'; package.mkdir(parents=True)
+            source = package/'model.py'; source.write_text('# synthetic provider fixture\n')
+            receipt = root/'source_receipt.json'
+            receipt.write_text(json.dumps(dict(commit=PINNED_DARKCAST_COMMIT,
+                files={'darkcast/model.py':hashlib.sha256(source.read_bytes()).hexdigest()})))
+            authority_output = root/'authority'; authority_output.mkdir()
+            authority = freeze_spectral_inputs(package.parent, receipt, authority_output)
+            templates = root/'templates'; templates.mkdir()
+            for number in range(1,5):
+                (templates/f'step{number}.py').write_text('# synthetic template fixture\n')
+            (root/'src').mkdir()
+
+            def prepare(output, boost, seed, previous=None):
+                reference = self.reference([1.5,1.8,2.], boost)
+                reference.update(common=[], cp5=[])
+                for row in reference['references']:
+                    row['width_authority']['spectral_source'] = authority
+                reference_path = root/(output+'_references.json')
+                reference_path.write_text(json.dumps(reference))
+                argv = ['prepare_dark_photon_spectral_grid.py', '--references', str(reference_path),
+                    '--templates', str(templates), '--output', str(root/output),
+                    '--darkcast-path', str(package.parent), '--darkcast-source-receipt', str(receipt),
+                    '--benchmark', 'pbc-bc1', '--masses', '1.5', '1.8', '2', '--mean-lab-flights-m', '5',
+                    '--events', '2', '--seed-base', str(seed), '--detector-job-base', '2700001',
+                    '--campaign', 'pbc_test_20261109', '--eos-base', '/eos/user/j/fixture']
+                if previous is not None:
+                    argv.extend(['--reuse-physical-plan', str(previous)])
+                with mock.patch.object(sys, 'argv', argv), mock.patch.dict(sys.modules, modules), \
+                     mock.patch.dict(os.environ, {'CMSSW_BASE':str(root)}), \
+                     mock.patch('dark_photon_pythia._native_inspect', side_effect=native_inspect), \
+                     mock.patch.object(spectral_grid.subprocess, 'check_output', return_value='synthetic-runtime'), \
+                     mock.patch.object(spectral_grid.grid, 'SOURCES', tuple(spectral_grid.grid.SOURCES)), \
+                     mock.patch('sys.stdout', new_callable=io.StringIO):
+                    spectral_grid.main()
+                return json.loads((root/output/'plan.json').read_text())
+
+            first = prepare('first', 200., 251013701)
+            reused = prepare('reused', 400., 251013801, root/'first/plan.json')
+            self.assertEqual(set(inspected_masses), {1.5,1.8,2.})
+            for old, new in zip(first['points'], reused['points']):
+                self.assertEqual(new['epsilon'], old['epsilon'])
+                self.assertEqual(new['proper_ctau_mm'], old['proper_ctau_mm'])
+                self.assertEqual(new['mean_beta_gamma_reference'], old['mean_beta_gamma_reference'])
+                self.assertNotEqual(new['run_number'], old['run_number'])
+                enabled = new['mass_gev'] < 2.
+                contract = json.loads(Path(new['signal_contract']).read_text())
+                self.assertEqual(contract['experimental_low_mass_dy'], enabled)
+                self.assertEqual(new['gen_argv'].count('--experimental-low-mass-dy'), int(enabled))
+                self.assertEqual(Path(new['gen_argv'][1]).name, 'run_dark_photon_spectral_gen.py')
+                self.assertTrue(Path(new['gen_argv'][1]).is_file())
+                self.assertFalse(contract['physics_valid'])
+                self.assertFalse(reused['physics_valid'])
+                self.assertFalse(reused['production_rate_validated'])
 
 
 class FrozenSpectralContract(unittest.TestCase):
