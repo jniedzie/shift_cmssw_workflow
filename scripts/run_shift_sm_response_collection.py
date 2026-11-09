@@ -43,6 +43,42 @@ def identity(row):
     return row['gen_sha256'], tuple(row['event_id'])
 
 
+def analysis_features(original, pins, cache):
+    """Load pinned GEN features lazily without changing a frozen sampling draw.
+
+    Large validation cohorts need only compact selected descriptors in their
+    detector requests. Their collector reads one full source at a time.
+    """
+    if pins is None:
+        return original
+    pin = pins[original['source_id']]
+    if cache.get('pin') != pin:
+        local = Path('analysis_GEN_features.json.gz')
+        download(pin['path'], local, pin['sha256'])
+        try:
+            if local.stat().st_size != pin['bytes'] or local.stat().st_size > 32*1048576:
+                raise ValueError('GEN feature size differs from its frozen authority')
+            with gzip.open(local, 'rb') as stream:
+                data = stream.read(512*1048576+1)
+            if len(data) > 512*1048576:
+                raise ValueError('Expanded GEN feature census exceeds its bound')
+            events = json.loads(data)['events']
+        finally:
+            local.unlink(missing_ok=True)
+        cache.clear()
+        cache.update(pin=copy.deepcopy(pin), events=events)
+    event = cache['events'][original['original_index']]
+    if (event['event_id'] != original['event_id']
+            or event['native_weight'] != original['native_weight']
+            or event['source_id'] != original['source_id']
+            or event['original_source_sha256'] != original['gen_sha256']
+            or event['source_file_sha256'] != original['prepared_gen_sha256']):
+        raise ValueError('GEN analysis features differ from the original detector event')
+    from shift_sm_response_features import feature_values
+    result = dict(original, features=feature_values(event))
+    return result
+
+
 def verify_worker_request(request, selected):
     """Check the original selected offset, not a newly drawn production mask."""
     source = detector_source(request)
@@ -118,6 +154,7 @@ def run(request_path):
     if len(selected) != plan['selected_events']:
         raise ValueError('Duplicate original in frozen benchmark')
     rows, producers, seen = [], [], set()
+    feature_cache = {}
     for number, record in enumerate(request['job_records']):
         original = record['selected']
         key = identity(original)
@@ -143,7 +180,8 @@ def run(request_path):
         local.unlink()
         if len(labels) != 1:
             raise ValueError('The diagnostic worker must contain exactly one original')
-        rows.append(study_row(labels[0], original, result))
+        rows.append(study_row(labels[0], analysis_features(original,
+            request.get('feature_sources'), feature_cache), result))
         producers.append(dict(directory=str(directory), request_sha256=record['request_sha256'],
             result_sha256=sha(directory/'result.json'), nano_path=result['nano_path'],
             nano_sha256=result['nano_sha256']))

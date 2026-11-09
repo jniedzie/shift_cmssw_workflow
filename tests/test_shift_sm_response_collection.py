@@ -1,8 +1,14 @@
 # Code style: AI-code. AI-generated benchmark weight and exposure guards.
 import copy
+import gzip
+import hashlib
+import json
+import os
 from pathlib import Path
 import sys
 import unittest
+import tempfile
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from run_shift_sm_response_collection import study_row, verify_exposure, verify_worker_request
@@ -76,6 +82,42 @@ class ResponseCollectionTest(unittest.TestCase):
         source['nano_base']='/eos/user/j/jniedzie/shift_cmssw/qcd/nano'
         with self.assertRaisesRegex(ValueError,'ordinary campaign'):
             verify_worker_request(request,selected)
+
+
+class LazyGENFeatureTest(unittest.TestCase):
+    def test_pinned_features_are_loaded_once_without_redrawing_or_reweighting(self):
+        from run_shift_sm_response_collection import analysis_features
+        from test_shift_sm_candidate_reco import event
+        row = event(2, depth=1.)
+        original = dict(source_id=row['source_id'], original_index=0,
+            event_id=row['event_id'], native_weight=row['native_weight'],
+            gen_sha256='a'*64, prepared_gen_sha256='b'*64,
+            existing_sampling_probability=.001, benchmark_inclusion_probability=1., features={})
+        before = copy.deepcopy(original)
+        data = gzip.compress(json.dumps(dict(events=[row])).encode())
+        pin = dict(path='/eos/source/features.json.gz', sha256=hashlib.sha256(data).hexdigest(), bytes=len(data))
+        def copy_input(path, target, digest):
+            self.assertEqual(digest, hashlib.sha256(data).hexdigest())
+            Path(target).write_bytes(data)
+        here = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                cache = {}
+                with patch('run_shift_sm_response_collection.download', side_effect=copy_input) as download:
+                    result = analysis_features(original, {row['source_id']:pin}, cache)
+                    second = analysis_features(original, {row['source_id']:pin}, cache)
+                self.assertEqual(download.call_count, 1)
+                self.assertEqual(result, second)
+                self.assertEqual(result['features']['n_gen_muons'], 2)
+                self.assertEqual(original, before)
+                self.assertEqual(result['existing_sampling_probability'], .001)
+                self.assertFalse(Path('analysis_GEN_features.json.gz').exists())
+                changed = dict(original, native_weight=123.)
+                with self.assertRaisesRegex(ValueError, 'differ from the original'):
+                    analysis_features(changed, {row['source_id']:pin}, cache)
+            finally:
+                os.chdir(here)
 
 
 if __name__=='__main__':
