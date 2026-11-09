@@ -256,7 +256,16 @@ def source_cache(parent, state):
                 selected=dict(event_ids=[], weights=[], selected_indices=[], sampling_probabilities=[]),
                 descriptor_hashes=[], original_result_sha256=key, original_result_path=str(path))
             continue
-        state['sources'][key] = dict(normalization=result['source'],
+        normalization = result['source']
+        if source.get('qcd_gen_filter') is not None:
+            if (source['normalization_record'] != normalization
+                    or result.get('qcd_gen_filter') != source['qcd_gen_filter']):
+                raise ValueError('QCD generator-filter provenance differs from its source receipt')
+            # Keep the original denominator/rate and retain the primary-filter
+            # counters as provenance through ordinary and grouped publication.
+            # They are never another event-weight or cross-section multiplier.
+            normalization = dict(normalization, qcd_gen_filter=source['qcd_gen_filter'])
+        state['sources'][key] = dict(normalization=normalization,
             selected=compact_source(source), descriptor_hashes=descriptor_hashes(source),
             original_result_sha256=key, original_result_path=str(path))
 

@@ -2,9 +2,10 @@
 # Code style: AI-code. AI-generated full-census SM source preparation worker.
 """Generate one independent SM chunk, prepare jaw decays and freeze admission.
 
-The ordinary GEN is uncensored. Muon-producing natural decays are completed
-after jaw placement, before material ranking. Geant4 decides actual survival.
-GEN exposure, source proposal weights and detector sampling stay separate.
+Raw GEN is an internal, uncensored intermediate. QCD becomes muon-enriched
+after jaw placement and natural decay completion, before full simulation.
+Geant4 decides actual survival. Original generation exposure and native weights
+remain separate from the filter and its small rejected-event sample.
 """
 import gzip
 import hashlib
@@ -291,6 +292,52 @@ def resume_source(request, directory):
     return source, identities, weights, publications
 
 
+def prepared_selection(request, source, prepared, features, identities, weights, preparation_sha256):
+    """Freeze the final GEN filter once; keep full original exposure unchanged."""
+    family = request['source_request']['family']
+    events = features['events']
+    if ([event['event_id'] for event in events] != identities
+            or [event['native_weight'] for event in events] != weights
+            or len(set(map(tuple, identities))) != len(identities)
+            or source['saved_events'] != len(identities)):
+        raise ValueError('The final GEN filter requires the complete ordered original census')
+    descriptor = dict(gen=eos_path(prepared['url']), gen_sha256=prepared['gen_sha256'],
+        receipt=source['original_receipt'], receipt_sha256=source['original_receipt_sha256'],
+        event_ids=identities, weights=weights, stratum=request['source_request']['stratum'],
+        normalization_record=source, missing_filter_lumi=family == 'dy',
+        storage_contract='shift-process-bin-detector-v1', nano_base=request['nano_base'],
+        metadata_base=request['metadata_base'], maximum_publication_bytes=16777216)
+    if family == 'qcd':
+        from shift_qcd_gen_filter import bind_filter, default_policy, prepare_filter
+        if request.get('first_sim_source', not bool(request.get('resume_raw'))) is not True:
+            raise ValueError('Reusing raw QCD for a new filter needs an explicit first-SIM source; '
+                             'existing frozen selections must not be redrawn')
+        policy = request.get('qcd_gen_filter_policy', default_policy())
+        ledger = prepare_filter(events, source, policy, request['selection_seed'],
+                                before_first_sim=True)
+        return bind_filter(descriptor, ledger), ledger
+    authority_source = dict(source_id=source['source_id'],
+        original_source_sha256=source['gen_sha256'],
+        feature_source_sha256s=[prepared['gen_sha256']], full_gen_exposure=source,
+        generator_profile='ordinary', decay_dependent_filter=False)
+    authorities = [dict(source_id=source['source_id'],
+        original_source_sha256=source['gen_sha256'],
+        feature_source_sha256=prepared['gen_sha256'], event_id=event['event_id'],
+        graph_sha256=event['graph_sha256'], native_weight=event['native_weight'],
+        sampling_probability=1., previous_selection_domains=[], proposal_kind='ordinary',
+        proposal_draw_id='natural-decay:'+str(request['source_request']['seed']+11),
+        proposal_density_ratio=1., proposal_correction=1.,
+        proposal_provenance_sha256=preparation_sha256, saved_decays_unchanged=True)
+        for event in events]
+    bundle = dict(schema='shift-production-material-inputs-v1',
+        cohort_id=request['cohort_id']+':'+request['source_request']['id'],
+        selection_seed=request['selection_seed'], features=features,
+        authority=dict(schema='shift-material-admission-authority-v1',
+            population_scope='representative_census', sources=[authority_source], events=authorities))
+    ledger = prepare_default_selection(bundle)
+    return bind_source(descriptor, ledger), ledger
+
+
 def main(request_path):
     request = json.loads(Path(request_path).read_text())
     row = request['source_request']
@@ -298,6 +345,15 @@ def main(request_path):
                   source_id=row['id'], started_epoch=time.time())
     save('source_report.json', report)
     try:
+        if row['family'] == 'qcd':
+            from shift_qcd_gen_filter import PROFILE, default_policy, validate_policy
+            validate_policy(request.get('qcd_gen_filter_policy', default_policy()))
+            report.update(raw_GEN_is_internal_intermediate=True,
+                          planned_muon_enriched_profile=PROFILE)
+            if (not request.get('generate_only')
+                    and request.get('first_sim_source', not bool(request.get('resume_raw'))) is not True):
+                raise ValueError('A new QCD filter requires a declared first-SIM census; '
+                                 'do not redraw an existing reconstruction selection')
         library = Path(os.environ['CMSSW_BASE'])/'lib'/os.environ['SCRAM_ARCH']
         for key in ('EDM_PLUGIN_PATH', 'LD_LIBRARY_PATH'):
             os.environ[key] = ':'.join([str(library)]+[
@@ -331,7 +387,7 @@ def main(request_path):
             if sum(path.stat().st_size for path, _ in files) > request['source_publication_bound_bytes']:
                 raise ValueError('Raw source exceeds its reserved publication bound')
             raw_publications = publish(files, raw_base)
-            source['url'] = 'root://eosuser.cern.ch/'+raw_base+'/gen.root'
+            source['url'] = xrootd_url(raw_base+'/gen.root')
             save('native_source_receipt.json', dict(schema='shift-smart-SM-native-source-v1',
                 events=len(identities), event_ids=identities,
                 semantic_audit=dict(event_ids=identities, weights=weights, native_audit=audit),
@@ -345,7 +401,7 @@ def main(request_path):
             receipt=Path('native_source_receipt.json')
             report.update(complete=True,generated_only=True,prepared_for_detector=False,
                 source=source,raw_events=len(identities),raw_publications=raw_publications,
-                raw_source_receipt_url='root://eosuser.cern.ch/'+source['original_receipt'],
+                raw_source_receipt_url=xrootd_url(source['original_receipt']),
                 raw_source_receipt_sha256=source['original_receipt_sha256'],
                 published_storage_bytes=sum(p['bytes'] for p in raw_publications)+receipt.stat().st_size,
                 finished_epoch=time.time())
@@ -389,30 +445,8 @@ def main(request_path):
         command(['xrdcp', '--silent', '--cksum', 'adler32', xrootd_url(request['publication_directory']+'/prepared/'+row['family']+'_features.json.gz'), str(feature_file)], timeout=900)
         with gzip.open(feature_file, 'rt') as stream:
             features = json.load(stream)
-        authority_source = dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
-            feature_source_sha256s=[prepared['gen_sha256']], full_gen_exposure=source,
-            generator_profile='ordinary', decay_dependent_filter=False)
-        authorities = [dict(source_id=source['source_id'], original_source_sha256=source['gen_sha256'],
-            feature_source_sha256=prepared['gen_sha256'], event_id=e['event_id'],
-            graph_sha256=e['graph_sha256'], native_weight=e['native_weight'],
-            sampling_probability=1., previous_selection_domains=[], proposal_kind='ordinary',
-            proposal_draw_id='natural-decay:'+str(row['seed']+11), proposal_density_ratio=1.,
-            proposal_correction=1., proposal_provenance_sha256=sha(preparation/'summary.json'),
-            saved_decays_unchanged=True) for e in features['events']]
-        bundle = dict(schema='shift-production-material-inputs-v1',
-            cohort_id=request['cohort_id']+':'+row['id'], selection_seed=request['selection_seed'],
-            features=features, authority=dict(schema='shift-material-admission-authority-v1',
-            population_scope='representative_census', sources=[authority_source], events=authorities))
-        ledger = prepare_default_selection(bundle)
-        descriptor = dict(gen=eos_path(prepared['url']),
-            gen_sha256=prepared['gen_sha256'], receipt=source['original_receipt'],
-            receipt_sha256=source['original_receipt_sha256'], event_ids=identities, weights=weights,
-            stratum=row['stratum'], normalization_record=source,
-            missing_filter_lumi=row['family'] == 'dy',
-            storage_contract='shift-process-bin-detector-v1',
-            nano_base=request['nano_base'], metadata_base=request['metadata_base'],
-            maximum_publication_bytes=16777216)
-        selected = bind_source(descriptor, ledger)
+        selected, ledger = prepared_selection(request, source, prepared, features,
+            identities, weights, sha(preparation/'summary.json'))
         save('selected_source.json', selected)
         with gzip.open('selection_ledger.json.gz', 'wt') as stream:
             json.dump(ledger, stream, allow_nan=False)
@@ -427,6 +461,9 @@ def main(request_path):
             published_storage_bytes=sum(x['bytes'] for x in
                 raw_publications+prepared_publications+publications)+1048576,
             source_preparation_receipt_sha256=sha(preparation/'summary.json'))
+        if 'qcd_gen_filter' in selected:
+            report['qcd_gen_filter'] = selected['qcd_gen_filter']
+            report['production_profile'] = selected['qcd_gen_filter']['profile']
     except BaseException as error:
         report.update(error=repr(error))
         if Path('raw/gen.root').is_file() and not Path('native_source_receipt.json').exists() and not request.get('resume_raw'):

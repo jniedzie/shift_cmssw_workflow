@@ -284,7 +284,8 @@ def advance_gen_supply(root,config,state,failures):
         request=read(directory/'request.json');request.pop('generate_only')
         request.update(resume_raw=dict(url=result['raw_source_receipt_url'],sha256=result['raw_source_receipt_sha256']),
             publication_directory=config['source_publication_base']+'/supply_prepared/'+request['source_request']['id'],
-            source_publication_bound_bytes=268435456,reservation_bytes=536870912)
+            source_publication_bound_bytes=268435456,reservation_bytes=536870912,
+            first_sim_source=True)
         name='prepared_'+stratum+'_'+str(index).zfill(5)
         tasks[name]=make_task(root,config,name,request,'source',stratum)
         tasks[name]['source_group']='supply'

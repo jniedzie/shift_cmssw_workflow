@@ -133,6 +133,9 @@ def source_rows(record):
     authority = load_record(record['result_path'], record['result_sha256'])
     features = load_record(record['feature_path'], record['feature_sha256'])
     descriptor = authority['selected_source']
+    if descriptor.get('qcd_gen_filter') is not None:
+        raise ValueError('Two-muon QCD GEN admission is already frozen; reconstruct its selected '
+                         'offsets directly instead of applying another response benchmark draw')
     exposure = authority['source']
     family = exposure['stratum'].split('_', 1)[0]
     if family not in ('qcd', 'dy', 'jpsi'):

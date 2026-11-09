@@ -335,6 +335,9 @@ def _bind_source(descriptor, ledger, rows, ledger_sha):
 
 def validate_contract(contract):
     """Check the small frozen contract without importing CMSSW."""
+    if contract.get('schema') == 'shift-qcd-gen-filter-selection-v1':
+        from shift_qcd_gen_filter import validate_contract as validate_qcd_filter
+        return validate_qcd_filter(contract)
     if (contract.get('schema') != SCHEMA or contract.get('track_all_hadron_decays') is not True
             or contract.get('maximum_untracked_hadron_flight_mm') != 1.e-5):
         raise ValueError('Invalid shared production material-transport contract')
