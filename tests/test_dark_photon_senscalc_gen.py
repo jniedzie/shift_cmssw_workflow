@@ -2,6 +2,7 @@
 import math
 import json
 import gzip
+import shutil
 from pathlib import Path
 import random
 import sys
@@ -14,10 +15,119 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import run_dark_photon_senscalc_gen as adapter
 from run_dark_photon_senscalc_gen import decay_momenta,unweight
 from dark_photon_senscalc import source_summary,write_json,digest
+import dark_photon_senscalc as benchmark
 from dark_photon_meson import MUON_MASS_GEV
 
 
 class SourceToGen(unittest.TestCase):
+    def metadata_fixture(self,directory,mass=.7):
+        from dark_photon_bremsstrahlung import SourceSampler,sampling_profile,TABLE_HASHES
+        profile=sampling_profile(mass);original=Path(profile['table_directory'])
+        tables=directory/'bremsstrahlung_inputs';tables.mkdir()
+        for name in TABLE_HASHES:shutil.copyfile(original/name,tables/name)
+        profile['table_directory']='bremsstrahlung_inputs';write_json(directory/'bremsstrahlung.json',profile)
+        sampler=SourceSampler(profile,directory)
+        radiation=sampler.candidate(1,123,26.)
+        self.assertGreater(radiation['weight_over_epsilon_squared'],0.)
+        selected=[]
+        for pdg in adapter.CHANNELS:
+            selected.append(dict(id=pdg,index=len(selected),source_trial=len(selected)+1,
+                event_slot=len(selected)+1,p4=[mass,0.,0.,0.],weight_over_epsilon_squared=1.))
+        selected.append(dict(radiation,source_trial=7,event_slot=7))
+        contract=dict(production_mechanism=adapter.INCLUSIVE_MECHANISM,rate_profile='pointlike',
+            mass_gev=mass,epsilon=1.e-5,run_number=5123,requested_events=len(selected))
+        return contract,selected,sampler
+
+    def test_source_metadata_preserves_draws_denominators_and_identifies_every_GEN_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)
+            original=json.dumps(selected)
+            adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+            self.assertEqual(json.dumps(selected),original)
+            theory=json.loads((directory/'source_theory_weights.json').read_text())
+            definition=json.loads((directory/'pbc_bc1_benchmark.json').read_text())
+            self.assertEqual([row['event_id'] for row in theory['records']],[[5123,1,i] for i in range(1,8)])
+            self.assertTrue(all(row['weights']==dict(Lower=1.,Central=1.,Upper=1.) for row in theory['records'][:-1]))
+            self.assertEqual(theory['records'][-1]['weights'],benchmark.fr_variation_weights(
+                sampler,selected[-1],table_directory=directory/'bremsstrahlung_inputs'))
+            self.assertFalse(theory['native_GEN_weights_changed'])
+            self.assertFalse(theory['extra_integrated_cross_section_ratio'])
+            self.assertFalse(theory['production_qualified'])
+            self.assertEqual(definition['components'][0]['bremsstrahlung']['table_directory'],'bremsstrahlung_inputs')
+            adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+            native=benchmark.fr_variation_weights
+            def nearby(instance,row,**kwargs):
+                return {name:math.nextafter(value,math.inf) for name,value in native(instance,row,**kwargs).items()}
+            with patch.object(benchmark,'fr_variation_weights',nearby):
+                adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+            with tempfile.TemporaryDirectory() as relocated:
+                moved=Path(relocated)/'gen';shutil.copytree(directory,moved)
+                adapter.validate_benchmark_source_metadata(moved,contract,selected,
+                    adapter.bremsstrahlung_sampler(moved))
+
+    def test_changed_source_theory_identity_or_density_is_not_hidden_by_a_new_file_hash(self):
+        for field in ('event_id','weights'):
+            with self.subTest(field=field),tempfile.TemporaryDirectory() as tmp:
+                directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)
+                adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+                path=directory/'source_theory_weights.json';theory=json.loads(path.read_text())
+                if field=='event_id':theory['records'][-1][field][-1]+=1
+                else:theory['records'][-1][field]['Upper']*=1.01
+                write_json(path,theory);contract['benchmark_metadata']['theory_weights']['sha256']=digest(path)
+                with self.assertRaisesRegex(ValueError,'exact selected source'):
+                    adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)
+            adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+            contract['benchmark_metadata']['definition']['path']='../elsewhere.json'
+            with self.assertRaisesRegex(ValueError,'authority'):
+                adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+            contract['rate_profile']='measured-form-factor'
+            with self.assertRaisesRegex(ValueError,'pointlike reference'):
+                adapter.benchmark_source_metadata(directory,contract,selected,sampler)
+
+    def test_source_theory_table_endpoint_stays_unavailable_instead_of_becoming_zero(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            contract,selected,sampler=self.metadata_fixture(Path(tmp),mass=1.995)
+            sidecars=adapter.benchmark_source_metadata(tmp,contract,selected,sampler)
+            theory=sidecars['theory_weights']
+            for name in ('Lower','Upper'):
+                self.assertFalse(theory['variations'][name]['available'])
+                self.assertIn('no extrapolation',theory['variations'][name]['reason'])
+                self.assertIsNone(theory['records'][-1]['weights'][name])
+                self.assertEqual(theory['records'][0]['weights'][name],1.)
+            self.assertEqual(theory['records'][-1]['weights']['Central'],1.)
+
+    def test_existing_custom_FR_or_measured_meson_profiles_are_labelled_without_changing_draws(self):
+        from dark_photon_bremsstrahlung import SourceSampler
+        for alternative in ('custom-FR','measured-form-factor'):
+            with self.subTest(alternative=alternative),tempfile.TemporaryDirectory() as tmp:
+                directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)
+                if alternative=='custom-FR':
+                    profile=dict(sampler.profile,lambda_p_gev=.7)
+                    sampler=SourceSampler(profile,directory)
+                else:contract['rate_profile']=alternative
+                before=json.dumps(selected)
+                self.assertFalse(adapter.write_benchmark_source_metadata(directory,contract,selected,sampler))
+                self.assertEqual(json.dumps(selected),before)
+                self.assertNotIn('benchmark_metadata',contract)
+                self.assertIn('outside the pinned',contract['benchmark_scope'])
+                self.assertFalse((directory/'source_theory_weights.json').exists())
+                adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+
+    def test_retention_keeps_both_actual_metadata_authorities_and_checks_their_hashes(self):
+        from export_dark_photon_cross_sections import input_files
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)
+            (directory/'source_bank').mkdir()
+            adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+            write_json(directory/'contract.json',contract)
+            files=input_files(directory,{})
+            self.assertIn('pbc_bc1_benchmark.json',files)
+            self.assertIn('source_theory_weights.json',files)
+            (directory/'source_theory_weights.json').write_text('{}')
+            with self.assertRaisesRegex(ValueError,'metadata authority'):input_files(directory,{})
+
     def test_exact_reviewed_parent_keeps_native_flight_and_on_shell_daughters(self):
         parent=[129.07712435564986,.6339862424770483,.1737338378333942,-129.07448202175664]
         first,second,flight=decay_momenta(parent,.5,300.,random.Random(7))
@@ -142,6 +252,10 @@ class SourceToGen(unittest.TestCase):
                 checked=adapter.accounting(directory,contract)
                 self.assertEqual(checked['source_exposure']['source_collisions'],4)
                 self.assertEqual(checked['target_cross_sections'],[contract['target_cross_section']])
+                contract['benchmark_metadata']={}
+                with self.assertRaisesRegex(ValueError,'Invalid PBC source metadata'):
+                    adapter.accounting(directory,contract)
+                contract.pop('benchmark_metadata')
                 raw=(directory/'source_bank/source_ledger.jsonl').read_bytes()
                 with gzip.open(directory/'source_bank/source_ledger.jsonl.gz','wb') as stream:stream.write(raw)
                 (directory/'source_bank/source_ledger.jsonl').unlink()

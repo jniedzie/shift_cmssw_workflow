@@ -5,12 +5,67 @@ from pathlib import Path
 import sys
 import unittest
 import random
+import copy
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import dark_photon_bremsstrahlung as model
+from dark_photon_senscalc import fr_variation_weights
 
 
 class PublishedBremsstrahlung(unittest.TestCase):
+    @staticmethod
+    def source_momentum(mass,z,pt):
+        pz=-z*math.sqrt(6800.**2-model.PROTON_MASS_GEV**2)
+        return dict(id=32,mechanism='proton-bremsstrahlung',
+                    p4=[math.hypot(mass,pt,pz),pt,0.,pz])
+
+    def test_correlated_variations_preserve_recorded_event_and_nominal_weight(self):
+        sampler=model.SourceSampler(model.sampling_profile(.7))
+        candidate=self.source_momentum(.7,.3,.2)
+        original=copy.deepcopy(candidate)
+        weights=fr_variation_weights(sampler,candidate)
+        self.assertEqual(candidate,original)
+        self.assertEqual(weights['Central'],1.)
+        self.assertAlmostEqual(weights['Lower'],.007274358598283819,places=14)
+        self.assertAlmostEqual(weights['Upper'],8.981207585669456,places=12)
+        # A spectrum variation is not a single cross-section multiplier.
+        other=fr_variation_weights(sampler,self.source_momentum(.7,.7,1.))
+        self.assertNotAlmostEqual(weights['Upper'],other['Upper'],places=3)
+
+    def test_event_variations_reproduce_independently_integrated_physical_rates(self):
+        import numpy as np
+        # Independent adaptive dpT,dz integrations of the published scenarios.
+        reference={'Lower':12789962.731319,'Central':1293147119.834526,
+                   'Upper':16484869840.903057}
+        sampler=model.SourceSampler(model.sampling_profile(.7))
+        nodes,quad_weights=np.polynomial.legendre.leggauss(64)
+        low,high=[math.log(z/(1-z)) for z in sampler.profile['z_range']]
+        rates={name:0. for name in reference}
+        for node,weight in zip(nodes,quad_weights):
+            t=low+(node+1)*(high-low)/2
+            for u_node,u_weight in zip(nodes,quad_weights):
+                z,pt,nominal=sampler.coordinates(t,(u_node+1)/2)
+                if nominal==0:continue
+                variations=fr_variation_weights(sampler,self.source_momentum(.7,z,pt))
+                for name in rates:
+                    rates[name]+=nominal*variations[name]*weight*u_weight*(high-low)/4
+        for name in rates:
+            self.assertAlmostEqual(rates[name]/reference[name],1.,places=7)
+
+    def test_variations_reject_missing_identity_wrong_mass_and_unsupported_support(self):
+        sampler=model.SourceSampler(model.sampling_profile(.7))
+        for field,value in [('id',4900113),('mechanism','rho-fragmentation'),
+                            ('p4',[1.,0.,0.,1.]),('p4',[float('nan'),0.,0.,-1.])]:
+            candidate=self.source_momentum(.7,.3,.2);candidate[field]=value
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):
+                fr_variation_weights(sampler,candidate)
+        for z in (-.3,.001,.995):
+            with self.subTest(z=z),self.assertRaisesRegex(ValueError,'beam direction or z support'):
+                fr_variation_weights(sampler,self.source_momentum(.7,z,.2))
+        endpoint=model.SourceSampler(model.sampling_profile(1.995))
+        with self.assertRaisesRegex(ValueError,'no extrapolation'):
+            fr_variation_weights(endpoint,self.source_momentum(1.995,.3,.2))
+
     def test_analytic_importance_bound_covers_resonances_variations_and_transverse_tails(self):
         rng=random.Random(1778)
         for mass in (.22,.7,.78,.9,1.019,1.4,1.8):

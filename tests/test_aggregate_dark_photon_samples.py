@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from aggregate_dark_photon_samples import (combined_rate, disjoint_parent_component_rates,
-                                         senscalc_dy_component_rates,
+                                         senscalc_dy_component_rates, prepare_senscalc_dy_histograms,
                                          completed_histogram_input, event_rows, execute, group_inputs,
                                          qualified_finalizer, sha, unique_populations,
                                          validate_event_rows, verify_aggregate_seal,
@@ -414,6 +414,130 @@ class SensCalcDYAccounting(unittest.TestCase):
                     first['populations'][0]['rate'][field] = value
                 with self.assertRaises(ValueError):
                     self.combine([first, second])
+
+
+class CompositeMainHistograms(unittest.TestCase):
+    def sources(self, directory):
+        import ROOT
+        components = [SensCalcDYAccounting.component('inclusive', 10, 10, 400, 5., reference=True),
+                      SensCalcDYAccounting.component('dy', 30, 2, 100, 3.)]
+        for index, component in enumerate(components):
+            population = component['populations'][0]
+            population['source']['point'] = 'm1p8_lab30' if index == 0 else 'm1p8_DY_component'
+            path = directory / ('component_' + str(index) + '.root')
+            file = ROOT.TFile(str(path), 'RECREATE')
+            raw = ROOT.TH1D('rawEventsCutFlow', '', 1, 0., 1.)
+            for unused in range(2 if index == 0 else 1):
+                raw.Fill(.5)
+            raw.Write()
+            folder = file.mkdir('dimuon'); folder.cd()
+            for category in ('', 'Good', 'Near-Both', 'Near-Far', 'Both-Both', 'Both-Far', 'Other'):
+                for variable in ('mass', 'pt', 'logMass'):
+                    hist = ROOT.TH1D('ShiftDimuonVertex' + category + '_' + variable, '', 10, 0., 100.)
+                    hist.Sumw2()
+                    for weight in ((1., 3.) if index == 0 else (1.,)):
+                        hist.Fill(15., weight)
+                    hist.Fill(-1., 2. if index == 0 else 3.)
+                    hist.Fill(101., 4. if index == 0 else 2.)
+                    hist.Write()
+            metadata = dict(schema='shift-preserved-full-GEN-histogram-v1',
+                stratum='darkphoton_' + population['source']['point'],
+                full_source_sumw=population['rate']['full_gen']['sum_weights'],
+                cross_section_pb=population['rate']['physical_selected_cross_sections_pb'][0]['value_pb'],
+                histogram_weight='native_gen_weight/reco_inclusion_probability', no_second_filter_efficiency=True,
+                original_sources=[dict(source_id=str(index), gen_sha256=population['parent']['gen_sha256'])])
+            file.cd(); ROOT.TObjString(json.dumps(metadata)).Write('ShiftFullGenNormalization'); file.Close()
+            population['report'] = dict(main_histograms=dict(complete=True,
+                published=dict(merged_histogram=dict(path=str(path), sha256=sha(path), bytes=path.stat().st_size)),
+                full_original_exposure=metadata))
+        return components
+
+    def test_saved_composite_roundtrips_through_ordinary_reader_with_flows_and_variances(self):
+        import ROOT
+        analysis = Path(__file__).resolve().parents[2] / 'tea_shift_cmssw'
+        paths = [analysis / 'bin', analysis / 'tea/pylibs/helpers', analysis / 'tea/pylibs/logger']
+        with patch.object(sys, 'path', [str(path) for path in paths] + sys.path):
+            from shift_sample_paths import histogram_gen_normalization
+            from teaHelpers import eos_xrootd_url  # Load the reader's lazy ordinary plotting dependency.
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); components = self.sources(directory)
+            snapshots = {row['name']: sha(row['populations'][0]['report']['main_histograms']['published']['merged_histogram']['path'])
+                         for row in components}
+            result = prepare_senscalc_dy_histograms(components, directory / 'composite.root',
+                point='m1p8_lab30', campaign='overlap')
+            normalization = histogram_gen_normalization(result['histogram']['path'], 'darkphoton_m1p8_lab30')
+            self.assertEqual(normalization, dict(cross_section_pb=8., initial_weight_sum=12.))
+            file = ROOT.TFile.Open(result['histogram']['path'])
+            hist = file.Get('dimuon/ShiftDimuonVertexBoth-Both_logMass')
+            self.assertEqual(hist.GetName(), 'ShiftDimuonVertexBoth-Both_logMass')
+            factor = normalization['cross_section_pb'] / normalization['initial_weight_sum']
+            self.assertAlmostEqual(factor * hist.Integral(), 3.5)
+            self.assertAlmostEqual(factor**2 * hist.GetBinError(hist.FindBin(15.))**2, 4.75)
+            self.assertAlmostEqual(factor * hist.GetBinContent(0), 5.5)
+            self.assertAlmostEqual(factor**2 * hist.GetBinError(0)**2, 21.25)
+            self.assertAlmostEqual(factor * hist.GetBinContent(hist.GetNbinsX() + 1), 5.)
+            self.assertAlmostEqual(factor**2 * hist.GetBinError(hist.GetNbinsX() + 1)**2, 13.)
+            self.assertEqual(file.Get('rawEventsCutFlow').GetBinContent(1), 3.)
+            metadata = json.loads(file.Get('ShiftFullGenNormalization').GetString().Data())
+            self.assertEqual(metadata['component_rate_scale_application_count'], 1)
+            self.assertEqual(len(metadata['original_sources']), 2)
+            self.assertFalse(metadata['component_nanos_combined'])
+            self.assertFalse(metadata['native_nano_weights_changed'])
+            self.assertFalse(result['publication_ready'])
+            file.Close()
+            for row in components:
+                self.assertEqual(sha(row['populations'][0]['report']['main_histograms']['published']['merged_histogram']['path']),
+                                 snapshots[row['name']])
+
+    def test_changed_receipt_missing_response_and_axis_mismatch_fail_before_output(self):
+        import ROOT
+        for change in ('checksum', 'exposure', 'receipt', 'axes', 'missing_histogram'):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); components = self.sources(directory)
+                population = components[1]['populations'][0]
+                marker = population['report']['main_histograms']; item = marker['published']['merged_histogram']
+                if change == 'checksum':
+                    item['sha256'] = '0' * 64
+                elif change == 'exposure':
+                    marker['full_original_exposure']['full_source_sumw'] = 1.
+                elif change == 'receipt':
+                    marker['complete'] = False
+                else:
+                    file = ROOT.TFile.Open(item['path'], 'UPDATE'); file.cd('dimuon')
+                    name = 'ShiftDimuonVertexBoth-Both_logMass'
+                    file.GetDirectory('dimuon').Delete(name + ';*')
+                    if change == 'axes':
+                        hist = ROOT.TH1D(name, '', 11, 0., 100.); hist.Sumw2(); hist.Write(name, ROOT.TObject.kOverwrite)
+                    file.Close(); item.update(sha256=sha(item['path']), bytes=Path(item['path']).stat().st_size)
+                with self.assertRaises((ValueError, TypeError)):
+                    prepare_senscalc_dy_histograms(components, directory / 'composite.root',
+                        point='m1p8_lab30', campaign='overlap')
+                self.assertFalse((directory / 'composite.root').exists())
+
+    def test_existing_output_is_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / 'keep.root'; output.write_bytes(b'preserve')
+            with self.assertRaises(FileExistsError):
+                prepare_senscalc_dy_histograms([], output, point='m1p8_lab30', campaign='overlap')
+            self.assertEqual(output.read_bytes(), b'preserve')
+
+    def test_completed_zero_response_keeps_original_GEN_but_pending_work_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); components = self.sources(directory)
+            reference = components[0]['populations'][0]
+            reference['rate_only'] = True
+            reference['report'] = dict(complete=True, rate_only=True, events=0)
+            result = prepare_senscalc_dy_histograms(components, directory / 'zero_response.root',
+                point='m1p8_lab30', campaign='overlap')
+            metadata = result['full_original_exposure']
+            self.assertEqual(metadata['full_source_sumw'], 12.)
+            self.assertEqual(metadata['cross_section_pb'], 8.)
+            self.assertEqual(len(metadata['original_sources']), 2)
+            reference['report']['complete'] = False
+            with self.assertRaisesRegex(ValueError, 'complete zero-response'):
+                prepare_senscalc_dy_histograms(components, directory / 'pending.root',
+                    point='m1p8_lab30', campaign='overlap')
+            self.assertFalse((directory / 'pending.root').exists())
 
 
 class PopulationAccounting(unittest.TestCase):

@@ -515,6 +515,152 @@ def senscalc_dy_component_rates(components, *, point, campaign):
         method='Pool identical estimates within each mechanism; sum inclusive SensCalc and native DY rates')
 
 
+def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
+    """Prepare a local histogram-only sum of completed physical components.
+
+    Inputs are the qualified populations consumed by ``senscalc_dy_component_rates``.
+    Each nonempty response needs its completed ``report.main_histograms`` marker.
+    A caller may stage a remote file as ``population.local_histogram_path``;
+    its original publication checksum and metadata are still required. Native
+    Nanos stay separate. This function neither transfers outputs nor publishes
+    an alias, and it does not qualify the source model or detector response.
+    """
+    import numpy as np
+    import ROOT
+    from dark_photon_production_support import histogram_inventory
+    from run_shift_sm_postprocessing import validate_dimuon_histograms
+
+    output = Path(output)
+    if output.exists():
+        raise FileExistsError('Preserve existing composite output: ' + str(output))
+    rate = senscalc_dy_component_rates(components, point=point, campaign=campaign)
+    scales = {row['name']: row for row in rate['components']}
+    expected, merged, originals, sources = {}, {}, [], []
+    for component in components:
+        scale = scales[component['name']]['histogram_scale']
+        seen = set()
+        for population in component['populations']:
+            # The rate helper already validated all recovery views. Adopt the
+            # same first view without rescanning its complete identity census.
+            identity = population['parent']['gen_sha256']
+            if identity in seen:
+                continue
+            seen.add(identity)
+            parent, record, report = population['parent'], population['rate'], population['report']
+            if population.get('rate_only'):
+                if report.get('complete') is not True or report.get('rate_only') is not True or report.get('events') != 0:
+                    raise ValueError('Missing complete zero-response receipt')
+                originals.append(dict(component=component['name'], gen_sha256=parent['gen_sha256'],
+                    full_source_events=record['full_gen']['accepted_events'], signal_rate_record=record,
+                    response='completed_rate_only'))
+                continue
+            marker = report.get('main_histograms', {})
+            item = marker.get('published', {}).get('merged_histogram', {})
+            if marker.get('complete') is not True or type(item.get('bytes')) is not int or item['bytes'] <= 0:
+                raise ValueError('Every response needs a completed main histogram receipt')
+            path = checked(population.get('local_histogram_path', item.get('path')), item.get('sha256'))
+            if path.stat().st_size != item['bytes']:
+                raise ValueError('Completed component histogram size changed')
+            inventory = histogram_inventory(path)
+            root = ROOT.TFile.Open(str(path))
+            if not root or root.IsZombie() or root.TestBit(ROOT.TFile.kRecovered):
+                raise ValueError('Unreadable completed component histogram: ' + str(path))
+            try:
+                validate_dimuon_histograms(root)
+                embedded = root.Get('ShiftFullGenNormalization')
+                metadata = json.loads(embedded.GetString().Data()) if embedded else {}
+                original = metadata.get('original_sources', [])
+                if (metadata != marker.get('full_original_exposure') or
+                        metadata.get('schema') != 'shift-preserved-full-GEN-histogram-v1' or
+                        metadata.get('stratum') != 'darkphoton_' + population['source']['point'] or
+                        metadata.get('histogram_weight') != 'native_gen_weight/reco_inclusion_probability' or
+                        metadata.get('no_second_filter_efficiency') is not True or
+                        metadata.get('full_source_sumw') != record['full_gen']['sum_weights'] or
+                        not math.isclose(metadata.get('cross_section_pb', -1.),
+                            record['physical_selected_cross_sections_pb'][0]['value_pb'], rel_tol=1e-12) or
+                        len(original) != 1 or original[0].get('gen_sha256') != parent['gen_sha256']):
+                    raise ValueError('Component histogram exposure differs from its original GEN record')
+                if merged and set(inventory) != set(merged):
+                    raise ValueError('Component histogram names differ')
+                for name, bins in inventory.items():
+                    obj = root.Get(name)
+                    factor = 1. if name == 'rawEventsCutFlow' else scale
+                    if name != 'rawEventsCutFlow' and (
+                            bins['classname'] not in ('TH1D', 'TH1F', 'TH2D', 'TH2F', 'TH3D', 'TH3F') or
+                            obj.GetSumw2N() == 0 or obj.GetNormFactor() != 0):
+                        raise ValueError('Physical component histograms need floating bins and explicit Sumw2: ' + name)
+                    if name in expected:
+                        previous = expected[name]
+                        if (bins['classname'] != previous['classname'] or len(bins['axes']) != len(previous['axes']) or
+                                any(not np.array_equal(a, b) for a, b in zip(bins['axes'], previous['axes']))):
+                            raise ValueError('Component histogram axes or types differ: ' + name)
+                        previous['values'] += factor * bins['values']
+                        previous['variances'] += factor**2 * bins['variances']
+                        previous['entries'] += bins['entries']
+                    else:
+                        expected[name] = dict(bins, values=factor * bins['values'],
+                            variances=factor**2 * bins['variances'])
+                    clone = obj.Clone('component_' + hashlib.sha256(
+                        (parent['gen_sha256'] + name).encode()).hexdigest()[:20])
+                    clone.SetDirectory(0); clone.SetName(obj.GetName()); clone.Scale(factor)
+                    if name in merged:
+                        merged[name].Add(clone)
+                    else:
+                        merged[name] = clone
+                originals.extend(dict(row, component=component['name']) for row in original)
+                sources.append(dict(component=component['name'], publication=item,
+                    gen_sha256=parent['gen_sha256'], histogram_scale=scale,
+                    full_original_exposure=metadata))
+            finally:
+                root.Close()
+    if not merged:
+        raise ValueError('No completed component histograms are available')
+    normalization = dict(rate['histogram_normalization'], components=[dict(
+        name=row['name'], mechanism=row['mechanism'], full_gen_weight_sum=row['full_gen_weight_sum'],
+        selected_cross_section_pb=row['selected_cross_section_pb'],
+        cross_section_per_gen_weight_pb=row['cross_section_per_gen_weight_pb'],
+        histogram_scale=row['histogram_scale'], original_gen_sha256=[p['gen_sha256']
+            for p in row['rate']['per_population']])
+        for row in rate['components']])
+    metadata = dict(schema='shift-preserved-full-GEN-histogram-v1', stratum='darkphoton_' + point,
+        full_source_sumw=normalization['reference_gen_weight_sum'],
+        cross_section_pb=rate['physical_selected_cross_sections_pb'][0]['value_pb'],
+        denominator_kind='component_reference_gen_weight_sum', original_sources=originals,
+        histogram_weight='native_gen_weight*component_rate_scale/reco_inclusion_probability',
+        no_second_filter_efficiency=True, component_rate_scale_application_count=1,
+        component_rate_normalization=normalization, component_nanos_combined=False,
+        native_nano_weights_changed=False, unscaled_diagnostic_histograms=['rawEventsCutFlow'],
+        source_rate_combination=rate['combination'], partial_production=True,
+        physics_normalization_ready=False, forced_decay_branching_convention_ready=True)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    target = ROOT.TFile.Open(str(output), 'CREATE')
+    if not target or target.IsZombie():
+        raise OSError('Cannot create composite histogram: ' + str(output))
+    try:
+        for name, histogram in merged.items():
+            directory = target
+            parts = name.split('/')
+            for part in parts[:-1]:
+                directory = directory.GetDirectory(part) or directory.mkdir(part)
+            directory.cd(); histogram.Write(parts[-1])
+        target.cd()
+        ROOT.TObjString(json.dumps(metadata, sort_keys=True)).Write('ShiftFullGenNormalization')
+    finally:
+        target.Close()
+    actual = histogram_inventory(output)
+    for name, bins in expected.items():
+        if (name not in actual or not np.allclose(actual[name]['values'], bins['values'], rtol=2e-7, atol=1e-10) or
+                not np.allclose(actual[name]['variances'], bins['variances'], rtol=1e-10, atol=1e-10) or
+                actual[name]['entries'] != bins['entries']):
+            raise ValueError('Composite histogram readback changed contents, flows or Sumw2: ' + name)
+    return dict(schema='shift-senscalc-dy-local-histogram-v1', complete=True, point=point,
+        histogram=dict(path=str(output), sha256=sha(output), bytes=output.stat().st_size),
+        full_original_exposure=metadata, component_inputs=sources, rate=rate,
+        histogram_only=True, new_nano_files_created=False, component_nanos_combined=False,
+        native_nano_weights_changed=False, flow_bins_checked=True, sum_weights_squared_checked=True,
+        physics_valid=False, publication_ready=False)
+
+
 def load_source(source, expected_model, conditions_digest):
     plan_path = checked(source['plan_path'], source['plan_sha256'])
     plan, directory = read(plan_path), plan_path.parent

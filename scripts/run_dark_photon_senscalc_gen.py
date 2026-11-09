@@ -192,6 +192,100 @@ def unweight(rows,seed,envelope=None):
         interpretation='Finite source-bank Bernoulli draws, not Pythia internal trials or new collision exposure')
 
 
+BENCHMARK_SIDECARS={'definition':'pbc_bc1_benchmark.json','theory_weights':'source_theory_weights.json'}
+
+
+def benchmark_source_metadata(directory,contract,selected,bremsstrahlung):
+    """Describe a new pointlike source without changing any GEN draw or weight."""
+    from dark_photon_senscalc import FR_VARIATIONS,fr_variation_weights,pbc_bc1_benchmark
+    from dark_photon_bremsstrahlung import form_factor_table
+    if (contract['production_mechanism']!=INCLUSIVE_MECHANISM or
+            contract['rate_profile']!='pointlike' or bremsstrahlung is None):
+        raise ValueError('PBC source metadata requires the pointlike reference plus FR')
+    profile=bremsstrahlung.profile
+    tables=(Path(directory)/'bremsstrahlung_inputs').resolve()
+    definition=pbc_bc1_benchmark(contract['mass_gev'],contract['epsilon'],
+        radiation_variation=profile['form_factor_variation'],
+        table_directory=tables)
+    reference=next(row for row in definition['components'] if row['name']=='senscalc')
+    reference['bremsstrahlung']['table_directory']='bremsstrahlung_inputs'
+    if not equivalent_numbers(reference['bremsstrahlung'],profile):
+        raise ValueError('New PBC metadata requires a published named FR source profile')
+    variants={}
+    for name,scale in FR_VARIATIONS:
+        maximum=form_factor_table(str(tables),name)[-1][0]
+        available=contract['mass_gev']<maximum
+        variants[name]=dict(available=available,lambda_p_gev=scale,
+            reason=None if available else 'Mass reaches the pinned form-factor table endpoint; no extrapolation')
+    run=contract['run_number'];records=[]
+    if type(run) is not int or run<=0 or len(selected)!=contract['requested_events']:
+        raise ValueError('Source theory weights require the exact GEN run and event count')
+    for slot,row in enumerate(selected,1):
+        if row['event_slot']!=slot:
+            raise ValueError('Source theory weights require ordered original GEN event slots')
+        if row['id'] in CHANNELS:
+            mechanism=CHANNELS[row['id']];weights={name:1. for name,scale in FR_VARIATIONS}
+        elif row['id']==32 and row.get('mechanism')=='proton-bremsstrahlung':
+            mechanism='proton-bremsstrahlung'
+            if all(item['available'] for item in variants.values()):
+                weights=fr_variation_weights(bremsstrahlung,row,table_directory=tables)
+            else:
+                # Only the central table extends from 1.99 to 2 GeV, where
+                # its own central-profile density ratio is exactly one.
+                if profile['form_factor_variation']!='Central':
+                    raise ValueError('No supported nominal FR scenario at this mass')
+                weights={name:1. if item['available'] else None for name,item in variants.items()}
+        else:
+            raise ValueError('Unknown source component cannot receive theory weights')
+        records.append(dict(event_id=[run,1,slot],source_trial=row['source_trial'],
+            source_index=row['index'],mechanism=mechanism,weights=weights))
+    theory=dict(schema='shift-source-FR-theory-weights-v1',nominal_scenario=profile['form_factor_variation'],
+        variations=variants,correlated_across_masses=True,records=records,
+        normalization='Multiply the nominal physical event weight by the source density ratio once; retain the original GEN denominator',
+        extra_integrated_cross_section_ratio=False,native_GEN_weights_changed=False,
+        source_component='senscalc',source_qualified=False,production_qualified=False)
+    return dict(definition=definition,theory_weights=theory)
+
+
+def write_benchmark_source_metadata(directory,contract,selected,bremsstrahlung):
+    """Attach metadata only while sealing a new pointlike FR source contract."""
+    from dark_photon_senscalc import FR_VARIATIONS
+    directory=Path(directory)
+    if contract['rate_profile']!='pointlike':
+        contract['benchmark_scope']='Alternative meson rate profile; outside the pinned pointlike benchmark'
+        return False
+    profile=bremsstrahlung.profile
+    if profile['lambda_p_gev']!=dict(FR_VARIATIONS).get(profile['form_factor_variation']):
+        contract['benchmark_scope']='Custom FR profile; outside the pinned named benchmark'
+        return False
+    sidecars=benchmark_source_metadata(directory,contract,selected,bremsstrahlung)
+    references=dict(schema='shift-pbc-source-metadata-v1',component='senscalc')
+    for key,name in BENCHMARK_SIDECARS.items():
+        write_json(directory/name,sidecars[key])
+        references[key]=dict(path=name,sha256=digest(directory/name))
+    contract['benchmark_metadata']=references
+    return True
+
+
+def validate_benchmark_source_metadata(directory,contract,selected,bremsstrahlung):
+    """Replay optional new metadata; old frozen contracts keep their old path."""
+    if 'benchmark_metadata' not in contract:return
+    directory=Path(directory);references=contract['benchmark_metadata']
+    if (not isinstance(references,dict) or references.get('schema')!='shift-pbc-source-metadata-v1' or
+            references.get('component')!='senscalc' or
+            set(references)!=set(BENCHMARK_SIDECARS)|{'schema','component'}):
+        raise ValueError('Invalid PBC source metadata references')
+    expected=benchmark_source_metadata(directory,contract,selected,bremsstrahlung)
+    for key,name in BENCHMARK_SIDECARS.items():
+        record=references[key]
+        if (not isinstance(record,dict) or record.get('path')!=name or
+                digest(directory/name)!=record.get('sha256')):
+            raise ValueError('Changed PBC source metadata authority: '+name)
+        saved=json.loads((directory/name).read_text())
+        if not equivalent_numbers(saved,expected[key]):
+            raise ValueError('PBC source metadata differs from the exact selected source: '+name)
+
+
 def decay_momenta(parent,mass,ctau,rng):
     """Isotropic reference decay, using a boost stable at large gamma."""
     energy,*momentum=parent
@@ -296,6 +390,7 @@ def accounting(directory,contract):
             digest(source/'manifest.json')!=contract['source_manifest_sha256'] or
             ledger_digest(source_ledger(source)[0])!=contract['source_ledger_sha256']):
         raise ValueError('Changed finite-bank unweighting, source identities or exposure')
+    validate_benchmark_source_metadata(directory,contract,selected,brem)
     exposure=json.loads((directory/'source_exposure.json').read_text())
     expected_exposure=dict(schema='shift-senscalc-source-exposure-v1',source_collisions=summary['source_collisions'],
         fixed_source_collisions=summary['source_collisions'],accepted_signal_events=len(selected),
@@ -373,7 +468,8 @@ def rate_record(contract,audit,*,point,campaign,source_hashes,gen_path,gen_sha25
         polarization_model=contract['polarization_model'],seed=contract['seed'],run_number=contract['run_number'],
         rate_scope=audit['rate_scope'],runtime_validated=True,physics_valid=False,normalization_ready=False,
         production_rate_validated=False,low_mass_mechanisms_included=True,prompt_interference_included=False,
-        gen_path=gen_path,gen_sha256=gen_sha256,source_sha256=source_hashes,exporter_sha256=digest(__file__))
+        gen_path=gen_path,gen_sha256=gen_sha256,source_sha256=source_hashes,exporter_sha256=digest(__file__),
+        **(dict(benchmark_metadata=contract['benchmark_metadata']) if 'benchmark_metadata' in contract else {}))
 
 
 def run(args):
@@ -456,6 +552,7 @@ def run(args):
                 bremsstrahlung_sampler_sha256=digest(output/'dark_photon_bremsstrahlung.py'),
                 source_model='Pinned ISR-off ND meson/fragmentation plus primary-beam FR proton bremsstrahlung')
             result['backend']=mechanism
+            write_benchmark_source_metadata(output,contract,selected,brem)
         write_hepmc(output/'signal.hepmc',selected,mass,width['ctau_mm'],args.seed)
         contract['signal_ascii_sha256']=digest(output/'signal.hepmc')
         if args.jaw_profile is not None:

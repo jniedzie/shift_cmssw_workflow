@@ -32,6 +32,118 @@ CHANNELS = {4900111:'pi0-decay', 4900221:'eta-decay', 4900331:'eta-prime-decay',
             4900333:'phi-fragmentation'}
 REFERENCES = ['https://arxiv.org/abs/2409.11096', 'https://arxiv.org/abs/2504.06828',
               'https://gitlab.com/YehorKyselyov/pythia-mixing/-/tree/'+PYTHIA_COMMIT]
+FR_VARIATIONS=(('Lower',.5),('Central',1.),('Upper',2.))
+
+
+def fr_variation_weights(sampler,candidate,table_directory=None):
+    """Correlated FR density ratios at the recorded source momentum.
+
+    Keep the original GEN denominator, sampling weight and decay point.
+    Multiply by this ratio once, without another integrated-rate ratio.
+    Nominal source sampling remains in its unchanged frozen kernel.
+    """
+    from dark_photon_bremsstrahlung import PROTON_MASS_GEV,density_pb,form_factors
+    if candidate.get('id')!=32 or candidate.get('mechanism')!='proton-bremsstrahlung':
+        raise ValueError('FR variations require an identified proton-radiation candidate')
+    p4=candidate.get('p4')
+    if (not isinstance(p4,list) or len(p4)!=4 or
+            any(type(value) not in (int,float) or not math.isfinite(value) for value in p4)):
+        raise ValueError('Require the finite recorded source four-momentum')
+    energy,px,py,pz=p4
+    if energy<=0 or not math.isclose(energy,math.hypot(sampler.mass,px,py,pz),rel_tol=64*math.ulp(1.)):
+        raise ValueError('Source momentum differs from the nominal on-shell mass')
+    z=-pz/math.sqrt(sampler.energy**2-PROTON_MASS_GEV**2)
+    if not sampler.profile['z_range'][0]<z<sampler.profile['z_range'][1]:
+        raise ValueError('Source momentum leaves the frozen beam direction or z support')
+    pt=math.hypot(px,py)
+    nominal=density_pb(sampler.mass,z,pt,sampler.energy,factors=sampler.factors,lambda_p_gev=sampler.scale)
+    if nominal<=0:
+        raise ValueError('Cannot reweight a candidate without positive nominal FR density')
+    tables=Path(table_directory) if table_directory is not None else Path(sampler.profile['table_directory'])
+    if not tables.is_absolute():
+        raise ValueError('Relative form-factor inputs require an explicit frozen table directory')
+    weights={}
+    for variation,scale in FR_VARIATIONS:
+        factors=form_factors(sampler.mass,tables,variation)
+        weights[variation]=density_pb(sampler.mass,z,pt,sampler.energy,
+            factors=factors,lambda_p_gev=scale)/nominal
+    return weights
+
+
+def pbc_bc1_benchmark(mass,epsilon,*,radiation_variation='Central',table_directory=None):
+    """Specify one visible benchmark without qualifying or running a source.
+
+    PBC BC1 defines the particle; the pinned SensCalc prescription supplies
+    this source model. Its DY overlap starts at 1.5 GeV. Tabulation endpoints
+    limit the radiation calculation, not the existence of physical radiation.
+    The returned components share one physical epsilon and decay-width model;
+    technical proposal couplings and exposure remain component-specific.
+
+    New producers can attach this definition before sealing a new contract.
+    Keep it as a sidecar for an old frozen replay; do not change pinned bytes.
+    """
+    from dark_photon_meson import MUON_MASS_GEV
+    from dark_photon_bremsstrahlung import form_factor_table,sampling_profile
+    from run_dark_photon_spectral_gen import NATIVE_EW,PINNED_DARKCAST_COMMIT
+    if (not math.isfinite(mass) or not 2*MUON_MASS_GEV<mass<NATIVE_EW.m_z_gev or
+            not math.isfinite(epsilon) or not 0<epsilon<=.01):
+        raise ValueError('This implementation requires an open dimuon mass below mZ and physical epsilon in (0, 0.01]')
+    scales=dict(FR_VARIATIONS)
+    if radiation_variation not in scales:
+        raise ValueError('Use the correlated Lower, Central or Upper FR scenario')
+    tables=(Path(table_directory) if table_directory is not None else
+            Path(__file__).resolve().parents[1]/'config/reference/senscalc').resolve()
+    maxima={name:form_factor_table(str(tables),name)[-1][0] for name in scales}
+    components=[]
+    if mass<2.:
+        if mass>=maxima[radiation_variation]:
+            raise ValueError('Requested FR scenario is outside its pinned table; no extrapolation or zero-rate replacement')
+        profile=sampling_profile(mass,lambda_p_gev=scales[radiation_variation],
+                                 variation=radiation_variation)
+        profile['table_directory']=str(tables)
+        components.append(dict(name='senscalc',
+            mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+            channels=list(CHANNELS.values())+['proton-bremsstrahlung'],
+            meson_decay_profile='pointlike',source_ISR=False,
+            bremsstrahlung=profile,
+            source_graph=dict(collision_activity=False,source_parent_transport=False,
+                dimuon_decay='isotropic in the dark-photon rest frame',decay_photon_radiation=False)))
+    if mass>=1.5:
+        components.append(dict(name='dy',mechanism='pure-on-shell-drell-yan',
+            coupling_model='exact-hypercharge',rate_order='LO',
+            higher_order_corrections_qualified=False,
+            source_graph=dict(prescription='native PYTHIA event and decay matrix element')))
+    spectral=mass<12.
+    width=dict(provider='DarkCast 2.1' if spectral else 'native exact-hypercharge fermion widths',
+        scope='photon-like spectral visible widths' if spectral else 'open SM fermions, including neutrinos',
+        neutral_current_width_included=not spectral,
+        hidden_decay_channels=False,lifetime='hbar_c / total physical width',
+        br_mumu='physical dimuon partial width / total physical width')
+    if spectral:
+        width['commit']=PINNED_DARKCAST_COMMIT
+    return dict(schema='shift-pbc-bc1-senscalc-benchmark-v1',mass_gev=mass,epsilon=epsilon,
+        particle_model='PBC-BC1-visible-hypercharge',
+        implementation_mass_scope_gev=dict(minimum=2*MUON_MASS_GEV,maximum=NATIVE_EW.m_z_gev,
+                                           endpoints='open',scope='current implementation, not the PBC model definition'),
+        low_mass_coupling='epsilon * e * Q_f',
+        high_mass_coupling='exact hypercharge mixing; retain neutral-current and axial terms',
+        physical_parameters=['mass_gev','epsilon'],width=width,components=components,
+        combination=dict(method='Sum physical component yields, pooling repeated estimates only within each component',
+            common_physical_point=['mass_gev','epsilon','proper_ctau_mm','physical_br_mumu'],
+            separate_GEN_denominators=True,apply_epsilon_and_dimuon_branching_once=True),
+        radiation=dict(scenario=radiation_variation,correlated_across_masses=True,
+            lambda_p_gev=scales[radiation_variation],table_max_mass_gev=maxima,
+            applicable=mass<2.,outside_support='Unmodelled by this tabulation; not a physical zero'),
+        source_assumptions=dict(beam_energy_gev=6800.,target='stationary proton',beam_direction=-1),
+        shared_benchmark_omissions=['omega -> pi0 A-prime decay','higher vector-resonance fragmentation',
+                                   'target cascades'],
+        implementation_source_scope='SensCalc meson/fragmentation plus FR below 2 GeV; DY from 1.5 GeV',
+        unmodelled_above_source_range=(['FR radiation outside its table',
+                                       'fragmentation outside the qualified source-adapter range'] if mass>=2. else []),
+        references=['https://arxiv.org/abs/1901.09966',*REFERENCES,
+                    'https://arxiv.org/abs/1801.04847','https://arxiv.org/abs/1412.0018'],
+        senscalc_commit=SENSCALC_COMMIT,source_pythia_commit=PYTHIA_COMMIT,
+        model_definition_specified=True,source_qualified=False,production_qualified=False)
 
 
 def digest(path):

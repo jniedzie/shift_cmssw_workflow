@@ -824,6 +824,17 @@ def input_files(directory, manifest):
             raise ValueError('Initialized native source configuration changed')
         names.add('source_configuration.json')
     contract=read(directory/'contract.json')
+    if 'benchmark_metadata' in contract:
+        references=contract['benchmark_metadata']
+        if (not isinstance(references,dict) or references.get('schema')!='shift-pbc-source-metadata-v1' or
+                references.get('component')!='senscalc'):
+            raise ValueError('Invalid PBC source metadata references')
+        for key,name in (('definition','pbc_bc1_benchmark.json'),('theory_weights','source_theory_weights.json')):
+            record=references.get(key,{})
+            if (not isinstance(record,dict) or record.get('path')!=name or
+                    sha256(directory/name)!=record.get('sha256')):
+                raise ValueError('Changed PBC source metadata authority: '+name)
+            names.add(name)
     if contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         names.update({'source_exposure.json','source_manifest.json',
                       'selected_signals.json','radiative_model.json'})

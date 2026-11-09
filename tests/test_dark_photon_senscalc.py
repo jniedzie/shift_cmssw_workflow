@@ -2,6 +2,7 @@
 import json
 import math
 import io
+import shutil
 import tarfile
 from pathlib import Path
 import sys
@@ -14,6 +15,81 @@ import dark_photon_senscalc as model
 
 
 class SensCalcBenchmark(unittest.TestCase):
+    def test_pbc_components_add_DY_in_the_published_overlap_without_replacing_radiation(self):
+        expected={.22:['senscalc'],1.49:['senscalc'],1.5:['senscalc','dy'],
+                  1.8:['senscalc','dy'],2.:['dy'],70.:['dy']}
+        for mass,names in expected.items():
+            with self.subTest(mass=mass):
+                definition=model.pbc_bc1_benchmark(mass,1.e-5)
+                self.assertEqual([row['name'] for row in definition['components']],names)
+                self.assertEqual(len(set(row['mechanism'] for row in definition['components'])),len(names))
+                self.assertTrue(definition['combination']['separate_GEN_denominators'])
+                self.assertTrue(definition['combination']['apply_epsilon_and_dimuon_branching_once'])
+                self.assertFalse(definition['source_qualified'])
+                self.assertFalse(definition['production_qualified'])
+        overlap=model.pbc_bc1_benchmark(1.8,1.e-5)
+        self.assertIn('isotropic',overlap['components'][0]['source_graph']['dimuon_decay'])
+        self.assertIn('native PYTHIA',overlap['components'][1]['source_graph']['prescription'])
+
+    def test_pbc_radiation_scenarios_keep_published_correlation_and_real_table_endpoints(self):
+        for name,scale in [('Lower',.5),('Central',1.),('Upper',2.)]:
+            definition=model.pbc_bc1_benchmark(.9,1.e-5,radiation_variation=name)
+            radiation=definition['radiation'];source=definition['components'][0]
+            self.assertEqual((radiation['scenario'],radiation['lambda_p_gev']),(name,scale))
+            self.assertTrue(radiation['correlated_across_masses'])
+            self.assertEqual(radiation['table_max_mass_gev'],dict(Lower=1.99,Central=2.,Upper=1.99))
+            self.assertEqual(source['bremsstrahlung']['form_factor_variation'],name)
+            self.assertEqual(source['bremsstrahlung']['lambda_p_gev'],scale)
+            self.assertFalse(source['source_ISR'])
+        for name in ('Lower','Upper'):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(ValueError,'no extrapolation or zero-rate'):
+                    model.pbc_bc1_benchmark(1.99,1.e-5,radiation_variation=name)
+        self.assertEqual(len(model.pbc_bc1_benchmark(1.99,1.e-5)['components']),2)
+        beyond=model.pbc_bc1_benchmark(2.,1.e-5,radiation_variation='Upper')
+        self.assertFalse(beyond['radiation']['applicable'])
+        self.assertIn('not a physical zero',beyond['radiation']['outside_support'])
+        self.assertTrue(any('fragmentation' in scope for scope in beyond['unmodelled_above_source_range']))
+
+    def test_pbc_definition_can_use_the_pinned_tables_in_a_frozen_deployment(self):
+        original=Path(model.__file__).resolve().parents[1]/'config/reference/senscalc'
+        with tempfile.TemporaryDirectory() as tmp:
+            tables=Path(tmp)
+            for path in original.glob('FFproton*.txt'):shutil.copyfile(path,tables/path.name)
+            definition=model.pbc_bc1_benchmark(.9,1.e-5,table_directory=tables)
+            self.assertEqual(definition['components'][0]['bremsstrahlung']['table_directory'],str(tables.resolve()))
+
+    def test_pbc_visible_definition_keeps_SM_neutrinos_and_exact_mixing_above_spectral_range(self):
+        low=model.pbc_bc1_benchmark(1.8,.001)
+        high=model.pbc_bc1_benchmark(70.,.001)
+        self.assertEqual(low['low_mass_coupling'],'epsilon * e * Q_f')
+        self.assertEqual(low['width']['provider'],'DarkCast 2.1')
+        self.assertFalse(low['width']['neutral_current_width_included'])
+        self.assertFalse(high['width']['hidden_decay_channels'])
+        self.assertTrue(high['width']['neutral_current_width_included'])
+        self.assertIn('neutrinos',high['width']['scope'])
+        self.assertIn('axial',high['high_mass_coupling'])
+        self.assertTrue(model.pbc_bc1_benchmark(12.,.001)['width']['neutral_current_width_included'])
+        self.assertFalse(high['components'][0]['higher_order_corrections_qualified'])
+        self.assertEqual(high['components'][0]['rate_order'],'LO')
+
+    def test_pbc_definition_rejects_closed_channels_unknown_scenarios_and_unsupported_couplings(self):
+        for mass,epsilon in [(.211316751,1.e-5),(.1,1.e-5),(float('nan'),1.e-5),
+                             (1.,0.),(1.,.02),(1.,float('inf'))]:
+            with self.subTest(mass=mass,epsilon=epsilon):
+                with self.assertRaises(ValueError):model.pbc_bc1_benchmark(mass,epsilon)
+        with self.assertRaisesRegex(ValueError,'correlated'):
+            model.pbc_bc1_benchmark(.9,1.e-5,radiation_variation='Baseline')
+
+    def test_pbc_implementation_scope_stops_below_Z_without_restricting_the_particle_definition(self):
+        definition=model.pbc_bc1_benchmark(90.,1.e-5)
+        self.assertEqual(definition['implementation_mass_scope_gev']['maximum'],91.1876)
+        self.assertIn('not the PBC model',definition['implementation_mass_scope_gev']['scope'])
+        for mass in (91.1876,100.):
+            with self.subTest(mass=mass):
+                with self.assertRaisesRegex(ValueError,'below mZ'):
+                    model.pbc_bc1_benchmark(mass,1.e-5)
+
     def test_source_capsule_checks_downloaded_bytes_and_rejects_archive_escape(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);archive=root/'payload.tar.gz'
