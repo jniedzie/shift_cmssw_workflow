@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from aggregate_dark_photon_samples import (combined_rate, disjoint_parent_component_rates,
+                                         senscalc_dy_component_rates,
                                          completed_histogram_input, event_rows, execute, group_inputs,
                                          qualified_finalizer, sha, unique_populations,
                                          validate_event_rows, verify_aggregate_seal,
@@ -214,6 +215,203 @@ class DisjointParentAccounting(unittest.TestCase):
                     second['name'] = 'old'
                 elif case == 'missing_conditions':
                     del second['conditions_sha256']
+                with self.assertRaises(ValueError):
+                    self.combine([first, second])
+
+
+class SensCalcDYAccounting(unittest.TestCase):
+    @staticmethod
+    def component(name, run, events=2, trials=100, rate=2., reference=False):
+        sample = population(run, events, trials, rate)
+        record = sample['rate']
+        record.update(mass_gev=1.8, generated_mass_support_gev=[1.782, 1.818],
+            mechanism='pure-on-shell-drell-yan', source_sha256={
+                key: hashlib.sha256((str(run) + key).encode()).hexdigest()
+                for key in ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log')})
+        if reference:
+            record.update(mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+                sampling_epsilon=record['epsilon'], generated_mass_support_gev=[1.7999982, 1.8000018],
+                source_model='ISR-off reference source', cross_section_convention='Reference dimuon rate',
+                rate_profile='pointlike', radiative_model_sha256='a' * 64,
+                source_graph_scope='isolated signal', polarization_model='isotropic',
+                rate_scope='reference ND mesons, fragmentation and FR',
+                source_ledger_sha256=str(run).zfill(64), source_seed=run,
+                source_sampling=dict(proposal_probability=.01, unweighting_envelope=4.,
+                    bremsstrahlung_profile_sha256='b' * 64, bremsstrahlung_sampler_sha256='c' * 64),
+                bremsstrahlung_profile_identity=dict(raw_sha256='b' * 64, physics_sha256='d' * 64),
+                source_exposure=dict(source_collisions=trials, fixed_source_collisions=trials,
+                    accepted_signal_events=events))
+            record['full_gen']['source_collisions'] = trials
+        return dict(name=name, conditions_sha256='a' * 64, populations=[sample])
+
+    def combine(self, components):
+        return senscalc_dy_component_rates(components, point='m1p8_lab30', campaign='overlap')
+
+    def test_pool_each_mechanism_then_sum_rates_with_independent_denominators(self):
+        reference = self.component('inclusive', 10, 2, 100, 2., reference=True)
+        reference['populations'] += self.component('repeat', 20, 8, 300, 6., reference=True)['populations']
+        dy = self.component('dy', 30, 2, 100, 3.)
+        result = self.combine([reference, dy])
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'], 8.)
+        self.assertAlmostEqual(result['physical_selected_cross_sections_pb'][0]['error_pb'],
+                               math.sqrt(.025**2 + .075**2 + .1**2))
+        low, high = result['components']
+        self.assertEqual(low['rate']['combination']['normalized_weights'], [.25, .75])
+        self.assertEqual([low['full_gen_weight_sum'], high['full_gen_weight_sum']], [10., 2.])
+        normalization = result['histogram_normalization']['cross_section_per_stored_weight_pb']
+        factors = [row['histogram_scale'] for row in result['components']]
+        # Two selected reference events and one selected DY event: preserve
+        # the rest of each original GEN denominator, including failed selection.
+        self.assertAlmostEqual(normalization * (2 * factors[0] + factors[1]), 2.5)
+        self.assertAlmostEqual(normalization**2 * (2 * factors[0]**2 + factors[1]**2), 2.75)
+        self.assertAlmostEqual(normalization * sum(
+            row['histogram_scale'] * row['full_gen_weight_sum'] for row in result['components']), 8.)
+        # Technical proposal epsilon, mass support and convention stay attached
+        # to their own component, rather than being silently made identical.
+        self.assertEqual(low['rate']['sampling_epsilon'], 1e-7)
+        self.assertEqual(high['rate']['sampling_epsilon'], .005)
+        self.assertNotEqual(low['rate']['cross_section_convention'], high['rate']['cross_section_convention'])
+        self.assertFalse(result['normalization_ready'])
+
+    def test_same_population_recovery_view_does_not_add_rate_or_exposure(self):
+        reference = self.component('inclusive', 10, reference=True)
+        reference['populations'].append(copy.deepcopy(reference['populations'][0]))
+        result = self.combine([reference, self.component('dy', 30, rate=3.)])
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'], 5.)
+        self.assertEqual(result['components'][0]['full_gen_weight_sum'], 2.)
+
+    def test_more_GEN_at_the_same_efficiency_preserves_yield_and_reduces_variance(self):
+        measured = []
+        for size in (1, 2):
+            reference = self.component('inclusive', 10, 10 * size, 400 * size, 5., reference=True)
+            result = self.combine([reference, self.component('dy', 30, 2 * size, 100 * size, 3.)])
+            scale = result['histogram_normalization']['cross_section_per_stored_weight_pb']
+            a, b = [row['histogram_scale'] for row in result['components']]
+            measured.append((scale * size * (2 * a + b), scale**2 * size * (2 * a**2 + b**2)))
+        self.assertAlmostEqual(measured[0][0], measured[1][0])
+        self.assertAlmostEqual(measured[1][1], measured[0][1] / 2)
+
+    def test_ROOT_component_scaling_preserves_sampling_weights_and_variance(self):
+        try:
+            import ROOT
+        except ImportError:
+            self.skipTest('ROOT is needed for the real histogram scaling control')
+        result = self.combine([self.component('inclusive', 10, 10, 400, 5., reference=True),
+                               self.component('dy', 30, 2, 100, 3.)])
+        selected, full = [], []
+        for index, (component, weights) in enumerate(zip(result['components'], [(1., 3.), (1.,)])):
+            hist = ROOT.TH1D('overlap_selected_' + str(index), '', 1, 0., 1.)
+            hist.SetDirectory(0)
+            hist.Sumw2()
+            for weight in weights:
+                hist.Fill(.5, weight)
+            hist.Scale(component['histogram_scale'])
+            selected.append(hist)
+            complete = ROOT.TH1D('overlap_full_' + str(index), '', 1, 0., 1.)
+            complete.SetDirectory(0)
+            complete.Sumw2()
+            for unused in range(int(component['full_gen_weight_sum'])):
+                complete.Fill(.5)
+            complete.Scale(component['histogram_scale'])
+            full.append(complete)
+        normalization = result['histogram_normalization']['cross_section_per_stored_weight_pb']
+        selected[0].Add(selected[1])
+        selected[0].Scale(normalization)
+        full[0].Add(full[1])
+        full[0].Scale(normalization)
+        self.assertAlmostEqual(selected[0].Integral(), 3.5)
+        self.assertAlmostEqual(selected[0].GetBinError(1)**2, 4.75)
+        self.assertAlmostEqual(full[0].Integral(), 8.)
+
+    def test_other_or_duplicate_mechanisms_are_not_independent_components(self):
+        for mechanism in ('senscalc-meson-fragmentation-bremsstrahlung',
+                          'senscalc-meson-fragmentation', 'meson-radiative', 'pure-on-shell-DY'):
+            with self.subTest(mechanism=mechanism):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                second['populations'][0]['rate']['mechanism'] = mechanism
+                with self.assertRaisesRegex(ValueError, 'nonoverlapping'):
+                    self.combine([first, second])
+        with self.assertRaises(ValueError):
+            self.combine([self.component('inclusive', 10, reference=True)])
+
+    def test_cross_component_reuse_rejects_ids_runs_seeds_gen_and_source_hashes(self):
+        for field in ('event_ids', 'run', 'seed', 'gen_sha256', 'source_sha256',
+                      'source_seed', 'source_ledger_sha256'):
+            with self.subTest(field=field):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                a, b = first['populations'][0], second['populations'][0]
+                if field in ('event_ids', 'run'):
+                    b['parent']['event_ids'][0][0] = 10
+                    if field == 'run':
+                        b['parent']['event_ids'][0][2] = 99
+                    b['rate']['full_gen']['event_ids_sha256'] = hashlib.sha256(
+                        json.dumps(b['parent']['event_ids'], separators=(',', ':')).encode()).hexdigest()
+                elif field == 'gen_sha256':
+                    b['parent'][field] = a['parent'][field]
+                elif field == 'source_sha256':
+                    b['rate'][field] = copy.deepcopy(a['rate'][field])
+                elif field == 'source_ledger_sha256':
+                    b['rate'][field] = a['rate'][field]
+                else:
+                    b['rate'][field] = 10
+                with self.assertRaisesRegex(ValueError, 'reuse GEN'):
+                    self.combine([first, second])
+
+    def test_shared_configuration_or_log_hash_is_not_reused_collision_exposure(self):
+        first = self.component('inclusive', 10, reference=True)
+        second = self.component('dy', 30, rate=3.)
+        expected = self.combine(copy.deepcopy([first, second]))
+        for key in ('contract.json', 'cmsRun.log'):
+            second['populations'][0]['rate']['source_sha256'][key] = (
+                first['populations'][0]['rate']['source_sha256'][key])
+        actual = self.combine([first, second])
+        self.assertEqual(actual['physical_selected_cross_sections_pb'], expected['physical_selected_cross_sections_pb'])
+        self.assertEqual(actual['histogram_normalization'], expected['histogram_normalization'])
+
+    def test_source_ledger_hash_must_be_valid_when_present(self):
+        for invalid in (None, '', 'not-a-hash', 'g' * 64):
+            with self.subTest(invalid=invalid):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                second['populations'][0]['rate']['source_ledger_sha256'] = invalid
+                with self.assertRaisesRegex(ValueError, 'source ledger hash'):
+                    self.combine([first, second])
+
+    def test_incompatible_physical_points_conditions_and_missing_source_proofs_fail(self):
+        changes = dict(mass_gev=1.7, epsilon=2e-7, proper_ctau_mm=101.,
+                       physical_br_mumu=.3, beam_energy_GeV=7000.)
+        for field, value in changes.items():
+            with self.subTest(field=field):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                second['populations'][0]['rate'][field] = value
+                with self.assertRaisesRegex(ValueError, 'different physical'):
+                    self.combine([first, second])
+        for field in ('conditions_sha256', 'source_sha256', 'generated_mass_support_gev'):
+            with self.subTest(field=field):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                if field == 'conditions_sha256':
+                    second[field] = 'b' * 64
+                elif field == 'source_sha256':
+                    second['populations'][0]['rate'].pop(field)
+                else:
+                    second['populations'][0]['rate'][field] = [1.9, float('inf')]
+                with self.assertRaises(ValueError):
+                    self.combine([first, second])
+
+    def test_source_profile_and_mass_range_are_explicitly_qualified(self):
+        for field, value in [('rate_profile', 'measured-form-factor'),
+                             ('bremsstrahlung_profile_identity', None), ('mass_gev', 1.4), ('mass_gev', 2.)]:
+            with self.subTest(field=field, value=value):
+                first = self.component('inclusive', 10, reference=True)
+                second = self.component('dy', 30)
+                if value is None:
+                    first['populations'][0]['rate'].pop(field)
+                else:
+                    first['populations'][0]['rate'][field] = value
                 with self.assertRaises(ValueError):
                     self.combine([first, second])
 

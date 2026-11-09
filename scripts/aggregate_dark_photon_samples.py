@@ -379,18 +379,26 @@ def disjoint_parent_component_rates(components, *, point, campaign):
             full_gen_weight_sum=denominator,
             selected_cross_section_pb=rate['value_pb'],
             cross_section_per_gen_weight_pb=rate['value_pb'] / denominator))
+    return _component_rate_summary(rows, point=point, campaign=campaign,
+        physical=physical, conditions=conditions,
+        schema='shift-dark-photon-disjoint-parent-component-rates-v1',
+        method='Pool repeated identical proposals within each source; sum parent-disjoint source rates')
+
+
+def _component_rate_summary(rows, *, point, campaign, physical, conditions, schema, method):
+    """Keep each component denominator when representing a sum in one histogram."""
     total_sigma = math.fsum(row['selected_cross_section_pb'] for row in rows)
     total_sumw = math.fsum(row['full_gen_weight_sum'] for row in rows)
     reference = total_sigma / total_sumw
     for row in rows:
         row['histogram_scale'] = row['cross_section_per_gen_weight_pb'] / reference
-    return dict(schema='shift-dark-photon-disjoint-parent-component-rates-v1',
+    return dict(schema=schema,
         point=point, campaign=campaign, physical_point=physical,
         conditions_sha256=conditions, components=rows,
         physical_selected_cross_sections_pb=[dict(value_pb=total_sigma,
             error_pb=math.sqrt(math.fsum(
                 row['rate']['physical_selected_cross_sections_pb'][0]['error_pb']**2 for row in rows)))],
-        combination=dict(method='Pool repeated identical proposals within each source; sum parent-disjoint source rates',
+        combination=dict(method=method,
             cross_sections_summed=True, source_collisions_is_luminosity=False,
             extra_decay_branching_fraction_applied=False,
             uncertainty_scope='Independent Monte Carlo errors only; common theory/source uncertainties are not bounded'),
@@ -403,6 +411,108 @@ def disjoint_parent_component_rates(components, *, point, campaign):
             native_gen_weights_changed=False, scale_flow_bins=True, scale_sumw2_by_squared_factor=True,
             shape_normalization='Sum physical components first; normalize the resulting shape once'),
         normalization_ready=False, physics_valid=False, production_rate_validated=False)
+
+
+def senscalc_dy_component_rates(components, *, point, campaign):
+    """Prepare the missing 1.5--2 GeV SensCalc plus native-DY overlap.
+
+    The inclusive SensCalc source already owns meson decays, fragmentation and
+    proton ISR. Its audited ISR-off source and a separate native DY population
+    may add; neither a second inclusive source nor an old meson model may add.
+    Repeated estimates within either mechanism are pooled first. Their native
+    proposal epsilon values may differ, but the physical point and conditions
+    must agree. Source validation is a prerequisite, not supplied by this helper.
+
+    This is accounting only: no Nano merge, histogram scaling or publication is
+    performed, and all original source records remain attached to their rates.
+    """
+    required = {'senscalc-meson-fragmentation-bremsstrahlung', 'pure-on-shell-drell-yan'}
+    if not isinstance(components, list) or len(components) != 2:
+        raise ValueError('Require exactly the inclusive SensCalc and native DY components')
+    rows, names, mechanisms = [], set(), set()
+    all_ids, all_runs, all_seeds, all_gen = set(), set(), set(), set()
+    all_sources, all_ledgers = set(), set()
+    physical, conditions = None, None
+    common_fields = ('mass_gev', 'epsilon', 'proper_ctau_mm', 'physical_br_mumu',
+                     'beam_energy_GeV')
+    for component in components:
+        name, digest = component.get('name'), component.get('conditions_sha256')
+        if not isinstance(name, str) or not SAFE_NAME.fullmatch(name) or name in names:
+            raise ValueError('Component names must be unique safe names')
+        if not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest):
+            raise ValueError('Require pinned detector/source conditions for every component')
+        if conditions is not None and digest != conditions:
+            raise ValueError('Components have different detector/source conditions')
+        conditions = digest
+        populations = unique_populations(component['populations'])
+        first = populations[0]['rate']
+        mechanism = first.get('mechanism')
+        if mechanism not in required or mechanism in mechanisms:
+            raise ValueError('Require nonoverlapping inclusive SensCalc and native DY mechanisms')
+        current = {field: first[field] for field in common_fields}
+        if (not 1.5 <= current['mass_gev'] < 2. or
+                any(not math.isfinite(current[field]) or current[field] <= 0
+                    for field in ('epsilon', 'proper_ctau_mm', 'physical_br_mumu', 'beam_energy_GeV')) or
+                current['physical_br_mumu'] > 1):
+            raise ValueError('Require a physical dimuon point in the qualified 1.5--2 GeV overlap')
+        if physical is not None and current != physical:
+            raise ValueError('Components describe different physical points')
+        physical = current
+        if (mechanism.startswith('senscalc-') and
+                (first.get('rate_profile') != 'pointlike' or
+                 'bremsstrahlung_profile_identity' not in first)):
+            raise ValueError('Require the pinned pointlike SensCalc source with a validated FR profile')
+        pooled = combined_rate(populations, point=point, campaign=campaign)
+        for population in populations:
+            parent, record = population['parent'], population['rate']
+            support = record.get('generated_mass_support_gev')
+            if (not isinstance(support, list) or len(support) != 2 or
+                    any(type(value) not in (int, float) or not math.isfinite(value) for value in support) or
+                    not 0 < support[0] < record['mass_gev'] < support[1]):
+                raise ValueError('Every component needs finite ordered on-shell mass support')
+            identities = set(map(tuple, parent['event_ids']))
+            runs = {identity[0] for identity in identities}
+            seeds = {record['seed']}
+            if 'source_seed' in record:
+                seeds.add(record['source_seed'])
+            sources = record.get('source_sha256', {})
+            if (not isinstance(sources, dict) or
+                    not {'contract.json', 'validation.json', 'manifest.json', 'cmsRun.log'} <= sources.keys() or
+                    any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
+                        for value in sources.values())):
+                raise ValueError('Require pinned original source records for every GEN population')
+            # A shared configuration or log is not proof of reused events.
+            # Deduplicate the complete origin proof and actual source ledger.
+            source_bundle = tuple(sources[key] for key in
+                                  ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log'))
+            ledger = record.get('source_ledger_sha256')
+            if ('source_ledger_sha256' in record and
+                    (not isinstance(ledger, str) or not re.fullmatch('[0-9a-f]{64}', ledger))):
+                raise ValueError('Require a valid source ledger hash when present')
+            gen = parent['gen_sha256']
+            if (identities & all_ids or runs & all_runs or seeds & all_seeds or
+                    gen in all_gen or source_bundle in all_sources or ledger in all_ledgers):
+                raise ValueError('Components reuse GEN identities, runs, seeds or source hashes')
+            all_ids.update(identities)
+            all_runs.update(runs)
+            all_seeds.update(seeds)
+            all_gen.add(gen)
+            all_sources.add(source_bundle)
+            if ledger is not None:
+                all_ledgers.add(ledger)
+        denominator = pooled['full_gen']['sum_weights']
+        if not math.isfinite(denominator) or denominator <= 0:
+            raise ValueError('Every component needs a positive full GEN denominator')
+        rate = pooled['physical_selected_cross_sections_pb'][0]
+        rows.append(dict(name=name, mechanism=mechanism, rate=pooled,
+            full_gen_weight_sum=denominator, selected_cross_section_pb=rate['value_pb'],
+            cross_section_per_gen_weight_pb=rate['value_pb'] / denominator))
+        names.add(name)
+        mechanisms.add(mechanism)
+    return _component_rate_summary(rows, point=point, campaign=campaign,
+        physical=physical, conditions=conditions,
+        schema='shift-dark-photon-senscalc-dy-component-rates-v1',
+        method='Pool identical estimates within each mechanism; sum inclusive SensCalc and native DY rates')
 
 
 def load_source(source, expected_model, conditions_digest):
