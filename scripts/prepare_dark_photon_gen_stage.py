@@ -11,6 +11,30 @@ import shutil
 from run_dark_photon_gen_stage import read, sha256, write_new
 
 
+def dy_prescription_sources(contract, sources):
+    """Resolve only the two optional inputs named by the qualified contract."""
+    if 'dy_prescription' not in contract:
+        return {}
+    try:
+        prescription = contract['dy_prescription']
+        authority = prescription['authority']
+        names = ((authority['helper_filename'], authority['helper_sha256']),
+                 (authority['filename'], authority['sha256']))
+        result = {}
+        for name, expected in names:
+            if Path(name).name != name or name not in sources:
+                raise ValueError('Selected DY prescription is missing its qualified input: '+str(name))
+            path = Path(sources[name])
+            if sha256(path) != expected:
+                raise ValueError('Selected DY prescription input changed: '+name)
+            result[name] = path
+        if len(result) != 2:
+            raise ValueError('Selected DY prescription requires distinct helper and table inputs')
+    except (KeyError, TypeError) as error:
+        raise ValueError('Incomplete selected DY prescription closure') from error
+    return result
+
+
 def combine_plans(paths, output):
     """Keep heterogeneous event budgets and every immutable physics authority."""
     output = Path(output).resolve()
@@ -29,9 +53,19 @@ def combine_plans(paths, output):
     for path, plan in zip(paths, plans):
         if any(plan[key] != result[key] for key in shared):
             raise ValueError('Physical preparations have incompatible stage conditions')
-        for key in ('cmssw_base', 'cmssw_version', 'scram_arch', 'cmssw_git_head'):
+        for key in ('cmssw_base', 'cmssw_version', 'scram_arch'):
             if plan['runtime'][key] != result['runtime'][key]:
                 raise ValueError('Physical preparations use incompatible CMSSW runtimes')
+        current, previous = plan['runtime'], result['runtime']
+        if current.get('gitless_deployment') or previous.get('gitless_deployment'):
+            if (current.get('gitless_deployment') is not True or previous.get('gitless_deployment') is not True or
+                    not current.get('runtime_provenance') or
+                    current['runtime_provenance'] != previous.get('runtime_provenance')):
+                raise ValueError('Gitless physical preparations require identical frozen runtime provenance')
+        heads = [runtime.get('cmssw_git_head', runtime.get('runtime_provenance',{}).get('cmssw_git_head'))
+                 for runtime in (current, previous)]
+        if not heads[0] or heads[0] != heads[1]:
+            raise ValueError('Physical preparations use incompatible CMSSW revisions')
         result['points'].extend(copy.deepcopy(plan['points']))
         result['preparation_authorities'].append(dict(path=str(Path(path).resolve()), sha256=sha256(path)))
         authority = plan.get('statistics_extension_physics_authority')
@@ -118,6 +152,16 @@ def frozen_dependencies(plan):
             files[authority['path']]=authority['sha256']
     for row in plan['points']:
         files[row['signal_contract']] = row['signal_contract_sha256']
+        contract = read(row['signal_contract'])
+        if 'dy_prescription' in contract:
+            sources = {name:record['frozen_copy']
+                       for name,record in plan['frozen_dependencies']['sources'].items()}
+            dy_prescription_sources(contract, sources)
+            argv = row['gen_argv']
+            if (argv.count('--dy-prescription') != 1 or
+                    argv.index('--dy-prescription')+1 >= len(argv) or
+                    argv[argv.index('--dy-prescription')+1] != contract['dy_prescription']['name']):
+                raise ValueError('Selected DY GEN command lost its frozen prescription')
         # The spectral runner will validate its pinned package again.
         option = '--darkcast-source-receipt'
         if option in row['gen_argv']:

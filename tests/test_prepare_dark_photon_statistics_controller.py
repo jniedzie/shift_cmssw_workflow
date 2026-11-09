@@ -14,6 +14,26 @@ import run_dark_photon_statistics as statistics
 
 
 class StatisticsControllerRollover(unittest.TestCase):
+    def test_selected_worklist_rejects_an_old_LO_tools_clone(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);qualified=root/'qualified';(qualified/'tools').mkdir(parents=True)
+            old=root/'old_tools';old.mkdir();name='export_dark_photon_cross_sections.py'
+            (qualified/'tools'/name).write_text('# qualified selected exporter\n')
+            contract=root/'contract.json';contract.write_text(json.dumps(dict(dy_prescription={'name':'msht20-nnlo'})))
+            proof={name:statistics.sha(qualified/'tools'/name)}
+            worklist=qualified/'worklist.json'
+            worklist.write_text(json.dumps(dict(schema='shift-dp-adaptive-statistics-worklist-v1',
+                points={'point':dict(contract=str(contract))},dy_prescription_helpers=proof)))
+            (qualified/'seal.json').write_text(json.dumps(dict(files={str(qualified/'tools'/name):proof[name]})))
+            config=dict(worklist=str(worklist),tools=str(old))
+            with self.assertRaisesRegex(ValueError,'separately qualified tools deployment'):
+                replacement.selected_worklist_tools(config)
+            shutil.copy2(qualified/'tools'/name,old/name)
+            replacement.selected_worklist_tools(config)
+            (old/name).write_text('# older exporter silently omits the prescription\n')
+            with self.assertRaisesRegex(ValueError,'separately qualified tools deployment'):
+                replacement.selected_worklist_tools(config)
+
     def pin(self, path, value):
         path.write_text(json.dumps(value))
         return dict(path=str(path), sha256=statistics.sha(path))

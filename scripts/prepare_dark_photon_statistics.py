@@ -19,7 +19,7 @@ import shlex
 import shutil
 
 import prepare_dark_photon_grid as grid
-from prepare_dark_photon_gen_stage import combine_plans, validate_plan
+from prepare_dark_photon_gen_stage import combine_plans, validate_plan, dy_prescription_sources
 
 
 MC_FIELDS = {'requested_events', 'maximum_framework_events', 'seed', 'run_number'}
@@ -187,6 +187,7 @@ def prepare_worklist(args):
         raise ValueError('Require an explicit dated campaign base')
     output.mkdir(parents=True)
     files, sources, points, physics_sources = {}, {}, {}, {}
+    prescription_sources = {}
     fresh_profile=getattr(args,'runtime_profile',None)
     jaw_profile=getattr(args,'jaw_profile',None)
     private_gen=getattr(args,'gen_runtime',None)
@@ -245,6 +246,12 @@ def prepare_worklist(args):
             contract = read(row['signal_contract'])
             if digest(row['signal_contract']) != row['signal_contract_sha256']:
                 raise ValueError('Qualified physical contract changed: ' + name)
+            selected = dy_prescription_sources(contract, {
+                key:item['frozen_copy'] for key,item in previous['frozen_dependencies']['sources'].items()})
+            for key, path in selected.items():
+                if key in prescription_sources and digest(prescription_sources[key]) != digest(path):
+                    raise ValueError('Qualified DY prescriptions use different frozen inputs: '+key)
+                prescription_sources[key] = path
             contract_path = source_dir / 'contracts' / (name + '.json')
             if fresh_profile:
                 from dark_photon_source_placement import place_contract
@@ -269,8 +276,9 @@ def prepare_worklist(args):
     if fresh_profile:
         from run_dark_photon_spectral_gen import SOURCES as SPECTRAL_SOURCES
         from prepare_dark_photon_material_source import DEPENDENCIES as MATERIAL_SOURCES
-        for name in set(grid.SOURCES)|set(SPECTRAL_SOURCES)|set(MATERIAL_SOURCES):
-            replacement=here/name
+        replacements = {name:here/name for name in set(grid.SOURCES)|set(SPECTRAL_SOURCES)|set(MATERIAL_SOURCES)}
+        replacements.update(prescription_sources)
+        for name, replacement in replacements.items():
             if name in physics_sources:
                 operational_overrides[name]=dict(qualified_sha256=digest(physics_sources[name]),
                     replacement_sha256=digest(replacement),
@@ -282,6 +290,13 @@ def prepare_worklist(args):
             qualified_sha256=digest(original), replacement_sha256=digest(args.detector_runner),
             reason='Reviewed exact selected-index FWLite audit; detector physics unchanged')
         physics_sources['run_dark_photon_detector.py'] = str(args.detector_runner.resolve())
+    if prescription_sources:
+        from run_dark_photon_statistics import aggregate_helper_names
+        for name in aggregate_helper_names(dict(tools=str(here), main_histogrammer=True)):
+            selected = prescription_sources.get(name, here/name)
+            if name in physics_sources and digest(physics_sources[name]) != digest(selected):
+                raise ValueError('Selected DY publication helper differs from its qualified source: '+name)
+            physics_sources[name] = str(selected)
     for name, source in physics_sources.items():
         copy_checked(source, output / 'physics_scripts' / name, files)
         copy_checked(source, output / 'tools' / name, files)
@@ -306,6 +321,9 @@ def prepare_worklist(args):
             private_gen_runtime=read(output/'gen_runtime.json'),jaw_profile=str(jaw_profile),
             prior_completed_events_are_exposure_credit=False,
             fresh_source_placement_requires_fullchain_canary=True)
+    if prescription_sources:
+        worklist['dy_prescription_helpers'] = {
+            name:digest(output/'tools'/name) for name in sorted(physics_sources)}
     if worklist['total_additional_events'] != allocation['totals']['planned_next_stage_additional_events']:
         raise ValueError('Worklist changed the authorized allocation')
     write(output / 'worklist.json', worklist)
@@ -375,9 +393,18 @@ def prepare_wave(worklist_path, wave_index, output, physics_scripts=None):
         runtime['width_preflight'] = ('Inherited qualified width/coupling contracts; fresh qualified jaw law and private runtime'
             if worklist.get('private_gen_runtime') else 'Exact inherited qualified physics contracts; only MC count/run/seed changed')
         destination = output / source_name
-        grid.SOURCES = tuple(worklist['physics_script_names'])
-        frozen = grid.write_plan(destination, source['references'], source['templates'], plan, runtime,
-                                 scripts=physics_scripts, executable=runtime['python_executable'])
+        selected_sources = {}
+        for row in plan['points']:
+            selected_sources.update(dy_prescription_sources(row['signal_contract'], {
+                name:Path(physics_scripts)/name for name in worklist['physics_script_names']}))
+        selected_options = dict(prescription_sources=selected_sources) if selected_sources else {}
+        original_sources = grid.SOURCES
+        try:
+            grid.SOURCES = tuple(worklist['physics_script_names'])
+            frozen = grid.write_plan(destination, source['references'], source['templates'], plan, runtime,
+                                     scripts=physics_scripts, executable=runtime['python_executable'], **selected_options)
+        finally:
+            grid.SOURCES = original_sources
         if source['spectral_directory']:
             external = Path(source['spectral_directory'])
             frozen['frozen_dependencies']['spectral_width_source'] = previous['frozen_dependencies']['spectral_width_source']

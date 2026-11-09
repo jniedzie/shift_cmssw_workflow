@@ -49,6 +49,27 @@ def relocated(path, previous, output):
     return output/value.relative_to(previous)
 
 
+def selected_worklist_tools(config):
+    """A policy rollover cannot upgrade an old LO physics deployment implicitly."""
+    worklist = statistics.read(config['worklist'])
+    if worklist.get('schema') != 'shift-dp-adaptive-statistics-worklist-v1':
+        return
+    selected = any('dy_prescription' in statistics.read(row['contract'])
+                   for row in worklist['points'].values())
+    if not selected:
+        return
+    helpers = worklist.get('dy_prescription_helpers')
+    if not isinstance(helpers, dict) or not helpers:
+        raise ValueError('Selected DY worklist lacks its qualified publication helper closure; prepare a new worklist')
+    seal = statistics.read(Path(config['worklist']).parent/'seal.json')['files']
+    for name, expected in helpers.items():
+        qualified = Path(config['worklist']).parent/'tools'/name
+        deployed = Path(config['tools'])/name
+        if (seal.get(str(qualified)) != expected or statistics.sha(qualified) != expected or
+                not deployed.is_file() or statistics.sha(deployed) != expected):
+            raise ValueError('Selected DY worklist requires a separately qualified tools deployment: '+name)
+
+
 def prepare(template, template_freeze, policy, output, meson_peer_controllers=(), current_SM_remaining_storage=None):
     template, policy, output = [Path(path).resolve() for path in (template, policy, output)]
     if output.exists():
@@ -61,6 +82,7 @@ def prepare(template, template_freeze, policy, output, meson_peer_controllers=()
         if statistics.sha(name) != expected:
             raise ValueError('Statistics template dependency changed: '+name)
     previous = statistics.configuration(template/'config.json')
+    selected_worklist_tools(previous)
     old_policy_pin = previous['supplement_admission']
     old_policy = statistics.pinned_json(old_policy_pin)
     candidate_policy = statistics.read(policy)

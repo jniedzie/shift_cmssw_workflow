@@ -35,6 +35,8 @@ def main():
                         help='Resolvable common amplitude scale; physical epsilon and lifetime stay unchanged')
     parser.add_argument('--experimental-large-epsilon', action='store_true',
                         help='Allow epsilon up to 0.1 with exact mixed couplings; pure-DY benchmark only')
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+                        help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--events', type=int, default=100)
     parser.add_argument('--accepted-events', action='store_true',
                         help='Write --events accepted GEN events, with input capped at10times that count')
@@ -49,6 +51,12 @@ def main():
     production_settings(args.mass, args.epsilon, experimental_large_epsilon=args.experimental_large_epsilon)
     scale = 1. if args.sampling_epsilon is None else args.sampling_epsilon/abs(args.epsilon)
     production_settings(args.mass, args.epsilon, scale, args.experimental_large_epsilon)
+    hard_settings = []
+    if args.dy_prescription is not None:
+        from dark_photon_dy_prescription import (
+            hard_pdf_settings, configure_hard_pdf, freeze_prescription, apply_prescription, TABLE_NAME,
+        )
+        hard_settings = hard_pdf_settings(args.dy_prescription)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999900 or args.timeout <= 0:
         parser.error('Require bounded events, seed and positive timeout')
     if not shutil.which('cmsRun') or not os.environ.get('CMSSW_BASE'):
@@ -61,18 +69,25 @@ def main():
     from dark_photon_model import validate_native_widths, validate_native_proposal_support
     common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
     cp5 = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
+    pdf_runtime = configure_hard_pdf(args.dy_prescription) if args.dy_prescription is not None else None
     cms_environment = os.environ.copy()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     manifest = dict(schema='shift-dark-photon-pilot-run-v1', status='preflight',
                     physics_valid=False, normalization_ready=False)
+    if args.dy_prescription is not None:
+        manifest['dy_pdf_runtime'] = pdf_runtime
     path = out / 'manifest.json'
     here = Path(__file__).resolve().parent
     for name in ('dark_photon_gen_cfg.py', 'dark_photon_generation.py', 'dark_photon_model.py',
                  'dark_photon_pythia.py', 'audit_dark_photon_gen.py',
                  'pythia_generation_ledger.py', 'fixed_target_generation.py', *DEPENDENCIES):
         shutil.copy2(here / name, out / name)
+    prescription_sources = {}
+    if args.dy_prescription is not None:
+        prescription_sources = freeze_prescription(args.dy_prescription, out)
     manifest['source_sha256'] = {p.name: digest(p) for p in out.glob('*.py')}
+    manifest['source_sha256'].update(prescription_sources)
     base = Path(os.environ['CMSSW_BASE'])
     record_runtime(manifest, base, out, args.runtime_provenance, args.runtime_archive)
     manifest['pythia_tool'] = subprocess.check_output(['scram', 'tool', 'info', 'pythia8'],
@@ -82,6 +97,7 @@ def main():
         # Preflight uses all natural signal channels before any forcing.
         width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon,
                                experimental_large_epsilon=args.experimental_large_epsilon)
+                               + hard_settings
                                + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
         width.update(epsilon=args.epsilon, total_width_gev=width['m_width_gev'],
                      ctau_mm=width['proper_length_mm'],
@@ -93,6 +109,7 @@ def main():
         else:
             sampling_width = measure_widths(common + cp5 + production_settings(args.mass, args.epsilon, scale,
                 args.experimental_large_epsilon)
+                + hard_settings
                 + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
             sampling_width.update(total_width_gev=sampling_width['m_width_gev'])
         sampling_width['pole_support_audit'] = validate_native_proposal_support(
@@ -100,6 +117,8 @@ def main():
         data = contract(args.mass, args.epsilon, width, args.decay_mode, args.events, args.seed,
                         args.run_number or args.seed, common, cp5, sampling_width, scale,
                         accepted_events=args.accepted_events, experimental_large_epsilon=args.experimental_large_epsilon)
+        if args.dy_prescription is not None:
+            data = apply_prescription(data, args.dy_prescription, table_path=out / TABLE_NAME)
         if args.jaw_profile is not None:
             data = place_contract(data, args.jaw_profile)
             shutil.copy2(args.jaw_profile, out/'jaw_profile.json')

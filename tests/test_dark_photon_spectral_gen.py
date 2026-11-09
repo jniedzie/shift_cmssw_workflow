@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import copy
 from pathlib import Path
 import sys
 import tempfile
@@ -163,7 +164,58 @@ class PBCSpectralPreparation(unittest.TestCase):
                 plan_points(self.reference([mass]), [mass], [5.], 50, 251013701, 2700001,
                             benchmark='pbc-bc1')
 
+    def test_qualified_reference_flux_reuse_keeps_physics_and_independent_dy_proposal(self):
+        reference = self.reference([1.5])
+        previous = plan_points(reference, [1.5], [5.], 2, 251013701, 2700001, benchmark='pbc-bc1')
+        mechanism = 'senscalc-meson-fragmentation-bremsstrahlung'
+        previous.update(production_mechanism=mechanism, physical_width_preflight_passed=True,
+            senscalc_width_qualification=dict(schema='shift-senscalc-physical-width-preflight-v1', points={}))
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for old in previous['points']:
+                gen = root/old['point']; gen.mkdir()
+                proper = 1000.*(1.e-7/old['epsilon'])**2
+                width = dict(mass_gev=1.5, epsilon=old['epsilon'], total_width_gev=1.973269804e-13/proper,
+                             ctau_mm=proper, br_mumu=.25)
+                contract = dict(production_mechanism=mechanism, filtering='none', mass_gev=1.5,
+                                epsilon=old['epsilon'], physical_width_table=width)
+                contract_path = gen/'contract.json'; contract_path.write_text(json.dumps(contract))
+                audit_path = gen/'validation.json'; audit_path.write_text(json.dumps(dict(runtime_validated=True)))
+                old.update(signal_contract=str(contract_path), gen_directory=str(gen), proper_ctau_mm=proper,
+                    sampling_epsilon=.001, mean_lab_flight_reference_estimate_m=200.*proper/1000)
+                old.pop('boost_reference_source')
+                previous['senscalc_width_qualification']['points'][old['point']] = dict(
+                    contract_sha256=spectral_grid.grid.digest(contract_path),
+                    validation_sha256=spectral_grid.grid.digest(audit_path))
+            previous_path = root/'fr_plan.json'; previous_path.write_text(json.dumps(previous))
+            fresh = plan_points(self.reference([1.5], boost=400.), [1.5], [5.], 2,
+                                251013801, 2700001, benchmark='pbc-bc1')
+            with self.assertRaisesRegex(ValueError, 'previously width-qualified'):
+                spectral_grid.grid.reuse_physical_points(fresh, previous)
+            reused = spectral_grid.reuse_pbc_physical_points(fresh, previous, previous_path)
+            for old, new in zip(previous['points'], reused['points']):
+                self.assertEqual(new['epsilon'], old['epsilon'])
+                self.assertEqual(new['mean_beta_gamma_reference'], 200.)
+                self.assertEqual(new['mean_lab_flight_reference_estimate_m'], old['mean_lab_flight_reference_estimate_m'])
+                self.assertEqual(new['pbc_common_physical_point']['proper_ctau_mm'], old['proper_ctau_mm'])
+                self.assertFalse(new['pbc_common_physical_point']['exposure_transferred'])
+                self.assertEqual(new['sampling_epsilon'], .01)
+                self.assertNotEqual(new['run_number'], old['run_number'])
+            epsilon_plan = plan_points(reference, [1.5], None, 2, 251013901, 2700001,
+                                       epsilons=[.001], benchmark='pbc-bc1')
+            prompt = spectral_grid.reuse_pbc_physical_points(epsilon_plan, previous, previous_path)['points'][0]
+            self.assertEqual(prompt['point'], 'm1p5_prompt')
+            self.assertEqual(prompt['original_point'], 'm1p5_prompt')
+            bad = copy.deepcopy(fresh); bad.pop('benchmark')
+            with self.assertRaisesRegex(ValueError, 'explicitly qualified'):
+                spectral_grid.reuse_pbc_physical_points(bad, previous, previous_path)
+            contract_path.write_text(contract_path.read_text()+'\n')
+            with self.assertRaisesRegex(ValueError, 'qualified hashes'):
+                spectral_grid.reuse_pbc_physical_points(fresh, previous, previous_path)
+
     def test_profile_survives_native_preflight_freezing_and_physical_point_reuse(self):
+        import dark_photon_dy_prescription as prescription
+        import test_dark_photon_dy_prescription as prescription_tests
         # Synthetic replies exercise the real planner/contracts, never physics qualification.
         model = SimpleNamespace(
             width=lambda state,mass,epsilon: .01973269804*epsilon**2 *
@@ -171,10 +223,12 @@ class PBCSpectralPreparation(unittest.TestCase):
             bfrac=lambda state,mass: .25,
             xfs={'e':(lambda mass:0., lambda mass:-.302822)})
         inspected_masses = []
+        inspected_settings = []
 
         def native_inspect(settings):
             mass = float(next(value.split(' = ')[1] for value in settings if value.startswith('32:m0 = ')))
             inspected_masses.append(mass)
+            inspected_settings.append(settings)
             return dict(pythia_version=8.317, mass_gev=mass, m_width_gev=2.e-6,
                 m_min_gev=.99*mass, m_max_gev=1.01*mass,
                 channels=[dict(on_shell_width_gev=1.e-6, branching_fraction=.5, products=[13,-13]),
@@ -196,12 +250,21 @@ class PBCSpectralPreparation(unittest.TestCase):
                 files={'darkcast/model.py':hashlib.sha256(source.read_bytes()).hexdigest()})))
             authority_output = root/'authority'; authority_output.mkdir()
             authority = freeze_spectral_inputs(package.parent, receipt, authority_output)
+            table = root/'dy_authority.json'
+            fixture = prescription_tests.DYPrescriptionTest().table()
+            fixture['points'] = [dict(fixture['points'][0], mass_gev=mass) for mass in [1.5,1.8,2.]]
+            table.write_text(json.dumps(fixture))
+            original_files = prescription.prescription_files
+            def fixture_files(name, table_path=None):
+                return original_files(name, table if table_path is None else table_path)
+            pdf_runtime = dict(schema='shift-dy-pdf-runtime-v1', data_root=fixture['pdf_data_root'],
+                               files=fixture['pdf_inputs'])
             templates = root/'templates'; templates.mkdir()
             for number in range(1,5):
                 (templates/f'step{number}.py').write_text('# synthetic template fixture\n')
             (root/'src').mkdir()
 
-            def prepare(output, boost, seed, previous=None):
+            def prepare(output, boost, seed, previous=None, dy=False):
                 reference = self.reference([1.5,1.8,2.], boost)
                 reference.update(common=[], cp5=[])
                 for row in reference['references']:
@@ -216,17 +279,22 @@ class PBCSpectralPreparation(unittest.TestCase):
                     '--campaign', 'pbc_test_20261109', '--eos-base', '/eos/user/j/fixture']
                 if previous is not None:
                     argv.extend(['--reuse-physical-plan', str(previous)])
+                if dy:
+                    argv.extend(['--dy-prescription', 'msht20-nnlo'])
                 with mock.patch.object(sys, 'argv', argv), mock.patch.dict(sys.modules, modules), \
                      mock.patch.dict(os.environ, {'CMSSW_BASE':str(root)}), \
                      mock.patch('dark_photon_pythia._native_inspect', side_effect=native_inspect), \
                      mock.patch.object(spectral_grid.subprocess, 'check_output', return_value='synthetic-runtime'), \
                      mock.patch.object(spectral_grid.grid, 'SOURCES', tuple(spectral_grid.grid.SOURCES)), \
+                     mock.patch.object(prescription, 'prescription_files', side_effect=fixture_files), \
+                     mock.patch.object(prescription, 'configure_hard_pdf', return_value=pdf_runtime), \
                      mock.patch('sys.stdout', new_callable=io.StringIO):
                     spectral_grid.main()
                 return json.loads((root/output/'plan.json').read_text())
 
             first = prepare('first', 200., 251013701)
             reused = prepare('reused', 400., 251013801, root/'first/plan.json')
+            selected = prepare('selected', 200., 251013901, dy=True)
             self.assertEqual(set(inspected_masses), {1.5,1.8,2.})
             for old, new in zip(first['points'], reused['points']):
                 self.assertEqual(new['epsilon'], old['epsilon'])
@@ -242,6 +310,24 @@ class PBCSpectralPreparation(unittest.TestCase):
                 self.assertFalse(contract['physics_valid'])
                 self.assertFalse(reused['physics_valid'])
                 self.assertFalse(reused['production_rate_validated'])
+            self.assertNotIn(prescription.HELPER_NAME, first['frozen_dependencies']['sources'])
+            self.assertNotIn(prescription.TABLE_NAME, first['frozen_dependencies']['sources'])
+            self.assertEqual(selected['runtime']['dy_pdf_runtime'], pdf_runtime)
+            self.assertIn(prescription.HELPER_NAME, selected['frozen_dependencies']['sources'])
+            self.assertIn(prescription.TABLE_NAME, selected['frozen_dependencies']['sources'])
+            for original, new in zip(first['points'], selected['points']):
+                old_contract = json.loads(Path(original['signal_contract']).read_text())
+                new_contract = json.loads(Path(new['signal_contract']).read_text())
+                self.assertEqual(new_contract['dy_prescription']['name'], 'msht20-nnlo')
+                self.assertEqual(new_contract['process_settings'], old_contract['process_settings'] +
+                                 prescription.hard_pdf_settings('msht20-nnlo'))
+                for key in ('production_rate_correction', 'width_authority',
+                            'cross_section_correction_components', 'physical_br_mumu'):
+                    self.assertEqual(new_contract[key], old_contract[key])
+                self.assertEqual(new['gen_argv'].count('--dy-prescription'), 1)
+                self.assertEqual(new['gen_argv'][new['gen_argv'].index('--dy-prescription')+1], 'msht20-nnlo')
+            self.assertEqual(sum('PDF:useHard = on' in settings for settings in inspected_settings),
+                             len(selected['points']))
 
 
 class FrozenSpectralContract(unittest.TestCase):

@@ -41,6 +41,78 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
         inputs=[dict(path='nano_' + str(run), events=events, event_ids=identities)])
 
 
+class DYNormalizationAggregation(unittest.TestCase):
+    @staticmethod
+    def apply(sample):
+        import dark_photon_dy_prescription as helper
+        record=sample['rate'];factor,error=2.,.2
+        prescription=dict(schema='shift-dy-msht20-nnlo-v1',name='msht20-nnlo',generator_order='LO+PS',
+            hard_pdf=dict(set='MSHT20nnlo_as118',member=0),
+            native_pdf_settings=list(helper.PDF_SYMMETRY_SETTINGS),
+            pdf_inputs={name:'c'*64 for name in helper.PDF_INPUT_NAMES},
+            normalization=dict(order='NNLO',reference='native-clipped-LO',factor=factor,common_numerical_error=error),
+            authority=dict(filename='dy_msht20_nnlo_v1.json',sha256='a'*64,
+                           helper_filename='dark_photon_dy_prescription.py',helper_sha256=sha(helper.__file__)))
+        lo=copy.deepcopy(record['physical_selected_cross_sections_pb'])
+        record.update(mechanism='pure-on-shell-drell-yan',dy_prescription=prescription,
+            dy_normalization_applications=1,physical_lo_selected_cross_sections_pb=lo,
+            physical_lo_inclusive_cross_sections_pb=[dict(value_pb=x['value_pb']/record['physical_br_mumu'],
+                error_pb=x['error_pb']/record['physical_br_mumu']) for x in lo],
+            dy_normalization_uncertainty=dict(kind='common_numerical_normalization',factor=factor,
+                absolute_k_error=error,relative_error=error/factor,
+                correlation_key='dy-nnlo-numerical:'+prescription['authority']['sha256']+':'+format(record['mass_gev'],'.17g'),
+                authority=copy.deepcopy(prescription['authority']),included_in_independent_error_pb=False))
+        record['physical_selected_cross_sections_pb']=[dict(value_pb=x['value_pb']*factor,error_pb=x['error_pb']*factor) for x in lo]
+        record['physical_inclusive_cross_sections_pb']=[dict(value_pb=x['value_pb']*factor,error_pb=x['error_pb']*factor)
+            for x in record['physical_lo_inclusive_cross_sections_pb']]
+        return sample
+
+    def test_pool_independent_MC_errors_but_keep_one_common_factor_error(self):
+        samples=[self.apply(population(10,2,100,2.,.1)),self.apply(population(20,2,300,6.,.2))]
+        result=combined_rate(samples,point='m15_prompt',campaign='repeat')
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],10.)
+        self.assertAlmostEqual(result['physical_selected_cross_sections_pb'][0]['error_pb'],2*math.hypot(.025,.15))
+        self.assertEqual(result['physical_lo_selected_cross_sections_pb'][0]['value_pb'],5.)
+        self.assertEqual(result['dy_normalization_uncertainty'],samples[0]['rate']['dy_normalization_uncertainty'])
+        self.assertEqual(result['dy_normalization_uncertainty']['relative_error'],.1)
+        self.assertEqual(result['dy_prescription'],samples[0]['rate']['dy_prescription'])
+        self.assertEqual(result['full_gen']['accepted_events'],4)
+
+    def test_legacy_and_different_prescriptions_cannot_hide_in_pooling_or_recovery_views(self):
+        first=self.apply(population(10));old=population(20);old['rate']['mechanism']='pure-on-shell-drell-yan'
+        with self.assertRaisesRegex(ValueError,'Different DY prescriptions'):
+            combined_rate([first,old],point='point',campaign='mixed')
+        for change in ('prescription','missing_common_error','inflated_independent_error',
+                       'inclusive_missing_K','inclusive_error_includes_common'):
+            second=self.apply(population(20))
+            if change=='prescription':second['rate']['dy_prescription']['hard_pdf']['member']=1
+            elif change=='missing_common_error':del second['rate']['dy_normalization_uncertainty']
+            elif change=='inclusive_missing_K':second['rate']['physical_inclusive_cross_sections_pb'][0]['value_pb']/=2.
+            elif change=='inclusive_error_includes_common':second['rate']['physical_inclusive_cross_sections_pb'][0]['error_pb']=10.
+            else:second['rate']['physical_selected_cross_sections_pb'][0]['error_pb']=1.
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                combined_rate([first,second],point='point',campaign='mixed')
+        recovery=copy.deepcopy(first);del recovery['rate']['dy_prescription']
+        with self.assertRaisesRegex(ValueError,'Recovery views disagree'):
+            unique_populations([first,recovery])
+        with self.assertRaisesRegex(ValueError,'Incomplete DY normalization'):
+            combined_rate([recovery],point='point',campaign='incomplete')
+
+    def test_FR_plus_DY_sum_keeps_the_DY_common_error_as_a_separate_component_nuisance(self):
+        reference=SensCalcDYAccounting.component('inclusive',10,10,400,5.,reference=True)
+        dy=SensCalcDYAccounting.component('dy',30,2,100,3.)
+        self.apply(dy['populations'][0])
+        result=senscalc_dy_component_rates([reference,dy],point='m1p8_lab30',campaign='overlap')
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],11.)
+        self.assertAlmostEqual(result['physical_selected_cross_sections_pb'][0]['error_pb'],math.hypot(.1,.2))
+        common,=result['dy_normalization_uncertainties']
+        self.assertEqual(common['component'],'dy')
+        self.assertAlmostEqual(common['absolute_selected_error_pb'],.6)
+        self.assertEqual(common['uncertainty']['relative_error'],.1)
+        self.assertEqual(result['components'][1]['full_gen_weight_sum'],2.)
+        self.assertNotIn('dy_prescription',reference['populations'][0]['rate'])
+
+
 class MainHistogramAggregation(unittest.TestCase):
     def test_legacy_refresh_requires_explicit_optin_and_no_classifier_selection(self):
         from aggregate_dark_photon_samples import legacy_main_histograms
@@ -488,6 +560,37 @@ class CompositeMainHistograms(unittest.TestCase):
             for row in components:
                 self.assertEqual(sha(row['populations'][0]['report']['main_histograms']['published']['merged_histogram']['path']),
                                  snapshots[row['name']])
+
+    def test_DY_common_normalization_proof_survives_saved_ROOT_without_entering_statistical_Sumw2(self):
+        import ROOT
+        analysis = Path(__file__).resolve().parents[2] / 'tea_shift_cmssw'
+        paths = [analysis / 'bin', analysis / 'tea/pylibs/helpers', analysis / 'tea/pylibs/logger']
+        with patch.object(sys, 'path', [str(path) for path in paths] + sys.path):
+            from shift_sample_paths import histogram_gen_normalization
+            from teaHelpers import eos_xrootd_url
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);components=self.sources(directory)
+            dy=components[1]['populations'][0];DYNormalizationAggregation.apply(dy)
+            marker=dy['report']['main_histograms'];item=marker['published']['merged_histogram']
+            metadata=marker['full_original_exposure'];metadata['cross_section_pb']=6.
+            root=ROOT.TFile.Open(item['path'],'UPDATE')
+            ROOT.TObjString(json.dumps(metadata)).Write('ShiftFullGenNormalization',ROOT.TObject.kOverwrite)
+            root.Close();item.update(sha256=sha(item['path']),bytes=Path(item['path']).stat().st_size)
+            result=prepare_senscalc_dy_histograms(components,directory/'composite.root',point='m1p8_lab30',campaign='overlap')
+            normalization=histogram_gen_normalization(result['histogram']['path'],'darkphoton_m1p8_lab30')
+            self.assertEqual(normalization,dict(cross_section_pb=11.,initial_weight_sum=12.))
+            root=ROOT.TFile.Open(result['histogram']['path'])
+            stored=json.loads(root.Get('ShiftFullGenNormalization').GetString().Data())
+            nuisance,=stored['dy_normalization_uncertainties']
+            self.assertEqual(nuisance['component'],'dy')
+            self.assertAlmostEqual(nuisance['absolute_selected_error_pb'],.6)
+            self.assertEqual(nuisance['dy_prescription'],dy['rate']['dy_prescription'])
+            self.assertEqual(len(nuisance['dy_prescription']['pdf_inputs']),4)
+            histogram=root.Get('dimuon/ShiftDimuonVertexBoth-Both_logMass')
+            factor=normalization['cross_section_pb']/normalization['initial_weight_sum']
+            self.assertAlmostEqual(factor*histogram.GetBinContent(histogram.FindBin(15.)),5.)
+            self.assertAlmostEqual(factor**2*histogram.GetBinError(histogram.FindBin(15.))**2,11.5)
+            root.Close()
 
     def test_changed_receipt_missing_response_and_axis_mismatch_fail_before_output(self):
         import ROOT
@@ -1167,7 +1270,7 @@ if __name__ == '__main__':
 
 class RelocatedDirectGenSource(unittest.TestCase):
     """Retained DY logs may move; their content and full exposure may not."""
-    def fixture(self, root, change=None):
+    def fixture(self, root, change=None, prescription=None):
         from aggregate_dark_photon_samples import write
         from pythia_generation_ledger import read_pythia_generation_ledger
         from test_pythia_generation_ledger import table
@@ -1189,7 +1292,9 @@ class RelocatedDirectGenSource(unittest.TestCase):
         elif change=='sumw2':audit['sum_weights_squared']=3.
         elif change=='IDs':audit['event_ids']=[[1762350000,1,2],[1762350000,1,1]]
         elif change=='GEN_hash':manifest['output_sha256']='b'*64
-        write(gen/'contract.json',dict(production_mechanism='pure-on-shell-DY'))
+        contract=dict(production_mechanism='pure-on-shell-DY')
+        if prescription is not None:contract['dy_prescription']=prescription
+        write(gen/'contract.json',contract)
         write(gen/'validation.json',audit);write(gen/'manifest.json',manifest)
         parent=dict(events=2,event_ids=identities,native_sumw=2.,native_sumw2=2.,gen_sha256='a'*64,
             gen_path='/eos/user/test/GEN.root',**{key:sha(gen/name) for name,key in [
@@ -1227,3 +1332,11 @@ class RelocatedDirectGenSource(unittest.TestCase):
                     with self.assertRaisesRegex(ValueError,'Source full GEN audit'):
                         load_source(source,model,'c'*64)
                     rate.assert_not_called()
+
+    def test_new_contract_cannot_use_an_old_exporter_that_drops_its_DY_prescription(self):
+        from aggregate_dark_photon_samples import load_source
+        with tempfile.TemporaryDirectory() as temporary:
+            source,model,_=self.fixture(Path(temporary),prescription={'schema':'synthetic-new-prescription'})
+            with patch('aggregate_dark_photon_samples.rate_record',return_value={'legacy_exporter':True}):
+                with self.assertRaisesRegex(ValueError,'complete helper closure'):
+                    load_source(source,model,'c'*64)

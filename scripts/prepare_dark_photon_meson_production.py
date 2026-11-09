@@ -89,9 +89,15 @@ def freeze_tools(config, scripts, tools, files):
     names = set(TOOLS)
     if config.get('main_histogrammer') is not None:
         names.update(aggregate_helper_names(dict(config, tools=str(scripts))))
-    for name in sorted(names):
+    sources = {name:scripts/name for name in names}
+    if config.get('dy_prescription') is not None:
+        from prepare_dark_photon_grid import source_files
+        from dark_photon_dy_prescription import HELPER_NAME, TABLE_NAME
+        selected = source_files(scripts, config['dy_prescription'])
+        sources.update({name:selected[name] for name in (HELPER_NAME, TABLE_NAME)})
+    for name, source in sorted(sources.items()):
         target = tools/name
-        shutil.copy2(scripts/name, target)
+        shutil.copy2(source, target)
         files[str(target)] = sha(target)
 
 

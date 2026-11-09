@@ -7,6 +7,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from dark_photon_model import DEFAULT_EW_INPUTS, FERMIONS, fermion_widths_qcd_first_order, HBAR_C_GEV_MM
 from dark_photon_sample_names import physical_point_name, point_mean_lab_flight_m
@@ -50,6 +51,63 @@ def frozen_inputs(base, ref):
 
 
 class PhysicalGridPlanning(unittest.TestCase):
+    def test_selected_dy_authority_freezes_without_changing_native_amplitude_or_lifetime(self):
+        import dark_photon_dy_prescription as prescription
+        import test_dark_photon_dy_prescription as prescription_tests
+        ref = references()
+        physical = plan_points(ref, masses=[15.,30.], epsilons=[.001])
+        original = preflight_points(physical, ref, fake_native)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            table = root/'authority.json'
+            fixture = prescription_tests.DYPrescriptionTest().table()
+            fixture['points'] = [dict(fixture['points'][0], mass_gev=mass) for mass in [15.,30.]]
+            table.write_text(json.dumps(fixture))
+            original_files = prescription.prescription_files
+            def fixture_files(name, table_path=None):
+                return original_files(name, table if table_path is None else table_path)
+            with mock.patch.object(prescription, 'prescription_files', side_effect=fixture_files):
+                selected = preflight_points(physical, ref, fake_native, dy_prescription='msht20-nnlo')
+                scripts, templates, refpath = frozen_inputs(root, ref)
+                mixed = copy.deepcopy(selected)
+                mixed['points'][1] = copy.deepcopy(original['points'][1])
+                with self.assertRaisesRegex(ValueError, 'selected and legacy'):
+                    write_plan(root/'mixed', refpath, templates, mixed, {}, scripts=scripts)
+                result = write_plan(root/'frozen', refpath, templates, selected, {}, scripts=scripts)
+            before, after = original['points'][0]['signal_contract'], selected['points'][0]['signal_contract']
+            self.assertEqual(after['process_settings'], before['process_settings'] +
+                             prescription.hard_pdf_settings('msht20-nnlo'))
+            for key in ('production_rate_correction', 'width_authority', 'sampling_width_authority',
+                        'requested_events', 'seed', 'run_number', 'cp5'):
+                self.assertEqual(after[key], before[key])
+            self.assertEqual(after['dy_prescription']['name'], 'msht20-nnlo')
+            for filename in [prescription.HELPER_NAME, prescription.TABLE_NAME]:
+                frozen = result['frozen_dependencies']['sources'][filename]
+                self.assertEqual(digest(frozen['frozen_copy']), frozen['sha256'])
+            argv = result['points'][0]['gen_argv']
+            self.assertEqual(argv.count('--dy-prescription'), 1)
+            self.assertEqual(argv[argv.index('--dy-prescription')+1], 'msht20-nnlo')
+            flat = {prescription.HELPER_NAME:scripts/prescription.HELPER_NAME,
+                    prescription.TABLE_NAME:scripts/prescription.TABLE_NAME}
+            flat[prescription.HELPER_NAME].write_bytes(Path(prescription.__file__).read_bytes())
+            flat[prescription.TABLE_NAME].write_bytes(table.read_bytes())
+            from prepare_dark_photon_grid import source_files
+            self.assertEqual(source_files(scripts, 'msht20-nnlo')[prescription.TABLE_NAME],
+                             flat[prescription.TABLE_NAME])
+            with mock.patch.object(prescription, 'prescription_files',
+                                   side_effect=AssertionError('Unexpected maintained-authority fallback')):
+                write_plan(root/'explicit', refpath, templates, selected, {}, scripts=scripts,
+                           prescription_sources=flat)
+            flat[prescription.TABLE_NAME].write_text('{}')
+            with self.assertRaisesRegex(ValueError, 'contract authority'):
+                write_plan(root/'changed_authority', refpath, templates, selected, {}, scripts=scripts,
+                           prescription_sources=flat)
+            flat[prescription.TABLE_NAME].unlink()
+            with self.assertRaisesRegex(ValueError, 'incomplete flat'):
+                source_files(scripts, 'msht20-nnlo')
+            with self.assertRaisesRegex(ValueError, 'complete helper/table'):
+                source_files(scripts, 'msht20-nnlo', {prescription.TABLE_NAME:table})
+
     def test_accepted_output_flag_survives_native_preflight_and_freezing(self):
         reference=references()
         plan=preflight_points(plan_points(reference,accepted_events=True),reference,fake_native)

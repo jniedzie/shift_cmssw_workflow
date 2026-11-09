@@ -1,0 +1,356 @@
+{
+  "schema": "shift-dy-msht20-nnlo-authority-v1",
+  "name": "msht20-nnlo",
+  "version": 1,
+  "beam_energy_GeV": 6800.0,
+  "sqrt_s_GeV": 112.97017754556772,
+  "hard_pdf": {
+    "set": "MSHT20nnlo_as118",
+    "member": 0
+  },
+  "pdf_DataVersion": 3,
+  "pdf_data_root": "/cvmfs/cms.cern.ch/el9_amd64_gcc13/external/lhapdf/6.4.0-1f3252c5c72dc8a91cbfc86966e3624f/share/LHAPDF",
+  "pdf_inputs": {
+    "MSHT20nnlo_as118/MSHT20nnlo_as118.info": "61b9f4a03105fc4ad5036298a2f0da9a15fb8e751b7f63cc480a251332735d18",
+    "MSHT20nnlo_as118/MSHT20nnlo_as118_0000.dat": "87b363af51f8467881d3eb3d59bc59c8acbaf62a21856eba1e2033697e7ee2f2",
+    "NNPDF31_nnlo_as_0118/NNPDF31_nnlo_as_0118.info": "6320acfbff69b7983d6f93173e4c70c2ec1bb914cdade3ba9d0dd5180e441b4c",
+    "NNPDF31_nnlo_as_0118/NNPDF31_nnlo_as_0118_0000.dat": "dd261226e764f3eb77c92a10bd1ed73b183db8343c9b7bdba7c31db54d966817"
+  },
+  "native_pdf_settings": [
+    "LHAPDF:sSymmetric = off",
+    "LHAPDF:cSymmetric = on",
+    "LHAPDF:bSymmetric = on"
+  ],
+  "normalization_reference": "native-clipped-LO",
+  "epsilon_reference": 0.001,
+  "epsilon_upper_bound": 0.001,
+  "small_mixing_qualified": true,
+  "weak_current": {
+    "sin2_theta_w": 0.2312,
+    "m_z_gev": 91.1876,
+    "model_source_sha256": "97060037c57067613bfef9b812c95fd62f251d3f2294dd76131172968809748c"
+  },
+  "theory_scope": {
+    "mechanism": "inclusive on-shell DY only",
+    "generator": "native LO+PS; original GEN weights and exposure unchanged",
+    "normalization": "Inclusive fixed-order NNLO at muR=muF=mass; apply only to physical DY rates, before/alongside the existing physical branching correction once",
+    "native_pdf": "Pythia8.317 heavy-flavor symmetry defaults followed by positive-PDF clipping",
+    "numerical_error": "Conservative quadrature/subtraction envelope, common across populations; distinct from theory and response uncertainty",
+    "current": "Exact native left/right quark flavor structure; massless five-flavor hard scattering, inclusive angular integration, no fiducial cuts. Optional axial-triangle code remains off under the declared DYTurbo default. No NNLO acceptance correction claimed.",
+    "nominal_grid_extrapolation": false,
+    "interpolation": "none; exact listed masses only",
+    "limitations": [
+      "Production hard-PDF/current/beam/scale metadata must match this authority. Scalar replay does not need PDF grids; GEN does.",
+      "The SFT current MSHT20 dataset is DataVersion4 with different grid hashes; it is not this qualified authority.",
+      "Scale/PDF/model and detector/source-shape uncertainties remain separate from numerical errors. No low-mass downward variation or untested mass scale uncertainty is manufactured.",
+      "Changing the DY hard PDF changes source shapes and sample compatibility; old NN31 sources cannot be silently mixed.",
+      "No meson, proton-bremsstrahlung, SM background or physical BR correction is supplied here."
+    ]
+  },
+  "software": {
+    "DYTurbo_version": "1.3.0",
+    "release_sha256": "416f790f9135e007506bb1d3e89ae469c6ce2a66b0e9362c0a4d75301d0f7388",
+    "driver_source_sha256": "99854b771a6ad3d999427d58c815d3af06cbd01a467b5f0f896b4d0cd628186c",
+    "shared_library_sha256": "71baf0fd88e50d485c77a46a166e478c2cba3a504b7b84a53228006b12e86e29",
+    "source_capsule": {
+      "archive_path": "/eos/user/j/jniedzie/shift_cmssw_support/dy_theory_20261109/dyturbo_fixed_order_20261109_9a3d584a448e.tar.gz",
+      "archive_sha256": "9a3d584a448e4f8296f691ad4cdaddea594bef4d72cab4426fbb74efa479d2e0"
+    }
+  },
+  "qualification": {
+    "source_authority_sha256": "9189f9c777a254819d3019790bf5b36768d8b4b2890cbc64c8d7313b52a5c9bc",
+    "source_authority_schema": "shift-dy-msht20-nnlo-normalization-authority-v1",
+    "scope": "qualified inclusive normalization factors for production preparation; detector acceptance and full-chain publication are separate gates",
+    "small_mixing_bound": {
+      "conclusion": "All eight exact normalized current shapes are bounded over0<abs(epsilon)<=.001 by their analytic zero-limit/reference endpoints. Maximum unit-current component shift3.16e-7 at70GeV. The paired70GeV K shift is3.9e-9 relative, unresolved within quadrature error. Overall coupling/epsilon dependence cancels K; this is a current-domain qualification, not an acceptance extrapolation.",
+      "continuous_interval_derivation": "For t=k\u00b2 increasing with epsilon\u00b2, (1+t)A\u00b2-(z+d)A+zd=0 gives dA/dt=-A\u00b2/sqrt((z-d)\u00b2-4tzd)<0. Therefore h=d/[cw\u00b2(A-d)] is monotone on0<|epsilon|<=.001, bounded exactly by its zero-limit and reference endpoints. Overall em_coefficient/epsilon cancels the matched K.",
+      "normalized_current_interval_proof": "For normalized v(h)=(u+h*w)/||u+h*w||, the derivative of each component has numerator (w_i*A-u_i*B)+(w_i*B-u_i*C)*h, A=u.u,B=u.w,C=w.w. Its possible internal extrema were checked explicitly; none lies in any of the8closed h intervals. Endpoint component envelopes therefore bound the continuous epsilon domain, not just the sampled epsilon grid.",
+      "paired_70_relative_K_change": 3.913648516373769e-09
+    },
+    "production_qualified": false
+  },
+  "references": [
+    "https://arxiv.org/abs/1910.07049",
+    "https://arxiv.org/abs/2309.16003",
+    "https://arxiv.org/abs/1901.09966"
+  ],
+  "points": [
+    {
+      "mass_gev": 1.5,
+      "factor": 2.2369709422733064,
+      "common_numerical_error": 0.014977452104974988,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0002097571594293435,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 2.2304515450861233,
+        "k_factor_numerical_error": 0.00845805492804659,
+        "relative_shift": -0.0029143861746178112,
+        "conservative_numerical_plus_cut_envelope_abs": 0.014977452104974988
+      },
+      "mass_window_control": {
+        "relative_mass_half_width": 5e-05,
+        "k_factor": 2.2369710885107734,
+        "relative_shift": 6.537298458120233e-08,
+        "k_factor_numerical_error": 0.00020975675089159455
+      },
+      "provenance": {
+        "current_table_sha256": "30dcf01c8e44411f75914d82b2276939910def5801740706f407a3e01475baf2",
+        "nominal_card_sha256": "a393fecfa39a7186cf55a571b172e8338db670c372f0123384af79b6d3482a1a",
+        "nominal_result_sha256": "ff2910bd58828a2b826d42fddf3506cff42ed9cfc2700aee00d140d3d90fdde6",
+        "native_clipped_born_log_sha256": "d6a82ed259579326e447c1d689d4f8e4ef6074e547cdca240b214ed1f438a603"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No clamp: downwardhalf-scale at1.5 and1.8GeV lies belowMSHT Qmin1GeV and is unavailable. At2GeV the exact half-scale is on the boundary and the finite mass window straddles it; no downward control was evaluated."
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 1.8,
+      "factor": 1.9339628036438823,
+      "common_numerical_error": 0.004913260032698229,
+      "qualified": true,
+      "numerical_quadrature_error": 0.00033187344868860076,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.9322251880012347,
+        "k_factor_numerical_error": 0.0031756443902291403,
+        "relative_shift": -0.0008984741792208428,
+        "conservative_numerical_plus_cut_envelope_abs": 0.004913260032698229
+      },
+      "mass_window_control": null,
+      "provenance": {
+        "current_table_sha256": "8712139cae10d09de69cfa53eb158c4d6309d42be4efbdfecf9e6749fde12a07",
+        "nominal_card_sha256": "dc7006cc8fe897b0307a663d36572bdc5fbaf5adee23e0b18e0b4129d2837b31",
+        "nominal_result_sha256": "db149f1296f5bb94cbf8e16fa1e0c0a4906840bcbcb0e83a1da78f5dfef64041",
+        "native_clipped_born_log_sha256": "df4c5bea52475b520d0aee4088e99b702fb67572ff2e178422bc42570ba7daaa"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No clamp: downwardhalf-scale at1.5 and1.8GeV lies belowMSHT Qmin1GeV and is unavailable. At2GeV the exact half-scale is on the boundary and the finite mass window straddles it; no downward control was evaluated."
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 2,
+      "factor": 1.8045210620233911,
+      "common_numerical_error": 0.0021156690403263297,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0021156690403263297,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.8055674004726814,
+        "k_factor_numerical_error": 0.00041487943916100893,
+        "relative_shift": 0.0005798427468155509,
+        "conservative_numerical_plus_cut_envelope_abs": 0.0021156690403263297
+      },
+      "mass_window_control": null,
+      "provenance": {
+        "current_table_sha256": "022da4f4061f86b004f6f6830eb2dcde69779b0d10eb1e1c8b7dc8cfc8393fc1",
+        "nominal_card_sha256": "6dfd29b0e883447f959b73a50194e253d66fa8fec89a29966856fba657001152",
+        "nominal_result_sha256": "77b19bb9db0f271ea87a5725a670a2e0a83d457e745bcfe19bd1039fcf59e723",
+        "native_clipped_born_log_sha256": "5dda73b2882f2ec72651f903820032c54545cd3efba9905de504d320d5261bba"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No clamp: downwardhalf-scale at1.5 and1.8GeV lies belowMSHT Qmin1GeV and is unavailable. At2GeV the exact half-scale is on the boundary and the finite mass window straddles it; no downward control was evaluated."
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 5,
+      "factor": 1.4038679839886892,
+      "common_numerical_error": 0.0008928246878289052,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0008928246878289052,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.4037616128887707,
+        "k_factor_numerical_error": 7.117831378127808e-05,
+        "relative_shift": -7.577001622072199e-05,
+        "conservative_numerical_plus_cut_envelope_abs": 0.0008928246878289052
+      },
+      "mass_window_control": {
+        "relative_mass_half_width": 5e-05,
+        "k_factor": 1.4038679733664121,
+        "relative_shift": -7.56643581123484e-09,
+        "k_factor_numerical_error": 0.0008928246248965713
+      },
+      "provenance": {
+        "current_table_sha256": "c9d4f74308b4e0ef9b7ba23c0414ccf38560d347e6e829c5c0c0f2274d1e55e6",
+        "nominal_card_sha256": "83c3f0fda4fee9277b8d600ffc49d130498294357b63d849b53c8f941e1283dd",
+        "nominal_result_sha256": "8d9d6e79c3163c2f380d0ddb9196940f3f038494b8553e8b262ecd97fa78a3e1",
+        "native_clipped_born_log_sha256": "cd48fa737d20e04f7e73e2f1850205ede0798468a5b67f9d8f88cc7c492c7013"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "measured",
+          "relative_envelope": [
+            -0.021461122021419254,
+            0.023318241337718426
+          ],
+          "scope": "Scale variation changes NNLO numerator; the native sampling denominator remains its nominal central value. The envelope is a theory variation, not a confidence interval, PDF uncertainty or detector acceptance uncertainty."
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 10,
+      "factor": 1.4400718908504648,
+      "common_numerical_error": 0.0005597192948175044,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0005597192948175044,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.4399704889733647,
+        "k_factor_numerical_error": 0.0002575959079090944,
+        "relative_shift": -7.041445482303121e-05,
+        "conservative_numerical_plus_cut_envelope_abs": 0.0005597192948175044
+      },
+      "mass_window_control": null,
+      "provenance": {
+        "current_table_sha256": "4597afaa7f45c139a11d1bca70772ccb01629365c750562b5fca721f8a506a89",
+        "nominal_card_sha256": "e1d9da1fd06e7e70508cb0e37e5d0895bf2fa0cf0229522b84ba0fd4570307ec",
+        "nominal_result_sha256": "9e48a6f7a705a97161ccf02d15a205a8dfd94f620bed0760abcf229ae02ca442",
+        "native_clipped_born_log_sha256": "b591f3a5808926af1aad9305babc0fd3cd9c816e11827e60b6ab3fb8d392db7d"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No scale envelope is inferred from another mass"
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 15,
+      "factor": 1.510262895634958,
+      "common_numerical_error": 0.001380526411151308,
+      "qualified": true,
+      "numerical_quadrature_error": 0.001380526411151308,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.5101569118860536,
+        "k_factor_numerical_error": 0.0010972374430737312,
+        "relative_shift": -7.017569537770552e-05,
+        "conservative_numerical_plus_cut_envelope_abs": 0.001380526411151308
+      },
+      "mass_window_control": null,
+      "provenance": {
+        "current_table_sha256": "9f33e46ae349fb1ee256cb963b479cb98c63dae3583b10461ee5ddc1e86c75d3",
+        "nominal_card_sha256": "1b76d0064d918eaf517936fa132852341929443cbada3f8c97158a5ea3d16973",
+        "nominal_result_sha256": "51aaa59f7fa9bb3096df0cc5a81aa52da65c08415244d046f2a48e84f20c39d7",
+        "native_clipped_born_log_sha256": "d8cd01a95376d9ec534f2f7c0f794cc91d9b8bbc4d09ca3b5dcdaead04c7392f"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No scale envelope is inferred from another mass"
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 40,
+      "factor": 1.9016974081821554,
+      "common_numerical_error": 0.002571482715841289,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0009651150939790621,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 1.9017516406892934,
+        "k_factor_numerical_error": 0.0025172502111543253,
+        "relative_shift": 2.8517947652684228e-05,
+        "conservative_numerical_plus_cut_envelope_abs": 0.002571482715841289
+      },
+      "mass_window_control": null,
+      "provenance": {
+        "current_table_sha256": "cb2c6216c1c909ca4561af3bed6e8fae7566305e9b1503a24ad151e297475d78",
+        "nominal_card_sha256": "6102b217813bd4a517bdd1bb2e082344ebd310c954a1d776093fb6aba144953b",
+        "nominal_result_sha256": "3347f8061905e3f40f194f8861421b691b86b2b0abc3e7019e24bf46bd790aa2",
+        "native_clipped_born_log_sha256": "9ac5e98695931de40459daf499cc31afc0554663ff3f78b00c9cac955a04d279"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "not_evaluated",
+          "reason": "No scale envelope is inferred from another mass"
+        },
+        "PDF": {
+          "status": "not_evaluated"
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    },
+    {
+      "mass_gev": 70,
+      "factor": 2.3435386937403986,
+      "common_numerical_error": 0.0016564041522327201,
+      "qualified": true,
+      "numerical_quadrature_error": 0.0004644658649724936,
+      "subtraction_control": {
+        "xqtcut": 0.002,
+        "k_factor": 2.3430227131385215,
+        "k_factor_numerical_error": 0.0011404245581074712,
+        "relative_shift": -0.0002201715735503651,
+        "conservative_numerical_plus_cut_envelope_abs": 0.0016564041522327201
+      },
+      "mass_window_control": {
+        "relative_mass_half_width": 5e-05,
+        "k_factor": 2.3435387113226986,
+        "relative_shift": 7.502457766150883e-09,
+        "k_factor_numerical_error": 0.0004644710385730415
+      },
+      "provenance": {
+        "current_table_sha256": "1177609298f7c2a5ab5b7f25956f58478f4c51505de5f5f33ed9950dd6629fe0",
+        "nominal_card_sha256": "8c13322db6aa90d3639581109092f080f8fb51887f172f6dbde4be1c3136bcf0",
+        "nominal_result_sha256": "3dbecb98004c86d08c455e26e0dca0692fc7f1b1446ec510f0d66044d2625b80",
+        "native_clipped_born_log_sha256": "307388e1cce82f0e67f8c8783092aa7a2c9df0c51de489657a610daf95fe507e"
+      },
+      "theory_uncertainties": {
+        "qcd_scale": {
+          "status": "measured",
+          "relative_envelope": [
+            -0.10388763357182518,
+            0.08496991981322544
+          ],
+          "scope": "Scale variation changes NNLO numerator; the native sampling denominator remains its nominal central value. The envelope is a theory variation, not a confidence interval, PDF uncertainty or detector acceptance uncertainty."
+        },
+        "PDF": {
+          "status": "separate published-set diagnostic, not an eigenvector error",
+          "comparison": {
+            "CT18_over_MSHT20": 0.756997722794929,
+            "MSHT20_over_CT18": 1.3210079368639005,
+            "relative_mass_half_width": 0.01,
+            "scope": "Inclusive finite-window carrier-rate ratio, not an on-shell acceptance or error eigenvector"
+          }
+        },
+        "detector_acceptance": "Separate qualification; no NNLO detector correction is supplied"
+      }
+    }
+  ]
+}

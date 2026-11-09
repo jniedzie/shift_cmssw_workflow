@@ -10,6 +10,7 @@ or combines independent cross-section estimates without their trial weights.
 import argparse
 import atexit
 from bisect import bisect_right
+import copy
 from datetime import datetime, timezone
 import gzip
 import hashlib
@@ -715,6 +716,8 @@ def meson_rate_record(contract, audit, *, point, campaign, source_hashes, gen_pa
 
 def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, gen_sha256, source_directory=None):
     """Keep proposal and physical dimuon rates distinct; correct exactly once."""
+    if 'dy_prescription' in contract and contract.get('mechanism') != 'pure-on-shell-drell-yan':
+        raise ValueError('A DY prescription cannot normalize a different source mechanism')
     if contract.get('production_mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung'):
         from run_dark_photon_senscalc_gen import rate_record as reference_rate_record
         return reference_rate_record(contract,audit,point=point,campaign=campaign,
@@ -774,7 +777,7 @@ def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, ge
     if len(native) == 1 and not math.isclose(native[0]["value_pb"], printed_pb, rel_tol=1e-3):
         raise ValueError("Native GenRunInfo rate differs from the printed mb-to-pb diagnostic")
     identity_digest = hashlib.sha256(json.dumps(audit["event_ids"], separators=(",", ":")).encode()).hexdigest()
-    return dict(schema=SCHEMA, point=point, campaign=campaign,
+    result = dict(schema=SCHEMA, point=point, campaign=campaign,
         mass_gev=contract["mass_gev"], epsilon=contract["epsilon"],
         sampling_epsilon=epsilon*scale, proper_ctau_mm=contract["width_authority"]["ctau_mm"],
         physical_br_mumu=physical_br, native_proposal_br_mumu=native_br,
@@ -804,6 +807,38 @@ def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, ge
         prompt_interference_included=contract["prompt_interference_included"],
         gen_path=gen_path, gen_sha256=gen_sha256, source_sha256=source_hashes,
         exporter_sha256=sha256(__file__))
+    if 'dy_prescription' in contract:
+        from dark_photon_dy_prescription import validate_prescription
+        metadata = validate_prescription(contract, source_directory)
+        if not isinstance(metadata, dict):
+            raise ValueError('An explicit DY prescription needs its frozen normalization authority')
+        normalization = metadata['normalization']
+        factor = positive(normalization['factor'], 'DY NNLO/native-LO normalization')
+        numerical = normalization['common_numerical_error']
+        if (isinstance(numerical, bool) or not isinstance(numerical, (int, float)) or
+                not math.isfinite(numerical) or numerical < 0 or
+                normalization.get('order') != 'NNLO' or normalization.get('reference') != 'native-clipped-LO'):
+            raise ValueError('Require the qualified DY factor and its common numerical error')
+        result.update(dy_prescription=copy.deepcopy(contract['dy_prescription']),
+            dy_normalization_applications=1,
+            physical_lo_selected_cross_sections_pb=copy.deepcopy(physical),
+            physical_lo_inclusive_cross_sections_pb=copy.deepcopy(result['physical_inclusive_cross_sections_pb']),
+            dy_normalization_uncertainty=dict(
+                kind='common_numerical_normalization', factor=factor, absolute_k_error=numerical,
+                relative_error=numerical/factor,
+                correlation_key='dy-nnlo-numerical:'+metadata['authority']['sha256']+':'+format(contract['mass_gev'], '.17g'),
+                correlation_scope='Common to every GEN population at this mass and authority; never averaged down',
+                authority=copy.deepcopy(metadata['authority']),
+                included_in_independent_error_pb=False))
+        result['physical_selected_cross_sections_pb'] = [dict(row,
+            value_pb=row['value_pb']*factor, error_pb=row['error_pb']*factor) for row in physical]
+        result['physical_inclusive_cross_sections_pb'] = [dict(row,
+            value_pb=row['value_pb']*factor, error_pb=row['error_pb']*factor)
+            for row in result['physical_lo_inclusive_cross_sections_pb']]
+        result['cross_section_authority'] = (
+            'Native GenRunInfo LO dimuon rate times the frozen on-shell NNLO/native-clipped-LO factor; units pb')
+        result['cross_section_convention'] += '; DY NNLO/native-clipped-LO factor applied once to physical rates'
+    return result
 
 
 def input_files(directory, manifest):
@@ -824,6 +859,12 @@ def input_files(directory, manifest):
             raise ValueError('Initialized native source configuration changed')
         names.add('source_configuration.json')
     contract=read(directory/'contract.json')
+    if 'dy_prescription' in contract:
+        from dark_photon_dy_prescription import prescription_input_files, validate_prescription
+        if validate_prescription(contract, directory) is None:
+            raise ValueError('An explicit DY prescription needs its frozen normalization authority')
+        for path in prescription_input_files(contract, directory):
+            names.add(str(Path(path).relative_to(directory)))
     if 'benchmark_metadata' in contract:
         references=contract['benchmark_metadata']
         if (not isinstance(references,dict) or references.get('schema')!='shift-pbc-source-metadata-v1' or

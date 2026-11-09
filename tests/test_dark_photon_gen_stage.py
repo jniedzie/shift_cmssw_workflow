@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
-from prepare_dark_photon_gen_stage import prepare, validate_plan
+from prepare_dark_photon_gen_stage import prepare, validate_plan, frozen_dependencies
 from run_dark_photon_gen_stage import (check_afs_margin, collect, publish_gen, read, run_point,
                                       sha256, validate_population, verify_seal, write_new)
 
@@ -97,6 +97,26 @@ def audited_meson_population(base):
 
 
 class DetachedGenStageTest(unittest.TestCase):
+    def test_selected_DY_stage_requires_exact_optional_inputs_and_explicit_GEN_selector(self):
+        from dark_photon_dy_prescription import prescription_files, prescription_metadata
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);plan,unused_prior,contract=fixture(root)
+            row=plan['points'][0]
+            selected=prescription_files('msht20-nnlo')
+            contract['dy_prescription']=prescription_metadata('msht20-nnlo',15.,1.e-7)
+            Path(row['signal_contract']).write_text(json.dumps(contract))
+            row['signal_contract_sha256']=sha256(row['signal_contract'])
+            row['gen_argv'].extend(['--dy-prescription','msht20-nnlo'])
+            for name,path in selected.items():
+                plan['frozen_dependencies']['sources'][name]=dict(frozen_copy=str(path),sha256=sha256(path))
+            self.assertIn(str(selected['dy_msht20_nnlo_v1.json']),frozen_dependencies(plan))
+            changed=copy.deepcopy(plan);del changed['frozen_dependencies']['sources']['dy_msht20_nnlo_v1.json']
+            with self.assertRaisesRegex(ValueError,'missing its qualified input'):
+                frozen_dependencies(changed)
+            changed=copy.deepcopy(plan);changed['points'][0]['gen_argv']=row['gen_argv'][:-2]
+            with self.assertRaisesRegex(ValueError,'GEN command lost'):
+                frozen_dependencies(changed)
+
     def test_preparation_rejects_old_runs_before_materializing_outputs(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary); plan, prior, unused = fixture(base)

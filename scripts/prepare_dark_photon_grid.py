@@ -68,6 +68,29 @@ def content_digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, allow_nan=False).encode()).hexdigest()
 
 
+def source_files(scripts=None, dy_prescription=None, prescription_sources=None):
+    scripts = Path(scripts or Path(__file__).resolve().parent)
+    result = {name:scripts/name for name in SOURCES}
+    if dy_prescription is not None:
+        from dark_photon_dy_prescription import prescription_files, hard_pdf_settings, HELPER_NAME, TABLE_NAME
+        hard_pdf_settings(dy_prescription)
+        flat = {name:scripts/name for name in (HELPER_NAME, TABLE_NAME)}
+        if prescription_sources is not None:
+            if set(prescription_sources) != set(flat):
+                raise ValueError('Selected DY sources require the complete helper/table pair')
+            selected = {name:Path(path) for name,path in prescription_sources.items()}
+        elif all(path.is_file() for path in flat.values()):
+            selected = flat
+        elif any(path.is_file() for path in flat.values()) and scripts.resolve() != Path(__file__).resolve().parent:
+            raise ValueError('Selected frozen DY sources contain an incomplete flat helper/table pair')
+        else:
+            selected = prescription_files(dy_prescription)
+        result.update(selected)
+    elif prescription_sources is not None:
+        raise ValueError('Explicit DY sources require a selected prescription')
+    return result
+
+
 def repartition_detector_chunks(chunks, event_ids, retained_chunks, events_per_job,
                                 output_base, job_base):
     """Split unstarted slices while retaining audited or live chunk descriptors.
@@ -482,7 +505,8 @@ def check_reused_lifetime(row, proper_ctau_mm):
         raise ValueError('Fresh width changed the reused physical lifetime: ' + row['point'])
 
 
-def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e-4):
+def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e-4,
+                     dy_prescription=None):
     """Probe natural physical widths and common-amplitude sampling before launch."""
     if not math.isfinite(relative_flight_tolerance) or not 0 < relative_flight_tolerance < 1:
         raise ValueError('Require finite relative lab-flight preflight tolerance')
@@ -501,6 +525,9 @@ def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e
         data = contract(mass, epsilon, width, 'mumu', row['events'], row['seed'], row['run_number'],
                         reference['common'], reference['cp5'], sampling, scale,
                         accepted_events=plan.get('event_budget_mode') == 'outputAccepted')
+        if dy_prescription is not None:
+            from dark_photon_dy_prescription import apply_prescription
+            data = apply_prescription(data, dy_prescription)
         lab = row['mean_beta_gamma_reference'] * width['ctau_mm'] / 1000
         target = row['target_mean_lab_flight_m']
         if target is not None and not math.isclose(lab, target, rel_tol=relative_flight_tolerance):
@@ -514,7 +541,8 @@ def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e
     return result
 
 
-def write_plan(output, reference_path, template_directory, plan, runtime, scripts=None, executable=None):
+def write_plan(output, reference_path, template_directory, plan, runtime, scripts=None, executable=None,
+               prescription_sources=None):
     """Freeze new sources/templates/contracts without creating runtime directories."""
     output, template_directory = Path(output).resolve(), Path(template_directory).resolve()
     if output.exists():
@@ -526,8 +554,21 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
         set_lab_point_name(row)
     if len({row['point'] for row in plan['points']}) != len(plan['points']):
         raise ValueError('Physical points collide in their rounded LAB names')
-    scripts = Path(scripts or Path(__file__).resolve().parent)
-    sources = {name: scripts / name for name in SOURCES}
+    prescriptions = {row['signal_contract']['dy_prescription']['name'] for row in plan['points']
+                     if 'dy_prescription' in row['signal_contract']}
+    if len(prescriptions) > 1:
+        raise ValueError('A frozen grid requires one coherent DY prescription')
+    if prescriptions and any(row['signal_contract'].get('mechanism') == 'pure-on-shell-drell-yan' and
+                             'dy_prescription' not in row['signal_contract'] for row in plan['points']):
+        raise ValueError('A frozen grid cannot mix selected and legacy DY prescriptions')
+    sources = source_files(scripts, next(iter(prescriptions), None), prescription_sources)
+    for row in plan['points']:
+        metadata = row['signal_contract'].get('dy_prescription')
+        if metadata is not None:
+            authority = metadata['authority']
+            if (digest(sources[authority['filename']]) != authority['sha256'] or
+                    digest(sources[authority['helper_filename']]) != authority['helper_sha256']):
+                raise ValueError('Selected DY source files differ from the physical contract authority')
     templates = {f'step{i}.py': template_directory / f'step{i}.py' for i in range(1, 5)}
     for path in list(sources.values()) + list(templates.values()) + [Path(reference_path)]:
         if not path.is_file():
@@ -586,6 +627,8 @@ def write_plan(output, reference_path, template_directory, plan, runtime, script
             row['gen_argv'].append('--experimental-large-epsilon')
         if point_contract.get('experimental_low_mass_dy') is True:
             row['gen_argv'].append('--experimental-low-mass-dy')
+        if 'dy_prescription' in point_contract:
+            row['gen_argv'].extend(['--dy-prescription', point_contract['dy_prescription']['name']])
         if 'gen_timeout_seconds' in result:
             row['gen_argv'].extend(['--timeout', str(result['gen_timeout_seconds'])])
         row['detector_argv'] = [python, str(frozen / 'run_dark_photon_detector.py'), str(gen),
@@ -613,6 +656,8 @@ def main():
     columns.add_argument('--epsilons', nargs='+', type=float)
     parser.add_argument('--prompt-epsilon', type=float, default=.001)
     parser.add_argument('--sampling-epsilon', type=float, default=.005)
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+                        help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--events', type=int, default=100)
     parser.add_argument('--gen-timeout', type=int, default=600)
     parser.add_argument('--accepted-events', action='store_true',
@@ -657,11 +702,18 @@ def main():
     # Match the existing GEN runner's native loader isolation; no shared files change.
     os.environ['LD_LIBRARY_PATH'] = ':'.join(p for p in os.environ.get('LD_LIBRARY_PATH', '').split(':') if '/biglib/' not in p)
     from dark_photon_pythia import measure_widths
-    source_preflight = {name: digest(Path(__file__).resolve().parent / name) for name in SOURCES}
+    source_preflight = {name:digest(path) for name,path in source_files(dy_prescription=args.dy_prescription).items()}
+    hard_settings = []
+    pdf_runtime = None
+    if args.dy_prescription is not None:
+        from dark_photon_dy_prescription import hard_pdf_settings, configure_hard_pdf
+        pdf_runtime = configure_hard_pdf(args.dy_prescription)
+        hard_settings = hard_pdf_settings(args.dy_prescription)
     def native_probe(mass, epsilon, scale):
         return measure_widths(current_common + current_cp5 + production_settings(mass, epsilon, scale)
+                              + hard_settings
                               + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
-    plan = preflight_points(plan, reference, native_probe)
+    plan = preflight_points(plan, reference, native_probe, dy_prescription=args.dy_prescription)
     if stage_requested:
         plan = plan_detector_stage(plan, args.campaign, args.eos_base,
             5 if args.events_per_job is None else args.events_per_job,
@@ -673,6 +725,8 @@ def main():
                    cmssw_git_head=subprocess.check_output(['git', '-C', str(base / 'src'), 'rev-parse', 'HEAD'], text=True).strip(),
                    pythia_tool=subprocess.check_output(['scram', 'tool', 'info', 'pythia8'], cwd=base / 'src', text=True),
                    width_preflight='native initialized Pythia widths with ProcessLevel:all=off; zero generated events')
+    if args.dy_prescription is not None:
+        runtime['dy_pdf_runtime'] = pdf_runtime
     result = write_plan(args.output, args.references, args.templates, plan, runtime)
     print(json.dumps(dict(output=str(args.output.resolve()), points=len(result['points']),
                           grid_mode=result['grid_mode'], native_width_preflight_passed=True,

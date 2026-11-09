@@ -28,6 +28,79 @@ def low_mass_dy_enabled(mass, benchmark):
     return benchmark == 'pbc-bc1' and 1.5 <= mass < 2.
 
 
+def reuse_pbc_physical_points(plan, previous, previous_path):
+    """Share a qualified FR physical anchor without sharing its proposal or exposure."""
+    qualification = previous.get('senscalc_width_qualification', {})
+    if (plan.get('benchmark') != 'pbc-bc1' or
+            previous.get('production_mechanism') not in grid.REFERENCE_MECHANISMS or
+            previous.get('physical_width_preflight_passed') is not True or
+            previous.get('native_width_preflight_passed') is True or
+            qualification.get('schema') != 'shift-senscalc-physical-width-preflight-v1'):
+        raise ValueError('PBC anchor reuse requires an explicitly qualified reference-flux plan')
+    old_rows = {}
+    for old in previous['points']:
+        for name in {old['point'], old.get('original_point', old['point'])}:
+            if name in old_rows and old_rows[name] is not old:
+                raise ValueError('Reference-flux physical selectors are ambiguous')
+            old_rows[name] = old
+    result = copy.deepcopy(plan)
+    for row in result['points']:
+        old = old_rows.get(row['point'])
+        epsilon_selector = plan['grid_mode'] == 'cartesian-mass-epsilon'
+        if old is None and epsilon_selector:
+            matches = [value for value in previous['points']
+                       if value['mass_gev'] == row['mass_gev'] and value['epsilon'] == row['epsilon']]
+            if len(matches) == 1:
+                old = matches[0]
+        if (old is None or not 1.5 <= row['mass_gev'] < 2. or
+                old['mass_gev'] != row['mass_gev'] or
+                (epsilon_selector and old['epsilon'] != row['epsilon']) or
+                (not epsilon_selector and old['target_mean_lab_flight_m'] != row['target_mean_lab_flight_m'])):
+            raise ValueError('Requested DY point does not match its PBC reference-flux anchor')
+        proof = qualification.get('points', {}).get(old['point'], {})
+        contract_path = Path(old['signal_contract'])
+        audit_path = Path(old['gen_directory']) / 'validation.json'
+        if (proof.get('contract_sha256') != grid.digest(contract_path) or
+                proof.get('validation_sha256') != grid.digest(audit_path)):
+            raise ValueError('Reference-flux physical anchor differs from its qualified hashes')
+        contract = json.loads(contract_path.read_text())
+        audit = json.loads(audit_path.read_text())
+        width = contract['physical_width_table']
+        mass, epsilon = row['mass_gev'], old['epsilon']
+        grid.check_width_table(width, mass, epsilon)
+        if (audit.get('runtime_validated') is not True or
+                contract.get('production_mechanism') != previous['production_mechanism'] or
+                contract.get('filtering') != 'none' or
+                contract['mass_gev'] != mass or contract['epsilon'] != epsilon or
+                not math.isclose(old['proper_ctau_mm'], width['ctau_mm'], rel_tol=1.e-12)):
+            raise ValueError('Reference-flux physical width and qualified point differ')
+        validate_point(mass, epsilon, row['sampling_epsilon'], experimental_low_mass_dy=True)
+        boost = old['mean_beta_gamma_reference']
+        if not math.isfinite(boost) or boost <= 0:
+            raise ValueError('Reference-flux LAB anchor requires a positive finite boost')
+        row.update(epsilon=epsilon, mean_beta_gamma_reference=boost,
+            pbc_common_physical_point=dict(point=old['point'], requested_selector=row['point'],
+                proper_ctau_mm=width['ctau_mm'], physical_br_mumu=width['br_mumu'],
+                contract_path=str(contract_path.resolve()), contract_sha256=proof['contract_sha256'],
+                validation_path=str(audit_path.resolve()), validation_sha256=proof['validation_sha256'],
+                exposure_transferred=False),
+            boost_reference_source=dict(component=previous['production_mechanism'],
+                point=old['point'], contract_sha256=proof['contract_sha256'],
+                validation_sha256=proof['validation_sha256']))
+        row['point'] = old['point']
+        row['original_point'] = old.get('original_point', old['point'])
+        if 'selector_kind' in old:
+            row['selector_kind'] = old['selector_kind']
+        for key in ('mean_lab_flight_reference_estimate_m', 'reference_mean_lab_flight_m',
+                    'mean_lab_flight_m'):
+            if key in old:
+                row[key] = copy.deepcopy(old[key])
+    result['pbc_physical_point_authority'] = dict(path=str(Path(previous_path).resolve()),
+        sha256=grid.digest(previous_path), physical_content_sha256=grid.content_digest(previous),
+        scope='Physical anchors only; DY proposal, identities, source rate and exposure remain independent')
+    return result
+
+
 def plan_points(reference, masses, flights, events, seed_base, detector_job_base,
                 sampling_epsilon=.01, prompt_epsilon=.001, epsilons=None, benchmark=None):
     if reference.get('schema') != grid.REFERENCE_SCHEMA or reference.get('sample_kind') != 'simulation_only':
@@ -99,6 +172,8 @@ def main():
     parser.add_argument('--darkcast-source-receipt',type=Path,required=True)
     parser.add_argument('--benchmark',choices=['pbc-bc1'],
         help='Prepare the DY component from 1.5 GeV, including its 1.5--2 GeV overlap; no production qualification implied')
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+        help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--masses',nargs='+',type=float,default=[2.,5.,10.])
     columns=parser.add_mutually_exclusive_group()
     columns.add_argument('--mean-lab-flights-m',nargs='+',type=float)
@@ -123,7 +198,11 @@ def main():
         args.events,args.seed_base,args.detector_job_base,args.sampling_epsilon,epsilons=args.epsilons,
         benchmark=args.benchmark)
     if args.reuse_physical_plan is not None:
-        plan=grid.reuse_physical_points(plan,json.loads(args.reuse_physical_plan.read_text()),args.reuse_physical_plan)
+        previous = json.loads(args.reuse_physical_plan.read_text())
+        if args.benchmark == 'pbc-bc1' and previous.get('production_mechanism') in grid.REFERENCE_MECHANISMS:
+            plan = reuse_pbc_physical_points(plan, previous, args.reuse_physical_plan)
+        else:
+            plan = grid.reuse_physical_points(plan, previous, args.reuse_physical_plan)
     plan['gen_timeout_seconds']=args.gen_timeout
     from Configuration.Generator.Pythia8CommonSettings_cfi import pythia8CommonSettingsBlock
     from Configuration.Generator.MCTunes2017.PythiaCP5Settings_cfi import pythia8CP5SettingsBlock
@@ -136,15 +215,26 @@ def main():
     import darkcast
     model=darkcast.Model('dark_photon')
     authority=copy.deepcopy(reference['references'][0]['width_authority']['spectral_source'])
+    pdf_runtime = None
+    if args.dy_prescription is not None:
+        from dark_photon_dy_prescription import configure_hard_pdf
+        pdf_runtime = configure_hard_pdf(args.dy_prescription)
     from dark_photon_pythia import _native_inspect
     for row in plan['points']:
         options=SimpleNamespace(mass=row['mass_gev'],epsilon=row['epsilon'],sampling_epsilon=row['sampling_epsilon'],
                                 events=row['events'],seed=row['seed'],run_number=row['run_number'],
-                                experimental_low_mass_dy=low_mass_dy_enabled(row['mass_gev'], args.benchmark))
+                                experimental_low_mass_dy=low_mass_dy_enabled(row['mass_gev'], args.benchmark),
+                                dy_prescription=args.dy_prescription)
         width=physical_width_table(model,options.mass,options.epsilon,authority)
         grid.check_reused_lifetime(row,width['ctau_mm'])
+        anchor = row.get('pbc_common_physical_point')
+        if anchor is not None and (
+                not math.isclose(width['ctau_mm'], anchor['proper_ctau_mm'], rel_tol=1.e-10) or
+                not math.isclose(width['br_mumu'], anchor['physical_br_mumu'], rel_tol=1.e-10)):
+            raise ValueError('Fresh DY width changed the common PBC lifetime or dimuon branching')
         native=_native_inspect(common+tune+native_proposal_settings(options.mass,options.epsilon,options.sampling_epsilon,
-            experimental_low_mass_dy=options.experimental_low_mass_dy)+beam_settings(6800.))
+            experimental_low_mass_dy=options.experimental_low_mass_dy,
+            dy_prescription=args.dy_prescription)+beam_settings(6800.))
         contract=build_contract(options,width,native,common,tune)
         lab=row['mean_beta_gamma_reference']*width['ctau_mm']/1000
         target=row['target_mean_lab_flight_m']
@@ -163,10 +253,13 @@ def main():
     here=Path(__file__).resolve().parent
     base=Path(os.environ['CMSSW_BASE'])
     runtime=dict(cmssw_base=str(base),cmssw_version=os.environ.get('CMSSW_VERSION'),scram_arch=os.environ.get('SCRAM_ARCH'),
-        python=sys.version,python_executable=sys.executable,source_preflight_sha256={name:grid.digest(here/name) for name in grid.SOURCES},
+        python=sys.version,python_executable=sys.executable,
+        source_preflight_sha256={name:grid.digest(path) for name,path in grid.source_files(here,args.dy_prescription).items()},
         cmssw_git_head=subprocess.check_output(['git','-C',str(base/'src'),'rev-parse','HEAD'],text=True).strip(),
         pythia_tool=subprocess.check_output(['scram','tool','info','pythia8'],cwd=base/'src',text=True),
         width_preflight='native natural DY proposal plus external complete physical spectral widths; no GEN generated')
+    if args.dy_prescription is not None:
+        runtime['dy_pdf_runtime'] = pdf_runtime
     result=grid.write_plan(args.output,args.references,args.templates,plan,runtime)
     frozen_authority=freeze_spectral_inputs(args.darkcast_path.resolve(),args.darkcast_source_receipt.resolve(),args.output.resolve())
     if authority!=frozen_authority:

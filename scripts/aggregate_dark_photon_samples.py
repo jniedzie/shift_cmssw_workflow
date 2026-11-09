@@ -14,6 +14,7 @@ Plans with histogram_only=true sum already-validated batch histograms while
 retaining their complete Nano groups at the original published locations.
 """
 import argparse
+import copy
 from datetime import datetime, timezone
 import hashlib
 import importlib.util
@@ -36,6 +37,7 @@ from dark_photon_material_selection import (
 SCHEMA = 'shift-dark-photon-additive-plan-v1'
 SAFE_NAME = re.compile(r'[A-Za-z0-9_-]+')
 MODEL_FIELDS = ('mass_gev', 'epsilon', 'proper_ctau_mm', 'sampling_epsilon')
+DY_RECIPE_FIELDS = ('dy_prescription', 'dy_normalization_applications', 'dy_normalization_uncertainty')
 
 
 def read(path):
@@ -146,7 +148,11 @@ def unique_populations(populations):
                     or previous['rate']['proposal_ledger'] != record['proposal_ledger']
                     or previous.get('selected_event_ids') != population.get('selected_event_ids')
                     or previous.get('sampling_probabilities') != population.get('sampling_probabilities')
-                    or previous.get('rate_only',False) != population.get('rate_only',False)):
+                    or previous.get('rate_only',False) != population.get('rate_only',False)
+                    or any((name in previous['rate']) != (name in record) or
+                           previous['rate'].get(name) != record.get(name)
+                           for name in DY_RECIPE_FIELDS + ('physical_lo_selected_cross_sections_pb',
+                                                         'physical_lo_inclusive_cross_sections_pb'))):
                 raise ValueError('Recovery views disagree about the same GEN population')
             previous.setdefault('duplicate_views', []).append(population['source'])
             continue
@@ -197,6 +203,55 @@ def reference_sampling_identity(record):
     return sampling
 
 
+def validated_dy_normalization(record):
+    """Keep the common K error separate from independent GEN integration errors."""
+    if 'dy_prescription' not in record:
+        if any(name in record for name in DY_RECIPE_FIELDS[1:] + (
+                'physical_lo_selected_cross_sections_pb','physical_lo_inclusive_cross_sections_pb')):
+            raise ValueError('Incomplete DY normalization metadata')
+        return None
+    try:
+        prescription = record['dy_prescription']
+        norm = prescription['normalization']
+        factor, error = norm['factor'], norm['common_numerical_error']
+        uncertainty = record['dy_normalization_uncertainty']
+        expected_key = ('dy-nnlo-numerical:'+prescription['authority']['sha256']+
+                        ':'+format(record['mass_gev'], '.17g'))
+        valid = (record.get('mechanism') == 'pure-on-shell-drell-yan' and
+            prescription['schema'] == 'shift-dy-msht20-nnlo-v1' and
+            norm['order'] == 'NNLO' and norm['reference'] == 'native-clipped-LO' and
+            type(record['dy_normalization_applications']) is int and record['dy_normalization_applications'] == 1 and
+            type(factor) in (int,float) and math.isfinite(factor) and factor > 0 and
+            type(error) in (int,float) and math.isfinite(error) and error >= 0 and
+            uncertainty['kind'] == 'common_numerical_normalization' and
+            uncertainty['factor'] == factor and uncertainty['absolute_k_error'] == error and
+            uncertainty['relative_error'] == error/factor and uncertainty['correlation_key'] == expected_key and
+            uncertainty['authority'] == prescription['authority'] and
+            uncertainty['included_in_independent_error_pb'] is False)
+        lo = record['physical_lo_selected_cross_sections_pb']
+        corrected = record['physical_selected_cross_sections_pb']
+        inclusive = record['physical_lo_inclusive_cross_sections_pb']
+        corrected_inclusive = record['physical_inclusive_cross_sections_pb']
+        if (not valid or len(lo) != len(corrected) or len(inclusive) != len(lo) or
+                len(corrected_inclusive) != len(lo) or not lo):
+            raise ValueError('Invalid common DY normalization or original LO rates')
+        for before,after in zip(lo,corrected):
+            if (not math.isfinite(before['value_pb']) or before['value_pb'] <= 0 or
+                    not math.isfinite(before['error_pb']) or before['error_pb'] < 0 or
+                    any(not math.isclose(after[key],factor*before[key],rel_tol=1e-12,abs_tol=0.)
+                        for key in ('value_pb','error_pb'))):
+                raise ValueError('DY rate must apply K once and keep its common error out of independent error_pb')
+        if any(not math.isclose(before[key]/record['physical_br_mumu'],after[key],rel_tol=1e-12,abs_tol=0.)
+               for before,after in zip(lo,inclusive) for key in ('value_pb','error_pb')):
+            raise ValueError('Original inclusive DY LO rate changed its dimuon branching convention')
+        if any(not math.isclose(factor*before[key],after[key],rel_tol=1e-12,abs_tol=0.)
+               for before,after in zip(inclusive,corrected_inclusive) for key in ('value_pb','error_pb')):
+            raise ValueError('Inclusive DY rate must apply K once, with the same independent MC error convention')
+    except (KeyError, TypeError) as error:
+        raise ValueError('Incomplete DY normalization metadata') from error
+    return uncertainty
+
+
 def combined_rate(populations, *, point, campaign):
     """Average identical-proposal estimates by their phase-space trial counts.
 
@@ -210,7 +265,13 @@ def combined_rate(populations, *, point, campaign):
     reference = first.get('mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
               'sampling_epsilon', 'beam_energy_GeV', 'source_model',
-              'generated_mass_support_gev')
+              'generated_mass_support_gev') + DY_RECIPE_FIELDS
+    if any(('dy_prescription' in population['rate']) != ('dy_prescription' in first)
+           for population in populations[1:]):
+        raise ValueError('Different DY prescriptions cannot be pooled')
+    dy_uncertainty = validated_dy_normalization(first)
+    for population in populations[1:]:
+        validated_dy_normalization(population['rate'])
     # A meson correction contains the measured all-collision mean probability,
     # which fluctuates between independent source populations. The model card
     # and source definition must agree; the measured means need not be equal.
@@ -301,6 +362,15 @@ def combined_rate(populations, *, point, campaign):
             result[key]=first.get(key)
         result['source_sampling']=first['source_sampling']
         result['source_sampling_physics_identity']=sampling
+    if dy_uncertainty is not None:
+        result.update(dy_prescription=copy.deepcopy(first['dy_prescription']),
+            dy_normalization_applications=1,dy_normalization_uncertainty=copy.deepcopy(dy_uncertainty))
+        for name in ('selected','inclusive'):
+            key='physical_lo_'+name+'_cross_sections_pb'
+            values=[population['rate'][key][0] for population in populations]
+            result[key]=[dict(value_pb=math.fsum(w*x['value_pb'] for w,x in zip(fractions,values)),
+                error_pb=math.sqrt(math.fsum((w*x['error_pb'])**2 for w,x in zip(fractions,values))))]
+        validated_dy_normalization(result)
     return result
 
 
@@ -392,7 +462,7 @@ def _component_rate_summary(rows, *, point, campaign, physical, conditions, sche
     reference = total_sigma / total_sumw
     for row in rows:
         row['histogram_scale'] = row['cross_section_per_gen_weight_pb'] / reference
-    return dict(schema=schema,
+    result = dict(schema=schema,
         point=point, campaign=campaign, physical_point=physical,
         conditions_sha256=conditions, components=rows,
         physical_selected_cross_sections_pb=[dict(value_pb=total_sigma,
@@ -411,6 +481,18 @@ def _component_rate_summary(rows, *, point, campaign, physical, conditions, sche
             native_gen_weights_changed=False, scale_flow_bins=True, scale_sumw2_by_squared_factor=True,
             shape_normalization='Sum physical components first; normalize the resulting shape once'),
         normalization_ready=False, physics_valid=False, production_rate_validated=False)
+    uncertainties=[]
+    for row in rows:
+        common=validated_dy_normalization(row['rate'])
+        if common is not None:
+            uncertainties.append(dict(component=row['name'],dy_prescription=copy.deepcopy(row['rate']['dy_prescription']),
+                uncertainty=copy.deepcopy(common),
+                absolute_selected_error_pb=row['selected_cross_section_pb']*common['relative_error']))
+    if uncertainties:
+        result['dy_normalization_uncertainties']=uncertainties
+        result['combination']['uncertainty_scope'] = (
+            'error_pb contains independent Monte Carlo errors only; DY common numerical normalization is retained separately; other theory/source uncertainties remain open')
+    return result
 
 
 def senscalc_dy_component_rates(components, *, point, campaign):
@@ -632,6 +714,8 @@ def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
         native_nano_weights_changed=False, unscaled_diagnostic_histograms=['rawEventsCutFlow'],
         source_rate_combination=rate['combination'], partial_production=True,
         physics_normalization_ready=False, forced_decay_branching_convention_ready=True)
+    if 'dy_normalization_uncertainties' in rate:
+        metadata['dy_normalization_uncertainties']=copy.deepcopy(rate['dy_normalization_uncertainties'])
     output.parent.mkdir(parents=True, exist_ok=True)
     target = ROOT.TFile.Open(str(output), 'CREATE')
     if not target or target.IsZombie():
@@ -707,6 +791,10 @@ def load_source(source, expected_model, conditions_digest):
     rate = rate_record(contract, audit, point=source['point'], campaign=plan['campaign'],
         source_hashes={name: sha(gen / name) for name in ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log')},
         gen_path=parent['gen_path'], gen_sha256=parent['gen_sha256'], source_directory=gen)
+    if 'dy_prescription' in contract:
+        if rate.get('dy_prescription') != contract['dy_prescription']:
+            raise ValueError('The source exporter did not retain its frozen DY prescription; qualify the complete helper closure')
+        validated_dy_normalization(rate)
     if reference:
         identity = validated_bremsstrahlung_identity(gen, contract, rate['source_sampling'])
         if identity is not None:

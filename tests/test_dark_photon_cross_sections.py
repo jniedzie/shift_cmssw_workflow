@@ -119,6 +119,83 @@ class CrossSectionAccounting(unittest.TestCase):
                 cwd=temporary,check=True,capture_output=True,text=True)
 
 
+class DYNormalizationAccounting(unittest.TestCase):
+    def setUp(self):
+        import dark_photon_dy_prescription as prescription
+        self.prescription = prescription
+        self.base = CrossSectionAccounting(); self.base.setUp()
+        self.temporary = tempfile.TemporaryDirectory(); self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        table = dict(schema=prescription.TABLE_SCHEMA,name='msht20-nnlo',beam_energy_GeV=6800.,
+            hard_pdf=dict(set='MSHT20nnlo_as118',member=0),normalization_reference='native-clipped-LO',
+            native_pdf_settings=list(prescription.PDF_SYMMETRY_SETTINGS),
+            pdf_inputs={name:'0'*64 for name in prescription.PDF_INPUT_NAMES},pdf_data_root='/nonexistent/test/PDFs',
+            epsilon_reference=.001,epsilon_upper_bound=.001,small_mixing_qualified=True,
+            weak_current=dict(sin2_theta_w=.2312,m_z_gev=91.1876),
+            theory_scope='Synthetic exporter fixture, not a production authority',
+            points=[dict(mass_gev=15.,factor=2.,common_numerical_error=.2,qualified=True)])
+        (self.directory/prescription.TABLE_NAME).write_text(json.dumps(table))
+        (self.directory/prescription.HELPER_NAME).write_bytes(Path(prescription.__file__).read_bytes())
+        (self.directory/'manifest.json').write_text(json.dumps(dict(dy_pdf_runtime=dict(
+            schema='shift-dy-pdf-runtime-v1',data_root='/nonexistent/test/PDFs',files=table['pdf_inputs']))))
+        source = dict(self.base.contract,process_settings=['StandardModel:sin2thetaW = 0.2312','23:m0 = 91.1876'])
+        self.contract = prescription.apply_prescription(source,'msht20-nnlo',self.directory/prescription.TABLE_NAME)
+        (self.directory/'contract.json').write_text(json.dumps(self.contract))
+
+    def record(self):
+        return rate_record(self.contract,self.base.audit,point='m15_lab_100m',campaign='conditions',
+            source_hashes={'contract.json':'a'*64},gen_path='/eos/user/t/test/gen.root',
+            gen_sha256='b'*64,source_directory=self.directory)
+
+    def test_K_changes_only_the_exported_physical_rate_and_independent_MC_error(self):
+        original = self.base.record(); before = copy.deepcopy(self.base.audit)
+        result = self.record()
+        self.assertEqual(result['physical_lo_selected_cross_sections_pb'],original['physical_selected_cross_sections_pb'])
+        self.assertEqual(result['physical_lo_inclusive_cross_sections_pb'],original['physical_inclusive_cross_sections_pb'])
+        self.assertEqual(result['physical_selected_cross_sections_pb'],[dict(value_pb=4e-8,error_pb=2e-9)])
+        for key in ('native_selected_cross_sections_pb','corrections','full_gen','proposal_ledger','physical_width_authority'):
+            self.assertEqual(result[key],original[key])
+        self.assertEqual(self.base.audit,before)
+        self.assertEqual(result['dy_prescription'],self.contract['dy_prescription'])
+        self.assertNotIn('dy_prescription_metadata',result)
+        self.assertEqual(result['dy_normalization_applications'],1)
+        common=result['dy_normalization_uncertainty']
+        self.assertEqual(common['relative_error'],.1)
+        self.assertEqual(common['absolute_k_error'],.2)
+        self.assertFalse(common['included_in_independent_error_pb'])
+        self.assertAlmostEqual(result['physical_inclusive_cross_sections_pb'][0]['value_pb'],2e-7)
+
+    def test_source_retention_replays_the_actual_frozen_helper_table_and_hard_PDF(self):
+        names=input_files(self.directory,{})
+        self.assertIn(self.prescription.HELPER_NAME,names)
+        self.assertIn(self.prescription.TABLE_NAME,names)
+        mutations=[(self.directory/self.prescription.HELPER_NAME,b'# changed helper\n'),
+                   (self.directory/self.prescription.TABLE_NAME,b'{}'),
+                   (self.directory/'manifest.json',b'{}')]
+        for path,payload in mutations:
+            original=path.read_bytes();path.write_bytes(payload)
+            with self.subTest(path=path.name),self.assertRaises(ValueError):self.record()
+            with self.assertRaises(ValueError):input_files(self.directory,{})
+            path.write_bytes(original)
+        self.contract['process_settings'].append('PDF:pHardSet = anotherPDF')
+        with self.assertRaisesRegex(ValueError,'hard-PDF'):self.record()
+
+    def test_already_corrected_GEN_rate_and_non_DY_or_empty_prescriptions_are_rejected(self):
+        self.base.audit['target_cross_sections'][0]['value_pb']*=2
+        with self.assertRaisesRegex(ValueError,'exactly once'):self.record()
+        self.base.audit['target_cross_sections'][0]['value_pb']/=2
+        original=copy.deepcopy(self.contract)
+        self.contract['mechanism']='meson-radiative'
+        with self.assertRaisesRegex(ValueError,'different source'):self.record()
+        self.contract=original;self.contract['dy_prescription']=None
+        with self.assertRaisesRegex(ValueError,'frozen normalization authority'):self.record()
+
+    def test_absent_prescription_stays_lazy_and_has_no_new_fields(self):
+        with patch.dict(sys.modules,{'dark_photon_dy_prescription':None}):
+            result=self.base.record()
+        self.assertFalse(any(key.startswith('dy_') or key.startswith('physical_lo_') for key in result))
+
+
 class MesonCrossSectionAccounting(unittest.TestCase):
     """The physical rate uses all pp collisions, not conditional signal N."""
     def setUp(self):

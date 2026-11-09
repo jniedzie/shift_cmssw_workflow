@@ -2512,6 +2512,16 @@ class HandoffStartPollReset(unittest.TestCase):
 
 
 class FrozenPublicationTools(unittest.TestCase):
+    def test_selected_DY_tools_retain_flat_helper_and_table_for_future_rate_exports(self):
+        import dark_photon_dy_prescription as prescription
+        scripts=Path(preparation.__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as temporary:
+            tools=Path(temporary);files={}
+            preparation.freeze_tools(dict(dy_prescription='msht20-nnlo'),scripts,tools,files)
+            for name,path in prescription.prescription_files('msht20-nnlo').items():
+                self.assertEqual(production.durable.sha(tools/name),production.durable.sha(path))
+                self.assertEqual(files[str(tools/name)],production.durable.sha(path))
+
     def test_prepared_tools_support_the_real_cumulative_lazy_imports(self):
         import run_dark_photon_statistics as statistics
         scripts = Path(preparation.__file__).resolve().parent

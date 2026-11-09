@@ -57,7 +57,7 @@ def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=Fal
 
 
 def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False,
-                             experimental_large_epsilon=False):
+                             experimental_large_epsilon=False, dy_prescription=None):
     validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy, experimental_large_epsilon)
     couplings = pythia_couplings(mass, epsilon, NATIVE_EW)
     scale = sampling_epsilon / epsilon
@@ -73,6 +73,9 @@ def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_m
     for species, coupling in couplings.items():
         settings.extend([f"Zprime:v{species} = {scale*coupling['vector']:.17g}",
                          f"Zprime:a{species} = {scale*coupling['axial']:.17g}"])
+    if dy_prescription is not None:
+        from dark_photon_dy_prescription import hard_pdf_settings
+        settings.extend(hard_pdf_settings(dy_prescription))
     return settings
 
 
@@ -144,7 +147,7 @@ def build_contract(args, width, native, common, tune):
     commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental, large_epsilon)
     commands.extend(["32:tauCalc = off", f"32:tau0 = {width['ctau_mm']:.17g}",
                      "32:onMode = off", "32:onIfMatch = 13 -13"])
-    return dict(schema="shift-dark-photon-gen-v1", model="PBC-BC1-visible-hypercharge",
+    result = dict(schema="shift-dark-photon-gen-v1", model="PBC-BC1-visible-hypercharge",
         backend="native-DY-proposal-with-external-spectral-physical-width",
         mechanism="pure-on-shell-drell-yan", mass_gev=args.mass, epsilon=args.epsilon,
         generated_mass_support_gev=[.99*args.mass, 1.01*args.mass], pdg_id=32, decay_mode="mumu",
@@ -170,6 +173,11 @@ def build_contract(args, width, native, common, tune):
         **({'experimental_large_epsilon': True} if large_epsilon else {}),
         production_scope="DY-only experimental extension; meson/bremsstrahlung absent" if args.mass<2 else "DY-only spectral pilot",
         prompt_interference_included=False, detector_simulated=False)
+    if getattr(args, 'dy_prescription', None) is not None:
+        from dark_photon_dy_prescription import apply_prescription
+        result = apply_prescription(result, args.dy_prescription,
+                                    table_path=getattr(args, 'dy_prescription_table', None))
+    return result
 
 
 
@@ -242,6 +250,8 @@ def main():
                         help="Allow 1.4-2 GeV DY-only diagnostics; retain native pole-support checks and provisional physics flags")
     parser.add_argument("--experimental-large-epsilon", action="store_true",
                         help="Allow epsilon up to 0.1 and use full vector/axial DarkCast couplings; provisional pure-DY benchmark")
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+                        help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument("--darkcast-path", type=Path, required=True)
     parser.add_argument("--darkcast-source-receipt", type=Path, required=True)
     parser.add_argument("--events", type=int, default=100)
@@ -263,18 +273,30 @@ def main():
     if not shutil.which("cmsRun") or not os.environ.get("CMSSW_BASE"):
         parser.error("Enter the existing built CMSSW runtime first; no build is performed")
     os.environ["LD_LIBRARY_PATH"] = ":".join(p for p in os.environ.get("LD_LIBRARY_PATH", "").split(":") if "/biglib/" not in p)
+    pdf_runtime = None
+    if args.dy_prescription is not None:
+        from dark_photon_dy_prescription import configure_hard_pdf
+        pdf_runtime = configure_hard_pdf(args.dy_prescription)
     environment = os.environ.copy()
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = dict(schema="shift-dark-photon-pilot-run-v1", status="preflight",
                     physics_valid=False, normalization_ready=False)
+    if args.dy_prescription is not None:
+        manifest['dy_pdf_runtime'] = pdf_runtime
     path = output / "manifest.json"
     here = Path(__file__).resolve().parent
     try:
         sources = SOURCES + (("dark_photon_spectral_widths.py",) if args.experimental_large_epsilon else ())
         for name in sources:
             shutil.copy2(here / name, output / name)
+        prescription_sources = {}
+        if args.dy_prescription is not None:
+            from dark_photon_dy_prescription import freeze_prescription, TABLE_NAME
+            prescription_sources = freeze_prescription(args.dy_prescription, output)
+            args.dy_prescription_table = output / TABLE_NAME
         manifest["source_sha256"] = {name: digest(output / name) for name in sources}
+        manifest['source_sha256'].update(prescription_sources)
         base = Path(os.environ["CMSSW_BASE"])
         record_runtime(manifest, base, output, args.runtime_provenance, args.runtime_archive)
         manifest["pythia_tool"] = subprocess.check_output(["scram", "tool", "info", "pythia8"], cwd=base / "src", text=True)
@@ -298,7 +320,7 @@ def main():
         common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
         tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
         native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,
-            args.experimental_low_mass_dy,args.experimental_large_epsilon)+beam_settings(6800.))
+            args.experimental_low_mass_dy,args.experimental_large_epsilon,args.dy_prescription)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
         if args.frozen_contract is not None:
             contract, closure = frozen_contract(contract, args.frozen_contract, args.jaw_profile)
