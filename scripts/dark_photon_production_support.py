@@ -163,7 +163,90 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
         receipt['error']=repr(error);save(receipt_path,receipt);raise
 
 
-def main_histogram_stage(directory,action,chunk_index=None):
+def main_nano_retry_policy(directory, action, chunk_index, reference):
+    """Allow one reviewed operational Nano timeout retry, never a physics change."""
+    directory = Path(directory)
+    if action != 'detector' or not isinstance(reference, dict):
+        raise ValueError('A main retry policy applies only to an exact detector slice')
+    policy_path = Path(reference['path']).resolve()
+    if not valid_digest(reference.get('sha256')) or sha256(policy_path) != reference['sha256']:
+        raise ValueError('Changed main retry policy')
+    policy = read(policy_path)
+    names = ('seal.json', 'plan.json', 'source.json', 'gen_inventory.json',
+             'primary_preflight/receipt.json', 'main_histogrammer.json')
+    if (policy.get('schema') != 'shift-main-nano-timeout-retry-v1'
+            or set(policy.get('original_files', {})) != set(names)
+            or any(sha256(directory/name) != policy['original_files'][name] for name in names)
+            or policy.get('replacement_helper_sha256') != sha256(__file__)):
+        raise ValueError('Main retry policy does not pin the unchanged original stage and replacement helper')
+    row = read(directory/'plan.json')['points'][0]
+    if type(chunk_index) is not int or not 0 <= chunk_index < len(row['chunks']):
+        raise ValueError('Unknown retry detector slice')
+    chunk = row['chunks'][chunk_index]
+    entry = policy.get('allowed_chunks', {}).get(str(chunk_index))
+    if not isinstance(entry, dict):
+        raise ValueError('Detector slice is not admitted by the reviewed retry policy')
+    proofs = {}
+    for name in ('first_failure', 'output_absence'):
+        item = entry[name]
+        path = Path(item['path']).resolve()
+        if not valid_digest(item.get('sha256')) or sha256(path) != item['sha256']:
+            raise ValueError('Changed main retry '+name+' evidence')
+        if path == (directory/'statuses'/('chunk_'+str(chunk_index)+'.json')).resolve():
+            raise ValueError('Archive the first failure outside the canonical status path')
+        proofs[name] = read(path)
+    failure, absence = proofs['first_failure'], proofs['output_absence']
+    payload = failure.get('payload', {})
+    try:
+        timeout = ast.parse(payload.get('error', ''), mode='eval').body
+        argv = ast.literal_eval(timeout.args[0])
+        nano_timeout = (isinstance(timeout, ast.Call) and isinstance(timeout.func, ast.Name)
+                        and timeout.func.id == 'TimeoutExpired' and len(timeout.args) == 2
+                        and not timeout.keywords and ast.literal_eval(timeout.args[1]) == 900
+                        and isinstance(argv, list) and len(argv) == 2 and argv[0] == 'cmsRun'
+                        and Path(argv[1]).name == 'step4_cfg.py')
+    except (AttributeError, IndexError, TypeError, ValueError, SyntaxError):
+        nano_timeout = False
+    pins = policy['original_files']
+    if (failure.get('complete') is not False or failure.get('action') != 'detector'
+            or 'retry_policy' in failure or payload.get('complete') is not False
+            or failure.get('plan_sha256') != pins['plan.json']
+            or failure.get('seal_sha256') != pins['seal.json']
+            or failure.get('primary_preflight_receipt_sha256') != pins['primary_preflight/receipt.json']
+            or payload.get('source_descriptor_sha256') != pins['source.json']
+            or payload.get('job') != chunk['job'] or payload.get('source_skip') != chunk['skip']
+            or payload.get('events') != chunk['count'] or payload.get('current_tier') != 'NANO'
+            or any(str(stage) not in payload.get('stages', {}) for stage in (1, 2, 3))
+            or any(key in payload for key in ('nano_path', 'nano_sha256', 'nano_readback_sha256', 'published'))
+            or not nano_timeout):
+        raise ValueError('Only the archived first unpublished Nano 900-second timeout may be retried')
+    source = read(directory/'source.json')
+    expected_directory = source['output_base']+f"/job{chunk['job']:07d}"
+    if (source.get('storage_contract') is not None
+            or absence.get('schema') != 'shift-main-detector-output-absence-v1'
+            or absence.get('complete') is not True or absence.get('chunk') != chunk_index
+            or absence.get('job') != chunk['job']
+            or absence.get('source_descriptor_sha256') != pins['source.json']
+            or absence.get('absent_paths') != [expected_directory]
+            or not isinstance(absence.get('checked_utc'), str) or not absence['checked_utc']):
+        raise ValueError('Retry requires reviewed absence of the exact original publication directory')
+    settings = read(directory/'main_histogrammer.json')
+    if (settings.get('detector_stage_timeouts') != [3600, 900, 1800, 900]
+            or settings.get('detector_timeout_seconds') != 7200
+            or settings.get('worker_runtime_seconds') != 10800
+            or failure.get('detector_stage_timeouts') != settings['detector_stage_timeouts']
+            or failure.get('detector_timeout_seconds') != 7200
+            or failure.get('requested_worker_runtime_seconds') != 10800
+            or any(failure.get(key) != settings.get(key) for key in
+                   ('detector_first_event_stall_timeout_seconds', 'detector_event_stall_timeout_seconds'))):
+        raise ValueError('Retry is restricted to the reviewed unchanged stage budget and progress guards')
+    return dict(path=str(policy_path), sha256=reference['sha256'],
+                replacement_helper_sha256=policy['replacement_helper_sha256'],
+                first_failure=entry['first_failure'], output_absence=entry['output_absence'],
+                scope='One operational retry; Nano deadline 900 to 3600 seconds; scientific inputs unchanged')
+
+
+def main_histogram_stage(directory,action,chunk_index=None,retry_policy=None):
     """Execute a sealed common detector slice or its main-histogram finalizer."""
     from run_dark_photon_statistics import save
     directory=Path(directory).resolve();seal=read(directory/'seal.json')
@@ -182,11 +265,16 @@ def main_histogram_stage(directory,action,chunk_index=None):
             converted.get('full_count')!=parent['events'] or converted.get('converted_count')!=parent['events']):
         raise ValueError('The complete original GEN must pass its actual converter before SIM')
     settings=read(directory/'main_histogrammer.json')
+    retry = (main_nano_retry_policy(directory, action, chunk_index, retry_policy)
+             if retry_policy is not None else None)
     stage_timeouts=settings.get('detector_stage_timeouts',[7200,3600,5400,7200])
     detector_timeout=settings.get('detector_timeout_seconds',43200)
     worker_runtime=settings.get('worker_runtime_seconds',43200)
     first_progress=settings.get('detector_first_event_stall_timeout_seconds',7200)
     event_progress=settings.get('detector_event_stall_timeout_seconds',3600)
+    if retry is not None:
+        stage_timeouts = [3600, 900, 1800, 3600]
+        detector_timeout = 9900
     if (not isinstance(stage_timeouts,list) or len(stage_timeouts)!=4
             or any(type(value) is not int or value<=0 for value in stage_timeouts)
             or type(detector_timeout) is not int or detector_timeout<=0
@@ -197,6 +285,11 @@ def main_histogram_stage(directory,action,chunk_index=None):
         raise ValueError('Detector stage budgets must fit the overall timeout and requested worker lifetime')
     status=directory/'statuses'/('chunk_'+str(chunk_index)+'.json' if action=='detector' else 'finalizer.json')
     if status.exists():raise ValueError('Preserve the existing attempt; review its outputs before any retry')
+    if retry is not None:
+        claims = directory/'retry_attempts'
+        claims.mkdir(exist_ok=True)
+        with (claims/('chunk_'+str(chunk_index)+'.json')).open('x') as claim:
+            json.dump(retry, claim, sort_keys=True)
     report=dict(complete=False,action=action,plan_sha256=sha256(directory/'plan.json'),
                 seal_sha256=sha256(directory/'seal.json'),
                 full_gen_events=parent['events'],
@@ -205,6 +298,8 @@ def main_histogram_stage(directory,action,chunk_index=None):
                 detector_first_event_stall_timeout_seconds=first_progress,
                 detector_event_stall_timeout_seconds=event_progress,
                 primary_preflight_receipt_sha256=sha256(directory/'primary_preflight/receipt.json'))
+    if retry is not None:
+        report['retry_policy'] = retry
     save(status,report)
     previous=Path.cwd()
     try:
@@ -837,5 +932,11 @@ if __name__=='__main__':
     parser.add_argument('--main-stage',type=Path,required=True)
     parser.add_argument('--action',choices=('detector','finalize'),required=True)
     parser.add_argument('--chunk',type=int)
+    parser.add_argument('--main-retry-policy',type=Path)
+    parser.add_argument('--main-retry-policy-sha256')
     options=parser.parse_args()
-    main_histogram_stage(options.main_stage,options.action,options.chunk)
+    if bool(options.main_retry_policy) != bool(options.main_retry_policy_sha256):
+        parser.error('Both --main-retry-policy and --main-retry-policy-sha256 are required for a retry')
+    retry = (dict(path=str(options.main_retry_policy), sha256=options.main_retry_policy_sha256)
+             if options.main_retry_policy else None)
+    main_histogram_stage(options.main_stage,options.action,options.chunk,retry_policy=retry)
