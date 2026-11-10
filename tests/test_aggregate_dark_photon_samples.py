@@ -617,6 +617,89 @@ class CompositeMainHistograms(unittest.TestCase):
                         point='m1p8_lab30', campaign='overlap')
                 self.assertFalse((directory / 'composite.root').exists())
 
+    @staticmethod
+    def edit_histograms(component, edit):
+        import ROOT
+        item = component['populations'][0]['report']['main_histograms']['published']['merged_histogram']
+        root = ROOT.TFile.Open(item['path'], 'UPDATE')
+        try:
+            edit(root)
+        finally:
+            root.Close()
+        item.update(sha256=sha(item['path']), bytes=Path(item['path']).stat().st_size)
+
+    def test_native_empty_and_unit_count_errors_promote_before_scaling_with_bookkeeping_cutflow(self):
+        import ROOT
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary); components = self.sources(directory)
+            def edit(root):
+                root.cd('dimuon')
+                for category in ('Both-Both', 'Other'):
+                    name = 'ShiftDimuonVertex' + category + '_logMass'
+                    hist = ROOT.TH1D(name, '', 10, 0., 100.)
+                    hist.Sumw2(False)
+                    if category == 'Both-Both':
+                        for value in (-1., 15., 101.):
+                            hist.Fill(value)
+                    self.assertEqual(hist.GetSumw2N(), 0)
+                    hist.Write(name, ROOT.TObject.kOverwrite)
+                root.cd()
+                flow = ROOT.TH1D('cutFlow', '', 2, 0., 2.)
+                flow.Sumw2(False)
+                flow.SetBinContent(1, 1.25); flow.SetBinContent(2, 3.75)
+                flow.Write('cutFlow', ROOT.TObject.kOverwrite)
+            for component in components:
+                self.edit_histograms(component, edit)
+            result = prepare_senscalc_dy_histograms(components, directory/'native.root',
+                point='m1p8_lab30', campaign='overlap')
+            scales = [row['histogram_scale'] for row in result['rate']['components']]
+            root = ROOT.TFile.Open(result['histogram']['path'])
+            mass = root.Get('dimuon/ShiftDimuonVertexBoth-Both_logMass')
+            for index in (0, mass.FindBin(15.), mass.GetNbinsX()+1):
+                self.assertAlmostEqual(mass.GetBinContent(index), sum(scales))
+                self.assertAlmostEqual(mass.GetBinError(index)**2, sum(x*x for x in scales))
+            empty = root.Get('dimuon/ShiftDimuonVertexOther_logMass')
+            self.assertEqual(empty.GetEntries(), 0)
+            self.assertEqual(empty.Integral(0, empty.GetNbinsX()+1), 0)
+            flow = root.Get('cutFlow')
+            self.assertAlmostEqual(flow.GetBinContent(1), 1.25*sum(scales))
+            self.assertAlmostEqual(flow.GetBinError(1)**2, 1.25*sum(x*x for x in scales))
+            self.assertEqual(root.Get('rawEventsCutFlow').GetBinContent(1), 3)
+            metadata = json.loads(root.Get('ShiftFullGenNormalization').GetString().Data())
+            self.assertEqual(len(metadata['native_unit_count_sumw2_promotions']), 4)
+            self.assertEqual(len(metadata['bookkeeping_error_promotions']), 2)
+            self.assertIn('not weighted-event statistical variance',
+                metadata['bookkeeping_histogram_error_conventions']['cutFlow'])
+            root.Close()
+
+    def test_missing_sumw2_rejects_ambiguous_weights_forced_errors_and_integer_storage(self):
+        import ROOT
+        for case in ('fractional', 'entries', 'not_weighted_bit', 'poisson', 'norm_factor', 'integer'):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary); components = self.sources(directory)
+                def edit(root):
+                    root.cd('dimuon')
+                    name = 'ShiftDimuonVertexBoth-Both_logMass'
+                    histogram_type = ROOT.TH1I if case == 'integer' else ROOT.TH1D
+                    hist = histogram_type(name, '', 10, 0., 100.)
+                    hist.Sumw2(False); hist.Fill(15.)
+                    if case == 'fractional':
+                        hist.SetBinContent(2, .5); hist.SetEntries(.5)
+                    elif case == 'entries':
+                        hist.SetEntries(2)
+                    elif case == 'not_weighted_bit':
+                        hist.SetBit(ROOT.TH1.kIsNotW)
+                    elif case == 'poisson':
+                        hist.SetBinErrorOption(ROOT.TH1.kPoisson)
+                    elif case == 'norm_factor':
+                        hist.SetNormFactor(2.)
+                    hist.Write(name, ROOT.TObject.kOverwrite)
+                self.edit_histograms(components[0], edit)
+                with self.assertRaisesRegex(ValueError, 'Sumw2'):
+                    prepare_senscalc_dy_histograms(components, directory/'reject.root',
+                        point='m1p8_lab30', campaign='overlap')
+                self.assertFalse((directory/'reject.root').exists())
+
     def test_existing_output_is_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / 'keep.root'; output.write_bytes(b'preserve')

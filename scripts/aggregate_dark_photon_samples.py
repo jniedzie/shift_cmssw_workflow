@@ -618,6 +618,7 @@ def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
     rate = senscalc_dy_component_rates(components, point=point, campaign=campaign)
     scales = {row['name']: row for row in rate['components']}
     expected, merged, originals, sources = {}, {}, [], []
+    promotions, bookkeeping = [], []
     for component in components:
         scale = scales[component['name']]['histogram_scale']
         seen = set()
@@ -667,10 +668,25 @@ def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
                 for name, bins in inventory.items():
                     obj = root.Get(name)
                     factor = 1. if name == 'rawEventsCutFlow' else scale
-                    if name != 'rawEventsCutFlow' and (
-                            bins['classname'] not in ('TH1D', 'TH1F', 'TH2D', 'TH2F', 'TH3D', 'TH3F') or
-                            obj.GetSumw2N() == 0 or obj.GetNormFactor() != 0):
-                        raise ValueError('Physical component histograms need floating bins and explicit Sumw2: ' + name)
+                    promote = False
+                    if name != 'rawEventsCutFlow':
+                        if (bins['classname'] not in ('TH1D', 'TH1F', 'TH2D', 'TH2F', 'TH3D', 'TH3F')
+                                or obj.GetNormFactor() != 0):
+                            raise ValueError('Physical component histograms need floating bins and explicit Sumw2: ' + name)
+                        if obj.GetSumw2N() == 0:
+                            values, variances = bins['values'], bins['variances']
+                            native_errors = (not obj.TestBit(ROOT.TH1.kIsNotW)
+                                and obj.GetBinErrorOption() == ROOT.TH1.kNormal
+                                and np.isfinite(values).all() and (values >= 0).all()
+                                and np.array_equal(variances, values))
+                            unit_counts = (native_errors and np.equal(values, np.floor(values)).all()
+                                and math.isfinite(bins['entries'])
+                                and bins['entries'] == float(np.sum(values)))
+                            if not unit_counts and not (name == 'cutFlow' and native_errors):
+                                raise ValueError('Missing Sumw2 is not an unambiguous native unit-count histogram: ' + name)
+                            promote = True
+                            (bookkeeping if name == 'cutFlow' else promotions).append(dict(
+                                component=component['name'], gen_sha256=parent['gen_sha256'], histogram=name))
                     if name in expected:
                         previous = expected[name]
                         if (bins['classname'] != previous['classname'] or len(bins['axes']) != len(previous['axes']) or
@@ -684,7 +700,12 @@ def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
                             variances=factor**2 * bins['variances'])
                     clone = obj.Clone('component_' + hashlib.sha256(
                         (parent['gen_sha256'] + name).encode()).hexdigest()[:20])
-                    clone.SetDirectory(0); clone.SetName(obj.GetName()); clone.Scale(factor)
+                    clone.SetDirectory(0); clone.SetName(obj.GetName())
+                    # Materialize the verified native errors before scaling. ROOT's
+                    # sqrt(content) display errors are bookkeeping only for cutFlow.
+                    if promote:
+                        clone.Sumw2()
+                    clone.Scale(factor)
                     if name in merged:
                         merged[name].Add(clone)
                     else:
@@ -712,7 +733,13 @@ def prepare_senscalc_dy_histograms(components, output, *, point, campaign):
         no_second_filter_efficiency=True, component_rate_scale_application_count=1,
         component_rate_normalization=normalization, component_nanos_combined=False,
         native_nano_weights_changed=False, unscaled_diagnostic_histograms=['rawEventsCutFlow'],
-        source_rate_combination=rate['combination'], partial_production=True,
+        source_rate_combination=rate['combination'],
+        native_unit_count_sumw2_promotions=promotions,
+        bookkeeping_error_promotions=bookkeeping,
+        bookkeeping_histogram_error_conventions=dict(
+            cutFlow='ROOT native display errors propagated through component scaling; not weighted-event statistical variance',
+            rawEventsCutFlow='Unscaled existing diagnostic count convention'),
+        partial_production=True,
         physics_normalization_ready=False, forced_decay_branching_convention_ready=True)
     if 'dy_normalization_uncertainties' in rate:
         metadata['dy_normalization_uncertainties']=copy.deepcopy(rate['dy_normalization_uncertainties'])
