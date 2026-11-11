@@ -13,23 +13,26 @@ import subprocess
 import sys
 import tempfile
 
+from shift_eos_storage import eos_endpoint, is_support_path
+
 
 
 def preserve_failed_gen(gen, scratch, config, row, stage):
     """Retain the sole failed GEN payload before removing worker scratch."""
     identifier = str(row['run_number'])+'_'+str(row['seed'])+'_'+uuid.uuid4().hex
     destination = config.get('private_gen_failure_base', '')
-    if not destination.startswith('/eos/user/j/jniedzie/shift_cmssw_support/'):
+    if not is_support_path(destination):
         raise ValueError('Failed GEN retention requires the protected EOS support area')
+    host=eos_endpoint(destination)
     archive = scratch/'failed_gen.tar.gz'
     with tarfile.open(archive,'w:gz') as output:
         output.add(gen,arcname='gen')
     expected = stage.sha256(archive)
     remote = destination+'/GEN_'+identifier+'.tar.gz'
-    stage.command(['/usr/bin/xrdfs',stage.HOST,'mkdir','-p',destination],timeout=120)
-    stage.command(['/usr/bin/xrdcp','--silent','--cksum','adler32',str(archive),stage.HOST+'/'+remote],timeout=900)
+    stage.command(['/usr/bin/xrdfs',host,'mkdir','-p',destination],timeout=120)
+    stage.command(['/usr/bin/xrdcp','--silent','--cksum','adler32',str(archive),host+'/'+remote],timeout=900)
     check = scratch/'failure_readback.tar.gz'
-    stage.command(['/usr/bin/xrdcp','--silent','--cksum','adler32',stage.HOST+'/'+remote,str(check)],timeout=900)
+    stage.command(['/usr/bin/xrdcp','--silent','--cksum','adler32',host+'/'+remote,str(check)],timeout=900)
     if check.stat().st_size != archive.stat().st_size or stage.sha256(check) != expected:
         raise ValueError('Failed GEN archive readback differs from its sole source')
     record = dict(complete=True,point=row['point'],path=remote,bytes=archive.stat().st_size,
