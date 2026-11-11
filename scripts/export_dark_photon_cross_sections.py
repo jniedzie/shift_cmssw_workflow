@@ -240,6 +240,8 @@ def meson_ledger_readback(path, receipt):
     The caller still checks the actual encoded and original hashes. Temporary
     files remain in worker scratch or /tmp and are removed at process exit.
     """
+    from shift_eos_storage import xrootd_url
+
     key = (str(path), receipt['sha256'], receipt['bytes'],
            receipt['uncompressed_sha256'], receipt['uncompressed_bytes'])
     if key in _MESON_LEDGER_READBACKS:
@@ -254,7 +256,7 @@ def meson_ledger_readback(path, receipt):
     environment['PATH'] = '/usr/bin:/bin'
     try:
         subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
-            'root://eosuser.cern.ch/' + str(path), str(target)],
+            xrootd_url(path), str(target)],
             env=environment, check=True, capture_output=True, text=True, timeout=1800)
         if target.stat().st_size != receipt['bytes'] or sha256(target) != receipt['sha256']:
             raise ValueError('Remote meson ledger readback failed SHA-256/size verification')
@@ -272,6 +274,8 @@ def resolve_meson_ledger(directory, contract):
     substitutes for reading the actual publication, including decompressed
     bytes for gzip. No inventory discovery or compatibility alias is used.
     """
+    from shift_eos_storage import GROUP_ROOT
+
     directory = Path(directory)
     expected = contract["source_ledger_sha256"]
     local = directory / "meson_source_ledger.jsonl"
@@ -286,7 +290,8 @@ def resolve_meson_ledger(directory, contract):
     if not isinstance(name, str):
         raise ValueError("Meson source ledger publication requires an explicit EOS path")
     path = Path(name)
-    allowed = ("/eos/user/j/jniedzie/shift_cmssw/", "/eos/user/j/jniedzie/shift_cmssw_support/")
+    allowed = ("/eos/user/j/jniedzie/shift_cmssw/",
+               "/eos/user/j/jniedzie/shift_cmssw_support/", GROUP_ROOT + "/")
     if (not path.is_absolute() or ".." in path.parts or str(path) != name or
             not name.startswith(allowed)):
         raise ValueError("Meson source ledger publication is outside its canonical EOS namespace")
@@ -905,9 +910,12 @@ def input_files(directory, manifest):
 
 def publish_file(source, destination):
     """Publish a small sidecar on mounted EOS and hash its readback."""
+    from shift_eos_storage import GROUP_ROOT
+
     source, destination = Path(source), Path(destination)
-    if not str(destination).startswith("/eos/user/") or ".." in destination.parts:
-        raise ValueError("Publication requires a canonical /eos/user destination")
+    if (not str(destination).startswith(("/eos/user/", GROUP_ROOT + "/"))
+            or ".." in destination.parts):
+        raise ValueError("Publication requires a canonical approved EOS destination")
     expected = sha256(source)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
@@ -925,10 +933,13 @@ def publish_file(source, destination):
 
 def publish_file_rpc(source, destination):
     """Publish without an EOS mount, refusing different bytes at an existing path."""
+    from shift_eos_storage import GROUP_ROOT, eos_endpoint, xrootd_url
+
     source, destination = Path(source), Path(destination)
-    if not str(destination).startswith("/eos/user/") or ".." in destination.parts:
-        raise ValueError("Publication requires a canonical /eos/user destination")
-    host = "root://eosuser.cern.ch"
+    if (not str(destination).startswith(("/eos/user/", GROUP_ROOT + "/"))
+            or ".." in destination.parts):
+        raise ValueError("Publication requires a canonical approved EOS destination")
+    host = eos_endpoint(destination)
     environment = {key: value for key, value in os.environ.items() if key not in
                    ("PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH", "LD_PRELOAD", "ROOTSYS")}
     environment["PATH"] = "/usr/bin:/bin"
@@ -944,11 +955,11 @@ def publish_file_rpc(source, destination):
             raise RuntimeError("Unknown EOS sidecar state: " + state.stderr)
         command(["/usr/bin/xrdfs", host, "mkdir", "-p", destination.parent])
         command(["/usr/bin/xrdcp", "--silent", "--posc", "--cksum", "adler32",
-                 source, host + "/" + str(destination)])
+                 source, xrootd_url(destination)])
     with tempfile.TemporaryDirectory(prefix="dp-rate-readback-") as temporary:
         readback = Path(temporary) / "sidecar"
         command(["/usr/bin/xrdcp", "--silent", "--cksum", "adler32",
-                 host + "/" + str(destination), readback])
+                 xrootd_url(destination), readback])
         actual = sha256(readback)
         if actual != expected or readback.stat().st_size != size:
             raise ValueError("Refuse different EOS sidecar bytes: " + str(destination))

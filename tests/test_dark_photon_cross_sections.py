@@ -518,7 +518,7 @@ class MesonCrossSectionAccounting(unittest.TestCase):
 
 
 class DurablePublication(unittest.TestCase):
-    def native_publication(self, previous, *, unknown_state=False):
+    def native_publication(self, previous, *, unknown_state=False, destination="/eos/user/t/test/cross_sections.json"):
         with tempfile.TemporaryDirectory() as temporary:
             source=Path(temporary)/"rate.json";source.write_bytes(b"exact rate\n")
             remote={"bytes":previous};uploads=[]
@@ -526,6 +526,8 @@ class DurablePublication(unittest.TestCase):
                 self.assertEqual(options["env"]["PATH"],"/usr/bin:/bin")
                 self.assertNotIn("LD_LIBRARY_PATH",options["env"])
                 if argv[0].endswith("xrdfs"):
+                    expected_host="root://eoscms.cern.ch" if str(destination).startswith("/eos/cms/") else "root://eosuser.cern.ch"
+                    self.assertEqual(argv[1],expected_host)
                     if argv[2]=="stat":
                         if unknown_state:
                             return SimpleNamespace(returncode=1,stderr="Connection failed")
@@ -543,11 +545,21 @@ class DurablePublication(unittest.TestCase):
                 return SimpleNamespace(returncode=0,stderr="")
             with patch("export_dark_photon_cross_sections.subprocess.run",side_effect=command):
                 try:
-                    result=publish_file_rpc(source,"/eos/user/t/test/cross_sections.json")
+                    result=publish_file_rpc(source,destination)
                 except Exception:
                     self.assertFalse(uploads)
                     raise
             return result,uploads
+
+    def test_group_sidecar_publication_uses_native_instance_and_refuses_unknown_roots(self):
+        from shift_eos_storage import GROUP_ROOT
+        result,uploads=self.native_publication(None,destination=GROUP_ROOT+'/20261111/metadata/cross_sections.json')
+        self.assertEqual(len(uploads),1)
+        self.assertTrue(uploads[0][-1].startswith('root://eoscms.cern.ch/'))
+        self.assertTrue(result['path'].startswith(GROUP_ROOT+'/'))
+        for bad in [GROUP_ROOT+'-neighbor/record.json','/eos/cms/store/group/other/record.json']:
+            with self.subTest(path=bad),self.assertRaisesRegex(ValueError,'canonical approved EOS'):
+                publish_file_rpc('/tmp/nonexistent',bad)
 
     def test_native_publication_writes_absent_sidecar_and_hashes_readback(self):
         result,uploads=self.native_publication(None)

@@ -25,6 +25,7 @@ import sys
 from dark_photon_generation import check_width_table, contract, production_settings
 from dark_photon_model import validate_native_proposal_support, validate_native_widths
 from dark_photon_sample_names import set_lab_point_name
+from shift_eos_storage import GROUP_ROOT
 from shift_production_selection import DEPENDENCIES as MATERIAL_SELECTION_SOURCES
 from dark_photon_source_placement import DEPENDENCIES as SOURCE_PLACEMENT_SOURCES
 
@@ -292,10 +293,10 @@ def plan_detector_stage(physical_plan, campaign, eos_base, events_per_job=5,
         raise ValueError('Detector stage campaign must contain its YYYYMMDD date')
     for date in dates:
         datetime.strptime(date, '%Y%m%d')
-    if (not isinstance(eos_base, str) or not eos_base.startswith('/eos/user/') or
+    if (not isinstance(eos_base, str) or not eos_base.startswith(('/eos/user/', GROUP_ROOT + '/')) or
             str(Path(eos_base)) != eos_base or '..' in Path(eos_base).parts or
             any(character.isspace() for character in eos_base)):
-        raise ValueError('Detector stages require a canonical absolute EOS user base')
+        raise ValueError('Detector stages require a canonical absolute approved EOS base')
     if type(events_per_job) is not int or not 1 <= events_per_job <= 20:
         raise ValueError('Detector stage chunks require 1..20 events per job')
     if type(group_events) is not int or group_events < events_per_job:

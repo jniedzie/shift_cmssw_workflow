@@ -303,6 +303,21 @@ class CompleteDetectorStagePlanning(unittest.TestCase):
                 for event in range(chunk['skip'], chunk['skip'] + chunk['count'])],
                 list(range(group['skip'], group['skip'] + group['count'])))
 
+    def test_group_storage_is_scoped_without_changing_physics(self):
+        from shift_eos_storage import GROUP_ROOT
+        ref=references()
+        physical=preflight_points(plan_points(ref),ref,fake_native)
+        user=plan_detector_stage(physical,'20261111-stage','/eos/user/t/test/data')
+        group=plan_detector_stage(physical,'20261111-stage',GROUP_ROOT+'/20261111_dp')
+        for a,b in zip(user['points'],group['points']):
+            self.assertTrue(b['final_output_base'].startswith(GROUP_ROOT+'/20261111_dp/'))
+            normalized=json.loads(json.dumps(b).replace(GROUP_ROOT+'/20261111_dp','/eos/user/t/test/data'))
+            for key in ['point','epsilon','proper_ctau_mm','seed','run_number','events','chunks','groups']:
+                self.assertEqual(a[key],normalized[key])
+        for path in [GROUP_ROOT+'-neighbor/data',GROUP_ROOT+'/../other', '/eos/cms/store/group/other/data']:
+            with self.subTest(path=path),self.assertRaises(ValueError):
+                plan_detector_stage(physical,'20261111-stage',path)
+
     def test_invalid_stage_names_budgets_jobs_and_duplicate_runs_fail(self):
         ref = references()
         physical = preflight_points(plan_points(ref), ref, fake_native)

@@ -15,6 +15,9 @@ import shlex
 import subprocess
 import tempfile
 
+from shift_eos_storage import eos_endpoint, xrootd_url
+
+# Older private-GEN failure wrappers retain archives in user EOS.
 HOST = 'root://eosuser.cern.ch'
 
 
@@ -90,7 +93,7 @@ def verify_remote_root(remote, expected, size, config=None):
                                      dir=configuration.get('scratch_base', '/tmp')) as temporary:
         check = Path(temporary) / 'gen.root'
         command(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
-                 HOST + '/' + remote, str(check)],
+                 xrootd_url(remote), str(check)],
                 timeout=configuration.get('publication_timeout_seconds', 600))
         if check.stat().st_size != size or sha256(check) != expected:
             raise ValueError('Published GEN readback differs from the complete audited source')
@@ -198,12 +201,14 @@ def check_afs_margin(config):
     return free_mb
 
 
-def check_eos_margin(config, required_payload_bytes):
-    output = command(['/usr/bin/eos', HOST, 'quota', '-m'], timeout=90).stdout
+def check_eos_margin(config, required_payload_bytes, publication_path=None):
+    host = eos_endpoint(publication_path or config.get('eos_base', config['eos_quota_space']))
+    output = command(['/usr/bin/eos', host, 'quota', '-m', '-p', config['eos_quota_space']], timeout=90).stdout
     rows = [dict(token.split('=', 1) for token in line.split() if '=' in token)
             for line in output.splitlines()]
     rows = [row for row in rows if row.get('space') == config['eos_quota_space']
-            and 'maxlogicalbytes' in row]
+            and int(row.get('maxlogicalbytes', 0)) > 0
+            and int(row.get('maxfiles', 0)) > 0]
     if len(rows) != 1:
         raise ValueError('EOS quota authority is unknown or ambiguous')
     free_bytes = int(rows[0]['maxlogicalbytes']) - int(rows[0]['usedlogicalbytes'])
@@ -223,16 +228,17 @@ def publish_gen(row, config):
     remote = row['final_output_base'] + '/GEN/gen.root'
     proof = root_publication(row, manifest) if not source.exists() else None
     size = source.stat().st_size if source.exists() else proof['bytes']
-    status = command(['/usr/bin/xrdfs', HOST, 'stat', remote], check=False)
+    host = eos_endpoint(remote)
+    status = command(['/usr/bin/xrdfs', host, 'stat', remote], check=False)
     if status.returncode:
         if '[3011]' not in status.stderr and 'No such file' not in status.stderr:
             raise RuntimeError('EOS state is unknown: ' + status.stderr)
         if not source.exists():
             raise ValueError('Canonical remote-only GEN ROOT is missing; refuse to regenerate or overwrite')
-        check_eos_margin(config, size)
-        command(['/usr/bin/xrdfs', HOST, 'mkdir', '-p', str(Path(remote).parent)])
+        check_eos_margin(config, size, remote)
+        command(['/usr/bin/xrdfs', host, 'mkdir', '-p', str(Path(remote).parent)])
         command(['/usr/bin/xrdcp', '--silent', '--posc', '--cksum', 'adler32',
-                 str(source), HOST + '/' + remote], timeout=config['publication_timeout_seconds'])
+                 str(source), xrootd_url(remote)], timeout=config['publication_timeout_seconds'])
     # This also makes an interrupted publication recoverable without overwriting.
     verify_remote_root(remote, expected, size, config)
     publication = dict(point=row['point'], path=remote, sha256=expected,

@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from prepare_dark_photon_gen_stage import prepare, validate_plan, frozen_dependencies
-from run_dark_photon_gen_stage import (check_afs_margin, collect, publish_gen, read, run_point,
+from run_dark_photon_gen_stage import (check_afs_margin, check_eos_margin, collect, publish_gen, read, run_point,
                                       sha256, validate_population, verify_seal, write_new)
 
 
@@ -30,7 +30,7 @@ def fixture(base):
         signal_contract_sha256=sha256(contract_path), gen_directory=str(base / 'gen'),
         gen_argv=['/usr/bin/python3', str(source / 'run_dark_photon_gen.py')],
         final_output_base='/eos/user/t/test/darkphoton_m15/20261014-test')
-    plan = dict(schema='shift-dark-photon-grid-plan-v1', native_width_preflight_passed=True,
+    plan = dict(schema='shift-dark-photon-grid-plan-v1', campaign='20261014-test', native_width_preflight_passed=True,
         detector_stage_prepared=True, event_budget_mode='outputAccepted', points=[row],
         runtime=dict(cmssw_base='/synthetic/cmssw'), frozen_dependencies=dict(
             sources=scripts, templates={}, references=dict(frozen_copy=str(reference), sha256=sha256(reference))))
@@ -142,6 +142,13 @@ class DetachedGenStageTest(unittest.TestCase):
             self.assertIn('MAXJOBS GEN 3', dag)
             self.assertNotIn('RETRY', dag)
             verify_seal(args.output, receipt['seal_sha256'])
+            helper = args.output / 'shift_eos_storage.py'
+            self.assertTrue(helper.is_file())
+            self.assertEqual(read(args.output/'seal.json')['files'][str(helper)],sha256(helper))
+            subprocess.run([sys.executable, '-I', '-c',
+                'import sys,runpy; sys.path.insert(0,sys.argv[1]); runpy.run_path(sys.argv[2])',
+                str(args.output), str(args.output/'gen_worker.py')], check=True, capture_output=True)
+            self.assertIn('SHIFT_DP_20261014-test_GEN', (args.output/'worker.sub').read_text())
             Path(plan['points'][0]['gen_argv'][1]).write_text('# mutated generator\n')
             with self.assertRaisesRegex(ValueError, 'dependency changed'):
                 verify_seal(args.output, receipt['seal_sha256'])
@@ -257,6 +264,39 @@ class DetachedGenStageTest(unittest.TestCase):
                 publish_gen(row, config)
             self.assertTrue((Path(row['gen_directory']) / 'gen.root').exists())
             self.assertFalse((Path(row['gen_directory']) / 'root_publication.json').exists())
+
+    def test_group_GEN_readback_routes_to_native_instance_and_keeps_identity(self):
+        from shift_eos_storage import GROUP_ROOT
+        with tempfile.TemporaryDirectory() as temporary:
+            row, config, payload = audited_population(Path(temporary))
+            row['final_output_base'] = GROUP_ROOT + '/qualification/20261111/darkphoton_m15'
+            with patch('run_dark_photon_gen_stage.command', side_effect=remote_transport(payload)) as transport:
+                publication, parent = publish_gen(row, config)
+                validate_population(row, config)
+            self.assertEqual(parent['event_ids'], [[row['run_number'],1,x] for x in [1,3,8]])
+            self.assertTrue(publication['path'].startswith(GROUP_ROOT+'/'))
+            for call in transport.call_args_list:
+                argv=call.args[0]
+                if argv[0].endswith('xrdfs'):
+                    self.assertEqual(argv[1], 'root://eoscms.cern.ch')
+                elif argv[0].endswith('xrdcp'):
+                    self.assertTrue(argv[-2].startswith('root://eoscms.cern.ch/'))
+
+    def test_group_quota_ignores_unlimited_uid_row_and_requires_real_margin(self):
+        from shift_eos_storage import GROUP_ROOT
+        space='/eos/cms/store/group/phys_exotica/'
+        config=dict(eos_quota_space=space,minimum_eos_free_bytes=1000,minimum_eos_free_files=10)
+        empty=f'space={space} uid=32542 maxlogicalbytes=0 usedlogicalbytes=0 maxfiles=0 usedfiles=0\n'
+        group=f'space={space} gid=1784 maxlogicalbytes=10000 usedlogicalbytes=2000 maxfiles=100 usedfiles=5\n'
+        with patch('run_dark_photon_gen_stage.command',return_value=subprocess.CompletedProcess([],0,empty+group,'')) as command:
+            self.assertEqual(check_eos_margin(config,100,GROUP_ROOT+'/test')['free_bytes'],8000)
+            self.assertEqual(command.call_args.args[0][1],'root://eoscms.cern.ch')
+            with self.assertRaisesRegex(ValueError,'reserved production margin'):
+                check_eos_margin(config,7500,GROUP_ROOT+'/test')
+        for text in [empty,group+group]:
+            with self.subTest(text=text), patch('run_dark_photon_gen_stage.command',return_value=subprocess.CompletedProcess([],0,text,'')):
+                with self.assertRaisesRegex(ValueError,'unknown or ambiguous'):
+                    check_eos_margin(config,100,GROUP_ROOT+'/test')
 
     def test_remote_only_gate_preserves_the_reviewed_metadata_reservation(self):
         config = dict(workspace='/synthetic', minimum_afs_free_mb=1000,

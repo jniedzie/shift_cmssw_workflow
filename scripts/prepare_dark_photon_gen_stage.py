@@ -236,6 +236,8 @@ def prepare(args):
     (output / 'logs').mkdir(); (output / 'statuses').mkdir()
     worker = output / 'gen_worker.py'
     shutil.copy2(Path(__file__).with_name('run_dark_photon_gen_stage.py'), worker)
+    storage_helper = output / 'shift_eos_storage.py'
+    shutil.copy2(Path(__file__).with_name('shift_eos_storage.py'), storage_helper)
     write_new(output / 'plan.json', plan)
     write_new(output / 'config.json', configuration)
     if plan.get('private_gen_runtime') is not None:
@@ -272,7 +274,7 @@ request_cpus = 1
 request_memory = 2500MB
 request_disk = 6000MB
 +JobFlavour = "tomorrow"
-+JobBatchName = "SHIFT_DarkPhoton_GEN_scale"
++JobBatchName = {json.dumps('SHIFT_DP_' + plan['campaign'] + '_GEN')}
 +SHIFTGenStageDirectory = "{output}"
 output = {output}/logs/$(action)_$(point).$(ClusterId).$(ProcId).out
 error = {output}/logs/$(action)_$(point).$(ClusterId).$(ProcId).err
@@ -286,7 +288,7 @@ queue
 '''
     (output / 'worker.sub').write_text(common)
     (output / 'pipeline.dag.in').write_text(dag)
-    for path in [worker, output / 'plan.json', output / 'config.json',
+    for path in [worker, storage_helper, output / 'plan.json', output / 'config.json',
                  output / 'runtime_fingerprint.json', output / 'worker.sub', output / 'pipeline.dag.in']:
         files[str(path)] = sha256(path)
     write_new(output / 'seal.json', dict(schema='shift-dark-photon-GEN-stage-seal-v1', files=files))
