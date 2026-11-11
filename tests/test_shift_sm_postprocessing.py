@@ -1005,5 +1005,34 @@ class GroupedHistogramPublicationTest(unittest.TestCase):
                         post.aggregate_histogram_groups(path,bad,50,60)
             finally:os.chdir(old)
 
+
+class GroupedWeightPolicyTest(unittest.TestCase):
+    def test_ordinary_groups_keep_native_sampling_weights_without_response_correction(self):
+        source=dict(source_id='ordinary',stratum='qcd_20toinf',gen_sha256='a'*64,
+                    denominator_kind='fixed_source_trials',full_source_trials=1000,sigma_nd_pb=123.)
+        meta=post.exposure([source],'qcd_20toinf')
+        result=post.grouped_weight_metadata([meta,dict(meta)])
+        self.assertEqual(result['histogram_weight_branch'],'shiftSamplingGenWeight')
+        self.assertEqual(result['histogram_weight'],meta['histogram_weight'])
+        self.assertNotIn('response_correction_application_count',result)
+        for changed in [dict(response_correction_application_count=1),
+                        dict(histogram_weight_branch='shiftResponseGenWeight'),
+                        dict(response_draw_authorities=[{}]),
+                        dict(material_survival_correction_applied=True)]:
+            with self.subTest(changed=changed),self.assertRaisesRegex(ValueError,'second correction'):
+                post.grouped_weight_metadata([dict(meta,**changed)])
+
+    def test_mixed_or_unknown_group_policies_are_rejected(self):
+        ordinary=dict(histogram_weight='native_gen_weight/reco_inclusion_probability',
+                      no_second_filter_efficiency=True)
+        response=dict(histogram_weight='native_gen_weight/(reco_inclusion_probability*response_sampling_probability)',
+                      histogram_weight_branch='shiftResponseGenWeight',response_correction_application_count=1,
+                      material_survival_correction_applied=False,complete_frozen_response_draws_only=True,
+                      response_draw_authorities=[dict(source_id='one')])
+        self.assertEqual(post.grouped_weight_metadata([response])['response_correction_application_count'],1)
+        for values in [[],[ordinary,response],[dict(histogram_weight='invented')]]:
+            with self.subTest(values=values),self.assertRaises(ValueError):
+                post.grouped_weight_metadata(values)
+
 if __name__ == '__main__':
     unittest.main()

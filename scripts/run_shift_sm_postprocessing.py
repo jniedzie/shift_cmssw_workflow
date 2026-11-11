@@ -581,6 +581,39 @@ def merged_nano_publication(request):
 
 
 
+def grouped_weight_metadata(metas):
+    """Keep ordinary W/p and response W/(p*q) snapshots separate."""
+    ordinary = 'native_gen_weight/reco_inclusion_probability'
+    response = 'native_gen_weight/(reco_inclusion_probability*response_sampling_probability)'
+    modes = {meta.get('histogram_weight') for meta in metas}
+    if not metas or len(modes) != 1:
+        raise ValueError('Grouped histograms require one homogeneous weight policy')
+    if modes == {ordinary}:
+        for meta in metas:
+            if (meta.get('no_second_filter_efficiency') is not True
+                    or meta.get('histogram_weight_branch', 'shiftSamplingGenWeight') != 'shiftSamplingGenWeight'
+                    or meta.get('response_correction_application_count', 0) != 0
+                    or meta.get('response_draw_authorities')
+                    or meta.get('material_survival_correction_applied', False) is not False):
+                raise ValueError('Ordinary group contains an undeclared second correction')
+        return dict(histogram_weight=ordinary, histogram_weight_branch='shiftSamplingGenWeight',
+                    material_survival_correction_applied=False)
+    if modes == {response}:
+        for meta in metas:
+            if (meta.get('histogram_weight_branch') != 'shiftResponseGenWeight'
+                    or meta.get('response_correction_application_count') != 1
+                    or meta.get('material_survival_correction_applied') is not False
+                    or meta.get('complete_frozen_response_draws_only') is not True
+                    or not meta.get('response_draw_authorities')):
+                raise ValueError('Group is not a qualified once-weighted response snapshot')
+        return dict(histogram_weight=response, histogram_weight_branch='shiftResponseGenWeight',
+            response_correction_application_count=1,material_survival_correction_applied=False,
+            complete_frozen_response_draws_only=True,
+            response_draw_authorities=[v for meta in metas for v in meta['response_draw_authorities']],
+            histogram_sumw2_is_pair_fills_not_sampling_design_variance=True)
+    raise ValueError('Unsupported grouped histogram weight policy')
+
+
 def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_timeout):
     """Combine disjoint, already qualified source groups without replaying Nano."""
     import ROOT
@@ -603,11 +636,7 @@ def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_
             originals={row['source_id']:row for row in meta['original_sources']}
             if originals != {sid:expected_sources[sid] for sid in ids}:
                 raise ValueError('Grouped histogram changed its full original exposure')
-            if (meta.get('histogram_weight') != 'native_gen_weight/(reco_inclusion_probability*response_sampling_probability)'
-                    or meta.get('response_correction_application_count') != 1
-                    or meta.get('material_survival_correction_applied') is not False
-                    or meta.get('complete_frozen_response_draws_only') is not True):
-                raise ValueError('Group is not a qualified once-weighted response snapshot')
+            grouped_weight_metadata([meta])
             if round(file.Get('rawEventsCutFlow').GetBinContent(1)) != group['events']:
                 raise ValueError('Group histogram event exposure differs')
             metas.append(meta)
@@ -625,11 +654,7 @@ def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_
         subprocess.run(hadd_command(hist,files,maximum_open_files),check=True,
             stdout=log,stderr=subprocess.STDOUT,timeout=merge_timeout)
     metadata=exposure(request['normalization_sources'],request['stratum'])
-    metadata.update(histogram_weight=metas[0]['histogram_weight'],
-        histogram_weight_branch='shiftResponseGenWeight',response_correction_application_count=1,
-        material_survival_correction_applied=False,complete_frozen_response_draws_only=True,
-        response_draw_authorities=[v for meta in metas for v in meta['response_draw_authorities']],
-        histogram_sumw2_is_pair_fills_not_sampling_design_variance=True)
+    metadata.update(grouped_weight_metadata(metas))
     root=ROOT.TFile.Open(str(hist),'UPDATE')
     try:
         validate_dimuon_histograms(root)
@@ -638,7 +663,7 @@ def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_
         h=root.Get('event/Event_nShiftMuon')
         actual=math.fsum(h.GetBinContent(i) for i in range(h.GetNcells()))
         if not math.isclose(actual,math.fsum(sumw),rel_tol=1e-9,abs_tol=1e-300):
-            raise ValueError('Cumulative histogram W/(p*q) sum changed')
+            raise ValueError('Cumulative histogram weighted event sum changed')
         ROOT.TObjString(json.dumps(metadata,sort_keys=True)).Write('ShiftFullGenNormalization',ROOT.TObject.kOverwrite)
     finally:root.Close()
     if 2*hist.stat().st_size+1048576>request['maximum_publication_bytes']:
