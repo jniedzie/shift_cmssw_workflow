@@ -977,8 +977,7 @@ def aggregate_helper_names(config):
             modules = ([row.name for row in statement.names] if isinstance(statement, ast.Import)
                        else [statement.module] if isinstance(statement, ast.ImportFrom) else [])
             for module in modules:
-                if module and (module.startswith('dark_photon_') or module in
-                               ('shift_production_selection', 'shift_material_preselection')):
+                if module and (Path(config['tools'])/(module.split('.')[0]+'.py')).is_file():
                     dependency = module.split('.')[0]+'.py'
                     if dependency not in helpers:
                         helpers.append(dependency)

@@ -1144,7 +1144,8 @@ def legacy_main_histograms(plan, population, work):
     return histogram, original
 
 
-def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,scratch,results_directory):
+def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,scratch,results_directory,
+                            publish_function=None):
     """Merge compatible main histograms; keep each complete grouped Nano in place.
 
     Conditional GEN has one common unweighting envelope. Pool its raw W/p
@@ -1153,6 +1154,8 @@ def execute_main_histograms(plan,row,populations,rate,plan_digest,seal_digest,sc
     """
     from run_shift_sm_postprocessing import download,publish,hadd_command,validate_dimuon_histograms
     from dark_photon_production_support import validate_histogram_merge
+    if publish_function is not None:
+        publish=publish_function
     import ROOT
     work=Path(scratch)/'main_histogram_aggregate';work.mkdir(exist_ok=False)
     histograms=[];originals=[];nanos=[]
