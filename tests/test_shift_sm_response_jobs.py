@@ -71,6 +71,34 @@ def fixture(root):
 
 
 class ResponseJobsTest(unittest.TestCase):
+    def test_array_stages_each_originals_own_authority_and_rejects_mixed_runtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            records = []
+            for number in range(2):
+                job = root/f'det_{number:03d}'
+                job.mkdir()
+                authority = root/f'source_{number}.json.gz'
+                authority.write_bytes(bytes([number]))
+                request = dict(stage='smart_sm_detector', application_timeout_seconds=12600,
+                    detector_source_ref=dict(path=str(authority)))
+                json_file(job/'request.json', request)
+                frozen = dict(bootstrap='/persistent/worker.sh', capsule='/persistent/tools.tar.gz',
+                    capsule_sha256='c'*64)
+                (job/'worker.sub').write_text(jobs.submit_text(job,request,frozen,10))
+                records.append(dict(job_directory=str(job),request_sha256=jobs.sha(job/'request.json')))
+            text=jobs.detector_array_submit_text(root, records)
+            header, items=text.split('queue JobEntry, SourceAuthority, RequestSHA from (')
+            self.assertIn(str(root)+'/$(JobEntry)',header)
+            self.assertIn('$(SourceAuthority)',header)
+            for i,record in enumerate(records):
+                self.assertIn(f'det_{i:03d} {root}/source_{i}.json.gz '+record['request_sha256'], items)
+                self.assertNotIn(str(root/f'source_{i}.json.gz'),header)
+            p=root/'det_001/worker.sub'
+            p.write_text(p.read_text().replace('/persistent/tools.tar.gz','/other/tools.tar.gz'))
+            with self.assertRaisesRegex(ValueError,'different runtimes'):
+                jobs.detector_array_submit_text(root,records)
+
     def test_exact_HTXS_exception_cannot_hide_changed_physics_or_normalization(self):
         from validate_shift_sm_detector_replay import compare_control_data
         original = dict(Events=dict(entries=1, branches=dict(

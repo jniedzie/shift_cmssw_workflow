@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import tarfile
 
@@ -224,6 +225,43 @@ def submit_text(directory, request, frozen, priority):
         '+ShiftSMResponseStudy = True', 'output = worker.out', 'error = worker.err',
         'log = events.log', 'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
         'periodic_release = False', 'queue 1', ''])
+
+
+def detector_array_submit_text(directory, records):
+    """Keep each request paired with its own staged source authority.
+
+    Individual submit files remain the recovery authority. Only their three
+    per-job values may differ in one array; runtime and policy stay identical.
+    The Iwd prefix is literal so late materialization cannot prepend it twice.
+    """
+    directory = Path(directory).resolve()
+    if not records:
+        raise ValueError('A detector array needs at least one record')
+    common = None
+    rows = []
+    for record in records:
+        job = Path(record['job_directory']).resolve()
+        if job.parent != directory or re.search(r'[\s,()]', str(job)):
+            raise ValueError('Detector array jobs must be direct, unambiguous children')
+        if sha(job/'request.json') != record['request_sha256']:
+            raise ValueError('Detector array request changed')
+        request = read(job/'request.json')
+        authority = request['detector_source_ref']['path']
+        if re.search(r'[\s,()]', authority):
+            raise ValueError('Ambiguous detector source authority path')
+        text = (job/'worker.sub').read_text()
+        text = text.replace(str(job/'request.json'), str(directory)+'/$(JobEntry)/request.json')
+        text = text.replace('initialdir = '+str(job), 'initialdir = '+str(directory)+'/$(JobEntry)')
+        text = text.replace(record['request_sha256'], '$(RequestSHA)')
+        text = text.replace(authority, '$(SourceAuthority)')
+        if common is not None and text != common:
+            raise ValueError('Detector array mixes different runtimes or submission policies')
+        common = text
+        rows.append(job.name+' '+authority+' '+record['request_sha256'])
+    if common.splitlines().count('queue 1') != 1:
+        raise ValueError('Expected exactly one individual queue statement')
+    return common.replace('queue 1', 'queue JobEntry, SourceAuthority, RequestSHA from (\n'
+                          +'\n'.join(rows)+'\n)')
 
 
 def choose_canaries(selected):

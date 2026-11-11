@@ -246,6 +246,9 @@ def source_cache(parent, state):
         if hashlib.sha256(raw).hexdigest() != key:
             raise ValueError('Parent source receipt changed')
         result = json.loads(raw)
+        if result.get('source_authority'):
+            from run_shift_qcd_production_source import read_source_authority
+            result = read_source_authority(path.parent, result)
         source = result.get('selected_source')
         if source is None:
             if result.get('empty_source') is not True or result.get('selected_events') != 0:

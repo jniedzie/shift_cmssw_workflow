@@ -61,4 +61,19 @@ def detector_source(request):
     data = source.read_bytes()
     if hashlib.sha256(data).hexdigest() != reference['sha256']:
         raise ValueError('Frozen source descriptor changed')
+    encoding = reference.get('encoding', 'json')
+    if encoding == 'gzip-source-authority-v1':
+        import gzip
+        import io
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as stream:
+            data = stream.read(16*1024*1024+1)
+        if len(data) > 16*1024*1024:
+            raise ValueError('Expanded source authority exceeds its bounded size')
+        authority = json.loads(data)
+        if (authority.get('complete') is not True
+                or authority.get('primary_preflight', {}).get('complete') is not True):
+            raise ValueError('Source authority lacks successful full-census preflight')
+        return authority['selected_source']
+    if encoding != 'json':
+        raise ValueError('Unknown source descriptor encoding')
     return json.loads(data)

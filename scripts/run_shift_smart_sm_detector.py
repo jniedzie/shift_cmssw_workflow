@@ -10,6 +10,18 @@ import sys
 import time
 
 
+def quota_row(rows, path, user_endpoint):
+    if user_endpoint:
+        return next(row for row in rows if row.get('space') == '/eos/user/j/jniedzie/')
+    matches = [row for row in rows if row.get('gid') in ('zh','phys_exotica','ALL')
+        and path.startswith(row.get('space', '\0'))
+        and int(row.get('maxlogicalbytes', '0')) > 0
+        and int(row.get('maxfiles', '0')) > 0]
+    if not matches:
+        raise ValueError('No finite enforced quota for the requested EOS group path')
+    return max(matches, key=lambda row: len(row['space']))
+
+
 def main(path):
     request = json.loads(Path(path).read_text())
     if request['stage'] == 'smart_sm_inventory':
@@ -37,9 +49,7 @@ def main(path):
             'quota', 'ls', '-m', quota_path], check=True, timeout=60,
             capture_output=True, text=True, env=environment).stdout
         rows = [dict(re.findall(r'(\w+)=([^\s]+)', line)) for line in text.splitlines()]
-        row = next(row for row in rows if (row.get('space') == '/eos/user/j/jniedzie/'
-            if endpoint == 'root://eoshome-j.cern.ch' else
-            row.get('gid') == 'zh' and quota_path.startswith(row.get('space', '\0'))))
+        row = quota_row(rows, quota_path, endpoint == 'root://eoshome-j.cern.ch')
         Path('report.json').write_text(json.dumps(dict(complete=True, checked_epoch=time.time(),
             quota_path=quota_path, quota_endpoint=endpoint,
             free_bytes=int(row['maxlogicalbytes'])-int(row['usedlogicalbytes']),
