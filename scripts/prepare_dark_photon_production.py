@@ -32,6 +32,14 @@ def write(path, value):
         output.write('\n')
 
 
+def main_detector_memory_mb(settings):
+    """Keep old resources unless a measured detector-memory profile is supplied."""
+    memory=settings.get('worker_memory_mb',4000)
+    if type(memory) is not int or not 1000<=memory<=16000:
+        raise ValueError('Detector worker memory must be an integer from1000 to16000MB')
+    return memory
+
+
 def prepare_main_histograms(args):
     """Use the common detector worker and main histogrammer for flux sources."""
     from dark_photon_detector_runtime import validate_profile
@@ -41,6 +49,7 @@ def prepare_main_histograms(args):
     inventory=read(args.gen_inventory);validate_plan(plan,inventory)
     check_gen(plan,inventory,read(args.gen_publication),args.prior_inventories)
     settings=read(args.main_histogrammer)
+    detector_memory_mb=main_detector_memory_mb(settings)
     qualification=settings['qualification'];proof=read(qualification['path'])
     control=proof.get('histogram_positive_control',{})
     if (sha256(qualification['path'])!=qualification['sha256'] or proof.get('complete') is not True or
@@ -130,7 +139,7 @@ def prepare_main_histograms(args):
             ('--chunk $(chunk)' if action=='detector' else '')+'\ninitialdir = '+str(output)+
             '\ngetenv = False\nshould_transfer_files = YES\n'
             'transfer_output_files = ""\nwhen_to_transfer_output = ON_EXIT\n'
-            'request_cpus = 1\nrequest_memory = 4000MB\n'
+            'request_cpus = 1\nrequest_memory = '+str(detector_memory_mb if action=='detector' else 4000)+'MB\n'
             'request_disk = 8000MB\n+MaxRuntime = '+str(settings.get('worker_runtime_seconds',43200))+
             '\n+SendCredential = True\n+WantIOProxy = True\n'
             '+ShiftDPStatisticsTask = '+json.dumps(str(output))+'\n+JobBatchName = '+
