@@ -583,6 +583,30 @@ class DurableSubmission(unittest.TestCase):
         row.update(changes)
         return row
 
+    def test_restart_adopts_exact_manager_with_its_running_children(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);description=directory/'manager.sub';description.write_text('queue\n')
+            controller.new(directory/'submission.json',dict(task=str(directory),
+                submit_sha256=controller.sha(description),cluster=123))
+            manager=self.ad(directory,JobUniverse=7)
+            child=self.ad(directory,ClusterId=124,JobUniverse=5,DAGManJobId=123)
+            with patch.object(controller,'jobs',return_value=[child,manager]),patch.object(controller,'run_condor') as command:
+                result=controller.submission({},directory,description)
+            self.assertEqual(result['cluster'],123)
+            command.assert_not_called()
+
+    def test_exact_manager_children_do_not_hide_another_owner_or_wrong_task(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);manager=self.ad(directory,JobUniverse=7)
+            for changes in [dict(DAGManJobId=999),dict(DAGManJobId=None),
+                            dict(ShiftDPStatisticsTask='another task'),dict(ClusterId=123)]:
+                child=self.ad(directory,ClusterId=124,JobUniverse=5,DAGManJobId=123)
+                child.update(changes)
+                with self.subTest(changes=changes),self.assertRaisesRegex(RuntimeError,'Ambiguous'):
+                    controller.verify_submitted_job({},directory,[manager,child],123)
+            with self.assertRaisesRegex(RuntimeError,'Ambiguous'):
+                controller.verify_submitted_job({},directory,[manager,self.ad(directory,ClusterId=124,DAGManJobId=123)],None)
+
     def test_native_manager_submission_binds_independent_preflight_manifest(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory=Path(temporary);gates=directory/'point_preflights';gates.mkdir()

@@ -144,7 +144,7 @@ def jobs(config, constraint):
 
 
 def verify_submitted_job(config, directory, rows, cluster=None):
-    """Accept one exact native job, including after a controller restart."""
+    """Accept one exact native owner and its own currently running DAG children."""
     identity = str(directory)
     if not rows:
         if cluster is not None:
@@ -154,6 +154,16 @@ def verify_submitted_job(config, directory, rows, cluster=None):
             selection = ['-constraint', constraint, '-limit', '2']
         rows = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
             *selection, '-json'], timeout=45))
+    if len(rows) > 1 and cluster is not None:
+        owners = [row for row in rows if row.get('ClusterId') == cluster
+                  and row.get('ProcId') == 0 and row.get('JobUniverse') == 7]
+        if len(owners) == 1:
+            owner = owners[0]
+            children = [row for row in rows if row is not owner]
+            if all(row.get('DAGManJobId') == cluster
+                   and row.get('ClusterId') != cluster
+                   and row.get('ShiftDPStatisticsTask') == identity for row in children):
+                rows = [owner]
     if len(rows) != 1:
         raise RuntimeError('Ambiguous submitted job state; preserve intent for review: ' + identity)
     row = rows[0]
