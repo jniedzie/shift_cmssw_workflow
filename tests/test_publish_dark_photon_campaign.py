@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch,MagicMock
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'scripts'))
 import publish_dark_photon_campaign as publisher
@@ -40,6 +40,24 @@ class PublicationOwnershipTests(unittest.TestCase):
             self.assertIn('shift_eos_storage.py',names)
             self.assertIn('shift_condor_native.py',names)
             self.assertEqual(len(names),len(set(names)))
+
+    def test_named_campaign_normalizes_frontend_home_paths_before_native_RPC(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);config,state=self.fixture(directory)
+            home='/eos/home-j/jniedzie/shift_cmssw/darkphoton_m5_prompt/campaign'
+            native='/eos/user/j/jniedzie/shift_cmssw/darkphoton_m5_prompt/campaign'
+            target='/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/publication/m5'
+            config['plot_aliases']={'m5_prompt':home}
+            entry=dict(name='m5_prompt',histogram_path=target+'/histograms_merged/ntuple_0.root')
+            transport=MagicMock();transport.metadata.side_effect=[None,{'target':target}]
+            # Exercise the real resolver: it intentionally preserves frontend
+            # spelling for analysis, so merely calling it is insufficient.
+            self.assertEqual(publisher.native_eos_path(home),native)
+            with patch('watch_dark_photon_production.EosRpc',return_value=transport),patch('run_dark_photon_gen_stage.command') as command:
+                publisher.publish_plot_aliases(config,state,dict(ready_signals=[entry]))
+            self.assertEqual(state['aliases']['m5_prompt']['path'],native)
+            self.assertFalse(state.get('alias_errors'))
+            self.assertTrue(all('/eos/home-' not in str(call) for call in command.call_args_list))
 
     def test_signature_ignores_discovery_order_but_keeps_completion_identity(self):
         a,b=source('a'),source('b')

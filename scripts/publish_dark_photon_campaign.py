@@ -361,6 +361,16 @@ def catalog(config,state,pending):
         plot_campaign=config.get('plot_campaign'),ordinary_campaign_alias_errors=state.get('alias_errors',{}))
 
 
+def native_eos_path(path):
+    """The analysis resolver preserves frontend spelling; native RPC cannot."""
+    from shift_storage_paths import resolve_storage_path
+    path=resolve_storage_path(path)
+    prefix='/eos/home-j/jniedzie'
+    if path==prefix or path.startswith(prefix+'/'):
+        path='/eos/user/j/jniedzie'+path[len(prefix):]
+    return path
+
+
 def publish_plot_aliases(config,state,result):
     """Expose a single named campaign; preserve the user's existing latest."""
     if not config.get('plot_aliases'):return
@@ -370,8 +380,8 @@ def publish_plot_aliases(config,state,result):
     for entry in result['ready_signals']:
         point=entry['name']
         if point not in config['plot_aliases']:continue
-        alias=config['plot_aliases'][point]
-        target=str(Path(entry['histogram_path']).parent.parent)
+        alias=native_eos_path(config['plot_aliases'][point])
+        target=native_eos_path(str(Path(entry['histogram_path']).parent.parent))
         if state.get('aliases',{}).get(point,{}).get('target')==target:continue
         try:
             eos_endpoint(target)
