@@ -17,11 +17,12 @@ import subprocess
 import tempfile
 
 from shift_production_selection import bind_source, prepare_default_selection
+from shift_eos_storage import xrootd_url
 
 DEPENDENCIES = ('prepare_dark_photon_material_source.py', 'shift_gen_material_features.py',
                 'audit_shift_material_scout.py', 'shift_material_path_score.py',
                 'shift_production_selection.py', 'shift_material_preselection.py',
-                'dark_photon_material_selection.py')
+                'dark_photon_material_selection.py', 'shift_eos_storage.py')
 
 
 def sha(path):
@@ -140,7 +141,7 @@ def prepare(request):
         scratch = Path(temporary)
         local = scratch/'gen.root'
         subprocess.run(['/usr/bin/xrdcp','--silent','--cksum','adler32',
-            'root://eosuser.cern.ch/'+request['gen_publication']['path'],str(local)],
+            xrootd_url(request['gen_publication']['path']),str(local)],
             check=True, timeout=900)
         if sha(local) != parent['gen_sha256']:
             raise ValueError('Downloaded GEN differs from the full audited parent')

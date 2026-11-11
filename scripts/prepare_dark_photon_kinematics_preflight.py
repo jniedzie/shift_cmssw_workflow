@@ -63,7 +63,7 @@ def prepare(production, new_profile_pin, output_dir, *, point_scope=None):
     scoped_points(plan,point_scope)
     output.mkdir(parents=True)
     helpers = output/'helpers'; helpers.mkdir()
-    for name in (Path(__file__).name, 'dark_photon_detector_runtime.py'):
+    for name in (Path(__file__).name, 'dark_photon_detector_runtime.py', 'shift_eos_storage.py'):
         shutil.copy2(Path(__file__).with_name(name), helpers/name)
     config = {'schema': 'shift-primary-kinematics-preflight-preparation-v1',
               'production': str(production), 'output': str(output),
@@ -183,13 +183,14 @@ def scan(config_path):
         report['point_scope']=sorted(config['point_scope'])
     configurations = {}
     from DataFormats.FWLite import Events
+    from shift_eos_storage import xrootd_url
     try:
         for point in scoped_points(plan,config.get('point_scope')):
             name = point['point']; parent = inventory['points'][name]
             with tempfile.TemporaryDirectory(prefix='dp-kinematics-') as scratch:
                 local = Path(scratch)/'gen.root'
                 subprocess.run(['/usr/bin/xrdcp', '--silent', '--cksum', 'adler32',
-                                'root://eosuser.cern.ch/'+parent['gen_path'], str(local)], check=True, timeout=900)
+                                xrootd_url(parent['gen_path']), str(local)], check=True, timeout=900)
                 if sha(local) != parent['gen_sha256']:
                     raise ValueError('Original canonical GEN SHA changed: '+name)
                 identities = []

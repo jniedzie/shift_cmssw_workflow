@@ -147,7 +147,7 @@ class PreflightPreparation(unittest.TestCase):
         points=['m2_prompt','m15_prompt','m40_prompt'];identities=[[1,1,index] for index in range(1,4)]
         payload=b'full original GEN including material-rejected events'
         inventory={'complete':True,'points':{name:{'events':3,'event_ids':identities,
-            'gen_sha256':hashlib.sha256(payload).hexdigest(),'gen_path':'/eos/'+name+'.root'} for name in points}}
+            'gen_sha256':hashlib.sha256(payload).hexdigest(),'gen_path':('/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/20261111/' if name=='m15_prompt' else '/eos/user/t/test/')+name+'.root'} for name in points}}
         plan={'points':[{'point':name,'material_selection':{'selected_indices':[0]}} for name in points]}
         (self.production/'plan.json').write_text(json.dumps(plan));(self.production/'gen_inventory.json').write_text(json.dumps(inventory))
         release=self.base/'release';files={}
@@ -169,7 +169,7 @@ class PreflightPreparation(unittest.TestCase):
                 name=command[4];(self.out/(name+'_cfg.py')).write_text('full census configuration')
             elif command[0]=='cmsRun':
                 (self.out/'m15_prompt_converter.json').write_text(json.dumps({'complete':True,'events':3}))
-        with patch.dict(os.environ,CMSSW_BASE=str(release)),patch.dict(sys.modules,{'DataFormats.FWLite':fw}),patch.object(MODULE.subprocess,'run',side_effect=run):
+        with patch.dict(os.environ,CMSSW_BASE=str(release)),patch.dict(sys.modules,{'DataFormats.FWLite':fw}),patch.object(MODULE.subprocess,'run',side_effect=run),patch.object(sys,'path',[str(self.out/'helpers')]+sys.path):
             MODULE.scan(result['config']['path'])
         receipt=json.loads(Path(result['receipt']).read_text())
         self.assertTrue(receipt['complete']);self.assertEqual(receipt['point_scope'],['m15_prompt'])
@@ -177,6 +177,11 @@ class PreflightPreparation(unittest.TestCase):
         self.assertEqual(receipt['points']['m15_prompt']['full_count'],3)
         self.assertEqual(receipt['points']['m15_prompt']['converted_count'],3)
         self.assertEqual(receipt['original_inventory_sha256'],MODULE.sha(self.production/'gen_inventory.json'))
+        transfers=[command for command in calls if command[0]=='/usr/bin/xrdcp']
+        self.assertEqual(len(transfers),1)
+        self.assertTrue(transfers[0][-2].startswith('root://eoscms.cern.ch/'))
+        helperpins=json.loads(Path(result['config']['path']).read_text())['helpers']
+        self.assertIn('shift_eos_storage.py',{Path(p['path']).name for p in helperpins})
         self.assertEqual([command[4] for command in calls if '--build-point' in command],['m15_prompt'])
 
 
