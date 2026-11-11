@@ -53,19 +53,29 @@ def analysis_features(original, pins, cache):
         return original
     pin = pins[original['source_id']]
     if cache.get('pin') != pin:
+        compressed_limit = pin.get('maximum_compressed_bytes', 32*1048576)
+        expanded_limit = pin.get('maximum_expanded_bytes', 512*1048576)
+        if (type(compressed_limit) is not int or not 0 < compressed_limit <= 128*1048576
+                or type(expanded_limit) is not int or not 0 < expanded_limit <= 2*1024*1048576):
+            raise ValueError('GEN feature limits exceed the bounded reader allocation')
+        if type(pin['bytes']) is not int or not 0 < pin['bytes'] <= compressed_limit:
+            raise ValueError('GEN feature size exceeds its declared compressed bound')
+        # A source switch must release the previous census before downloading
+        # and decoding another one. Failed reads must not leave a stale census.
+        cache.clear()
         local = Path('analysis_GEN_features.json.gz')
-        download(pin['path'], local, pin['sha256'])
         try:
-            if local.stat().st_size != pin['bytes'] or local.stat().st_size > 32*1048576:
+            download(pin['path'], local, pin['sha256'])
+            if local.stat().st_size != pin['bytes']:
                 raise ValueError('GEN feature size differs from its frozen authority')
             with gzip.open(local, 'rb') as stream:
-                data = stream.read(512*1048576+1)
-            if len(data) > 512*1048576:
+                data = stream.read(expanded_limit+1)
+            if len(data) > expanded_limit:
                 raise ValueError('Expanded GEN feature census exceeds its bound')
             events = json.loads(data)['events']
+            del data
         finally:
             local.unlink(missing_ok=True)
-        cache.clear()
         cache.update(pin=copy.deepcopy(pin), events=events)
     event = cache['events'][original['original_index']]
     if (event['event_id'] != original['event_id']

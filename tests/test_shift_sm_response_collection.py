@@ -85,6 +85,43 @@ class ResponseCollectionTest(unittest.TestCase):
 
 
 class LazyGENFeatureTest(unittest.TestCase):
+    def test_feature_limits_reject_unallocated_compressed_inputs_before_download(self):
+        from run_shift_sm_response_collection import analysis_features
+        original = dict(source_id='source')
+        default_pin = dict(path='/eos/features.json.gz', sha256='a'*64,
+                           bytes=32*1048576+1)
+        with patch('run_shift_sm_response_collection.download') as download:
+            with self.assertRaisesRegex(ValueError, 'compressed bound'):
+                analysis_features(original, {'source': default_pin}, {})
+            for limits in (dict(maximum_compressed_bytes=128*1048576+1),
+                           dict(maximum_expanded_bytes=2*1024*1048576+1),
+                           dict(maximum_compressed_bytes=True)):
+                with self.assertRaisesRegex(ValueError, 'reader allocation'):
+                    analysis_features(original, {'source': dict(default_pin, **limits)}, {})
+            download.assert_not_called()
+
+    def test_expansion_failure_releases_old_cache_and_removes_partial_input(self):
+        from run_shift_sm_response_collection import analysis_features
+        data = gzip.compress(json.dumps(dict(events=[dict(payload='x'*100)])).encode())
+        pin = dict(path='/eos/source/features.json.gz', sha256=hashlib.sha256(data).hexdigest(),
+                   bytes=len(data), maximum_compressed_bytes=128*1048576,
+                   maximum_expanded_bytes=10)
+        cache = dict(pin={'old': 'source'}, events=[{'old': 'census'}])
+        def copy_input(path, target, digest):
+            self.assertEqual(cache, {})
+            Path(target).write_bytes(data)
+        here = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch('run_shift_sm_response_collection.download', side_effect=copy_input):
+                    with self.assertRaisesRegex(ValueError, 'Expanded GEN feature census'):
+                        analysis_features(dict(source_id='new'), {'new': pin}, cache)
+                self.assertEqual(cache, {})
+                self.assertFalse(Path('analysis_GEN_features.json.gz').exists())
+            finally:
+                os.chdir(here)
+
     def test_pinned_features_are_loaded_once_without_redrawing_or_reweighting(self):
         from run_shift_sm_response_collection import analysis_features
         from test_shift_sm_candidate_reco import event
@@ -113,9 +150,15 @@ class LazyGENFeatureTest(unittest.TestCase):
                 self.assertEqual(original, before)
                 self.assertEqual(result['existing_sampling_probability'], .001)
                 self.assertFalse(Path('analysis_GEN_features.json.gz').exists())
+                # A larger explicitly allocated reader keeps identity and W/p
+                # checks identical to the unchanged default reader.
+                larger_pin = dict(pin, maximum_compressed_bytes=128*1048576,
+                                  maximum_expanded_bytes=2*1024*1048576)
+                with patch('run_shift_sm_response_collection.download', side_effect=copy_input):
+                    self.assertEqual(analysis_features(original, {row['source_id']:larger_pin}, cache), result)
                 changed = dict(original, native_weight=123.)
                 with self.assertRaisesRegex(ValueError, 'differ from the original'):
-                    analysis_features(changed, {row['source_id']:pin}, cache)
+                    analysis_features(changed, {row['source_id']:larger_pin}, cache)
             finally:
                 os.chdir(here)
 
