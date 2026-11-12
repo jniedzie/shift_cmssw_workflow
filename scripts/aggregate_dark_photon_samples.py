@@ -38,6 +38,7 @@ SCHEMA = 'shift-dark-photon-additive-plan-v1'
 SAFE_NAME = re.compile(r'[A-Za-z0-9_-]+')
 MODEL_FIELDS = ('mass_gev', 'epsilon', 'proper_ctau_mm', 'sampling_epsilon')
 DY_RECIPE_FIELDS = ('dy_prescription', 'dy_normalization_applications', 'dy_normalization_uncertainty')
+PHOTON_BENCHMARK_FIELDS = ('experimental_photon_benchmark', 'photon_benchmark_approximation')
 
 
 def read(path):
@@ -252,6 +253,43 @@ def validated_dy_normalization(record):
     return uncertainty
 
 
+def recipe_compatibility_value(record, key):
+    """Ignore reader provenance only; retain every physical DY recipe field."""
+    value = record.get(key)
+    if key in ('dy_prescription', 'dy_normalization_uncertainty') and value is not None:
+        value = copy.deepcopy(value)
+        value.get('authority', {}).pop('helper_sha256', None)
+    return value
+
+
+def source_rate_record(contract, audit, *, source_directory, **kwargs):
+    """Replay each DY source with its own pinned normalization reader.
+
+    A later reader may support another authority without changing this source.
+    Keep the original reader hash and restore the caller's imports afterward.
+    """
+    authority = contract.get('dy_prescription', {}).get('authority')
+    if authority is None:
+        return rate_record(contract, audit, source_directory=source_directory, **kwargs)
+    filename = authority['helper_filename']
+    if filename != 'dark_photon_dy_prescription.py':
+        raise ValueError('Unrecognized frozen DY reader')
+    helper = checked(Path(source_directory)/filename, authority['helper_sha256'])
+    name = 'dark_photon_dy_prescription'
+    specification = importlib.util.spec_from_file_location('_source_dy_'+sha(helper)[:16], helper)
+    module = importlib.util.module_from_spec(specification)
+    specification.loader.exec_module(module)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        return rate_record(contract, audit, source_directory=source_directory, **kwargs)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+
+
 def combined_rate(populations, *, point, campaign):
     """Average identical-proposal estimates by their phase-space trial counts.
 
@@ -265,7 +303,7 @@ def combined_rate(populations, *, point, campaign):
     reference = first.get('mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
     fields = ('mechanism', 'model', 'cross_section_convention', 'physical_br_mumu',
               'sampling_epsilon', 'beam_energy_GeV', 'source_model',
-              'generated_mass_support_gev') + DY_RECIPE_FIELDS
+              'generated_mass_support_gev') + DY_RECIPE_FIELDS + PHOTON_BENCHMARK_FIELDS
     if any(('dy_prescription' in population['rate']) != ('dy_prescription' in first)
            for population in populations[1:]):
         raise ValueError('Different DY prescriptions cannot be pooled')
@@ -286,8 +324,8 @@ def combined_rate(populations, *, point, campaign):
         source_seeds=[p['rate']['source_seed'] for p in populations]
         if len(set(banks))!=len(banks) or len(set(source_seeds))!=len(source_seeds):
             raise ValueError('Reference source banks overlap; new unweighting seeds are not new collision exposure')
-    if any(any(population['rate'].get(key) != first.get(key) for key in fields)
-           for population in populations[1:]):
+    if any(any(recipe_compatibility_value(population['rate'], key) != recipe_compatibility_value(first, key)
+               for key in fields) for population in populations[1:]):
         raise ValueError('Rate estimates require identical physics and generation proposals')
     rates, trials = [], []
     for population in populations:
@@ -362,6 +400,9 @@ def combined_rate(populations, *, point, campaign):
             result[key]=first.get(key)
         result['source_sampling']=first['source_sampling']
         result['source_sampling_physics_identity']=sampling
+    for key in PHOTON_BENCHMARK_FIELDS:
+        if key in first:
+            result[key] = copy.deepcopy(first[key])
     if dy_uncertainty is not None:
         result.update(dy_prescription=copy.deepcopy(first['dy_prescription']),
             dy_normalization_applications=1,dy_normalization_uncertainty=copy.deepcopy(dy_uncertainty))
@@ -815,7 +856,7 @@ def load_source(source, expected_model, conditions_digest):
             or manifest['output_sha256'] != parent['gen_sha256']
             or not ledger_matches):
         raise ValueError('Source full GEN audit differs from its inventory')
-    rate = rate_record(contract, audit, point=source['point'], campaign=plan['campaign'],
+    rate = source_rate_record(contract, audit, point=source['point'], campaign=plan['campaign'],
         source_hashes={name: sha(gen / name) for name in ('contract.json', 'validation.json', 'manifest.json', 'cmsRun.log')},
         gen_path=parent['gen_path'], gen_sha256=parent['gen_sha256'], source_directory=gen)
     if 'dy_prescription' in contract:

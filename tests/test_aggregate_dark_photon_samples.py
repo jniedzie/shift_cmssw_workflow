@@ -78,6 +78,76 @@ class DYNormalizationAggregation(unittest.TestCase):
         self.assertEqual(result['dy_prescription'],samples[0]['rate']['dy_prescription'])
         self.assertEqual(result['full_gen']['accepted_events'],4)
 
+    def test_reader_code_change_preserves_physical_pooling_and_original_provenance(self):
+        first=self.apply(population(10,2,100,2.,.1));second=self.apply(population(20,3,300,2.,.1))
+        for field in ('dy_prescription','dy_normalization_uncertainty'):
+            second['rate'][field]['authority']['helper_sha256']='b'*64
+        originals=copy.deepcopy([first,second])
+        result=combined_rate([first,second],point='m15_prompt',campaign='same_physics')
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],4.)
+        self.assertEqual(result['full_gen']['accepted_events'],5)
+        self.assertEqual(result['full_gen']['n_tried'],400)
+        self.assertEqual(result['dy_normalization_uncertainty']['relative_error'],.1)
+        self.assertEqual([p['record'] for p in result['per_population']],[p['rate'] for p in originals])
+        self.assertEqual([first,second],originals)
+        for field,member,value in [('authority','sha256','d'*64),('normalization','factor',2.1),
+                                   ('hard_pdf','member',1),('normalization','common_numerical_error',.3)]:
+            changed=copy.deepcopy(second);record=changed['rate'];record['dy_prescription'][field][member]=value
+            uncertainty=record['dy_normalization_uncertainty']
+            if field=='authority':
+                uncertainty['authority'][member]=value
+                uncertainty['correlation_key']='dy-nnlo-numerical:'+value+':'+format(record['mass_gev'],'.17g')
+            elif member=='factor':
+                uncertainty['factor']=value;uncertainty['relative_error']=uncertainty['absolute_k_error']/value
+                for name in ('selected','inclusive'):
+                    record['physical_'+name+'_cross_sections_pb']=[dict(value_pb=row['value_pb']*value,error_pb=row['error_pb']*value)
+                        for row in record['physical_lo_'+name+'_cross_sections_pb']]
+            elif member=='common_numerical_error':
+                uncertainty['absolute_k_error']=value;uncertainty['relative_error']=value/uncertainty['factor']
+            with self.subTest(field=field,member=member),self.assertRaises(ValueError):
+                combined_rate([first,changed],point='m15_prompt',campaign='wrong_physics')
+
+    def test_explicit_photon_extension_survives_single_and_multiple_population_pooling(self):
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        first=self.apply(population(10));first['rate'].update(experimental_photon_benchmark=True,
+            photon_benchmark_approximation=photon_benchmark_epsilon(.03,True))
+        second=self.apply(population(20));second['rate'].update(copy.deepcopy({key:first['rate'][key]
+            for key in ('experimental_photon_benchmark','photon_benchmark_approximation')}))
+        for samples in [[first],[first,second]]:
+            result=combined_rate(samples,point='point',campaign='explicit')
+            self.assertTrue(result['experimental_photon_benchmark'])
+            self.assertEqual(result['photon_benchmark_approximation'],first['rate']['photon_benchmark_approximation'])
+        absent=self.apply(population(30))
+        result=combined_rate([absent],point='point',campaign='default')
+        self.assertNotIn('experimental_photon_benchmark',result)
+        explicit_false=copy.deepcopy(absent);explicit_false['rate']['experimental_photon_benchmark']=False
+        result=combined_rate([explicit_false],point='point',campaign='explicit_false')
+        self.assertIs(result['experimental_photon_benchmark'],False)
+        for change in ('absent','false','different_scope'):
+            altered=copy.deepcopy(second)
+            if change=='absent':altered['rate'].pop('experimental_photon_benchmark')
+            elif change=='false':altered['rate']['experimental_photon_benchmark']=False
+            else:altered['rate']['photon_benchmark_approximation']['maximum_epsilon']=.1
+            with self.subTest(change=change),self.assertRaises(ValueError):
+                combined_rate([first,altered],point='point',campaign='mixed')
+
+    def test_source_reader_is_bound_to_its_own_hash_and_does_not_leak_imports(self):
+        import aggregate_dark_photon_samples as aggregate
+        import dark_photon_dy_prescription as original
+        with tempfile.TemporaryDirectory() as tmp:
+            source=Path(tmp);helper=source/'dark_photon_dy_prescription.py'
+            helper.write_text('MARKER = "frozen-source-reader"\n')
+            contract=dict(dy_prescription=dict(authority=dict(helper_filename=helper.name,helper_sha256=sha(helper))))
+            def export(*args,**kwargs):
+                import dark_photon_dy_prescription as active
+                self.assertEqual(active.MARKER,'frozen-source-reader');return {'own_reader_verified':True}
+            with patch.object(aggregate,'rate_record',side_effect=export):
+                self.assertTrue(aggregate.source_rate_record(contract,{},source_directory=source)['own_reader_verified'])
+            self.assertIs(sys.modules['dark_photon_dy_prescription'],original)
+            helper.write_text('MARKER = "changed"\n')
+            with self.assertRaisesRegex(ValueError,'missing or changed|changed'):
+                aggregate.source_rate_record(contract,{},source_directory=source)
+
     def test_legacy_and_different_prescriptions_cannot_hide_in_pooling_or_recovery_views(self):
         first=self.apply(population(10));old=population(20);old['rate']['mechanism']='pure-on-shell-drell-yan'
         with self.assertRaisesRegex(ValueError,'Different DY prescriptions'):
