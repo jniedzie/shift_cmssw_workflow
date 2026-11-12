@@ -35,6 +35,26 @@ def proposal_library(family):
     return TOOLS/'plugin'/name
 
 
+def generation_sampling(row):
+    """Resolve sampling explicitly; preserve existing requests' old behavior.
+
+    Native class generation requests accepted unit-weight events. The weighted
+    proposal requests fixed original ND trials. These are different exposure
+    units, not interchangeable event budgets or different physical classes.
+    """
+    mode = row.get('generation_sampling', 'auto')
+    family, lower = row['family'], row['bounds'][0]
+    if family not in ('qcd', 'jpsi', 'dy'):
+        raise ValueError('Unknown SM source family')
+    if mode not in ('auto', 'native_class', 'weighted_trials'):
+        raise ValueError('Unknown generation sampling mode')
+    if mode == 'auto':
+        mode = 'weighted_trials' if family != 'dy' and lower > 0 else 'native_class'
+    if mode == 'weighted_trials' and (family == 'dy' or lower <= 0):
+        raise ValueError('Weighted source sampling requires a positive QCD/Jpsi bin')
+    return mode
+
+
 def sha(path):
     result = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -70,7 +90,9 @@ def generate(request, directory):
         raise ValueError('Use the reserved new-production run namespace')
     directory.mkdir()
     scripts = TOOLS/'scripts'
-    weighted = family != 'dy' and low > 0
+    weighted = generation_sampling(row) == 'weighted_trials'
+    if profile == DEFERRED_CHARM_PROFILE and not weighted:
+        raise ValueError('Deferred charm requires its separately audited weighted proposal')
     if family == 'dy':
         argv = ['cmsRun', str(scripts/'fixed_target_gen_cfg.py'), 'sample=dy',
                 'lower='+str(low), 'upper='+str(high), 'maxEvents='+str(count),
@@ -127,6 +149,7 @@ process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization
         config = directory/'resolved_gen_cfg.py'
         run(['edmConfigDump', 'gen_cfg.py'], config, cwd=directory, timeout=600)
         environment = dict(os.environ)
+        environment.pop('LD_PRELOAD', None)
         if weighted:
             environment['LD_PRELOAD'] = str(proposal_library(family))
         run(['cmsRun', 'gen_cfg.py'], directory/'cmsRun.log', cwd=directory,
@@ -148,6 +171,9 @@ process.FEVTDEBUGoutput.outputCommands.append('keep *_shiftWeightedNormalization
 
 def inspect_source(row, directory, audit, config, weighted):
     family, count = row['family'], row['events_or_trials']
+    sampling = 'weighted_trials' if weighted else 'native_class'
+    if generation_sampling(row) != sampling:
+        raise ValueError('Actual generator and declared exposure units differ')
     from audit_shift_material_scout import identity, metadata, product
     from DataFormats.FWLite import Events
     gen = directory/'gen.root'
@@ -162,6 +188,7 @@ def inspect_source(row, directory, audit, config, weighted):
     source = dict(source_id=row['id'], stratum=row['stratum'],
         source_family='qcd_ordinary' if family == 'qcd' else family,
         gen_sha256=sha(gen), saved_events=len(identities), generator_profile=row.get('generator_profile', 'ordinary'),
+        generation_sampling=sampling,
         timing_input_label='VtxSmeared' if family == 'dy' else 'generatorSmeared',
         decay_dependent_filter=False, saved_decays_unchanged=True,
         physics_normalization_ready=False, additional_branching_factor_applied=False,
@@ -266,7 +293,7 @@ def resume_source(request, directory):
     if audit != native['semantic_audit']['native_audit']:
         raise ValueError('Recovery native audit differs from its original receipt')
     row = request['source_request']
-    weighted = row['family'] != 'dy' and row['bounds'][0] > 0
+    weighted = generation_sampling(row) == 'weighted_trials'
     if weighted:
         from audit_shift_weighted_gen import validate_ledger
         ledger = json.loads((directory/'proposal_ledger.json').read_text())
