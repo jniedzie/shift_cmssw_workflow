@@ -532,11 +532,16 @@ def main():
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
         state=read(config['state_path']) if Path(config['state_path']).is_file() else dict(published={},attempts={},quarantined={})
         deadline=datetime.fromisoformat(config['deadline_utc']).timestamp()
+        session=config.get('maximum_session_seconds')
+        if session is not None and (type(session) is not int or session<=0):
+            raise ValueError('Publisher session duration must be a positive integer')
+        session_deadline=time.monotonic()+session if session is not None else None
         while True:
             result=poll(config,state)
             print(json.dumps(dict(utc=now(),ready=len(result['ready_signals']),pending=len(result['pending_signals']),
                 quarantined=len(result['quarantined_points']))),flush=True)
-            if args.once or time.time()>=deadline:break
+            if (args.once or time.time()>=deadline or
+                    (session_deadline is not None and time.monotonic()>=session_deadline)):break
             time.sleep(config.get('poll_seconds',120))
 
 

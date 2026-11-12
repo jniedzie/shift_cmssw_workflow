@@ -127,6 +127,17 @@ class PublicationOwnershipTests(unittest.TestCase):
             groups=publisher.components_for([dy,sc])
         self.assertEqual(sum(map(len,groups.values())),2)
 
+    def test_daily_session_returns_after_a_completed_poll_for_normal_DAG_handoff(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);config,state=self.fixture(directory)
+            config.update(deadline_utc='2030-01-01T00:00:00+00:00',maximum_session_seconds=1)
+            path=directory/'config.json';path.write_text('{}')
+            result=dict(ready_signals=[],pending_signals=[],quarantined_points={})
+            with patch.object(sys,'argv',['publisher','--config',str(path),'--config-sha256',publisher.sha(path)]),patch.object(publisher,'configuration',return_value=config),patch.object(publisher,'poll',return_value=result) as poll,patch.object(publisher.time,'monotonic',side_effect=[0,2]),patch.object(publisher.time,'sleep') as sleep:
+                publisher.main()
+            poll.assert_called_once()
+            sleep.assert_not_called()
+
     def test_unchanged_completed_bundle_is_not_republished(self):
         with tempfile.TemporaryDirectory() as temporary:
             config,state=self.fixture(Path(temporary));inputs=[source()]
