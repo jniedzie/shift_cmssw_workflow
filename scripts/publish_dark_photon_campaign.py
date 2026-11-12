@@ -140,6 +140,44 @@ def input_signature(sources):
     return hashlib.sha256(json.dumps(rows,separators=(',',':')).encode()).hexdigest()
 
 
+def validated_epsilon_domain(rate):
+    """Admit only the source's exact qualified prescription and epsilon range.
+
+    Source loading already verifies its original helper and rate record. The
+    publisher additionally checks the common authority before extending a scan.
+    """
+    epsilon = rate['epsilon']
+    if not math.isfinite(epsilon) or epsilon <= 0:
+        raise ValueError('Invalid signal epsilon')
+    if rate['mechanism'] == 'pure-on-shell-drell-yan':
+        from dark_photon_dy_prescription import prescription_metadata
+        metadata = rate.get('dy_prescription', {})
+        name = metadata.get('name')
+        maximum = .1 if name == 'msht20-nnlo-v2' else .001
+        if epsilon > maximum:
+            raise ValueError('DY epsilon exceeds qualified authority')
+        expected = prescription_metadata(name, rate['mass_gev'], epsilon)
+        if expected is None:
+            raise ValueError('Unapproved DY prescription')
+        # Each source retains its own helper hash; helper revisions may add
+        # another prescription without changing the older table or physics.
+        actual = json.loads(json.dumps(metadata))
+        for record in (actual, expected):
+            record['authority'].pop('helper_sha256', None)
+        if actual != expected:
+            raise ValueError('DY rate differs from the pinned publication authority')
+    if rate['mass_gev'] < 12.:
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        experimental = rate.get('experimental_photon_benchmark') is True
+        expected = photon_benchmark_epsilon(epsilon, experimental)
+        if experimental and rate.get('photon_benchmark_approximation') != expected:
+            raise ValueError('Changed photon-benchmark approximation')
+        if epsilon > .01 and not experimental:
+            raise ValueError('Extended photon benchmark must be explicit')
+        if rate.get('physical_width_authority', {}).get('neutral_current_width_included') is not False:
+            raise ValueError('Publication below12 GeV requires the pinned photon-like width benchmark')
+
+
 def components_for(populations):
     """Only the approved DY prescription may contribute to a new DY catalog."""
     import aggregate_dark_photon_samples as aggregate
@@ -150,9 +188,11 @@ def components_for(populations):
             if 'dy_prescription' not in rate:
                 raise ValueError('Legacy DY is not an MSHT20 response')
             aggregate.validated_dy_normalization(rate)
-            if rate['epsilon']>0.001:raise ValueError('DY epsilon exceeds qualified authority')
+            validated_epsilon_domain(rate)
         elif mechanism!='senscalc-meson-fragmentation-bremsstrahlung':
             raise ValueError('Unapproved signal mechanism: '+mechanism)
+        if mechanism=='senscalc-meson-fragmentation-bremsstrahlung':
+            validated_epsilon_domain(rate)
         groups.setdefault(mechanism,[]).append(population)
     groups={name:aggregate.unique_populations(rows) for name,rows in groups.items()}
     first=next(iter(groups.values()))[0]['rate']
@@ -268,6 +308,9 @@ def build_publication(config,point,sources,attempt,work,previous=None):
     populations=[population for group in groups.values() for population in group]
     originals=[population['parent']['gen_sha256'] for population in populations]
     keep_all_originals(previous,originals)
+    retained = config.get('retained_original_GEN_sha256', {}).get(point)
+    if retained:
+        keep_all_originals(dict(original_GEN_sha256=retained), originals)
     from run_dark_photon_gen_stage import check_eos_margin
     check_eos_margin(dict(eos_quota_space=config['storage_quota']['space'],
         minimum_eos_free_bytes=config['storage_quota']['minimum_free_bytes'],

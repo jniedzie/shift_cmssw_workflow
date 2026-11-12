@@ -89,10 +89,39 @@ class PublicationOwnershipTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'epsilon exceeds'):
                 publisher.components_for([old])
 
+    def test_extended_DY_requires_exact_versioned_authority(self):
+        from dark_photon_dy_prescription import prescription_metadata
+        rate = dict(mechanism='pure-on-shell-drell-yan', mass_gev=40., epsilon=.03,
+            dy_prescription=prescription_metadata('msht20-nnlo-v2', 40., .03))
+        publisher.validated_epsilon_domain(rate)
+        rate['dy_prescription']['normalization']['factor'] *= 2
+        with self.assertRaisesRegex(ValueError, 'pinned publication authority'):
+            publisher.validated_epsilon_domain(rate)
+        rate['dy_prescription'] = prescription_metadata('msht20-nnlo', 40., .001)
+        with self.assertRaisesRegex(ValueError, 'epsilon exceeds'):
+            publisher.validated_epsilon_domain(rate)
+
+    def test_photon_extension_never_implicitly_changes_the_benchmark(self):
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        rate = dict(mechanism='senscalc-meson-fragmentation-bremsstrahlung',
+            mass_gev=.5, epsilon=.03, physical_width_authority=dict(neutral_current_width_included=False))
+        with self.assertRaisesRegex(ValueError, 'Photon-benchmark epsilon'):
+            publisher.validated_epsilon_domain(rate)
+        rate.update(experimental_photon_benchmark=True,
+            photon_benchmark_approximation=photon_benchmark_epsilon(.03, True))
+        publisher.validated_epsilon_domain(rate)
+        rate['physical_width_authority']['neutral_current_width_included'] = True
+        with self.assertRaisesRegex(ValueError, 'pinned photon-like width'):
+            publisher.validated_epsilon_domain(rate)
+        rate['physical_width_authority']['neutral_current_width_included'] = False
+        rate['photon_benchmark_approximation']['neutral_current_width_included'] = True
+        with self.assertRaisesRegex(ValueError, 'Changed photon'):
+            publisher.validated_epsilon_domain(rate)
+
     def test_overlap_needs_both_components_and_keeps_each_population(self):
         dy=dict(rate=dict(mechanism='pure-on-shell-drell-yan',dy_prescription={},epsilon=.001,mass_gev=1.5))
         sc=dict(rate=dict(mechanism='senscalc-meson-fragmentation-bremsstrahlung',epsilon=.001,mass_gev=1.5))
-        with patch.object(aggregate,'validated_dy_normalization'),patch.object(aggregate,'unique_populations',side_effect=lambda rows:rows):
+        with patch.object(aggregate,'validated_dy_normalization'),patch.object(publisher,'validated_epsilon_domain'),patch.object(aggregate,'unique_populations',side_effect=lambda rows:rows):
             self.assertIsNone(publisher.components_for([dy]))
             self.assertIsNone(publisher.components_for([sc]))
             groups=publisher.components_for([dy,sc])
