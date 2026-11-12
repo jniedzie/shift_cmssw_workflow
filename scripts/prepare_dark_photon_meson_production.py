@@ -92,9 +92,9 @@ def freeze_tools(config, scripts, tools, files):
     sources = {name:scripts/name for name in names}
     if config.get('dy_prescription') is not None:
         from prepare_dark_photon_grid import source_files
-        from dark_photon_dy_prescription import HELPER_NAME, TABLE_NAME
+        from dark_photon_dy_prescription import HELPER_NAME, table_filename
         selected = source_files(scripts, config['dy_prescription'])
-        sources.update({name:selected[name] for name in (HELPER_NAME, TABLE_NAME)})
+        sources.update({name:selected[name] for name in (HELPER_NAME, table_filename(config['dy_prescription']))})
     for name, source in sorted(sources.items()):
         target = tools/name
         shutil.copy2(source, target)
@@ -157,7 +157,12 @@ def validate_batches(rows, prior_inventories, seed_base=761216001,
     for index, original in enumerate(rows):
         row = copy.deepcopy(original)
         mass, epsilon = row['mass_gev'], row['epsilon']
-        if not 2*.1056583755 < mass < endpoint or not math.isfinite(epsilon) or not 0 < epsilon <= .01:
+        experimental = row.get('experimental_photon_benchmark', False)
+        if type(experimental) is not bool or (experimental and mechanism not in REFERENCE_MECHANISMS):
+            raise ValueError('Experimental photon benchmark requires the pinned reference source')
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        photon_benchmark_epsilon(epsilon, experimental)
+        if not 2*.1056583755 < mass < endpoint:
             raise ValueError('Require an open dimuon meson mass and physical epsilon')
         count = row['source_collisions']
         maximum = limits['maximum_canary_source_collisions'] if row.get('operational_canary', False) else limits['maximum_source_collisions_per_batch']

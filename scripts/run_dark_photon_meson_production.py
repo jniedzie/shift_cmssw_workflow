@@ -1280,6 +1280,8 @@ def source(config, seal_digest, batch):
                     '--darkcast-source-receipt',config['darkcast_source_receipt'],
                     '--detector-runtime-profile',str(profile_path),'--output',str(gen),
                     '--timeout',str(config['gen_timeout_seconds'])]
+                if batch.get('experimental_photon_benchmark', False):
+                    argv.append('--experimental-photon-benchmark')
                 if source_mechanism(config)==REFERENCE_MECHANISMS[1]:
                     authority=reference['settings']['bremsstrahlung_profiles'][str(batch['mass_gev'])]
                     argv.extend(['--bremsstrahlung-profile',str(pinned_path(authority))])

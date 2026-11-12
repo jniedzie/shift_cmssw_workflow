@@ -53,6 +53,24 @@ class SpectralGenerationTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_point(2., .10001, .10001, experimental_large_epsilon=True)
 
+    def test_photon_benchmark_extension_is_distinct_from_full_hypercharge(self):
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        for epsilon in (.003, .01):
+            photon_benchmark_epsilon(epsilon)
+        with self.assertRaises(ValueError):
+            photon_benchmark_epsilon(.03)
+        scope=photon_benchmark_epsilon(.03, True)
+        self.assertFalse(scope['neutral_current_width_included'])
+        self.assertEqual(scope['source_scaling'], 'epsilon squared')
+        validate_point(1.5, .03, .03, experimental_low_mass_dy=True,
+                       experimental_photon_benchmark=True)
+        with self.assertRaises(ValueError):
+            validate_point(1.5, .03001, .03001, experimental_low_mass_dy=True,
+                           experimental_photon_benchmark=True)
+        with self.assertRaisesRegex(ValueError, 'Choose photon'):
+            validate_point(1.5, .03, .03, experimental_low_mass_dy=True,
+                           experimental_large_epsilon=True, experimental_photon_benchmark=True)
+
     def test_contract_retains_physical_width_and_accepted_identity_budget(self):
         args = SimpleNamespace(mass=2., epsilon=1.e-7, sampling_epsilon=.01,
                                events=10, seed=1234, run_number=5678)

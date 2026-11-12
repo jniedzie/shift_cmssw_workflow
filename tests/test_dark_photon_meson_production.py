@@ -267,6 +267,21 @@ class FixedExposure(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'at most100000'):
             preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
 
+    def test_larger_reference_epsilon_requires_its_explicit_photon_benchmark(self):
+        rows=self.rows()
+        for index,row in enumerate(rows):
+            row.update(source_seed=711+index,epsilon=.03)
+        with self.assertRaisesRegex(ValueError, 'Photon-benchmark epsilon'):
+            preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+        for row in rows:row['experimental_photon_benchmark']=True
+        prepared=preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+        self.assertTrue(all(row['experimental_photon_benchmark'] for row in prepared))
+        with self.assertRaisesRegex(ValueError, 'pinned reference'):
+            preparation.validate_batches(rows,[],mechanism='meson-radiative')
+        rows[0]['epsilon']=.03001
+        with self.assertRaises(ValueError):
+            preparation.validate_batches(rows,[],mechanism='senscalc-meson-fragmentation')
+
     def test_heavy_source_mass_scope_comes_from_the_declared_current(self):
         from test_dark_photon_meson_source import CorrelatedCurrentSourceTest
         parent=CorrelatedCurrentSourceTest().quark()

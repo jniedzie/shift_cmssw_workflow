@@ -109,6 +109,49 @@ class DYPrescriptionTest(unittest.TestCase):
                 with self.subTest(change=change),self.assertRaises(ValueError):
                     prescription.prescription_metadata('msht20-nnlo', 2., epsilon, table)
 
+    def test_v2_is_explicit_and_keeps_v1_domain_unchanged(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);v1=root/prescription.TABLE_NAME
+            v1.write_text(json.dumps(self.table()))
+            value=self.table();value.update(name='msht20-nnlo-v2',version=2,epsilon_upper_bound=.1,
+                extended_mixing_qualification=dict(complete=True,maximum_epsilon=.1,
+                    native_width_algebra_passed=True,paired_NNLO_Born_controls_passed=True))
+            v2=root/prescription.table_filename('msht20-nnlo-v2');v2.write_text(json.dumps(value))
+            with self.assertRaises(ValueError):
+                prescription.prescription_metadata('msht20-nnlo',2.,.01,v1)
+            for epsilon in [.001,.003,.01,.03,.1]:
+                meta=prescription.prescription_metadata('msht20-nnlo-v2',2.,epsilon,v2)
+                self.assertEqual(meta['epsilon_upper_bound'],.1)
+                self.assertEqual(meta['authority']['filename'],v2.name)
+            for epsilon in [.10001,1.,0.]:
+                with self.assertRaises(ValueError):
+                    prescription.prescription_metadata('msht20-nnlo-v2',2.,epsilon,v2)
+            value['extended_mixing_qualification']['complete']=False
+            v2.write_text(json.dumps(value))
+            with self.assertRaisesRegex(ValueError,'qualification'):
+                prescription.prescription_metadata('msht20-nnlo-v2',2.,.01,v2)
+
+    def test_v2_isolated_freeze_and_replay_use_its_own_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);value=self.table()
+            value.update(name='msht20-nnlo-v2',version=2,epsilon_upper_bound=.1,
+                extended_mixing_qualification=dict(complete=True,maximum_epsilon=.1,
+                    native_width_algebra_passed=True,paired_NNLO_Born_controls_passed=True))
+            table=root/'authority.json';table.write_text(json.dumps(value));frozen=root/'frozen';frozen.mkdir()
+            files=prescription.prescription_files('msht20-nnlo-v2',table)
+            with patch.object(prescription,'prescription_files',return_value=files):
+                prescription.freeze_prescription('msht20-nnlo-v2',frozen)
+            contract=self.contract();contract['epsilon']=.03
+            contract=prescription.apply_prescription(contract,'msht20-nnlo-v2',table_path=table)
+            (frozen/'manifest.json').write_text(json.dumps(dict(dy_pdf_runtime=dict(
+                schema='shift-dy-pdf-runtime-v1',files=value['pdf_inputs']))))
+            spec=importlib.util.spec_from_file_location('isolated_v2',frozen/prescription.HELPER_NAME)
+            module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
+            self.assertEqual(module.validate_prescription(contract,frozen)['name'],'msht20-nnlo-v2')
+            self.assertEqual({p.name for p in module.prescription_input_files(contract,frozen)},
+                             {prescription.HELPER_NAME,prescription.table_filename('msht20-nnlo-v2')})
+            self.assertFalse((frozen/prescription.TABLE_NAME).exists())
+
     def test_real_pdf_data_are_checked_before_setting_the_standard_search_path(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);value=self.table();data=root/'PDFs';data.mkdir()

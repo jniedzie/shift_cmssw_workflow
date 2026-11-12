@@ -35,7 +35,7 @@ def main():
                         help='Resolvable common amplitude scale; physical epsilon and lifetime stay unchanged')
     parser.add_argument('--experimental-large-epsilon', action='store_true',
                         help='Allow epsilon up to 0.1 with exact mixed couplings; pure-DY benchmark only')
-    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo', 'msht20-nnlo-v2'],
                         help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--events', type=int, default=100)
     parser.add_argument('--accepted-events', action='store_true',
@@ -54,7 +54,7 @@ def main():
     hard_settings = []
     if args.dy_prescription is not None:
         from dark_photon_dy_prescription import (
-            hard_pdf_settings, configure_hard_pdf, freeze_prescription, apply_prescription, TABLE_NAME,
+            hard_pdf_settings, configure_hard_pdf, freeze_prescription, apply_prescription, table_filename,
         )
         hard_settings = hard_pdf_settings(args.dy_prescription)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999900 or args.timeout <= 0:
@@ -118,7 +118,7 @@ def main():
                         args.run_number or args.seed, common, cp5, sampling_width, scale,
                         accepted_events=args.accepted_events, experimental_large_epsilon=args.experimental_large_epsilon)
         if args.dy_prescription is not None:
-            data = apply_prescription(data, args.dy_prescription, table_path=out / TABLE_NAME)
+            data = apply_prescription(data, args.dy_prescription, table_path=out / table_filename(args.dy_prescription))
         if args.jaw_profile is not None:
             data = place_contract(data, args.jaw_profile)
             shutil.copy2(args.jaw_profile, out/'jaw_profile.json')

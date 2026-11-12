@@ -70,7 +70,8 @@ def fr_variation_weights(sampler,candidate,table_directory=None):
     return weights
 
 
-def pbc_bc1_benchmark(mass,epsilon,*,radiation_variation='Central',table_directory=None):
+def pbc_bc1_benchmark(mass,epsilon,*,radiation_variation='Central',table_directory=None,
+                      experimental_photon_benchmark=False):
     """Specify one visible benchmark without qualifying or running a source.
 
     PBC BC1 defines the particle; the pinned SensCalc prescription supplies
@@ -84,10 +85,11 @@ def pbc_bc1_benchmark(mass,epsilon,*,radiation_variation='Central',table_directo
     """
     from dark_photon_meson import MUON_MASS_GEV
     from dark_photon_bremsstrahlung import form_factor_table,sampling_profile
-    from run_dark_photon_spectral_gen import NATIVE_EW,PINNED_DARKCAST_COMMIT
+    from run_dark_photon_spectral_gen import NATIVE_EW,PINNED_DARKCAST_COMMIT,photon_benchmark_epsilon
+    epsilon_scope=photon_benchmark_epsilon(epsilon, experimental_photon_benchmark)
     if (not math.isfinite(mass) or not 2*MUON_MASS_GEV<mass<NATIVE_EW.m_z_gev or
-            not math.isfinite(epsilon) or not 0<epsilon<=.01):
-        raise ValueError('This implementation requires an open dimuon mass below mZ and physical epsilon in (0, 0.01]')
+            (experimental_photon_benchmark and mass>=12.)):
+        raise ValueError('Require an open dimuon mass below mZ; the experimental photon benchmark applies below12 GeV')
     scales=dict(FR_VARIATIONS)
     if radiation_variation not in scales:
         raise ValueError('Use the correlated Lower, Central or Upper FR scenario')
@@ -123,6 +125,8 @@ def pbc_bc1_benchmark(mass,epsilon,*,radiation_variation='Central',table_directo
         width['commit']=PINNED_DARKCAST_COMMIT
     return dict(schema='shift-pbc-bc1-senscalc-benchmark-v1',mass_gev=mass,epsilon=epsilon,
         particle_model='PBC-BC1-visible-hypercharge',
+        **(dict(experimental_photon_benchmark=True,photon_benchmark_approximation=epsilon_scope)
+            if experimental_photon_benchmark else {}),
         implementation_mass_scope_gev=dict(minimum=2*MUON_MASS_GEV,maximum=NATIVE_EW.m_z_gev,
                                            endpoints='open',scope='current implementation, not the PBC model definition'),
         low_mass_coupling='epsilon * e * Q_f',

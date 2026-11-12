@@ -102,14 +102,16 @@ def reuse_pbc_physical_points(plan, previous, previous_path):
 
 
 def plan_points(reference, masses, flights, events, seed_base, detector_job_base,
-                sampling_epsilon=.01, prompt_epsilon=.001, epsilons=None, benchmark=None):
+                sampling_epsilon=.01, prompt_epsilon=.001, epsilons=None, benchmark=None,
+                experimental_photon_benchmark=False):
     if reference.get('schema') != grid.REFERENCE_SCHEMA or reference.get('sample_kind') != 'simulation_only':
         raise ValueError('Require explicit simulation width/boost references')
     refs = {}
     for row in reference['references']:
         mass = float(row['mass_gev'])
         validate_point(mass, float(row['epsilon']), sampling_epsilon,
-                       experimental_low_mass_dy=low_mass_dy_enabled(mass, benchmark))
+                       experimental_low_mass_dy=low_mass_dy_enabled(mass, benchmark),
+                       experimental_photon_benchmark=experimental_photon_benchmark)
         if mass in refs or not math.isfinite(row['mean_beta_gamma']) or row['mean_beta_gamma'] <= 0:
             raise ValueError('Require distinct reference masses and positive unfiltered GEN boosts')
         if row['width_authority']['schema'] != 'shift-dark-photon-spectral-width-v1' or not row.get('boost_source'):
@@ -141,7 +143,8 @@ def plan_points(reference, masses, flights, events, seed_base, detector_job_base
                 epsilon = ref['epsilon'] * math.sqrt(
                     ref['width_authority']['ctau_mm'] * ref['mean_beta_gamma'] / (1000 * target))
             experimental = low_mass_dy_enabled(mass, benchmark)
-            validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=experimental)
+            validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=experimental,
+                           experimental_photon_benchmark=experimental_photon_benchmark)
             index = len(rows)
             rows.append(dict(point='m'+format(mass,'.8g').replace('.','p')+'_'+name,
                 mass_gev=mass, epsilon=epsilon, target_mean_lab_flight_m=target,
@@ -150,6 +153,8 @@ def plan_points(reference, masses, flights, events, seed_base, detector_job_base
                 seed=seed_base+index, run_number=seed_base+index, detector_job=detector_job_base+index))
             if experimental:
                 rows[-1]['experimental_low_mass_dy'] = True
+            if experimental_photon_benchmark:
+                rows[-1]['experimental_photon_benchmark'] = True
     if len({row['point'] for row in rows}) != count:
         raise ValueError('Spectral point names collide')
     result = dict(grid_mode=mode, points=rows,
@@ -172,7 +177,7 @@ def main():
     parser.add_argument('--darkcast-source-receipt',type=Path,required=True)
     parser.add_argument('--benchmark',choices=['pbc-bc1'],
         help='Prepare the DY component from 1.5 GeV, including its 1.5--2 GeV overlap; no production qualification implied')
-    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo', 'msht20-nnlo-v2'],
         help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--masses',nargs='+',type=float,default=[2.,5.,10.])
     columns=parser.add_mutually_exclusive_group()
@@ -188,6 +193,8 @@ def main():
     parser.add_argument('--eos-base',required=True)
     parser.add_argument('--events-per-job',type=int,default=5)
     parser.add_argument('--group-events',type=int,default=2000)
+    parser.add_argument('--experimental-photon-benchmark',action='store_true',
+        help='Extend unchanged photon-like widths through epsilon .03; record the approximation')
     args=parser.parse_args()
     if args.output.exists():
         raise FileExistsError('Refuse to overwrite an existing spectral preparation')
@@ -196,7 +203,7 @@ def main():
     reference=json.loads(args.references.read_text())
     plan=plan_points(reference,args.masses,args.mean_lab_flights_m or [5.,30.,100.,1000.],
         args.events,args.seed_base,args.detector_job_base,args.sampling_epsilon,epsilons=args.epsilons,
-        benchmark=args.benchmark)
+        benchmark=args.benchmark,experimental_photon_benchmark=args.experimental_photon_benchmark)
     if args.reuse_physical_plan is not None:
         previous = json.loads(args.reuse_physical_plan.read_text())
         if args.benchmark == 'pbc-bc1' and previous.get('production_mechanism') in grid.REFERENCE_MECHANISMS:
@@ -224,7 +231,8 @@ def main():
         options=SimpleNamespace(mass=row['mass_gev'],epsilon=row['epsilon'],sampling_epsilon=row['sampling_epsilon'],
                                 events=row['events'],seed=row['seed'],run_number=row['run_number'],
                                 experimental_low_mass_dy=low_mass_dy_enabled(row['mass_gev'], args.benchmark),
-                                dy_prescription=args.dy_prescription)
+                                dy_prescription=args.dy_prescription,
+                                experimental_photon_benchmark=args.experimental_photon_benchmark)
         width=physical_width_table(model,options.mass,options.epsilon,authority)
         grid.check_reused_lifetime(row,width['ctau_mm'])
         anchor = row.get('pbc_common_physical_point')
@@ -234,7 +242,8 @@ def main():
             raise ValueError('Fresh DY width changed the common PBC lifetime or dimuon branching')
         native=_native_inspect(common+tune+native_proposal_settings(options.mass,options.epsilon,options.sampling_epsilon,
             experimental_low_mass_dy=options.experimental_low_mass_dy,
-            dy_prescription=args.dy_prescription)+beam_settings(6800.))
+            dy_prescription=args.dy_prescription,
+            experimental_photon_benchmark=args.experimental_photon_benchmark)+beam_settings(6800.))
         contract=build_contract(options,width,native,common,tune)
         lab=row['mean_beta_gamma_reference']*width['ctau_mm']/1000
         target=row['target_mean_lab_flight_m']
@@ -270,6 +279,8 @@ def main():
         row['gen_argv'][1]=str(Path(row['gen_argv'][1]).with_name('run_dark_photon_spectral_gen.py'))
         if '--accepted-events' in row['gen_argv']:
             row['gen_argv'].remove('--accepted-events')
+        if args.experimental_photon_benchmark:
+            row['gen_argv'].append('--experimental-photon-benchmark')
         row['gen_argv'].extend(['--darkcast-path',str(external),'--darkcast-source-receipt',str(external/'source_receipt.json')])
         row['gen_command']=shlex.join(row['gen_argv'])
     (args.output/'plan.json').write_text(json.dumps(result,indent=2,allow_nan=False)+'\n')

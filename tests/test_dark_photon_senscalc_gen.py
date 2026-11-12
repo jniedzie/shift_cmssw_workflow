@@ -38,6 +38,24 @@ class SourceToGen(unittest.TestCase):
             mass_gev=mass,epsilon=1.e-5,run_number=5123,requested_events=len(selected))
         return contract,selected,sampler
 
+    def test_experimental_photon_benchmark_keeps_the_same_source_population(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory,1.5)
+            contract['epsilon']=.03
+            with self.assertRaisesRegex(ValueError, 'Photon-benchmark epsilon'):
+                adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+            contract.update(experimental_photon_benchmark=True,
+                photon_benchmark_approximation=adapter.photon_benchmark_epsilon(.03, True))
+            unchanged=json.dumps(selected)
+            adapter.write_benchmark_source_metadata(directory,contract,selected,sampler)
+            adapter.validate_benchmark_source_metadata(directory,contract,selected,sampler)
+            self.assertEqual(unchanged,json.dumps(selected))
+            definition=json.loads((directory/'pbc_bc1_benchmark.json').read_text())
+            self.assertEqual(definition['epsilon'],.03)
+            self.assertFalse(definition['width']['neutral_current_width_included'])
+            self.assertEqual(definition['photon_benchmark_approximation'],contract['photon_benchmark_approximation'])
+            self.assertEqual([row['name'] for row in definition['components']],['senscalc','dy'])
+
     def test_source_metadata_preserves_draws_denominators_and_identifies_every_GEN_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             directory=Path(tmp);contract,selected,sampler=self.metadata_fixture(directory)

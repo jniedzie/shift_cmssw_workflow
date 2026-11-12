@@ -23,14 +23,14 @@ import gzip
 from dark_photon_senscalc import (CHANNELS,MASS_SUPPORT_RELATIVE_TOLERANCE,
     digest,ledger_digest,source_ledger,source_summary,write_json,reviewed_source_mass_roundoff)
 from dark_photon_meson import MUON_MASS_GEV,transition_form_factor_abs2
-from run_dark_photon_spectral_gen import freeze_spectral_inputs,physical_width_table
+from run_dark_photon_spectral_gen import freeze_spectral_inputs,physical_width_table,photon_benchmark_epsilon
 
 MECHANISM='senscalc-meson-fragmentation'
 INCLUSIVE_MECHANISM='senscalc-meson-fragmentation-bremsstrahlung'
 MECHANISMS=(MECHANISM,INCLUSIVE_MECHANISM)
 SOURCES=('run_dark_photon_senscalc_gen.py','dark_photon_senscalc.py','dark_photon_meson.py',
          'dark_photon_bremsstrahlung.py',
-         'run_dark_photon_spectral_gen.py','dark_photon_model.py','fixed_target_generation.py',
+         'run_dark_photon_spectral_gen.py','dark_photon_spectral_widths.py','dark_photon_model.py','fixed_target_generation.py',
          'dark_photon_meson_gen_cfg.py','audit_dark_photon_gen.py','export_dark_photon_cross_sections.py',
          'pythia_generation_ledger.py','dark_photon_source_placement.py','shift_source_placement.py',
          'shift_jaw_source.py','shift_material_preselection.py','dark_photon_detector_runtime.py')
@@ -206,7 +206,8 @@ def benchmark_source_metadata(directory,contract,selected,bremsstrahlung):
     tables=(Path(directory)/'bremsstrahlung_inputs').resolve()
     definition=pbc_bc1_benchmark(contract['mass_gev'],contract['epsilon'],
         radiation_variation=profile['form_factor_variation'],
-        table_directory=tables)
+        table_directory=tables,
+        experimental_photon_benchmark=contract.get('experimental_photon_benchmark', False))
     reference=next(row for row in definition['components'] if row['name']=='senscalc')
     reference['bremsstrahlung']['table_directory']='bremsstrahlung_inputs'
     if not equivalent_numbers(reference['bremsstrahlung'],profile):
@@ -356,6 +357,10 @@ public:
 def accounting(directory,contract):
     """Recompute the full source rate and exact finite-bank selection."""
     directory=Path(directory)
+    epsilon_scope=photon_benchmark_epsilon(contract['epsilon'], contract.get('experimental_photon_benchmark', False))
+    if contract.get('experimental_photon_benchmark'):
+        if contract.get('photon_benchmark_approximation') != epsilon_scope:
+            raise ValueError('Changed experimental photon-benchmark approximation')
     for name,key in [('source_manifest.json','source_manifest_sha256'),('source_ledger.jsonl','source_ledger_sha256'),
                      ('source_exposure.json','source_exposure_sha256'),('radiative_model.json','radiative_model_sha256')]:
         path=directory/name
@@ -469,7 +474,10 @@ def rate_record(contract,audit,*,point,campaign,source_hashes,gen_path,gen_sha25
         rate_scope=audit['rate_scope'],runtime_validated=True,physics_valid=False,normalization_ready=False,
         production_rate_validated=False,low_mass_mechanisms_included=True,prompt_interference_included=False,
         gen_path=gen_path,gen_sha256=gen_sha256,source_sha256=source_hashes,exporter_sha256=digest(__file__),
-        **(dict(benchmark_metadata=contract['benchmark_metadata']) if 'benchmark_metadata' in contract else {}))
+        **(dict(benchmark_metadata=contract['benchmark_metadata']) if 'benchmark_metadata' in contract else {}),
+        **(dict(experimental_photon_benchmark=True,
+            photon_benchmark_approximation=contract['photon_benchmark_approximation'])
+            if contract.get('experimental_photon_benchmark') else {}))
 
 
 def run(args):
@@ -478,7 +486,8 @@ def run(args):
     try:
         if not 1<=args.seed<=899999800 or not 1<=args.run_number<=4294967295:
             raise ValueError('Valid unused GEN seed and run required')
-        if not math.isfinite(args.epsilon) or not 0<args.epsilon<=.01:raise ValueError('Small positive physical epsilon required')
+        experimental = getattr(args, 'experimental_photon_benchmark', False)
+        epsilon_scope = photon_benchmark_epsilon(args.epsilon, experimental)
         for name in SOURCES:shutil.copy2(Path(__file__).with_name(name),output/name)
         result['source_sha256']={name:digest(output/name) for name in SOURCES}
         shutil.copy2(args.radiative_model,output/'radiative_model.json')
@@ -546,6 +555,8 @@ def run(args):
                 error_pb=summary['sigma_statistical_error_over_epsilon_squared_pb']*factor),
             cross_section_convention='Reference ND sigma times full-source weighted mean, epsilon squared and physical dimuon BR once; saved conditional GEN has unit weights',
             physics_valid=False,normalization_ready=False)
+        if experimental:
+            contract.update(experimental_photon_benchmark=True, photon_benchmark_approximation=epsilon_scope)
         if brem is not None:
             contract.update(bremsstrahlung_profile_sha256=digest(output/'bremsstrahlung.json'),
                 bremsstrahlung_proposals_sha256=ledger_digest(bremsstrahlung_proposal_file(output)),
@@ -599,6 +610,8 @@ def main():
     parser.add_argument('--mass',type=float);parser.add_argument('--source-collisions',type=int)
     parser.add_argument('--source-seed',type=int);parser.add_argument('--proposal-probability',type=float,default=.01)
     parser.add_argument('--epsilon',type=float,required=True)
+    parser.add_argument('--experimental-photon-benchmark',action='store_true',
+        help='Extend the unchanged epsilon-squared photon benchmark to .03; record its finite-mixing approximation')
     parser.add_argument('--seed',type=int,required=True);parser.add_argument('--run-number',type=int,required=True)
     parser.add_argument('--rate-profile',choices=('pointlike','measured-form-factor'),default='pointlike')
     parser.add_argument('--bremsstrahlung-profile',type=Path,

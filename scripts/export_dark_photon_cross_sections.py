@@ -812,6 +812,12 @@ def rate_record(contract, audit, *, point, campaign, source_hashes, gen_path, ge
         prompt_interference_included=contract["prompt_interference_included"],
         gen_path=gen_path, gen_sha256=gen_sha256, source_sha256=source_hashes,
         exporter_sha256=sha256(__file__))
+    if contract.get('experimental_photon_benchmark'):
+        from run_dark_photon_spectral_gen import photon_benchmark_epsilon
+        approximation=photon_benchmark_epsilon(epsilon, True)
+        if contract.get('photon_benchmark_approximation') != approximation:
+            raise ValueError('Changed experimental photon-benchmark approximation')
+        result.update(experimental_photon_benchmark=True,photon_benchmark_approximation=approximation)
     if 'dy_prescription' in contract:
         from dark_photon_dy_prescription import validate_prescription
         metadata = validate_prescription(contract, source_directory)

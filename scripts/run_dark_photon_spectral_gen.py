@@ -44,12 +44,30 @@ def digest(path):
     return checksum.hexdigest()
 
 
+def photon_benchmark_epsilon(epsilon, experimental=False):
+    """Keep the published photon approximation explicit outside its old guard.
+
+    This extends the same epsilon-squared source and DarkCast photon widths;
+    it does not replace them with the full-hypercharge alternative.
+    """
+    maximum = .03 if experimental else .01
+    if not math.isfinite(epsilon) or not 0 < epsilon <= maximum:
+        raise ValueError(f"Photon-benchmark epsilon must be in (0, {maximum}]")
+    return dict(schema='shift-experimental-photon-benchmark-epsilon-v1',
+        maximum_epsilon=.03, source_scaling='epsilon squared',
+        physical_width='Unchanged pinned DarkCast photon-like spectral widths',
+        neutral_current_width_included=False,
+        approximation='Leading electromagnetic current; finite-mixing and weak-current differences retained as model uncertainty')
+
+
 def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False,
-                   experimental_large_epsilon=False):
+                   experimental_large_epsilon=False, experimental_photon_benchmark=False):
     minimum = 1.4 if experimental_low_mass_dy else 2.
     if not math.isfinite(mass) or not minimum <= mass < 12.:
         raise ValueError("Spectral DY pilot requires mass >=2 GeV, or >=1.4 GeV with the explicit experimental low-mass DY option, and mass <12 GeV")
-    maximum = .1 if experimental_large_epsilon else .01
+    if experimental_large_epsilon and experimental_photon_benchmark:
+        raise ValueError('Choose photon-benchmark widths or full-hypercharge widths explicitly')
+    maximum = .1 if experimental_large_epsilon else (.03 if experimental_photon_benchmark else .01)
     if not math.isfinite(epsilon) or not 0 < epsilon <= maximum:
         raise ValueError(f"Physical epsilon must be finite and in (0, {maximum}]")
     if not math.isfinite(sampling_epsilon) or not epsilon <= sampling_epsilon <= maximum:
@@ -57,8 +75,9 @@ def validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=Fal
 
 
 def native_proposal_settings(mass, epsilon, sampling_epsilon, experimental_low_mass_dy=False,
-                             experimental_large_epsilon=False, dy_prescription=None):
-    validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy, experimental_large_epsilon)
+                             experimental_large_epsilon=False, dy_prescription=None, experimental_photon_benchmark=False):
+    validate_point(mass, epsilon, sampling_epsilon, experimental_low_mass_dy, experimental_large_epsilon,
+                   experimental_photon_benchmark)
     couplings = pythia_couplings(mass, epsilon, NATIVE_EW)
     scale = sampling_epsilon / epsilon
     settings = [
@@ -144,7 +163,9 @@ def build_contract(args, width, native, common, tune):
     support = validate_native_proposal_support(native, .99*args.mass, 1.01*args.mass)
     experimental = getattr(args, 'experimental_low_mass_dy', False)
     large_epsilon = getattr(args, 'experimental_large_epsilon', False)
-    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental, large_epsilon)
+    photon_benchmark = getattr(args, 'experimental_photon_benchmark', False)
+    commands = native_proposal_settings(args.mass, args.epsilon, args.sampling_epsilon, experimental, large_epsilon,
+                                       experimental_photon_benchmark=photon_benchmark)
     commands.extend(["32:tauCalc = off", f"32:tau0 = {width['ctau_mm']:.17g}",
                      "32:onMode = off", "32:onIfMatch = 13 -13"])
     result = dict(schema="shift-dark-photon-gen-v1", model="PBC-BC1-visible-hypercharge",
@@ -171,6 +192,8 @@ def build_contract(args, width, native, common, tune):
         filtering="none", physics_valid=False, normalization_ready=False, low_mass_mechanisms_included=False,
         experimental_low_mass_dy=experimental,
         **({'experimental_large_epsilon': True} if large_epsilon else {}),
+        **(dict(experimental_photon_benchmark=True, photon_benchmark_approximation=
+            photon_benchmark_epsilon(args.epsilon, True)) if photon_benchmark else {}),
         production_scope="DY-only experimental extension; meson/bremsstrahlung absent" if args.mass<2 else "DY-only spectral pilot",
         prompt_interference_included=False, detector_simulated=False)
     if getattr(args, 'dy_prescription', None) is not None:
@@ -250,7 +273,7 @@ def main():
                         help="Allow 1.4-2 GeV DY-only diagnostics; retain native pole-support checks and provisional physics flags")
     parser.add_argument("--experimental-large-epsilon", action="store_true",
                         help="Allow epsilon up to 0.1 and use full vector/axial DarkCast couplings; provisional pure-DY benchmark")
-    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo', 'msht20-nnlo-v2'],
                         help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument("--darkcast-path", type=Path, required=True)
     parser.add_argument("--darkcast-source-receipt", type=Path, required=True)
@@ -263,9 +286,11 @@ def main():
     parser.add_argument("--frozen-contract", type=Path)
     parser.add_argument("--runtime-provenance", type=Path)
     parser.add_argument("--runtime-archive", type=Path)
+    parser.add_argument('--experimental-photon-benchmark', action='store_true',
+                        help='Extend the unchanged photon-like spectral benchmark to epsilon .03; retain finite-mixing differences as model uncertainty')
     args = parser.parse_args()
     validate_point(args.mass, args.epsilon, args.sampling_epsilon, args.experimental_low_mass_dy,
-                   args.experimental_large_epsilon)
+                   args.experimental_large_epsilon, args.experimental_photon_benchmark)
     if not 1 <= args.events <= 10000 or not 1 <= args.seed <= 899999823 or args.timeout <= 0:
         parser.error("Require bounded events, valid seed namespace and positive timeout")
     if args.run_number is not None and not 1 <= args.run_number <= 4294967295:
@@ -292,9 +317,9 @@ def main():
             shutil.copy2(here / name, output / name)
         prescription_sources = {}
         if args.dy_prescription is not None:
-            from dark_photon_dy_prescription import freeze_prescription, TABLE_NAME
+            from dark_photon_dy_prescription import freeze_prescription, table_filename
             prescription_sources = freeze_prescription(args.dy_prescription, output)
-            args.dy_prescription_table = output / TABLE_NAME
+            args.dy_prescription_table = output / table_filename(args.dy_prescription)
         manifest["source_sha256"] = {name: digest(output / name) for name in sources}
         manifest['source_sha256'].update(prescription_sources)
         base = Path(os.environ["CMSSW_BASE"])
@@ -320,7 +345,8 @@ def main():
         common = list(pythia8CommonSettingsBlock.pythia8CommonSettings)
         tune = list(pythia8CP5SettingsBlock.pythia8CP5Settings)
         native = _native_inspect(common+tune+native_proposal_settings(args.mass,args.epsilon,args.sampling_epsilon,
-            args.experimental_low_mass_dy,args.experimental_large_epsilon,args.dy_prescription)+beam_settings(6800.))
+            args.experimental_low_mass_dy,args.experimental_large_epsilon,args.dy_prescription,
+            args.experimental_photon_benchmark)+beam_settings(6800.))
         contract = build_contract(args, width, native, common, tune)
         if args.frozen_contract is not None:
             contract, closure = frozen_contract(contract, args.frozen_contract, args.jaw_profile)

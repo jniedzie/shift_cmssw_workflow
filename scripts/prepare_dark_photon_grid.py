@@ -41,7 +41,7 @@ SOURCES = ('prepare_dark_photon_grid.py', 'run_dark_photon_gen.py', 'run_dark_ph
            'run_shift_gen_to_nano.py', 'shift_eos_storage.py', 'shift_storage_paths.py', 'shift_muon_decay_replay.py',
            'pythia_generation_ledger.py', 'dark_photon_sample_names.py',
            'run_dark_photon_senscalc_gen.py', 'dark_photon_senscalc.py', 'dark_photon_meson.py', 'dark_photon_bremsstrahlung.py',
-           'run_dark_photon_spectral_gen.py', 'export_dark_photon_cross_sections.py', 'dark_photon_meson_gen_cfg.py',
+           'run_dark_photon_spectral_gen.py', 'dark_photon_spectral_widths.py', 'export_dark_photon_cross_sections.py', 'dark_photon_meson_gen_cfg.py',
            'dark_photon_detector_runtime.py', 'dark_photon_material_selection.py') + RUNTIME_HELPER_SOURCES + tuple(dict.fromkeys(
                MATERIAL_SELECTION_SOURCES + SOURCE_PLACEMENT_SOURCES))
 VALIDATION_REQUIREMENTS = (
@@ -73,9 +73,9 @@ def source_files(scripts=None, dy_prescription=None, prescription_sources=None):
     scripts = Path(scripts or Path(__file__).resolve().parent)
     result = {name:scripts/name for name in SOURCES}
     if dy_prescription is not None:
-        from dark_photon_dy_prescription import prescription_files, hard_pdf_settings, HELPER_NAME, TABLE_NAME
+        from dark_photon_dy_prescription import prescription_files, hard_pdf_settings, HELPER_NAME, table_filename
         hard_pdf_settings(dy_prescription)
-        flat = {name:scripts/name for name in (HELPER_NAME, TABLE_NAME)}
+        flat = {name:scripts/name for name in (HELPER_NAME, table_filename(dy_prescription))}
         if prescription_sources is not None:
             if set(prescription_sources) != set(flat):
                 raise ValueError('Selected DY sources require the complete helper/table pair')
@@ -403,7 +403,7 @@ def validate_references(reference):
 def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
                 epsilons=None, prompt_epsilon=.001, sampling_epsilon=.005,
                 events=100, detector_count=2, seed_base=24693357, detector_job_base=910001,
-                accepted_events=False):
+                accepted_events=False, experimental_large_epsilon=False):
     """Select physical epsilon; scaling is only an initial native-width estimate."""
     refs = validate_references(reference)
     masses = tuple(map(float, masses))
@@ -440,7 +440,7 @@ def plan_points(reference, masses=(15., 30., 50.), mean_lab_flights_m=(5., 30.),
             epsilon = float(epsilon)
             if epsilon <= 0 or not math.isfinite(sampling_epsilon) or epsilon > sampling_epsilon:
                 raise ValueError('Physical epsilon must be positive and no larger than the sampling amplitude')
-            production_settings(mass, epsilon, sampling_epsilon / epsilon)
+            production_settings(mass, epsilon, sampling_epsilon / epsilon, experimental_large_epsilon)
             i = len(points)
             points.append(dict(point='m' + format(mass, '.8g').replace('.', 'p') + '_' + name,
                                mass_gev=mass, epsilon=epsilon, target_mean_lab_flight_m=target,
@@ -507,7 +507,7 @@ def check_reused_lifetime(row, proper_ctau_mm):
 
 
 def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e-4,
-                     dy_prescription=None):
+                     dy_prescription=None, experimental_large_epsilon=False):
     """Probe natural physical widths and common-amplitude sampling before launch."""
     if not math.isfinite(relative_flight_tolerance) or not 0 < relative_flight_tolerance < 1:
         raise ValueError('Require finite relative lab-flight preflight tolerance')
@@ -525,7 +525,8 @@ def preflight_points(plan, reference, native_probe, relative_flight_tolerance=1e
             width['pole_support_audit'] = copy.deepcopy(sampling['pole_support_audit'])
         data = contract(mass, epsilon, width, 'mumu', row['events'], row['seed'], row['run_number'],
                         reference['common'], reference['cp5'], sampling, scale,
-                        accepted_events=plan.get('event_budget_mode') == 'outputAccepted')
+                        accepted_events=plan.get('event_budget_mode') == 'outputAccepted',
+                        experimental_large_epsilon=experimental_large_epsilon)
         if dy_prescription is not None:
             from dark_photon_dy_prescription import apply_prescription
             data = apply_prescription(data, dy_prescription)
@@ -657,7 +658,9 @@ def main():
     columns.add_argument('--epsilons', nargs='+', type=float)
     parser.add_argument('--prompt-epsilon', type=float, default=.001)
     parser.add_argument('--sampling-epsilon', type=float, default=.005)
-    parser.add_argument('--dy-prescription', choices=['msht20-nnlo'],
+    parser.add_argument('--experimental-large-epsilon', action='store_true',
+                        help='Use the existing exact mixed-coupling native benchmark up to epsilon0.1')
+    parser.add_argument('--dy-prescription', choices=['msht20-nnlo', 'msht20-nnlo-v2'],
                         help='Select the qualified hard-PDF and physical-rate authority; CP5 showers/MPI remain unchanged')
     parser.add_argument('--events', type=int, default=100)
     parser.add_argument('--gen-timeout', type=int, default=600)
@@ -687,7 +690,8 @@ def main():
     reference = json.loads(args.references.read_text())
     plan = plan_points(reference, args.masses, args.mean_lab_flights_m or (5., 30.), args.epsilons,
                        args.prompt_epsilon, args.sampling_epsilon, args.events, args.detector_count,
-                       args.seed_base, args.detector_job_base, accepted_events=args.accepted_events)
+                       args.seed_base, args.detector_job_base, accepted_events=args.accepted_events,
+                       experimental_large_epsilon=args.experimental_large_epsilon)
     if args.reuse_physical_plan is not None:
         plan = reuse_physical_points(plan, json.loads(args.reuse_physical_plan.read_text()),
                                     args.reuse_physical_plan)
@@ -711,10 +715,11 @@ def main():
         pdf_runtime = configure_hard_pdf(args.dy_prescription)
         hard_settings = hard_pdf_settings(args.dy_prescription)
     def native_probe(mass, epsilon, scale):
-        return measure_widths(current_common + current_cp5 + production_settings(mass, epsilon, scale)
+        return measure_widths(current_common + current_cp5 + production_settings(mass, epsilon, scale, args.experimental_large_epsilon)
                               + hard_settings
                               + ['Beams:frameType = 2', 'Beams:eA = 0.', 'Beams:eB = 6800.'])
-    plan = preflight_points(plan, reference, native_probe, dy_prescription=args.dy_prescription)
+    plan = preflight_points(plan, reference, native_probe, dy_prescription=args.dy_prescription,
+                            experimental_large_epsilon=args.experimental_large_epsilon)
     if stage_requested:
         plan = plan_detector_stage(plan, args.campaign, args.eos_base,
             5 if args.events_per_job is None else args.events_per_job,

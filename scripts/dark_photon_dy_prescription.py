@@ -13,9 +13,10 @@ import os
 from pathlib import Path
 import re
 
-PRESCRIPTION_NAMES = ('msht20-nnlo',)
+PRESCRIPTION_NAMES = ('msht20-nnlo', 'msht20-nnlo-v2')
 HELPER_NAME = 'dark_photon_dy_prescription.py'
 TABLE_NAME = 'dy_msht20_nnlo_v1.json'
+TABLE_NAMES = {'msht20-nnlo': TABLE_NAME, 'msht20-nnlo-v2': 'dy_msht20_nnlo_v2.json'}
 SCHEMA = 'shift-dy-msht20-nnlo-v1'
 TABLE_SCHEMA = 'shift-dy-msht20-nnlo-authority-v1'
 PDF_SYMMETRY_SETTINGS = ('LHAPDF:sSymmetric = off', 'LHAPDF:cSymmetric = on',
@@ -41,14 +42,20 @@ def hard_pdf_settings(name):
             *PDF_SYMMETRY_SETTINGS]
 
 
+def table_filename(name):
+    hard_pdf_settings(name)
+    return TABLE_NAMES[name]
+
+
 def prescription_files(name, table_path=None):
     if not hard_pdf_settings(name):
         return {}
     helper = Path(__file__).resolve()
-    table = Path(table_path) if table_path is not None else helper.with_name(TABLE_NAME)
+    filename = table_filename(name)
+    table = Path(table_path) if table_path is not None else helper.with_name(filename)
     if table_path is None and not table.is_file():
-        table = helper.parent.parent / 'data/dark_photon' / TABLE_NAME
-    return {HELPER_NAME: helper, TABLE_NAME: table}
+        table = helper.parent.parent / 'data/dark_photon' / filename
+    return {HELPER_NAME: helper, filename: table}
 
 
 def freeze_prescription(name, directory):
@@ -69,17 +76,27 @@ def freeze_prescription(name, directory):
 
 def _read_authority(name, table_path):
     files = prescription_files(name, table_path)
-    payload = files[TABLE_NAME].read_bytes()
+    payload = files[table_filename(name)].read_bytes()
     table = json.loads(payload)
     if (table.get('schema') != TABLE_SCHEMA or table.get('name') != name or
             table.get('beam_energy_GeV') != 6800. or
             table.get('hard_pdf') != {'set': 'MSHT20nnlo_as118', 'member': 0} or
             table.get('normalization_reference') != 'native-clipped-LO' or
-            table.get('epsilon_upper_bound') != .001 or table.get('epsilon_reference') != .001 or
+            table.get('epsilon_reference') != .001 or
             table.get('native_pdf_settings') != list(PDF_SYMMETRY_SETTINGS) or
             table.get('weak_current', {}).get('sin2_theta_w') != .2312 or
             table.get('weak_current', {}).get('m_z_gev') != 91.1876):
         raise ValueError('Unrecognized DY normalization authority')
+    maximum = .1 if name == 'msht20-nnlo-v2' else .001
+    if table.get('epsilon_upper_bound') != maximum:
+        raise ValueError('DY normalization authority has an unqualified epsilon domain')
+    if name == 'msht20-nnlo-v2':
+        proof = table.get('extended_mixing_qualification', {})
+        if (table.get('version') != 2 or proof.get('complete') is not True or
+                proof.get('maximum_epsilon') != maximum or
+                proof.get('native_width_algebra_passed') is not True or
+                proof.get('paired_NNLO_Born_controls_passed') is not True):
+            raise ValueError('Extended DY authority lacks its explicit current/width qualification')
     inputs = table.get('pdf_inputs', {})
     if (set(inputs) != set(PDF_INPUT_NAMES) or
             any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
@@ -141,9 +158,11 @@ def prescription_metadata(name, mass, epsilon, table_path=None):
         beam_energy_GeV=table['beam_energy_GeV'], epsilon_upper_bound=maximum,
         normalization=dict(order='NNLO', reference=table['normalization_reference'],
             mass_gev=row['mass_gev'], factor=factor, common_numerical_error=error,
-            error_scope='Common numerical normalization error, not an independent error per GEN population',
+            error_scope=('Common quadrature and epsilon-current continuation envelope, not independent per GEN population'
+                         if name == 'msht20-nnlo-v2' else
+                         'Common numerical normalization error, not an independent error per GEN population'),
             theory_uncertainties=row.get('theory_uncertainties', {})),
-        authority=dict(filename=TABLE_NAME, sha256=hashlib.sha256(payload).hexdigest(),
+        authority=dict(filename=table_filename(name), sha256=hashlib.sha256(payload).hexdigest(),
             helper_filename=HELPER_NAME, helper_sha256=digest(files[HELPER_NAME])),
         weak_current=table['weak_current'], theory_scope=table['theory_scope'])
 
@@ -170,7 +189,7 @@ def validate_prescription(contract, directory):
         raise ValueError('DY prescription replay requires its frozen source directory')
     directory = Path(directory)
     expected = prescription_metadata(metadata['name'], contract['mass_gev'], contract['epsilon'],
-                                     directory / TABLE_NAME)
+                                     directory / table_filename(metadata['name']))
     if metadata != expected:
         raise ValueError('DY prescription differs from its frozen authority')
     helper = directory / HELPER_NAME
@@ -201,4 +220,4 @@ def validate_prescription(contract, directory):
 def prescription_input_files(contract, directory):
     if validate_prescription(contract, directory) is None:
         return []
-    return [Path(directory) / HELPER_NAME, Path(directory) / TABLE_NAME]
+    return [Path(directory) / HELPER_NAME, Path(directory) / table_filename(contract['dy_prescription']['name'])]
