@@ -487,7 +487,7 @@ class PublisherDeploymentTest(unittest.TestCase):
 
 
 class OrdinaryPublisherPollTest(unittest.TestCase):
-    def check_real_ordinary_path(self, inventory_mode):
+    def check_real_ordinary_path(self, inventory_mode, hourly=False, final=False):
         import run_shift_sm_postprocessing_controller as controller
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);parent=root/'parent';parent.mkdir()
@@ -503,7 +503,7 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
             for name,result in [('positive',dict(source=normalization,selected_source=source)),
                                 ('zero',dict(source=zero,empty_source=True,selected_events=0))]:
                 p=parent/name;p.mkdir();checksum=write(p/'result.json',result)
-                tasks[name]=dict(kind='source',phase='done',directory=str(p),result_sha256=checksum)
+                tasks[name]=dict(kind='source',phase='done',directory=str(p),result_sha256=checksum,stratum='jpsi_5to10')
             nano=dict(path='/eos/test/nano_job0000001.root',sha256='b'*64,events=1,
                       stratum='jpsi_5to10',source_descriptor_sha256=controller.descriptor_hashes(source)[0])
             p=parent/'detector';p.mkdir();checksum=write(p/'result.json',dict(nano_path=nano['path'],
@@ -512,6 +512,8 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 nano_sha256=nano['sha256'],events=1,source_descriptor_sha256=nano['source_descriptor_sha256']))
             tasks['detector_0000001']=dict(kind='detector',phase='done',directory=str(p),
                 result_sha256=checksum,stratum='jpsi_5to10')
+            if hourly or final:
+                tasks['pending_source']=dict(kind='source',phase='submitted',stratum='qcd_2to5' if final else 'jpsi_5to10')
             write(parent/'ledger.json',dict(tasks=tasks))
             if inventory_mode=='present':write(parent/'source_inventory.json',dict(nano_outputs=[nano]))
             if inventory_mode=='malformed':(parent/'source_inventory.json').write_text('malformed existing inventory')
@@ -519,6 +521,13 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 histogram_runtime=dict(path='/pinned/histogram.tar.gz'),output_base='/eos/test',
                 worker_template='initialdir = @DIRECTORY@\narguments = @REQUEST_SHA@\nqueue 1\n')
             state=dict(tasks={},latest={},sources={},nanos={})
+            if hourly or final:
+                import time
+                config.update(minimum_new_sources=250,minimum_relative_source_growth=2.)
+                state['latest']['jpsi_5to10']=['positive']
+                state['tasks'].update(old_cumulative=dict(kind='aggregate',phase='done',stratum='jpsi_5to10',
+                    finished_epoch=time.time() if final else time.time()-4000,published_bytes=0,events=1),recent_group=dict(kind='source_group',
+                    phase='done',stratum='jpsi_5to10',finished_epoch=time.time(),published_bytes=0,events=0))
             with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
                 if inventory_mode=='malformed':
                     with self.assertRaises(ValueError):controller.poll(root,config,state)
@@ -527,12 +536,15 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 controller.poll(root,config,state)
             submit.assert_not_called()
             self.assertEqual(len(state['sources']),2);self.assertEqual(len(state['nanos']),1)
-            self.assertEqual(len(state['tasks']),1)
-            task=next(iter(state['tasks'].values()));request=json.loads((Path(task['directory'])/'request.json').read_text())
+            ready=[t for t in state['tasks'].values() if t['phase']=='ready'];self.assertEqual(len(ready),1)
+            task=ready[0];request=json.loads((Path(task['directory'])/'request.json').read_text())
             self.assertEqual(task['phase'],'ready');self.assertEqual(task['events'],1)
             self.assertEqual({r['source_id'] for r in request['normalization_sources']},{'positive','zero'})
             self.assertEqual(sum(r['full_source_trials'] for r in request['normalization_sources']),300)
             self.assertEqual(request['selected_sources'][0]['sampling_probabilities'],[.25])
+            if final:
+                self.assertTrue(request['parent_completion_status']['all_attempts_settled'])
+                self.assertTrue(request['parent_completion_status']['all_responses_complete'])
             self.assertEqual(json.loads((root/'heartbeat.json').read_text())['phase'],'waiting_for_quota')
 
     def test_real_ordinary_parent_cache_snapshot_and_zero_exposure_before_quota(self):
@@ -543,6 +555,12 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
 
     def test_existing_malformed_inventory_is_not_treated_as_empty(self):
         self.check_real_ordinary_path('malformed')
+
+    def test_steady_source_groups_do_not_postpone_hourly_cumulative_refresh(self):
+        self.check_real_ordinary_path('present',hourly=True)
+
+    def test_final_settled_increment_flushes_without_waiting_for_another_bin(self):
+        self.check_real_ordinary_path('present',final=True)
 
     def test_startup_without_inventory_or_completed_jobs_waits_without_exposure(self):
         import run_shift_sm_postprocessing_controller as controller
@@ -594,11 +612,15 @@ class CumulativeBaselineSnapshotTest(unittest.TestCase):
         self.config['baseline_publications_by_stratum']={self.stratum:dict(path=str(p),sha256=post.digest(p))}
 
     def test_baseline_augments_once_keeps_new_discovery_ids_and_full_zero_exposure(self):
-        task=snapshot(self.root,self.config,self.stratum,[self.fresh,self.zero])
+        status=dict(all_attempts_settled=True,all_responses_complete=False,
+                    excluded_incomplete_tasks=[dict(task_name='quarantined_source')])
+        task=snapshot(self.root,self.config,self.stratum,[self.fresh,self.zero],publication_status=status)
         request=json.loads((Path(task['directory'])/'request.json').read_text())
         self.assertEqual(task['source_ids'],['fresh','freshzero'])
         self.assertEqual(set(task['published_source_ids']),{'fresh','freshzero','old','oldzero'})
         self.assertEqual(task['baseline_source_ids'],['old','oldzero']);self.assertEqual(task['events'],2)
+        self.assertEqual(request['parent_completion_status'],status)
+        self.assertEqual(task['parent_completion_status'],status)
         self.assertEqual(len(request['histogram_groups']),2)
         self.assertEqual(request['zero_selected_source_ids'],['freshzero'])
         self.assertEqual(exposure(request['normalization_sources'],self.stratum)['full_source_sumw'],1200)
@@ -703,7 +725,7 @@ class PublisherQuotaTest(unittest.TestCase):
     def test_explicit_passed_canary_allows_parallel_group_and_aggregate_before_latest(self):
         import run_shift_sm_postprocessing_controller as controller
         import time
-        for prequalified in [False,True]:
+        for prequalified in [False,True,'native_terminal']:
             with self.subTest(prequalified=prequalified),tempfile.TemporaryDirectory() as temporary:
                 root=Path(temporary);parent=root/'parent';parent.mkdir()
                 q=parent/'quota';q.mkdir();result=q/'result.json'
@@ -717,21 +739,31 @@ class PublisherQuotaTest(unittest.TestCase):
                     account_worker_ceiling=100,reserved_science_bytes=0)))
                 config=dict(campaign='parallel',parent_state=str(parent),parent_config=str(parent_config),
                     grouped_response_publication=True,worker_publication_bound_bytes=100,
-                    maximum_publication_bytes=10000)
+                    maximum_publication_bytes=10000000)
                 state=dict(tasks={},latest={},sources={},nanos={})
+                terminals={}
                 if prequalified:
                     config['qualification_task']='positive'
                     state['tasks']['positive']=dict(phase='done',qualification_only=True,stratum='qcd_1to2',
                                                     events=1,published_bytes=0)
+                    if prequalified=='native_terminal':
+                        p=root/'qualification';p.mkdir()
+                        (p/'result.json').write_text(json.dumps(dict(complete=True,request_sha256='a'*64,
+                            events=1,published=dict(histogram=dict(bytes=1)))))
+                        state['tasks']['positive'].update(kind='qualification',phase='submitted',cluster=20,
+                            directory=str(p),request_sha256='a'*64,source_ids=['OLD_BASELINE_REPLAY'])
+                        terminals={20:dict(Iwd=str(p),ExitCode=0,ExitBySignal=False)}
                 for name,kind,events in [('group','source_group',1),('aggregate','aggregate',355)]:
                     p=root/name;p.mkdir();(p/'worker.sub').write_text('queue 1\n')
                     state['tasks'][name]=dict(phase='ready',kind=kind,stratum='qcd_1to2',events=events,
                         source_ids=[name],directory=str(p),publication_bound_bytes=100)
                 with patch.object(controller,'query',return_value=[]),\
+                        patch.object(controller,'publication_history',return_value=terminals),\
                         patch.object(controller,'run_condor',side_effect=['123.0 - 123.0\n','124.0 - 124.0\n']) as submit:
                     controller.poll(root,config,state)
                 self.assertEqual(submit.call_count,2 if prequalified else 1)
                 self.assertEqual(state['tasks']['aggregate']['phase'],'submitted' if prequalified else 'ready')
+                self.assertEqual(state['latest'],{})
 
     def test_old_or_physics_ledger_cannot_become_quota_authority(self):
         import run_shift_sm_postprocessing_controller as controller
@@ -1011,6 +1043,25 @@ class PostprocessingTest(unittest.TestCase):
         self.assertTrue(meaningful_update([], ['first']))
         with self.assertRaises(ValueError):
             meaningful_update(['missing'], ['other'])
+
+    def test_opt_in_refresh_counts_baseline_in_both_total_sizes(self):
+        self.assertFalse(meaningful_update([],range(222),250,.2,1111))
+        self.assertTrue(meaningful_update([],range(223),250,.2,1111))
+        self.assertFalse(meaningful_update(range(223),range(472),250,.2,1111))
+        self.assertTrue(meaningful_update(range(223),range(473),250,.2,1111))
+        self.assertFalse(meaningful_update([],range(89),250,.2,449))
+        self.assertTrue(meaningful_update([],range(90),250,.2,449))
+
+    def test_final_settled_status_is_per_bin_and_preserves_missing_responses(self):
+        from run_shift_sm_postprocessing_controller import settled_stratum_status
+        parent=dict(tasks=dict(done=dict(kind='source',stratum='qcd_1to2',phase='done'),
+            failed=dict(kind='detector',stratum='qcd_1to2',phase='failed',error='Missing response',selected_events=1),
+            other=dict(kind='source',stratum='qcd_2to5',phase='submitted')))
+        self.assertIsNone(settled_stratum_status(parent,'qcd_2to5'))
+        status=settled_stratum_status(parent,'qcd_1to2')
+        self.assertTrue(status['all_attempts_settled']);self.assertFalse(status['all_responses_complete'])
+        self.assertEqual(status['excluded_incomplete_tasks'][0]['task_name'],'failed')
+        self.assertFalse(status['missing_responses_are_physics_rejections'])
 
     def test_parent_storage_charge_includes_downstream_committed_and_pending(self):
         with tempfile.TemporaryDirectory() as temporary:

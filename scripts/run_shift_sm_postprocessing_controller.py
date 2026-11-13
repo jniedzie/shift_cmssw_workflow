@@ -227,12 +227,42 @@ def closed_sources(sources, nanos):
     return closed
 
 
-def meaningful_update(previous, current):
+def meaningful_update(previous, current, minimum_new_sources=10, minimum_relative_growth=.2,
+                      baseline_source_count=0):
     old = set(previous)
     new = set(current)
     if not old <= new:
         raise ValueError('A previously published original source disappeared')
-    return bool(new - old) and (not old or len(new - old) >= 10 or len(new) >= 1.2 * len(old))
+    if (type(minimum_new_sources) is not int or minimum_new_sources < 1
+            or type(baseline_source_count) is not int or baseline_source_count < 0
+            or not isinstance(minimum_relative_growth,(int,float))
+            or not math.isfinite(minimum_relative_growth) or minimum_relative_growth <= 0):
+        raise ValueError('Invalid cumulative publication refresh thresholds')
+    old_size,new_size = len(old)+baseline_source_count,len(new)+baseline_source_count
+    return bool(new-old) and (not old_size or len(new-old)>=minimum_new_sources
+        or new_size >= (1+minimum_relative_growth)*old_size)
+
+
+def settled_stratum_status(parent, stratum):
+    """Settled failures remain explicit missing responses, never completed physics."""
+    science = {name:task for name,task in parent['tasks'].items()
+               if task['kind'] in ('source','detector') and task['stratum']==stratum}
+    terminal = ('done','failed','quarantined')
+    for task in science.values():
+        if task['phase'] in terminal:
+            continue
+        children = task.get('replacement_tasks',[])
+        if (task['phase']!='replaced' or not children
+                or any(name not in science or science[name]['phase'] not in terminal for name in children)):
+            return None
+    if not science:
+        return None
+    missing = [dict(task_name=name,kind=task['kind'],phase=task['phase'],
+        source_id=task.get('source_id'),error=task.get('error'),
+        selected_events=task.get('selected_events'),quarantined_exposure=task.get('quarantined_exposure'))
+        for name,task in science.items() if task['phase'] in ('failed','quarantined')]
+    return dict(all_attempts_settled=True,all_responses_complete=not missing,
+                excluded_incomplete_tasks=missing,missing_responses_are_physics_rejections=False)
 
 
 def source_cache(parent, state):
@@ -386,7 +416,7 @@ def append_baseline_publication(body, pin):
     return ids
 
 
-def snapshot(root, config, stratum, sources):
+def snapshot(root, config, stratum, sources, publication_status=None):
     sources = sorted(sources, key=lambda s: s['normalization']['source_id'])
     normalizations = [s['normalization'] for s in sources]
     discovery_ids = [source['source_id'] for source in normalizations]
@@ -427,6 +457,8 @@ def snapshot(root, config, stratum, sources):
     if baseline_enabled and body.get('histogram_groups') is not None:
         baseline_ids = append_baseline_publication(body,baseline)
         identities = [tuple(row['event_id']) for source in body['selected_sources'] for row in selected_rows(source)]
+    if publication_status is not None:
+        body['parent_completion_status'] = publication_status
     checksum = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     directory = root / 'jobs' / (stratum + '_' + checksum[:12])
     timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -447,6 +479,8 @@ def snapshot(root, config, stratum, sources):
     if baseline_ids:
         task.update(baseline_source_ids=baseline_ids,
                     published_source_ids=[s['source_id'] for s in body['normalization_sources']])
+    if publication_status is not None:
+        task['parent_completion_status'] = publication_status
     return task
 
 
@@ -651,9 +685,10 @@ def poll(root, config, state):
         task.update(phase='done', native=terminal, result_sha256=digest(result),
                     published_bytes=sum(r['bytes'] for r in receipt['published'].values())
                     + result.stat().st_size + 65536, finished_epoch=time.time())
-        if task.get('kind') != 'source_group':
+        if task.get('kind') != 'source_group' and not task.get('qualification_only'):
             state['latest'][task['stratum']] = task['source_ids']
     qualified = publication_qualification_ready(config,state)
+    parent_for_completion = None
     if not qualified:
         # The qualification itself still needs the ordinary quota-checked
         # submission path. Returning here deadlocks a ready canary forever.
@@ -662,6 +697,7 @@ def poll(root, config, state):
         groups = response_source_cache(config, state, ads)
     else:
         parent = read(Path(config['parent_state']) / 'ledger.json')
+        parent_for_completion = parent
         try:
             inventory = read(Path(config['parent_state']) / 'source_inventory.json')
         except FileNotFoundError:
@@ -713,15 +749,29 @@ def poll(root, config, state):
         ids = [s['normalization']['source_id'] for s in sources]
         previous = state['latest'].get(stratum, [])
         last_finished = max((t.get('finished_epoch', 0) for t in state['tasks'].values()
-                             if t['stratum'] == stratum and t['phase'] == 'done'), default=0)
+                             if t['stratum'] == stratum and t['phase'] == 'done'
+                             and t.get('kind')!='source_group' and not t.get('qualification_only')), default=0)
+        batching = 'minimum_new_sources' in config or 'minimum_relative_source_growth' in config
+        baseline_count = 0
+        if batching:
+            pin = config.get('baseline_publications_by_stratum',{}).get(stratum)
+            if pin:
+                baseline_count = len(read_response_pin(pin)['baseline_source_ids'])
+            if not last_finished:
+                last_finished = state.setdefault('publication_refresh_epochs',{}).setdefault(stratum,time.time())
         hourly_update = set(ids) > set(previous) and time.time() - last_finished > 3600
         final_due = (config.get('merged_nano_only_when_bin_complete') is True
             and set(ids) == set(complete_bin_source_ids(config,stratum))
             and not any(task['stratum']==stratum and task['phase']=='done'
                 and task.get('publishes_merged_nano') is True for task in state['tasks'].values()))
-        if not meaningful_update(previous, ids) and not hourly_update and not final_due:
+        settled = settled_stratum_status(parent_for_completion,stratum) if batching and parent_for_completion else None
+        final_settled = (settled is not None and set(ids)>set(previous) and not any(
+            t['stratum']==stratum and t.get('kind')=='source_group' and t['phase'] in ('ready','submitted','submitting')
+            for t in state['tasks'].values()))
+        if not meaningful_update(previous,ids,config.get('minimum_new_sources',10),
+                config.get('minimum_relative_source_growth',.2),baseline_count) and not hourly_update and not final_due and not final_settled:
             continue
-        task = snapshot(root, config, stratum, sources)
+        task = snapshot(root,config,stratum,sources,publication_status=settled if final_settled else None)
         if task:
             state['tasks'][Path(task['directory']).name] = task
             save(root / 'state.json', state)
