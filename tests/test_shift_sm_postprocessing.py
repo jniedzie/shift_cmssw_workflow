@@ -487,7 +487,7 @@ class PublisherDeploymentTest(unittest.TestCase):
 
 
 class OrdinaryPublisherPollTest(unittest.TestCase):
-    def test_real_ordinary_parent_cache_snapshot_and_zero_exposure_before_quota(self):
+    def check_real_ordinary_path(self, inventory_mode):
         import run_shift_sm_postprocessing_controller as controller
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);parent=root/'parent';parent.mkdir()
@@ -508,14 +508,22 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                       stratum='jpsi_5to10',source_descriptor_sha256=controller.descriptor_hashes(source)[0])
             p=parent/'detector';p.mkdir();checksum=write(p/'result.json',dict(nano_path=nano['path'],
                 nano_sha256=nano['sha256'],events=1,source_descriptor_sha256=nano['source_descriptor_sha256']))
+            write(p/'status.json',dict(complete=True,exit_code=0,nano_path=nano['path'],
+                nano_sha256=nano['sha256'],events=1,source_descriptor_sha256=nano['source_descriptor_sha256']))
             tasks['detector_0000001']=dict(kind='detector',phase='done',directory=str(p),
                 result_sha256=checksum,stratum='jpsi_5to10')
-            write(parent/'ledger.json',dict(tasks=tasks));write(parent/'source_inventory.json',dict(nano_outputs=[nano]))
+            write(parent/'ledger.json',dict(tasks=tasks))
+            if inventory_mode=='present':write(parent/'source_inventory.json',dict(nano_outputs=[nano]))
+            if inventory_mode=='malformed':(parent/'source_inventory.json').write_text('malformed existing inventory')
             config=dict(campaign='ordinary',parent_state=str(parent),worker_publication_bound_bytes=1000000,
                 histogram_runtime=dict(path='/pinned/histogram.tar.gz'),output_base='/eos/test',
                 worker_template='initialdir = @DIRECTORY@\narguments = @REQUEST_SHA@\nqueue 1\n')
             state=dict(tasks={},latest={},sources={},nanos={})
             with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
+                if inventory_mode=='malformed':
+                    with self.assertRaises(ValueError):controller.poll(root,config,state)
+                    submit.assert_not_called()
+                    return
                 controller.poll(root,config,state)
             submit.assert_not_called()
             self.assertEqual(len(state['sources']),2);self.assertEqual(len(state['nanos']),1)
@@ -526,6 +534,28 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
             self.assertEqual(sum(r['full_source_trials'] for r in request['normalization_sources']),300)
             self.assertEqual(request['selected_sources'][0]['sampling_probabilities'],[.25])
             self.assertEqual(json.loads((root/'heartbeat.json').read_text())['phase'],'waiting_for_quota')
+
+    def test_real_ordinary_parent_cache_snapshot_and_zero_exposure_before_quota(self):
+        self.check_real_ordinary_path('present')
+
+    def test_missing_inventory_uses_completed_native_status_fallback(self):
+        self.check_real_ordinary_path('missing')
+
+    def test_existing_malformed_inventory_is_not_treated_as_empty(self):
+        self.check_real_ordinary_path('malformed')
+
+    def test_startup_without_inventory_or_completed_jobs_waits_without_exposure(self):
+        import run_shift_sm_postprocessing_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parent=root/'parent';parent.mkdir()
+            (parent/'ledger.json').write_text(json.dumps(dict(tasks={})))
+            state=dict(tasks={},latest={},sources={},nanos={})
+            config=dict(parent_state=str(parent),worker_publication_bound_bytes=100)
+            with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
+                controller.poll(root,config,state)
+            submit.assert_not_called();self.assertEqual(state,dict(tasks={},latest={},sources={},nanos={}))
+            self.assertEqual(json.loads((root/'heartbeat.json').read_text())['phase'],'waiting_for_quota')
+            self.assertFalse((parent/'source_inventory.json').exists())
 
 
 class CumulativeBaselineSnapshotTest(unittest.TestCase):

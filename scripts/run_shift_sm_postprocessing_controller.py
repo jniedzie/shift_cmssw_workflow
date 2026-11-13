@@ -662,7 +662,12 @@ def poll(root, config, state):
         groups = response_source_cache(config, state, ads)
     else:
         parent = read(Path(config['parent_state']) / 'ledger.json')
-        inventory = read(Path(config['parent_state']) / 'source_inventory.json')
+        try:
+            inventory = read(Path(config['parent_state']) / 'source_inventory.json')
+        except FileNotFoundError:
+            # The source controller emits its first inventory after a useful
+            # increment. Completed Nanos still require nano_cache's real status.
+            inventory = dict(nano_outputs=[])
         source_cache(parent, state)
         nano_cache(parent, inventory, state)
         groups = closed_sources(state['sources'].values(), state['nanos'].values())
