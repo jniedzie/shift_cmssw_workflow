@@ -605,6 +605,53 @@ class BoundedWatchdogRestartTests(unittest.TestCase):
             self.assertEqual(result['action'],'refused');self.assertIn('ambiguous',result['reason'])
             submit.assert_called_once()
 
+    def test_publisher_role_uses_state_attention_and_its_own_classad(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config,deployment=self.fixture(root);iwd=Path('/persistent/publisher')
+            (root/'ledger.json').unlink()
+            policy=config['watchdog_restart'];policy.update(controller_attribute='ShiftSMPostprocessingController',
+                ledger_filename='state.json',failure_filename='attention_required.json')
+            policy['submit_template']=policy['submit_template'].replace('@DEPLOYMENT@',str(iwd)).replace(
+                'ShiftSmartSMController','ShiftSMPostprocessingController')
+            controller.save(root/'state.json',dict(tasks={}))
+            controller.save(root/'attention_required.json',dict(error='scientific publication failure'))
+            with patch.object(controller,'query') as query,patch.object(controller,'run_condor') as submit:
+                self.assertEqual(controller.restart_controller(root,config,iwd)['action'],'refused')
+            query.assert_not_called();submit.assert_not_called();(root/'attention_required.json').unlink()
+            controller.save(root/'state.json',dict(tasks=dict(histogram=dict(phase='submitting'))))
+            with patch.object(controller,'query') as query,patch.object(controller,'run_condor') as submit:
+                self.assertIn('ambiguous',controller.restart_controller(root,config,iwd)['reason'])
+            query.assert_not_called();submit.assert_not_called()
+            controller.save(root/'state.json',dict(tasks={}))
+            with patch.object(controller,'query',return_value=[]) as query,\
+                    patch.object(controller,'run_condor',return_value='123.0 - 123.0\n'):
+                self.assertEqual(controller.restart_controller(root,config,iwd)['cluster'],123)
+            self.assertIn('ShiftSMPostprocessingController',query.call_args.args[0])
+            self.assertNotIn('ShiftSmartSMController',query.call_args.args[0])
+
+    def test_watch_query_and_template_follow_role_and_reject_unknown_knobs(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config,deployment=self.fixture(root);iwd=Path('/persistent/publisher')
+            config['watchdog_restart'].update(controller_attribute='ShiftSMPostprocessingController',
+                ledger_filename='state.json',failure_filename='attention_required.json')
+            controller.save(root/'heartbeat.json',dict(phase='running',checked_epoch=controller.time.time()))
+            with patch.object(controller,'query',return_value=[dict(ClusterId=1,JobStatus=2)]) as query:
+                self.assertFalse(controller.watch(root,iwd,config))
+            self.assertIn('ShiftSMPostprocessingController',query.call_args.args[0])
+            controller.save(root/'state.json',dict(tasks={}))
+            with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
+                # A source-role submit template cannot restart a publisher.
+                with self.assertRaisesRegex(ValueError,'persistent controller ownership'):
+                    controller.restart_controller(root,config,iwd)
+            submit.assert_not_called()
+            for key,value in [('controller_attribute','UnrelatedController'),('ledger_filename','../ledger.json'),
+                              ('failure_filename','ignored_failure.json')]:
+                bad=copy.deepcopy(config);bad['watchdog_restart'][key]=value
+                with self.subTest(key=key),self.assertRaisesRegex(ValueError,'Unsupported watchdog'):
+                    controller.watchdog_role(bad)
+
 
 if __name__ == '__main__':
     unittest.main()

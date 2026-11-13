@@ -795,9 +795,25 @@ def step(root, config, state):
     return record
 
 
+def watchdog_role(config):
+    """Use the same bounded watchdog for the two existing controller roles."""
+    policy = (config or {}).get('watchdog_restart') or {}
+    attribute = policy.get('controller_attribute','ShiftSmartSMController')
+    ledger = policy.get('ledger_filename','ledger.json')
+    failure = policy.get('failure_filename','controller_failure.json')
+    for name,value,allowed in [
+            ('controller_attribute',attribute,('ShiftSmartSMController','ShiftSMPostprocessingController')),
+            ('ledger_filename',ledger,('ledger.json','state.json')),
+            ('failure_filename',failure,('controller_failure.json','attention_required.json'))]:
+        if value not in allowed:
+            raise ValueError('Unsupported watchdog '+name+': '+str(value))
+    return attribute,ledger,failure
+
+
 def restart_controller(root, config, controller_iwd):
     """One bounded operational restart; never replay an uncertain submission."""
     policy = config['watchdog_restart']
+    attribute,ledger_name,failure_name = watchdog_role(config)
     receipt_path = root/'watchdog_restarts.json'
     previous = read(receipt_path) if receipt_path.exists() else dict(attempts=[])
     if previous.get('phase') == 'submitting':
@@ -816,13 +832,13 @@ def restart_controller(root, config, controller_iwd):
     for name, checksum in config['deployment_files'].items():
         if sha(deployment/name) != checksum:
             raise ValueError('Restart frozen helper changed: '+name)
-    if (root/'controller_failure.json').exists():
+    if (root/failure_name).exists():
         return dict(action='refused', reason='Controller failure requires review')
-    ledger = read(root/'ledger.json')
+    ledger = read(root/ledger_name)
     if any(task['phase'] == 'submitting' for task in ledger['tasks'].values()):
         return dict(action='refused', reason='Persisted worker submission is ambiguous')
     owner = pwd.getpwuid(os.getuid()).pw_name
-    constraint = 'Iwd == '+json.dumps(str(controller_iwd))+' && ShiftSmartSMController =?= True'
+    constraint = 'Iwd == '+json.dumps(str(controller_iwd))+' && '+attribute+' =?= True'
     # The controller lock prevents racing a live admission process. A fresh
     # scheduler lookup inside it prevents racing another queued replacement.
     with (root/'controller.lock').open('a') as lock:
@@ -833,7 +849,7 @@ def restart_controller(root, config, controller_iwd):
         previous = read(receipt_path) if receipt_path.exists() else dict(attempts=[])
         if previous.get('phase') == 'submitting' or len(previous['attempts']) >= maximum:
             return dict(action='refused', reason='Restart already attempted or ambiguous')
-        if any(task['phase'] == 'submitting' for task in read(root/'ledger.json')['tasks'].values()):
+        if any(task['phase'] == 'submitting' for task in read(root/ledger_name)['tasks'].values()):
             return dict(action='refused', reason='Persisted worker submission is ambiguous')
         ads = query(constraint,['ClusterId','ProcId','Owner','Iwd','JobStatus',
             'HoldReasonCode','HoldReasonSubCode','HoldReason'],timeout=45)
@@ -860,7 +876,7 @@ def restart_controller(root, config, controller_iwd):
         fields = {k.strip().lower():v.strip().strip('"') for line in text.splitlines()
                   for k,sep,v in [line.partition('=')] if sep}
         if (fields.get('initialdir') != str(controller_iwd)
-                or fields.get('+shiftsmartsmcontroller','').lower() != 'true'
+                or fields.get('+'+attribute.lower(),'').lower() != 'true'
                 or str(controller_iwd).startswith(('/tmp/','/pool/'))):
             raise ValueError('Restart template lacks the persistent controller ownership')
         attempt = dict(epoch=time.time(), previous_controller_ads=ads, config_sha256=expected,
@@ -891,18 +907,19 @@ def restart_controller(root, config, controller_iwd):
 
 
 def watch(root, controller_iwd=None, config=None):
+    attribute,_,failure_name = watchdog_role(config)
     record = read(root/'heartbeat.json') if (root/'heartbeat.json').exists() else {}
     if record.get('phase') in ('ntuples_complete','completed_with_quarantine'):
         save(root/'watchdog_heartbeat.json', dict(checked_epoch=time.time(), terminal=True))
         return True
-    ads = query('Iwd == '+json.dumps(str(controller_iwd or root))+' && ShiftSmartSMController =?= True',
+    ads = query('Iwd == '+json.dumps(str(controller_iwd or root))+' && '+attribute+' =?= True',
                 ['ClusterId','JobStatus','NumJobStarts'], timeout=45)
     problems = []
     if not ads or any(ad['JobStatus']==5 for ad in ads):
         problems.append('Controller absent or held')
     if time.time()-record.get('checked_epoch', 0) > 300:
         problems.append('Controller heartbeat stale')
-    if (root/'controller_failure.json').exists():
+    if (root/failure_name).exists():
         problems.append('Controller failure receipt needs review')
     if record.get('phase') == 'scheduler_unknown':
         problems.append('Scheduler state unknown; admission paused')

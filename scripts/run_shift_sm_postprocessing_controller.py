@@ -7,6 +7,7 @@ import fcntl
 import errno
 import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import sys
@@ -320,15 +321,84 @@ def complete_bin_source_ids(config, stratum):
     return sorted(ids)
 
 
+def append_baseline_publication(body, pin):
+    """Include one qualified old histogram with its complete original exposure."""
+    baseline = read_response_pin(pin)
+    stratum = body['stratum']
+    if baseline.get('schema') != 'shift-native-cumulative-baseline-v1' or baseline.get('stratum') != stratum:
+        raise ValueError('Wrong cumulative baseline schema or process/bin')
+    original = baseline['normalization_sources']
+    ids = [source['source_id'] for source in original]
+    current = [source['source_id'] for source in body['normalization_sources']]
+    if (not ids or len(ids) != len(set(ids)) or len(current) != len(set(current))
+            or len(baseline['baseline_source_ids']) != len(ids)
+            or set(baseline['baseline_source_ids']) != set(ids) or set(ids).intersection(current)):
+        raise ValueError('Overlapping or inconsistent baseline source IDs')
+    selected = baseline['selected_sources']
+    if len(selected) != len(original):
+        raise ValueError('Baseline selection omits an original source or zero-event exposure')
+    old_exposure = exposure(original,stratum)
+    exposure(body['normalization_sources']+original,stratum)
+    for key in ('source_family','generator_profile','generation_sampling','timing_input_label'):
+        values = {json.dumps(source.get(key),sort_keys=True) for source in body['normalization_sources']+original}
+        if len(values) != 1:
+            raise ValueError('Baseline source class differs: '+key)
+    if (baseline['full_original_GEN'] != old_exposure['full_source_sumw']
+            or not math.isclose(baseline['cross_section_pb'],old_exposure['cross_section_pb'],rel_tol=1e-10)):
+        raise ValueError('Baseline full original GEN exposure or class rate changed')
+    old_rows = [row for source in selected for row in selected_rows(source)]
+    new_rows = [row for source in body['selected_sources'] for row in selected_rows(source)]
+    old_rles = [tuple(row['event_id']) for row in old_rows]
+    all_rles = old_rles+[tuple(row['event_id']) for row in new_rows]
+    if (len(all_rles) != len(set(all_rles)) or len(baseline['selected_event_ids']) != len(old_rles)
+            or set(map(tuple,baseline['selected_event_ids'])) != set(old_rles)):
+        raise ValueError('Overlapping or inconsistent baseline selected original identities')
+    from run_shift_sm_postprocessing import histogram_weight_branch
+    histogram_weight_branch(body['selected_sources']+selected)
+    group = baseline['histogram_group']
+    if len(group['source_ids']) != len(ids) or set(group['source_ids']) != set(ids):
+        raise ValueError('Baseline histogram group omits full source exposure')
+    receipt = read_response_pin(group['result_pin'])
+    if (receipt.get('complete') is not True or receipt.get('exit_code',0) != 0
+            or set(receipt['source_ids']) != set(ids) or len(receipt['source_ids']) != len(ids)
+            or receipt['published']['merged_histogram'] != group['histogram']
+            or receipt['full_original_exposure']['full_source_sumw'] != old_exposure['full_source_sumw']
+            or not math.isclose(receipt['full_original_exposure']['cross_section_pb'],old_exposure['cross_section_pb'],rel_tol=1e-10)
+            or len(receipt['full_original_exposure']['original_sources']) != len(original)
+            or {r['source_id']:r for r in receipt['full_original_exposure']['original_sources']} !=
+               {r['source_id']:r for r in original}):
+        raise ValueError('Baseline lacks its exact qualified cumulative histogram receipt')
+    weights = [row['native_weight']/row['sampling_probability'] for row in old_rows]
+    for key,expected in [('events',len(old_rows)),('sumw',math.fsum(weights)),
+                         ('sumw2',math.fsum(weight*weight for weight in weights))]:
+        if any(not math.isclose(value[key],expected,rel_tol=1e-10,abs_tol=1e-300)
+               for value in (baseline,group,receipt)):
+            raise ValueError('Baseline selected event/weight census changed: '+key)
+    if sum(row['events'] for row in baseline['nano_inputs']) != len(old_rows):
+        raise ValueError('Baseline Nano metadata omits original selected events')
+    body['normalization_sources'].extend(original)
+    body['selected_sources'].extend(selected)
+    body['nano_inputs'].extend(baseline['nano_inputs'])
+    body['histogram_groups'].append(group)
+    # The baseline histogram already covers ALL old sources, including zeros.
+    # Only newly discovered zero-selected sources belong to the separate list.
+    body['baseline_publication'] = pin
+    return ids
+
+
 def snapshot(root, config, stratum, sources):
     sources = sorted(sources, key=lambda s: s['normalization']['source_id'])
     normalizations = [s['normalization'] for s in sources]
+    discovery_ids = [source['source_id'] for source in normalizations]
     exposure(normalizations, stratum)
     identities = [tuple(row['event_id']) for source in sources for row in selected_rows(source['selected'])]
     if len(identities) != len(set(identities)):
         raise ValueError('Repeated selected original between source cohorts')
     inputs = [r for s in sources for r in s['nano_inputs']]
-    if not inputs:
+    baseline = config.get('baseline_publications_by_stratum',{}).get(stratum)
+    baseline_enabled = (baseline and config.get('grouped_response_publication')
+        and not config.get('source_group_only') and stratum.split('_')[0] in config.get('grouped_response_processes',['qcd']))
+    if not inputs and not baseline_enabled:
         return None
     body = dict(schema='shift-smart-SM-postprocessing-v1', campaign=config['campaign'],
                 stratum=stratum, complete_source_selections_only=True,
@@ -353,6 +423,10 @@ def snapshot(root, config, stratum, sources):
         body['zero_selected_source_ids']=[source['normalization']['source_id'] for source in sources if not source['nano_inputs']]
         body['publish_merged_nano']=False
         body['maximum_publication_bytes']=67108864
+    baseline_ids = []
+    if baseline_enabled and body.get('histogram_groups') is not None:
+        baseline_ids = append_baseline_publication(body,baseline)
+        identities = [tuple(row['event_id']) for source in body['selected_sources'] for row in selected_rows(source)]
     checksum = hashlib.sha256(json.dumps(body, sort_keys=True).encode()).hexdigest()
     directory = root / 'jobs' / (stratum + '_' + checksum[:12])
     timestamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -365,11 +439,15 @@ def snapshot(root, config, stratum, sources):
     text = config['worker_template'].replace('@DIRECTORY@', str(directory))
     text = text.replace('@REQUEST_SHA@', digest(directory / 'request.json'))
     (directory / 'worker.sub').write_text(text)
-    return dict(directory=str(directory), phase='ready', stratum=stratum,
+    task = dict(directory=str(directory), phase='ready', stratum=stratum,
                 request_sha256=digest(directory / 'request.json'),
-                source_ids=[s['source_id'] for s in normalizations], events=len(identities),
+                source_ids=discovery_ids, events=len(identities),
                 publishes_merged_nano=body.get('publish_merged_nano',True),
                 publication_bound_bytes=body['maximum_publication_bytes'])
+    if baseline_ids:
+        task.update(baseline_source_ids=baseline_ids,
+                    published_source_ids=[s['source_id'] for s in body['normalization_sources']])
+    return task
 
 
 
@@ -583,6 +661,7 @@ def poll(root, config, state):
     elif response_monitor_pins(config):
         groups = response_source_cache(config, state, ads)
     else:
+        parent = read(Path(config['parent_state']) / 'ledger.json')
         inventory = read(Path(config['parent_state']) / 'source_inventory.json')
         source_cache(parent, state)
         nano_cache(parent, inventory, state)
@@ -735,7 +814,8 @@ def poll(root, config, state):
             break
         # A small canary uses the exact real publication route; independent
         # bins are released together once that result has passed.
-        if not state['latest'] and any(t['phase'] == 'submitted' for t in state['tasks'].values()):
+        if (not state['latest'] and not (qualified and config.get('qualification_task'))
+                and any(t['phase'] == 'submitted' for t in state['tasks'].values())):
             break
         task['phase'] = 'submitting'
         save(root / 'state.json', state)
@@ -775,6 +855,8 @@ def validate_deployment_inputs(deployment, config, helpers_directory):
                 'shift_event_weights', 'shift_nano_integrity']
     if config.get('refresh_quota'):
         required.append('run_shift_smart_sm_controller')
+    if config.get('compact_source_authority'):
+        required.append('run_shift_qcd_production_source')
     if response_monitor_pins(config):
         required.append('monitor_shift_sm_candidate_search')
     for name in required:

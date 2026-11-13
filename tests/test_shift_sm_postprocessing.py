@@ -473,6 +473,137 @@ class PublisherDeploymentTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'archive differs from its argument hash'):
             self.validate()
 
+    def test_compact_source_requires_the_pinned_lazy_qcd_adapter(self):
+        self.config['compact_source_authority']=True
+        with self.assertRaisesRegex(ValueError,'run_shift_qcd_production_source'):
+            self.validate()
+        path=self.helpers/'run_shift_qcd_production_source.py'
+        path.write_text('# frozen compact authority reader\n')
+        self.config['frozen_files'][str(path)]=hashlib.sha256(path.read_bytes()).hexdigest()
+        self.validate()
+        del self.config['frozen_files'][str(path)]
+        with self.assertRaisesRegex(ValueError,'Missing pinned publication helper'):
+            self.validate()
+
+
+class OrdinaryPublisherPollTest(unittest.TestCase):
+    def test_real_ordinary_parent_cache_snapshot_and_zero_exposure_before_quota(self):
+        import run_shift_sm_postprocessing_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);parent=root/'parent';parent.mkdir()
+            def write(path,value):
+                path.write_text(json.dumps(value,indent=2)+'\n')
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+            source=dict(event_ids=[[11,1,1],[11,1,2]],weights=[2.,5.],
+                        selected_indices=[0],sampling_probabilities=[.25],gen_sha256='c'*64)
+            normalization=dict(source_id='positive',stratum='jpsi_5to10',gen_sha256='a'*64,
+                denominator_kind='fixed_source_trials',full_source_trials=100,sigma_nd_pb=123.)
+            zero=dict(normalization,source_id='zero',gen_sha256='d'*64,full_source_trials=200,saved_events=0)
+            tasks={}
+            for name,result in [('positive',dict(source=normalization,selected_source=source)),
+                                ('zero',dict(source=zero,empty_source=True,selected_events=0))]:
+                p=parent/name;p.mkdir();checksum=write(p/'result.json',result)
+                tasks[name]=dict(kind='source',phase='done',directory=str(p),result_sha256=checksum)
+            nano=dict(path='/eos/test/nano_job0000001.root',sha256='b'*64,events=1,
+                      stratum='jpsi_5to10',source_descriptor_sha256=controller.descriptor_hashes(source)[0])
+            p=parent/'detector';p.mkdir();checksum=write(p/'result.json',dict(nano_path=nano['path'],
+                nano_sha256=nano['sha256'],events=1,source_descriptor_sha256=nano['source_descriptor_sha256']))
+            tasks['detector_0000001']=dict(kind='detector',phase='done',directory=str(p),
+                result_sha256=checksum,stratum='jpsi_5to10')
+            write(parent/'ledger.json',dict(tasks=tasks));write(parent/'source_inventory.json',dict(nano_outputs=[nano]))
+            config=dict(campaign='ordinary',parent_state=str(parent),worker_publication_bound_bytes=1000000,
+                histogram_runtime=dict(path='/pinned/histogram.tar.gz'),output_base='/eos/test',
+                worker_template='initialdir = @DIRECTORY@\narguments = @REQUEST_SHA@\nqueue 1\n')
+            state=dict(tasks={},latest={},sources={},nanos={})
+            with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
+                controller.poll(root,config,state)
+            submit.assert_not_called()
+            self.assertEqual(len(state['sources']),2);self.assertEqual(len(state['nanos']),1)
+            self.assertEqual(len(state['tasks']),1)
+            task=next(iter(state['tasks'].values()));request=json.loads((Path(task['directory'])/'request.json').read_text())
+            self.assertEqual(task['phase'],'ready');self.assertEqual(task['events'],1)
+            self.assertEqual({r['source_id'] for r in request['normalization_sources']},{'positive','zero'})
+            self.assertEqual(sum(r['full_source_trials'] for r in request['normalization_sources']),300)
+            self.assertEqual(request['selected_sources'][0]['sampling_probabilities'],[.25])
+            self.assertEqual(json.loads((root/'heartbeat.json').read_text())['phase'],'waiting_for_quota')
+
+
+class CumulativeBaselineSnapshotTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary=tempfile.TemporaryDirectory();self.addCleanup(self.temporary.cleanup)
+        self.root=Path(self.temporary.name);self.stratum='qcd_1to2'
+        def normalization(sid,checksum,trials):
+            return dict(source_id=sid,stratum=self.stratum,gen_sha256=checksum*64,
+                denominator_kind='fixed_source_trials',full_source_trials=trials,sigma_nd_pb=123.,
+                source_family='qcd_ordinary',generator_profile='ordinary',generation_sampling='weighted_trials')
+        self.old=[normalization('old','a',100),normalization('oldzero','c',200)]
+        empty=dict(event_ids=[],weights=[],selected_indices=[],sampling_probabilities=[])
+        self.old_selected=[dict(event_ids=[[1,1,1]],weights=[2.],selected_indices=[0],sampling_probabilities=[.5]),empty]
+        histogram=dict(path='/eos/baseline/hist.root',sha256='f'*64,bytes=100)
+        group=dict(source_ids=['old','oldzero'],events=1,sumw=4.,sumw2=16.,histogram=histogram)
+        receipt=dict(complete=True,exit_code=0,source_ids=group['source_ids'],events=1,sumw=4.,sumw2=16.,
+            published=dict(merged_histogram=histogram),full_original_exposure=exposure(self.old,self.stratum))
+        p=self.root/'old_result.json';p.write_text(json.dumps(receipt));group['result_pin']=dict(path=str(p),sha256=post.digest(p))
+        self.baseline=dict(schema='shift-native-cumulative-baseline-v1',stratum=self.stratum,
+            baseline_source_ids=['old','oldzero'],normalization_sources=self.old,selected_sources=self.old_selected,
+            nano_inputs=[dict(path='/eos/baseline/nano.root',sha256='e'*64,events=1)],histogram_group=group,
+            events=1,sumw=4.,sumw2=16.,full_original_GEN=300,cross_section_pb=123.,selected_event_ids=[[1,1,1]])
+        selected=dict(event_ids=[[2,1,1]],weights=[3.],selected_indices=[0],sampling_probabilities=[.25])
+        self.fresh=dict(normalization=normalization('fresh','b',400),selected=selected,
+            nano_inputs=[dict(path='/eos/new/nano.root',sha256='d'*64,events=1)],
+            histogram_group=dict(source_ids=['fresh'],events=1,sumw=12.,sumw2=144.,
+                histogram=dict(path='/eos/new/hist.root',sha256='9'*64,bytes=100)))
+        self.zero=dict(normalization=normalization('freshzero','d',500),selected=copy.deepcopy(empty),nano_inputs=[])
+        self.config=dict(campaign='cumulative',histogram_runtime=dict(path='/frozen/runtime'),
+            output_base='/eos/test',worker_template='initialdir = @DIRECTORY@\narguments = @REQUEST_SHA@\n',
+            worker_publication_bound_bytes=1000000,grouped_response_publication=True)
+        self.pin_baseline()
+
+    def pin_baseline(self):
+        p=self.root/'baseline.json';p.write_text(json.dumps(self.baseline))
+        self.config['baseline_publications_by_stratum']={self.stratum:dict(path=str(p),sha256=post.digest(p))}
+
+    def test_baseline_augments_once_keeps_new_discovery_ids_and_full_zero_exposure(self):
+        task=snapshot(self.root,self.config,self.stratum,[self.fresh,self.zero])
+        request=json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertEqual(task['source_ids'],['fresh','freshzero'])
+        self.assertEqual(set(task['published_source_ids']),{'fresh','freshzero','old','oldzero'})
+        self.assertEqual(task['baseline_source_ids'],['old','oldzero']);self.assertEqual(task['events'],2)
+        self.assertEqual(len(request['histogram_groups']),2)
+        self.assertEqual(request['zero_selected_source_ids'],['freshzero'])
+        self.assertEqual(exposure(request['normalization_sources'],self.stratum)['full_source_sumw'],1200)
+        rows=[row for source in request['selected_sources'] for row in selected_rows(source)]
+        self.assertEqual(sorted(row['native_weight']/row['sampling_probability'] for row in rows),[4.,12.])
+
+    def test_zero_only_new_increment_still_publishes_the_ready_baseline(self):
+        task=snapshot(self.root,self.config,self.stratum,[self.zero])
+        request=json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertEqual(task['events'],1);self.assertEqual(task['source_ids'],['freshzero'])
+        self.assertEqual(request['zero_selected_source_ids'],['freshzero'])
+        self.assertEqual(request['histogram_groups'][0]['source_ids'],['old','oldzero'])
+        self.assertEqual(exposure(request['normalization_sources'],self.stratum)['full_source_sumw'],800)
+
+    def test_source_group_workers_do_not_include_the_cumulative_baseline(self):
+        task=snapshot(self.root,dict(self.config,source_group_only=True),self.stratum,[self.fresh])
+        request=json.loads((Path(task['directory'])/'request.json').read_text())
+        self.assertEqual(task['events'],1);self.assertEqual(task['source_ids'],['fresh'])
+        self.assertNotIn('baseline_source_ids',task);self.assertNotIn('histogram_groups',request)
+
+    def test_duplicate_ids_rles_and_missing_baseline_exposure_are_rejected(self):
+        cases=['source_id','event_id','full_GEN','group_coverage','source_class','pin']
+        original=copy.deepcopy(self.baseline)
+        for case in cases:
+            with self.subTest(case=case):
+                self.baseline=copy.deepcopy(original);fresh=copy.deepcopy(self.fresh)
+                if case=='source_id':fresh['normalization']['source_id']='old'
+                if case=='event_id':fresh['selected']['event_ids']=[[1,1,1]]
+                if case=='full_GEN':self.baseline['full_original_GEN']=299
+                if case=='group_coverage':self.baseline['histogram_group']['source_ids']=['old']
+                if case=='source_class':fresh['normalization']['generation_sampling']='native_class'
+                self.pin_baseline()
+                if case=='pin':(self.root/'baseline.json').write_text('{}')
+                with self.assertRaises(ValueError):snapshot(self.root,self.config,self.stratum,[fresh])
+
 
 class PublisherQuotaTest(unittest.TestCase):
     def setUp(self):
@@ -538,6 +669,39 @@ class PublisherQuotaTest(unittest.TestCase):
             publication_qualification_ready(config,state)
         with self.assertRaisesRegex(ValueError,'canary is missing'):
             publication_qualification_ready(config,dict(tasks={}))
+
+    def test_explicit_passed_canary_allows_parallel_group_and_aggregate_before_latest(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        for prequalified in [False,True]:
+            with self.subTest(prequalified=prequalified),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);parent=root/'parent';parent.mkdir()
+                q=parent/'quota';q.mkdir();result=q/'result.json'
+                result.write_text(json.dumps(dict(complete=True,checked_epoch=time.time(),free_bytes=10**9)))
+                quota=dict(kind='quota',phase='done',directory=str(q),result_sha256=post.digest(result),
+                           native_exit_code=0,finished_epoch=time.time(),published_bytes=0)
+                (parent/'ledger.json').write_text(json.dumps(dict(tasks=dict(quota=quota))))
+                (parent/'source_inventory.json').write_text(json.dumps(dict(nano_outputs=[])))
+                parent_config=root/'parent_config.json';parent_config.write_text(json.dumps(dict(
+                    own_reservation_bytes=10**8,external_future_reservation_bytes=0,safety_floor_bytes=0,
+                    account_worker_ceiling=100,reserved_science_bytes=0)))
+                config=dict(campaign='parallel',parent_state=str(parent),parent_config=str(parent_config),
+                    grouped_response_publication=True,worker_publication_bound_bytes=100,
+                    maximum_publication_bytes=10000)
+                state=dict(tasks={},latest={},sources={},nanos={})
+                if prequalified:
+                    config['qualification_task']='positive'
+                    state['tasks']['positive']=dict(phase='done',qualification_only=True,stratum='qcd_1to2',
+                                                    events=1,published_bytes=0)
+                for name,kind,events in [('group','source_group',1),('aggregate','aggregate',355)]:
+                    p=root/name;p.mkdir();(p/'worker.sub').write_text('queue 1\n')
+                    state['tasks'][name]=dict(phase='ready',kind=kind,stratum='qcd_1to2',events=events,
+                        source_ids=[name],directory=str(p),publication_bound_bytes=100)
+                with patch.object(controller,'query',return_value=[]),\
+                        patch.object(controller,'run_condor',side_effect=['123.0 - 123.0\n','124.0 - 124.0\n']) as submit:
+                    controller.poll(root,config,state)
+                self.assertEqual(submit.call_count,2 if prequalified else 1)
+                self.assertEqual(state['tasks']['aggregate']['phase'],'submitted' if prequalified else 'ready')
 
     def test_old_or_physics_ledger_cannot_become_quota_authority(self):
         import run_shift_sm_postprocessing_controller as controller
