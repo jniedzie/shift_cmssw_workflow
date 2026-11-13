@@ -32,6 +32,52 @@ def plan(count=3):
 
 
 class SourceCensusTests(unittest.TestCase):
+    def test_geometry_first_requires_QCD_full_census_and_exact_policy(self):
+        from shift_qcd_gen_filter import default_policy
+        value=plan()
+        self.assertIsNone(prep.qcd_geometry_first_policy(value))
+        value.update(qcd_geometry_first_material_scoring=True,
+                     qcd_geometry_first_filter_policy=default_policy())
+        self.assertEqual(prep.validate_plan(value),3)
+        self.assertEqual(prep.qcd_geometry_first_policy(value),default_policy())
+        for mutation in ('nonboolean','family','census','missing_policy','geometry','material'):
+            with self.subTest(mutation=mutation):
+                changed=copy.deepcopy(value)
+                if mutation=='nonboolean':changed['qcd_geometry_first_material_scoring']=1
+                if mutation=='family':changed['units'][0]['family']='dy'
+                if mutation=='census':changed['material_feature_census']=False
+                if mutation=='missing_policy':changed.pop('qcd_geometry_first_filter_policy')
+                if mutation=='geometry':changed['qcd_geometry_first_filter_policy']['max_two_station_miss_cm']=501.
+                if mutation=='material':changed['qcd_geometry_first_filter_policy']['max_parent_interaction_depth']=3.
+                with self.assertRaises(ValueError):prep.qcd_geometry_first_policy(changed)
+
+    def test_geometry_first_scanner_flag_and_policy_header_are_bound(self):
+        from shift_qcd_gen_filter import default_policy
+        value=plan();value.update(qcd_geometry_first_material_scoring=True,
+            qcd_geometry_first_filter_policy=default_policy())
+        unit=value['units'][0]
+        for wrong_header in (False,True):
+            with self.subTest(wrong_header=wrong_header),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory);output=path/'complete.root';output.write_bytes(b'synthetic')
+                def scanner(command,**kwargs):
+                    self.assertIn('--qcd-geometry-first',command)
+                    self.assertEqual(command[-2],'--output')
+                    policy=default_policy()
+                    if wrong_header:policy['max_two_station_miss_cm']=501.
+                    data=dict(qcd_geometry_first=True,qcd_geometry_policy=policy,
+                        events=[dict(event_id=e,native_weight=w,original_source_sha256='a'*64)
+                            for e,w in zip(unit['event_ids'],unit['native_weights'])],
+                        sources=[dict(sha256=prep.sha(output))],maximum_events_per_source=None,
+                        prefix_requested=False,summary=dict(source_read_counts=[dict(entire_input_file_read=True)]))
+                    with gzip.open(command[-1],'wt') as stream:json.dump(data,stream)
+                with patch.object(prep.subprocess,'run',side_effect=scanner):
+                    if wrong_header:
+                        with self.assertRaisesRegex(ValueError,'frozen QCD geometry-first policy'):
+                            prep.feature_census(path,unit,value,output)
+                    else:
+                        _,audit=prep.feature_census(path,unit,value,output)
+                        self.assertEqual(audit['events'],3)
+
     def test_smooth_audit_sums_all_components_and_requires_absorbed_latent_parents(self):
         definition=dict(ordinary_fraction=.1,components=[
             dict(probability=.2,parent_barcodes=[11],mean_proper_lifetime_mm=[2.]),

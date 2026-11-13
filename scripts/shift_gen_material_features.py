@@ -153,7 +153,40 @@ def path_feature(geometry, frame, event_id, number, kind, start, end):
     return result
 
 
-def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, frame=None):
+def qcd_relevant_muons(rows, policy):
+    """Upper bound on muons which can enter an existing QCD geometric pair.
+
+    Missing birth/momentum inputs remain possible unknowns. A finite ray with
+    no two-station projection is rejected exactly as in the existing filter.
+    No material or new cut enters this policy-specific upper bound.
+    """
+    from shift_sm_response_features import _station_misses
+    possible = set()
+    for row in rows:
+        if abs(row['pdg']) != 13 or row['status'] != 1:
+            continue
+        if row.get('birth_cm') is None or row.get('momentum_GeV') is None:
+            possible.add(row['barcode'])
+            continue
+        projection = _station_misses(row)
+        if (projection is not None and projection['two_station_miss'] is not None
+                and projection['two_station_miss'] <= policy['max_two_station_miss_cm']):
+            possible.add(row['barcode'])
+    return possible if len(possible) >= 2 else set()
+
+
+def qcd_path_feature(geometry, frame, event_id, number, kind, start, end, needed):
+    if needed:
+        return path_feature(geometry, frame, event_id, number, kind, start, end)
+    # Keep an explicit unknown/unscored record, never fabricate known vacuum.
+    result = path_feature(None, frame, event_id, number, kind, start, end)
+    result['not_scored_for_qcd_geometry'] = True
+    if start is not None and end is not None:
+        result['unknown_reason'] = 'not scored: irrelevant to unchanged QCD geometry condition'
+    return result
+
+
+def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, frame=None, geometry_first_policy=None):
     """Pure graph features, with optional read-only ROOT geometry navigation."""
     if len(event_id) != 3 or any(type(x) is not int or x <= 0 for x in event_id):
         raise ValueError('GEN identity needs positive run, lumi and event')
@@ -170,6 +203,13 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
             raise ValueError('Missing immediate HepMC parent')
     muons, parent_flights, needed_ancestors = [], {}, set()
     unknown_ancestors = set()
+    relevant_muons = None
+    relevant_parents = set()
+    if geometry_first_policy is not None:
+        relevant_muons = qcd_relevant_muons(rows, geometry_first_policy)
+        for number in relevant_muons:
+            relevant_parents.update(parent for parent in ancestry(number, particles)
+                if hadron(particles[parent]['pdg']) and particles[parent]['status'] != 4)
     for row in rows:
         if abs(row['pdg']) != 13 or row['status'] != 1:
             continue
@@ -197,13 +237,14 @@ def event_features(rows, event_id, native_weight, hepmc_weights, geometry=None, 
                 **kinematics(parent['momentum_GeV']),
                 incoming_towards_CMS_z0=(parent['birth_cm'] is not None
                                         and parent['birth_cm'][2]*parent['momentum_GeV'][2] < 0),
-                material=path_feature(geometry, frame, event_id, number, 'parent',
-                                      parent['birth_cm'], parent['end_cm']))
+                material=qcd_path_feature(geometry, frame, event_id, number, 'parent',
+                    parent['birth_cm'], parent['end_cm'],
+                    relevant_muons is None or number in relevant_parents))
         motion = kinematics(row['momentum_GeV'])
         end, reason = ray_to_cms_entry(row['birth_cm'], row['momentum_GeV'],
                                        frame['minimum_abs_z_cm'] if frame else 0.)
-        material = path_feature(geometry, frame, event_id, row['barcode'], 'muon',
-                                row['birth_cm'], end)
+        material = qcd_path_feature(geometry, frame, event_id, row['barcode'], 'muon',
+            row['birth_cm'], end, relevant_muons is None or row['barcode'] in relevant_muons)
         if reason:
             material['unknown_reason'] = reason
         # ROOT nuclear interaction lengths describe a hadron-ranking feature.
@@ -297,7 +338,7 @@ def _score_event_to_file(arguments, output):
     Path(output).write_text(json.dumps(result, separators=(',', ':'), allow_nan=False))
 
 
-def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, frame, seconds):
+def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, frame, seconds, geometry_first_policy=None):
     """Isolate one slow navigator; other originals retain their scored paths.
 
     Timeout is unknown material, never a rejected original or zero depth.
@@ -306,7 +347,9 @@ def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, fram
     """
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError('Per-event scoring timeout must be finite and positive')
-    arguments = (rows, event_id, weight, hepmc_weights, geometry, frame)
+    arguments = (rows, event_id, weight, hepmc_weights, geometry, frame, geometry_first_policy)
+    if geometry_first_policy is not None and not qcd_relevant_muons(rows, geometry_first_policy):
+        return event_features(rows, event_id, weight, hepmc_weights, None, frame, geometry_first_policy)
     if geometry is None:
         return event_features(*arguments)
     context = multiprocessing.get_context('fork')
@@ -332,10 +375,11 @@ def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, fram
             if code != 0 or not output.is_file():
                 raise RuntimeError('Material feature child failed for '+str(event_id)+': '+str(code))
             return json.loads(output.read_text())
-    result = event_features(rows, event_id, weight, hepmc_weights, None, frame)
+    result = event_features(rows, event_id, weight, hepmc_weights, None, frame, geometry_first_policy)
     result['material_navigation_timeout'] = True
     for parent in result['parent_flights']:
-        parent['material']['unknown_reason'] = 'per-event material navigation timeout'
+        if not parent['material'].get('not_scored_for_qcd_geometry'):
+            parent['material']['unknown_reason'] = 'per-event material navigation timeout'
     for muon in result['muons']:
         if muon['material_to_CMS_entry'].get('unknown_reason') == 'geometry scoring not requested':
             muon['material_to_CMS_entry']['unknown_reason'] = 'per-event material navigation timeout'
@@ -343,7 +387,7 @@ def bounded_event_features(rows, event_id, weight, hepmc_weights, geometry, fram
 
 
 def scan_source(path, hepmc_label, geometry=None, frame=None, maximum_events=None,
-                original_sources=None, event_timeout_seconds=0.):
+                original_sources=None, event_timeout_seconds=0., geometry_first_policy=None):
     from DataFormats.FWLite import Events
     seen = set()
     for event in Events(str(path)):
@@ -356,8 +400,8 @@ def scan_source(path, hepmc_label, geometry=None, frame=None, maximum_events=Non
         rows, weight, hepmc_weights, units = read_hepmc(event, hepmc_label)
         print('Material features: event '+str(list(event_id)),flush=True)
         arguments = (rows, event_id, weight, hepmc_weights, geometry, frame)
-        record = (bounded_event_features(*arguments, event_timeout_seconds)
-                  if event_timeout_seconds else event_features(*arguments))
+        record = (bounded_event_features(*arguments, event_timeout_seconds, geometry_first_policy)
+                  if event_timeout_seconds else event_features(*arguments, geometry_first_policy))
         record['original_hepmc_units'] = dict(momentum=units[0], length=units[1])
         original = (original_sources or {}).get(str(event_id[0]), {})
         record.update(source_id=original.get('source_id'),
@@ -372,6 +416,8 @@ def main():
     parser.add_argument('--hepmc-label', default='shiftEventTime')
     parser.add_argument('--geometry', type=Path)
     parser.add_argument('--frame', type=Path, help='JSON object with the existing material scorer frame')
+    parser.add_argument('--qcd-geometry-first', action='store_true',
+                        help='Private prototype: skip only paths irrelevant to the unchanged QCD geometry condition')
     parser.add_argument('--skip-material-navigation', action='store_true',
                         help='Read the complete GEN graph but mark material paths unknown after a reviewed navigator timeout')
     parser.add_argument('--original-source-map', type=Path,
@@ -381,6 +427,10 @@ def main():
                         help='Optional per-event navigator isolation; zero preserves the existing scanner')
     parser.add_argument('--output', type=Path, required=True, help='JSON or .json.gz; must not exist')
     args = parser.parse_args()
+    geometry_first_policy = None
+    if args.qcd_geometry_first:
+        from shift_qcd_gen_filter import default_policy
+        geometry_first_policy = default_policy()
     if bool(args.geometry) != bool(args.frame):
         parser.error('--geometry and --frame must be supplied together')
     if args.maximum_events_per_source is not None and args.maximum_events_per_source < 1:
@@ -423,6 +473,8 @@ def main():
                   full_source_exposure_is_not_selected_event_count=True,
                   geometry_path=str(args.geometry.resolve()) if args.geometry else None,
                   material_navigation_skipped=args.skip_material_navigation,
+                  qcd_geometry_first=args.qcd_geometry_first,
+                  qcd_geometry_policy=geometry_first_policy,
                   event_timeout_seconds=args.event_timeout_seconds,
                   geometry_sha256=digest(args.geometry) if args.geometry else None,
                   frame_definition_sha256=digest(args.frame) if args.frame else None,
@@ -447,7 +499,7 @@ def main():
             read_count = 0
             for row in scan_source(path, args.hepmc_label, geometry, frame,
                                    args.maximum_events_per_source, original_sources,
-                                   args.event_timeout_seconds):
+                                   args.event_timeout_seconds, geometry_first_policy):
                 row['source_file_sha256'] = source['sha256']
                 if counts['events']:
                     target.write(',\n')

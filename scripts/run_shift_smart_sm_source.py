@@ -372,6 +372,15 @@ def main(request_path):
                   source_id=row['id'], started_epoch=time.time())
     save('source_report.json', report)
     try:
+        geometry_first=request.get('preparation_contract',{}).get('qcd_geometry_first_material_scoring',False)
+        if type(geometry_first) is not bool:
+            raise ValueError('QCD geometry-first scoring switch must be Boolean')
+        if geometry_first:
+            from shift_qcd_gen_filter import default_policy
+            policy=request.get('qcd_gen_filter_policy',default_policy())
+            if row['family']!='qcd' or policy!=default_policy():
+                raise ValueError('Geometry-first scoring requires the exact qualified QCD filter policy')
+            request['preparation_contract']['qcd_geometry_first_filter_policy']=policy
         if row['family'] == 'qcd':
             from shift_qcd_gen_filter import PROFILE, default_policy, validate_policy
             validate_policy(request.get('qcd_gen_filter_policy', default_policy()))

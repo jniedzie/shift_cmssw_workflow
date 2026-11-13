@@ -3,6 +3,7 @@
 import copy
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import unittest
@@ -13,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 from test_shift_sm_candidate_reco import event
 from run_shift_smart_sm_source import prepared_selection
+import run_shift_smart_sm_source as source_worker
 from shift_production_selection import configure_transport, validate_contract
 
 
@@ -37,6 +39,34 @@ class QCDSourceFilterTest(unittest.TestCase):
     def select(self, request=None, events=None):
         return prepared_selection(request or self.request, self.source, self.prepared,
             dict(events=self.events if events is None else events), self.ids, self.weights, 'e'*64)
+
+    def test_geometry_first_adapter_binds_policy_and_preserves_default_requests(self):
+        from shift_qcd_gen_filter import default_policy
+        cases=[('absent',{},None,None),
+               ('disabled_custom',dict(qcd_geometry_first_material_scoring=False),
+                default_policy(max_two_station_miss_cm=501.),None),
+               ('nonboolean',dict(qcd_geometry_first_material_scoring=1),None,'Boolean'),
+               ('wrong_family',dict(qcd_geometry_first_material_scoring=True),None,'exact qualified QCD'),
+               ('wrong_policy',dict(qcd_geometry_first_material_scoring=True),
+                default_policy(max_two_station_miss_cm=501.),'exact qualified QCD')]
+        for name,contract,policy,error in cases:
+            with self.subTest(case=name),tempfile.TemporaryDirectory() as directory:
+                path=Path(directory);runtime=path/'runtime';(runtime/'lib/test-arch').mkdir(parents=True)
+                request=dict(source_request=dict(id='geometry-test',family='dy' if name=='wrong_family' else 'qcd'),
+                             generate_only=True)
+                if name!='absent':request['preparation_contract']=contract
+                if policy is not None:request['qcd_gen_filter_policy']=policy
+                request_path=path/'request.json';request_path.write_text(json.dumps(request))
+                before=Path.cwd();os.chdir(path)
+                try:
+                    with patch.dict(os.environ,dict(CMSSW_BASE=str(runtime),SCRAM_ARCH='test-arch')),patch.object(
+                            source_worker.shutil,'copyfile'),patch.object(source_worker,'run',
+                            side_effect=RuntimeError('guard accepted; no GEN run')):
+                        if error:
+                            with self.assertRaisesRegex(ValueError,error):source_worker.main(request_path)
+                        else:
+                            with self.assertRaisesRegex(RuntimeError,'no GEN run'):source_worker.main(request_path)
+                finally:os.chdir(before)
 
     def test_source_defaults_to_enrichment_without_second_material_draw(self):
         original = copy.deepcopy(self.source)

@@ -173,5 +173,104 @@ class GenMaterialFeatureTests(unittest.TestCase):
         self.assertEqual(result['hepmc_weights'], [-.125])
 
 
+class QCDGeometryFirstTests(unittest.TestCase):
+    def geometry_event(self):
+        from test_shift_qcd_gen_filter import event
+        value=event(1)
+        for muon in value['muons']:
+            muon['status']=1
+            muon['material_to_CMS_entry']=dict(complete=False,
+                full_saved_chord_coverage=False,column_density_g_cm2=None)
+        return value
+
+    def test_geometry_gate_matches_filter_for_twelve_known_and_unknown_cases(self):
+        from shift_qcd_gen_filter import default_policy,filter_event
+        import shift_qcd_gen_filter as qcd_filter
+        import shift_sm_response_features as response
+        policy=default_policy()
+        cases=[('plausible_unknown_material',{},None,True),
+               ('zero_pz',dict(momentum_GeV=[10.,0.,0.]),None,False),
+               ('away',dict(momentum_GeV=[0.,0.,10.]),None,False),
+               ('central_one_sided',dict(birth_cm=[0.,0.,0.]),None,False),
+               ('large_miss',dict(momentum_GeV=[10.,0.,-1.]),None,False),
+               ('missing_birth',dict(birth_cm=None),0,True),
+               ('missing_momentum',dict(momentum_GeV=None),0,True),
+               ('both_missing',dict(birth_cm=None,momentum_GeV=None),None,True),
+               ('one_known_bad',dict(momentum_GeV=[10.,0.,0.]),0,False),
+               ('unknown_parent',dict(transport_parent_barcodes=[999],ancestor_barcodes=[999]),0,True)]
+        for name,update,index,expected in cases:
+            with self.subTest(case=name):
+                value=self.geometry_event()
+                for i,muon in enumerate(value['muons']):
+                    if index is None or i==index:muon.update(update)
+                relevant=features.qcd_relevant_muons(value['muons'],policy)
+                decision=filter_event(value,policy)
+                self.assertEqual(bool(relevant),expected)
+                self.assertEqual(decision['passes_filter'],expected)
+                self.assertEqual(decision['protected_unknown'],expected)
+        for projection in (None,dict(two_station_miss=None)):
+            with self.subTest(projection=projection),patch.object(response,'_station_misses',return_value=projection),patch.object(qcd_filter,'_station_misses',return_value=projection):
+                value=self.geometry_event()
+                self.assertFalse(features.qcd_relevant_muons(value['muons'],policy))
+                self.assertFalse(filter_event(value,policy)['passes_filter'])
+
+    def timeout_rows(self):
+        return [particle(10,211,birth=(0.,0.,14805.),end=(0.,0.,14800.)),
+                particle(1,13,[10],status=1,birth=(0.,0.,14800.),end=None),
+                particle(2,-13,[10],status=1,birth=(0.,0.,14800.),end=None)]
+
+    def test_six_timeout_cases_keep_the_graph_weights_and_unknown_protection(self):
+        from shift_qcd_gen_filter import default_policy,filter_event
+        policy=default_policy()
+        for case in ('eligible','missing_vertex','unknown_model','prompt','irrelevant_parent','known_away'):
+            with self.subTest(case=case):
+                rows=self.timeout_rows()
+                if case=='missing_vertex':rows[1]['birth_cm']=None
+                if case=='unknown_model':rows[0]['pdg']=9000001
+                if case=='prompt':
+                    rows=rows[1:]
+                    for row in rows:row['parents']=[]
+                if case=='irrelevant_parent':
+                    rows.extend([particle(20,321,birth=(0.,0.,14805.),end=(0.,0.,14800.)),
+                        particle(3,13,[20],status=1,birth=(0.,0.,14800.),end=None)])
+                    rows[-1]['momentum_GeV']=[0.,0.,10.]
+                if case=='known_away':
+                    for row in rows[1:]:row['momentum_GeV']=[0.,0.,10.]
+                results=[]
+                for selected_policy in (None,policy):
+                    with patch.object(features,'_score_event_to_file',side_effect=lambda *args:time.sleep(1.)):
+                        result=features.bounded_event_features(rows,[99,1,1],2.,[2.],
+                            object(),dict(minimum_abs_z_cm=1100.),.02,selected_policy)
+                    self.assertEqual(result['native_weight'],2.)
+                    self.assertEqual(result['GEN_muons'],len(rows)-sum(abs(r['pdg'])!=13 for r in rows))
+                    self.assertEqual(bool(result.get('material_navigation_timeout')),
+                        selected_policy is None or case!='known_away')
+                    for muon in result['muons']:
+                        material=muon['material_to_CMS_entry']
+                        self.assertFalse(material['complete'])
+                        self.assertFalse(material['full_saved_chord_coverage'])
+                        self.assertIsNone(material['column_density_g_cm2'])
+                    results.append(result)
+                self.assertEqual(results[0]['graph_sha256'],results[1]['graph_sha256'])
+                self.assertEqual(filter_event(results[0],policy),filter_event(results[1],policy))
+                self.assertEqual(filter_event(results[1],policy)['passes_filter'],case!='known_away')
+
+    def test_both_modes_keep_child_failure_and_invalid_timeout_guards(self):
+        from shift_qcd_gen_filter import default_policy
+        for selected_policy in (None,default_policy()):
+            with self.subTest(policy=selected_policy):
+                child=Mock(exitcode=1)
+                child.is_alive.return_value=False
+                context=Mock();context.Process.return_value=child
+                with patch.object(features.multiprocessing,'get_context',return_value=context):
+                    with self.assertRaisesRegex(RuntimeError,'child failed'):
+                        features.bounded_event_features(self.timeout_rows(),[99,1,1],2.,[2.],
+                            object(),dict(minimum_abs_z_cm=1100.),1.,selected_policy)
+                for invalid in (0.,-1.,float('nan'),float('inf')):
+                    with self.assertRaises(ValueError):
+                        features.bounded_event_features(self.timeout_rows(),[99,1,1],2.,[2.],
+                            None,dict(minimum_abs_z_cm=1100.),invalid,selected_policy)
+
+
 if __name__ == '__main__':
     unittest.main()

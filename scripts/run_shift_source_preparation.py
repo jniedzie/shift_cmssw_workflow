@@ -353,6 +353,21 @@ process=p
 open('resolved_cfg.py','w').write(p.dumpPython())
 '''
 
+def qcd_geometry_first_policy(plan):
+    """Bind optional QCD-only scoring to the exact qualified filter policy."""
+    enabled=plan.get('qcd_geometry_first_material_scoring',False)
+    require(type(enabled) is bool,'QCD geometry-first scoring switch must be Boolean')
+    if not enabled:return None
+    from shift_qcd_gen_filter import default_policy
+    policy=default_policy()
+    require(plan.get('material_feature_census') is True
+            and all(unit['family']=='qcd' for unit in plan['units']),
+            'Geometry-first material scoring is qualified only for a full QCD feature census')
+    require(plan.get('qcd_geometry_first_filter_policy')==policy,
+            'Geometry-first scoring requires the exact qualified QCD filter policy')
+    return policy
+
+
 def validate_plan(plan):
     """Reject censored sources, partial censuses and ambiguous exposure early."""
     bound=plan.get('maximum_events_per_unit')
@@ -393,6 +408,7 @@ def validate_plan(plan):
     require(len(containment)==total and {tuple(row['event_id']) for row in containment}==identities,
             'Native containment expectations do not cover the complete source census')
     require(type(plan.get('material_feature_census',False)) is bool,'Feature census switch must be Boolean')
+    qcd_geometry_first_policy(plan)
     return total
 
 
@@ -407,6 +423,9 @@ def feature_census(directory,unit,plan,output):
              '--gen',str(output),'--hepmc-label','shiftEventTime',
              '--geometry',plan['geometry_path'],'--frame',str(directory/'frame.json'),
              '--original-source-map',str(directory/'original_sources.json'),'--output',str(features)]
+    geometry_policy=qcd_geometry_first_policy(plan)
+    if geometry_policy is not None:
+        command=command[:-2]+['--qcd-geometry-first']+command[-2:]
     event_timeout=plan.get('feature_event_timeout_seconds',0.)
     require(isinstance(event_timeout,(int,float)) and not isinstance(event_timeout,bool)
             and math.isfinite(event_timeout) and event_timeout>=0,
@@ -442,6 +461,9 @@ def feature_census(directory,unit,plan,output):
             run_reader(command,600)
     import gzip
     with gzip.open(features,'rt') as stream:data=json.load(stream)
+    if geometry_policy is not None:
+        require(data.get('qcd_geometry_first') is True and data.get('qcd_geometry_policy')==geometry_policy,
+                'Material scanner did not use the frozen QCD geometry-first policy')
     expected={tuple(identity):weight for identity,weight in zip(unit['event_ids'],unit['native_weights'])}
     rows=data['events'];seen={tuple(row['event_id']):row['native_weight'] for row in rows}
     require(len(rows)==len(expected) and seen==expected,'Material-feature census changed original identities or weights')
