@@ -185,7 +185,10 @@ def make_task(root, config, name, request, kind, stratum):
             raise ValueError('Worker stage priority must be an integer')
         text = text.replace('@PRIORITY@',str(priority))
     if kind == 'quota':
-        text=text.replace('queue 1','priority = 1000\nqueue 1')
+        priority = config.get('stage_priorities',{}).get('quota',1000)
+        if type(priority) is not int:
+            raise ValueError('Worker stage priority must be an integer')
+        text=text.replace('queue 1','priority = '+str(priority)+'\nqueue 1')
         text = text.replace('+MaxRuntime = 45000', '+MaxRuntime = 900')
         text = text.replace('request_memory = 6000', 'request_memory = 1000')
         text = text.replace('request_disk = 12000000', 'request_disk = 1000000')
@@ -227,7 +230,49 @@ def make_task(root, config, name, request, kind, stratum):
                 kind=kind, stratum=stratum, bound_bytes=request.get('reservation_bytes', 16777216))
 
 
+def detector_seed_range(config, first_job, count):
+    """Validate the worker's strict seed domain before creating any requests."""
+    if type(first_job) is not int or first_job < 0 or type(count) is not int or count < 0:
+        raise ValueError('Detector seed range requires nonnegative integer jobs/count')
+    policy = config.get('detector_seed_policy')
+    if policy is None:
+        first_seed, stride = 230000000+first_job*100, 100
+    else:
+        if not isinstance(policy, dict) or any(type(policy.get(key)) is not int
+                for key in ('job_base','seed_base','stride')):
+            raise ValueError('Detector seed policy requires integer job_base, seed_base and stride')
+        if policy['job_base'] < 0 or policy['stride'] < 1 or first_job < policy['job_base']:
+            raise ValueError('Detector seed policy has invalid job base or stride')
+        first_seed = policy['seed_base']+(first_job-policy['job_base'])*policy['stride']
+        stride = policy['stride']
+    # Keep these bounds identical to run_shift_gen_to_nano's --seed guard.
+    if count and not (0 < first_seed <= first_seed+(count-1)*stride < 899990000):
+        raise ValueError('Detector simulation seed range is outside the supported domain')
+    return first_seed, stride
+
+
+def validate_detector_seed_policy(config, state):
+    """Reject an invalid finite deployment before admission or scheduler changes."""
+    maximum = config.get('maximum_detector_events')
+    if maximum is not None and (type(maximum) is not int or maximum < 0):
+        raise ValueError('Maximum detector events must be a nonnegative integer')
+    policy = config.get('detector_seed_policy')
+    if policy is not None:
+        # Validate even a zero-event policy, then the complete authorized range.
+        first_job = policy.get('job_base') if isinstance(policy, dict) else None
+        detector_seed_range(config, first_job, max(1, maximum or 0))
+    if maximum is not None:
+        originals = [t for t in state['tasks'].values()
+                     if t['kind']=='detector' and not t.get('retry_level',0)]
+        if any(type(t.get('selected_events')) is not int or t['selected_events'] < 0 for t in originals):
+            raise ValueError('Original detector event census is unknown; seed budget cannot be inferred')
+        # One original event per job is the largest possible number of jobs.
+        remaining = max(0, maximum-sum(t['selected_events'] for t in originals))
+        detector_seed_range(config, state['next_detector_job'], remaining)
+
+
 def detector_tasks(root, config, state, source_task, source_task_name=None):
+    validate_detector_seed_policy(config, state)
     result = read(Path(source_task['directory'])/'result.json')
     if config.get('compact_source_authority') and result.get('source_authority'):
         from run_shift_qcd_production_source import read_source_authority
@@ -265,7 +310,9 @@ def detector_tasks(root, config, state, source_task, source_task_name=None):
         else (1 if source_task['stratum'].endswith('20toinf') else 5))
     if type(stride) is not int or stride < 1:
         raise ValueError('Detector group size must be a positive integer')
-    for start in range(0, count, stride):
+    first_seed, seed_stride = detector_seed_range(config, state['next_detector_job'],
+        (count+stride-1)//stride)
+    for child_index, start in enumerate(range(0, count, stride)):
         job = state['next_detector_job']
         state['next_detector_job'] += 1
         request = dict(schema='shift-stream-payload-v1', environment='cmssw',
@@ -275,6 +322,8 @@ def detector_tasks(root, config, state, source_task, source_task_name=None):
             return_files=[], failure_return_files=['evidence.tar.gz'], status_fields={}, detector_source=source,
             selected_skip=start, selected_count=min(stride, count-start), detector_job=job,
             reservation_bytes=reservation)
+        if config.get('detector_seed_policy') is not None:
+            request['detector_seed'] = first_seed+child_index*seed_stride
         name='detector_'+str(job).zfill(7)
         state['tasks'][name] = make_task(root, config, name, request, 'detector', source_task['stratum'])
         if source_task_name is not None:
@@ -500,12 +549,13 @@ def cpu_retry_request(request):
 import json,sys,subprocess
 from pathlib import Path
 r=json.loads(Path('request.json').read_text())
+seed_arguments=['--seed',str(r['detector_seed'])] if 'detector_seed' in r else []
 Path('selected_source.json').write_text(json.dumps(dict(r['detector_source'],gen_path_resolved=True),indent=2)+'\\n')
 subprocess.run([sys.executable,'@TOOLS@/scripts/run_shift_gen_to_nano.py','selected_source.json',
  '--skip',str(r['selected_skip']),'--count',str(r['selected_count']),'--job',str(r['detector_job']),
  '--templates','@TOOLS@/templates','--publish','--remove-consumed-intermediates',
  '--absolute-stage-timeouts','--stage-timeouts','43200,3600,5400,10800',
- '--first-event-stall-timeout','10800','--event-stall-timeout','10800'],check=True,timeout=85000)
+ '--first-event-stall-timeout','10800','--event-stall-timeout','10800',*seed_arguments],check=True,timeout=85000)
 """
     child.update(argv=['python3','-c',code],same_seed_CPU_recovery=True,
         application_timeout_seconds=86400,failure_return_files=['evidence.tar.gz'])
@@ -564,11 +614,12 @@ def postprocessing_charge(config):
     ledger = read(Path(directory) / 'state.json')
     spent = sum(t.get('published_bytes', 0) for t in ledger['tasks'].values())
     reserved = sum(policy['worker_publication_bound_bytes'] for t in ledger['tasks'].values()
-                   if t['phase'] in ('submitted', 'submitting'))
+                   if t['phase'] in ('submitted', 'submitting', 'failed'))
     return spent, reserved
 
 
 def step(root, config, state):
+    validate_detector_seed_policy(config, state)
     finite_sources = validate_source_worklist(config, state)
     per_source = config.get('per_source_quarantine') is True
     # One account query; no full status-tree scan for each completed event.
@@ -929,6 +980,8 @@ def watch(root, controller_iwd=None, config=None):
         problems.append('Failed bins require review: '+', '.join(record['failed_bins']))
     if record.get('failed_by_stage'):
         problems.append('Failed stages require review: '+json.dumps(record['failed_by_stage'],sort_keys=True))
+    if record.get('tasks',{}).get('failed',0):
+        problems.append('Failed worker tasks require review: '+str(record['tasks']['failed']))
     if record.get('phase')=='waiting_for_storage':
         problems.append('Admission waiting for storage; workers and full exposure preserved')
     value = dict(checked_epoch=time.time(), problems=problems, controller_ads=ads)

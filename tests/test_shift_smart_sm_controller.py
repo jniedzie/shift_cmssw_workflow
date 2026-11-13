@@ -121,6 +121,22 @@ class SchedulingTests(unittest.TestCase):
                                       'legacy',{},'source','qcd_low')
             self.assertEqual((Path(task['directory'])/'worker.sub').read_text(),'queue 1\n')
 
+    def test_quota_priority_respects_configuration_and_keeps_default(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            for name,config,expected in [('default',dict(worker_template='queue 1\n'),1000),
+                    ('configured',dict(worker_template='priority = @PRIORITY@\nqueue 1\n',
+                                       stage_priorities=dict(quota=3000)),3000)]:
+                task=controller.make_task(root,config,name,{},'quota','all')
+                priorities=[line.partition('=')[2].strip() for line in
+                    (Path(task['directory'])/'worker.sub').read_text().splitlines()
+                    if line.startswith('priority =')]
+                self.assertTrue(priorities);self.assertEqual(set(priorities),{str(expected)})
+            with self.assertRaisesRegex(ValueError,'priority must be an integer'):
+                controller.make_task(root,dict(worker_template='queue 1\n',stage_priorities=dict(quota=True)),
+                                     'bad_quota',{},'quota','all')
+
 
 class SupplyAndRetryTests(unittest.TestCase):
     def test_native_on_exit_hold_does_not_require_a_termination_event(self):
@@ -188,6 +204,24 @@ class SupplyAndRetryTests(unittest.TestCase):
                 self.assertEqual(argv[argv.index('--job')+1],'123')
                 self.assertEqual(argv[argv.index('--count')+1],'5')
                 self.assertIn('43200,3600,5400,10800',argv)
+            finally:os.chdir(here)
+
+    def test_CPU_retry_preserves_an_explicit_detector_seed(self):
+        import run_shift_smart_sm_controller as controller
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            here=os.getcwd()
+            try:
+                os.chdir(directory)
+                request=dict(detector_source=dict(gen='/synthetic'),selected_skip=0,selected_count=1,
+                             detector_job=7300000,detector_seed=261130001)
+                child=controller.cpu_retry_request(request)
+                Path('request.json').write_text(json.dumps(child))
+                with patch('subprocess.run') as run:exec(compile(child['argv'][2],'<retry>','exec'),{})
+                argv=run.call_args.args[0]
+                self.assertEqual(argv[argv.index('--seed')+1],'261130001')
+                self.assertEqual(child['detector_seed'],request['detector_seed'])
+                self.assertEqual(child['detector_source'],request['detector_source'])
             finally:os.chdir(here)
 
     def test_reviewed_native_SIM_timeout_keeps_event_order_seed_and_failure(self):
@@ -404,6 +438,71 @@ class CompactFiniteSourceTests(unittest.TestCase):
             self.assertEqual(len(state['tasks']),2)
             self.assertEqual(zero['selected_events'],0)
             self.assertEqual(controller.read(Path(zero['directory'])/'result.json')['source']['saved_events'],3)
+
+    def test_explicit_detector_seeds_are_deterministic_and_preserve_source(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);task,source=self.source(root,'good')
+            state=dict(tasks={},next_detector_job=7300003)
+            config=dict(campaign='bounded',compact_source_authority=True,detector_group_size=1,
+                maximum_detector_events=2000,worker_template='queue 1\n',
+                detector_seed_policy=dict(job_base=7300000,seed_base=261130001,stride=100))
+            controller.detector_tasks(root,config,state,task,'source_good')
+            requests=[controller.read(Path(t['directory'])/'request.json') for t in state['tasks'].values()]
+            self.assertEqual([r['detector_job'] for r in requests],[7300003,7300004])
+            self.assertEqual([r['detector_seed'] for r in requests],[261130301,261130401])
+            self.assertTrue(all(r['detector_source']==source for r in requests))
+            self.assertEqual(controller.detector_seed_range(config,7301999,1),(261329901,100))
+
+    def test_invalid_detector_seed_range_creates_no_partial_children(self):
+        import run_shift_smart_sm_controller as controller
+        for policy,job in [(None,6699899),
+                (dict(job_base=7300000,seed_base=899989999,stride=1),7300000)]:
+            with self.subTest(policy=policy),tempfile.TemporaryDirectory() as directory:
+                root=Path(directory);task,_=self.source(root,'good')
+                state=dict(tasks={},next_detector_job=job);before=copy.deepcopy(state)
+                config=dict(campaign='bounded',compact_source_authority=True,detector_group_size=1,
+                            worker_template='queue 1\n')
+                if policy is not None:config['detector_seed_policy']=policy
+                with patch.object(controller,'make_task') as create:
+                    with self.assertRaisesRegex(ValueError,'outside the supported domain'):
+                        controller.detector_tasks(root,config,state,task,'source_good')
+                create.assert_not_called();self.assertEqual(state,before)
+
+    def test_full_finite_detector_seed_range_is_checked_before_queue_reads(self):
+        import run_shift_smart_sm_controller as controller
+        policy=dict(job_base=7300000,seed_base=899989900,stride=100)
+        state=dict(tasks={},next_detector_job=7300000);before=copy.deepcopy(state)
+        config=dict(maximum_detector_events=2,detector_seed_policy=policy)
+        with patch.object(controller,'query') as query:
+            with self.assertRaisesRegex(ValueError,'outside the supported domain'):
+                controller.step(Path('/unused'),config,state)
+        query.assert_not_called();self.assertEqual(state,before)
+        # The valid first seed alone must not qualify an invalid second one.
+        self.assertEqual(controller.detector_seed_range(config,7300000,1),(899989900,100))
+        with self.assertRaisesRegex(ValueError,'outside the supported domain'):
+            controller.validate_detector_seed_policy(dict(maximum_detector_events=2),
+                dict(tasks={},next_detector_job=6699899))
+
+    def test_detector_seed_policy_rejects_bad_domains_and_preserves_legacy_requests(self):
+        import run_shift_smart_sm_controller as controller
+        good=dict(job_base=10,seed_base=1,stride=100)
+        for policy in [dict(good,seed_base=0),dict(good,seed_base=899990000),
+                       dict(good,stride=0),dict(good,stride=True),dict(good,job_base=-1),{},False]:
+            with self.subTest(policy=policy):
+                with self.assertRaises(ValueError):
+                    controller.validate_detector_seed_policy(dict(detector_seed_policy=policy),
+                        dict(tasks={},next_detector_job=10))
+        with self.assertRaisesRegex(ValueError,'job base'):
+            controller.detector_seed_range(dict(detector_seed_policy=good),9,1)
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);task,_=self.source(root,'good',selected=1)
+            state=dict(tasks={},next_detector_job=6699899)
+            config=dict(campaign='legacy',compact_source_authority=True,worker_template='queue 1\n')
+            controller.detector_tasks(root,config,state,task)
+            request=controller.read(Path(next(iter(state['tasks'].values()))['directory'])/'request.json')
+            self.assertNotIn('detector_seed',request)
+            self.assertEqual(controller.detector_seed_range({},6699899,1),(899989900,100))
 
     def test_finite_worklist_prevents_refill_or_changed_source(self):
         import run_shift_smart_sm_controller as controller
@@ -629,6 +728,33 @@ class BoundedWatchdogRestartTests(unittest.TestCase):
                 self.assertEqual(controller.restart_controller(root,config,iwd)['cluster'],123)
             self.assertIn('ShiftSMPostprocessingController',query.call_args.args[0])
             self.assertNotIn('ShiftSmartSMController',query.call_args.args[0])
+
+    def test_publisher_failed_worker_counter_is_durable_attention_not_a_retry(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);config,deployment=self.fixture(root)
+            config['watchdog_restart'].update(controller_attribute='ShiftSMPostprocessingController',
+                ledger_filename='state.json',failure_filename='attention_required.json')
+            controller.save(root/'heartbeat.json',dict(phase='running',checked_epoch=controller.time.time(),
+                tasks=dict(failed=1,submitted=2)))
+            with patch.object(controller,'query',return_value=[dict(ClusterId=1,JobStatus=2)]),\
+                    patch.object(controller,'restart_controller') as restart,patch.object(controller,'run_condor') as submit:
+                self.assertFalse(controller.watch(root,deployment,config))
+            restart.assert_not_called();submit.assert_not_called()
+            attention=controller.read(root/'watchdog_attention_required.json')
+            self.assertIn('Failed worker tasks require review: 1',attention['problems'])
+
+    def test_failed_publication_keeps_full_uncertain_partial_storage_claim(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory)
+            controller.save(root/'config.json',dict(worker_publication_bound_bytes=10000))
+            controller.save(root/'state.json',dict(tasks=dict(
+                failed=dict(phase='failed'),submitted=dict(phase='submitted'),
+                submitting=dict(phase='submitting'),ready=dict(phase='ready'),
+                done=dict(phase='done',published_bytes=1234))))
+            self.assertEqual(controller.postprocessing_charge(dict(postprocessing_directory=str(root))),
+                             (1234,30000))
 
     def test_watch_query_and_template_follow_role_and_reject_unknown_knobs(self):
         import run_shift_smart_sm_controller as controller
