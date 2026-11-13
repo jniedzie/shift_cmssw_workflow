@@ -765,6 +765,47 @@ class PublisherQuotaTest(unittest.TestCase):
                 self.assertEqual(state['tasks']['aggregate']['phase'],'submitted' if prequalified else 'ready')
                 self.assertEqual(state['latest'],{})
 
+    def test_failed_worker_retains_partial_write_bound_and_alerts_without_retry(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        for failure in ['held','nonzero_terminal']:
+            for publication_budget in [199,200]:
+                with self.subTest(failure=failure,budget=publication_budget), tempfile.TemporaryDirectory() as directory:
+                    root=Path(directory);parent=root/'parent';parent.mkdir();quota=parent/'quota';quota.mkdir()
+                    result=quota/'result.json';result.write_text(json.dumps(dict(
+                        complete=True,checked_epoch=time.time(),free_bytes=10**9)))
+                    (parent/'ledger.json').write_text(json.dumps(dict(tasks=dict(quota=dict(
+                        kind='quota',phase='done',directory=str(quota),result_sha256=post.digest(result),
+                        native_exit_code=0,finished_epoch=time.time(),published_bytes=0)))))
+                    (parent/'source_inventory.json').write_text(json.dumps(dict(nano_outputs=[])))
+                    policy=root/'policy.json';policy.write_text(json.dumps(dict(own_reservation_bytes=10**8,
+                        external_future_reservation_bytes=0,safety_floor_bytes=0,account_worker_ceiling=100)))
+                    config=dict(parent_state=str(parent),parent_config=str(policy),
+                        worker_publication_bound_bytes=900,maximum_publication_bytes=publication_budget)
+                    bad=root/'bad';bad.mkdir();(bad/'result.json').write_text('{}')
+                    good=root/'good';good.mkdir();(good/'worker.sub').write_text('queue 1\n')
+                    state=dict(tasks=dict(bad=dict(kind='source_group',phase='submitted',cluster=20,
+                        stratum='qcd_1to2',directory=str(bad),request_sha256='a'*64,source_ids=['bad'],
+                        events=1,publication_bound_bytes=100),good=dict(kind='source_group',phase='ready',
+                        stratum='qcd_2to5',directory=str(good),source_ids=['good'],events=1,
+                        publication_bound_bytes=100)),latest={},sources={},nanos={})
+                    live=[dict(ClusterId=20,JobStatus=5,JobUniverse=5)] if failure=='held' else []
+                    history={} if live else {20:dict(Iwd=str(bad),ExitCode=1,ExitBySignal=False)}
+                    with patch.object(controller,'query',return_value=live), \
+                            patch.object(controller,'publication_history',return_value=history), \
+                            patch.object(controller,'run_condor',return_value='123.0 - 123.0\n') as submit:
+                        controller.poll(root,config,state)
+                    self.assertEqual(state['tasks']['bad']['phase'],'failed')
+                    self.assertEqual(state['tasks']['good']['phase'],'submitted' if publication_budget==200 else 'ready')
+                    self.assertEqual(submit.call_count,int(publication_budget==200))
+                    alert=json.loads((root/'worker_attention_required.json').read_text())
+                    self.assertEqual(alert['failed_workers']['bad']['request_sha256'],'a'*64)
+                    self.assertIn('no automatic retry',alert['action'])
+                    self.assertFalse((root/'attention_required.json').exists())
+                    heartbeat=json.loads((root/'heartbeat.json').read_text())
+                    self.assertEqual(heartbeat['tasks']['failed'],1)
+                    self.assertEqual(heartbeat['publication_budget_remaining_bytes'],99 if publication_budget==199 else 0)
+
     def test_old_or_physics_ledger_cannot_become_quota_authority(self):
         import run_shift_sm_postprocessing_controller as controller
         with self.assertRaisesRegex(ValueError,'own private quota'):

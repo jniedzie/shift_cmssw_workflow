@@ -687,6 +687,16 @@ def poll(root, config, state):
                     + result.stat().st_size + 65536, finished_epoch=time.time())
         if task.get('kind') != 'source_group' and not task.get('qualification_only'):
             state['latest'][task['stratum']] = task['source_ids']
+    failed_workers = {name: {key: task[key] for key in (
+        'directory','request_sha256','cluster','stratum','kind','events','source_ids','error') if key in task}
+        for name,task in state['tasks'].items() if task['phase']=='failed'}
+    if failed_workers:
+        # Worker failures quarantine only those responses. Keep this separate
+        # from a critical controller failure so independent admission can recover.
+        save(root/'worker_attention_required.json',dict(checked_epoch=time.time(),
+            failed_workers=failed_workers,
+            action='Review retained worker attempts and partial outputs; no automatic retry. '
+                   'Full publication bounds remain reserved; independent qualified work continues.'))
     qualified = publication_qualification_ready(config,state)
     parent_for_completion = None
     if not qualified:
@@ -781,7 +791,9 @@ def poll(root, config, state):
     submitted = 0
     spent = sum(t.get('published_bytes', 0) for t in state['tasks'].values())
     reserved = sum(t.get('publication_bound_bytes',config['worker_publication_bound_bytes']) for t in state['tasks'].values()
-                   if t['phase'] in ('submitted', 'submitting'))
+                   # A failed worker can leave unverified partial EOS writes.
+                   # Release its claim only after an explicit reviewed readback.
+                   if t['phase'] in ('submitted', 'submitting', 'failed'))
     # Scheduler hosts have no EOS client. Reuse the main production's actual
     # authenticated quota worker and its pinned native-success receipt.
     if config.get('refresh_quota') is True:
