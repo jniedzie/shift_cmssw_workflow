@@ -554,7 +554,8 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'boolean'):
                 post.save(root/'invalid.json',result,compact=1)
 
-    def check_real_ordinary_path(self, inventory_mode, hourly=False, final=False):
+    def check_real_ordinary_path(self, inventory_mode, hourly=False, final=False, hourly_limit=None,
+                                 previous_hourlies=(), growth=False, expected_ready=1):
         import run_shift_sm_postprocessing_controller as controller
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);parent=root/'parent';parent.mkdir()
@@ -595,6 +596,16 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 state['tasks'].update(old_cumulative=dict(kind='aggregate',phase='done',stratum='jpsi_5to10',
                     finished_epoch=time.time() if final else time.time()-4000,published_bytes=0,events=1),recent_group=dict(kind='source_group',
                     phase='done',stratum='jpsi_5to10',finished_epoch=time.time(),published_bytes=0,events=0))
+            if hourly_limit is not None:
+                config['maximum_hourly_updates_per_stratum']=hourly_limit
+            for index,phase in enumerate(previous_hourlies):
+                state['tasks']['old_hourly'+str(index)]=dict(kind='aggregate',phase=phase,
+                    publication_trigger='hourly',stratum='jpsi_5to10',finished_epoch=0,
+                    events=1,published_bytes=0)
+            if growth:
+                config['minimum_new_sources']=1
+            # Exercise the persisted count, as on a real controller restart.
+            state=json.loads(json.dumps(state))
             with patch.object(controller,'query',return_value=[]),patch.object(controller,'run_condor') as submit:
                 if inventory_mode=='malformed':
                     with self.assertRaises(ValueError):controller.poll(root,config,state)
@@ -603,7 +614,10 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 controller.poll(root,config,state)
             submit.assert_not_called()
             self.assertEqual(len(state['sources']),2);self.assertEqual(len(state['nanos']),1)
-            ready=[t for t in state['tasks'].values() if t['phase']=='ready'];self.assertEqual(len(ready),1)
+            ready=[t for t in state['tasks'].values() if t['phase']=='ready' and 'directory' in t]
+            self.assertEqual(len(ready),expected_ready)
+            if not expected_ready:
+                return
             task=ready[0];request=json.loads((Path(task['directory'])/'request.json').read_text())
             self.assertEqual(task['phase'],'ready');self.assertEqual(task['events'],1)
             self.assertEqual({r['source_id'] for r in request['normalization_sources']},{'positive','zero'})
@@ -625,6 +639,18 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
 
     def test_steady_source_groups_do_not_postpone_hourly_cumulative_refresh(self):
         self.check_real_ordinary_path('present',hourly=True)
+
+    def test_hourly_limit_survives_restart_and_counts_failed_and_pending_snapshots(self):
+        self.check_real_ordinary_path('present',hourly=True,hourly_limit=2,
+            previous_hourlies=('done',),expected_ready=1)
+        for phases in [('done','done'),('done','failed'),('done','ready')]:
+            with self.subTest(phases=phases):
+                self.check_real_ordinary_path('present',hourly=True,hourly_limit=2,
+                    previous_hourlies=phases,expected_ready=0)
+
+    def test_exhausted_hourly_limit_keeps_growth_and_final_flushes(self):
+        self.check_real_ordinary_path('present',hourly=True,hourly_limit=0,growth=True)
+        self.check_real_ordinary_path('present',final=True,hourly_limit=0)
 
     def test_final_settled_increment_flushes_without_waiting_for_another_bin(self):
         self.check_real_ordinary_path('present',final=True)

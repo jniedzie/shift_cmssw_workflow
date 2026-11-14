@@ -669,6 +669,9 @@ def poll(root, config, state):
         if type(config.get('maximum_starts_per_poll')) is not int or not 1 <= config['maximum_starts_per_poll'] <= 64:
             raise ValueError('Journaled publication requires a finite batch of 1 to 64 starts')
         reconcile_submission_batch(root, config, state, state_filename='state.json')
+    hourly_limit = config.get('maximum_hourly_updates_per_stratum')
+    if hourly_limit is not None and (type(hourly_limit) is not int or hourly_limit < 0):
+        raise ValueError('Hourly publication limit must be a nonnegative integer')
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
                 'Iwd', 'DAGManJobId', 'Owner', 'GlobalJobId', 'NumJobStarts', 'HoldReason'], timeout=45)
     live = {a['ClusterId']: a for a in ads}
@@ -786,7 +789,12 @@ def poll(root, config, state):
                 baseline_count = len(read_response_pin(pin)['baseline_source_ids'])
             if not last_finished:
                 last_finished = state.setdefault('publication_refresh_epochs',{}).setdefault(stratum,time.time())
-        hourly_update = set(ids) > set(previous) and time.time() - last_finished > 3600
+        # Every created hourly snapshot retains metadata, even while pending or
+        # after failure. Growth and final flushes do not consume this allowance.
+        hourlies = sum(t.get('publication_trigger') == 'hourly' and t['stratum'] == stratum
+                       for t in state['tasks'].values())
+        hourly_update = (set(ids) > set(previous) and time.time() - last_finished > 3600
+                        and (hourly_limit is None or hourlies < hourly_limit))
         final_due = (config.get('merged_nano_only_when_bin_complete') is True
             and set(ids) == set(complete_bin_source_ids(config,stratum))
             and not any(task['stratum']==stratum and task['phase']=='done'
@@ -795,11 +803,14 @@ def poll(root, config, state):
         final_settled = (settled is not None and set(ids)>set(previous) and not any(
             t['stratum']==stratum and t.get('kind')=='source_group' and t['phase'] in ('ready','submitted','submitting')
             for t in state['tasks'].values()))
-        if not meaningful_update(previous,ids,config.get('minimum_new_sources',10),
-                config.get('minimum_relative_source_growth',.2),baseline_count) and not hourly_update and not final_due and not final_settled:
+        growth_update = meaningful_update(previous,ids,config.get('minimum_new_sources',10),
+                config.get('minimum_relative_source_growth',.2),baseline_count)
+        if not growth_update and not hourly_update and not final_due and not final_settled:
             continue
         task = snapshot(root,config,stratum,sources,publication_status=settled if final_settled else None)
         if task:
+            task['publication_trigger'] = ('final' if final_due or final_settled else
+                                           'growth' if growth_update else 'hourly')
             state['tasks'][Path(task['directory']).name] = task
             if not journal:
                 save(root / 'state.json', state)
