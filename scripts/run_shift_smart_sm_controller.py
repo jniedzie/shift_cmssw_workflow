@@ -320,6 +320,9 @@ def observe(task, ads):
 
 
 def make_task(root, config, name, request, kind, stratum):
+    root = Path(root)
+    if not root.is_absolute():
+        raise ValueError('Task preparation requires an absolute persistent root: '+str(root))
     # AFS limits the size of one directory independently of volume quota.
     # Existing ledger paths stay fixed; only newly created tasks use shards.
     shard = hashlib.sha256(name.encode()).hexdigest()[:2]
@@ -523,6 +526,10 @@ def validate_source_worklist(config, state):
     if any(task['kind'] == 'raw_source' for task in state['tasks'].values()):
         raise ValueError('Finite source worklist cannot contain raw GEN refill tasks')
     for name, task in actual.items():
+        directory = Path(task.get('directory', ''))
+        description = Path(task.get('submit_description', directory/'worker.sub'))
+        if not directory.is_absolute() or not description.is_absolute():
+            raise ValueError('Finite source task requires absolute directory and submit paths: '+name)
         pin = expected[name]
         if task['request_sha256'] != pin['request_sha256'] or task['stratum'] != pin['stratum']:
             raise ValueError('Finite source request changed: '+name)

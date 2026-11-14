@@ -48,6 +48,13 @@ class SchedulingTests(unittest.TestCase):
             self.assertIn('SM_qcd_2to5_detector_20261113_detector_7300000', submit)
             self.assertNotIn('@KIND@', submit)
 
+    def test_relative_task_preparation_cannot_create_scheduler_inputs(self):
+        import run_shift_smart_sm_controller as controller
+        with self.assertRaisesRegex(ValueError,'absolute persistent root'):
+            controller.make_task(Path('validation/relative-campaign'),
+                dict(worker_template='initialdir = @DIRECTORY@\nqueue 1\n'),
+                'source_one',{},'source','qcd_low')
+
     def test_short_quota_jobs_have_priority_before_the_queue_statement(self):
         import run_shift_smart_sm_controller as controller
         with tempfile.TemporaryDirectory() as directory:
@@ -685,7 +692,8 @@ class CompactFiniteSourceTests(unittest.TestCase):
 
     def test_finite_worklist_prevents_refill_or_changed_source(self):
         import run_shift_smart_sm_controller as controller
-        task=dict(kind='source',phase='ready',stratum='qcd_low',request_sha256='a'*64)
+        task=dict(kind='source',phase='ready',stratum='qcd_low',request_sha256='a'*64,
+                  directory='/frozen/source_one')
         state=dict(tasks=dict(source_one=task))
         config=dict(production=dict(qcd_low=dict(chunks=1)),finite_source_worklist=[dict(
             task_name='source_one',stratum='qcd_low',request_sha256='a'*64)])
@@ -695,6 +703,18 @@ class CompactFiniteSourceTests(unittest.TestCase):
             with self.assertRaises(ValueError):controller.validate_source_worklist(changed,state)
         state['tasks']['source_one']['request_sha256']='b'*64
         with self.assertRaisesRegex(ValueError,'request changed'):controller.validate_source_worklist(config,state)
+
+    def test_appended_finite_source_cannot_use_relative_operational_paths(self):
+        import run_shift_smart_sm_controller as controller
+        config=dict(production=dict(qcd_low=dict(chunks=1)),finite_source_worklist=[dict(
+            task_name='source_one',stratum='qcd_low',request_sha256='a'*64)])
+        for directory,description in [('validation/source_one','/frozen/worker.sub'),
+                                       ('/frozen/source_one','validation/worker.sub')]:
+            task=dict(kind='source',phase='ready',stratum='qcd_low',request_sha256='a'*64,
+                      directory=directory,submit_description=description)
+            with self.subTest(directory=directory,description=description):
+                with self.assertRaisesRegex(ValueError,'absolute directory and submit paths'):
+                    controller.validate_source_worklist(config,dict(tasks=dict(source_one=task)))
 
     def test_configured_source_parallelism_keeps_legacy_default(self):
         tasks={str(i):dict(kind='source',phase='ready',stratum='qcd_low') for i in range(10)}
