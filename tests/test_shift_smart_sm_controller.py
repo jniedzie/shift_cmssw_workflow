@@ -421,6 +421,57 @@ class CompactFiniteSourceTests(unittest.TestCase):
         return dict(kind='source',phase='done',directory=str(directory),stratum='qcd_low',
                     request_sha256=name*8,bound_bytes=1000000),source
 
+    def test_opt_in_compact_groups_stage_one_verified_authority_without_redrawing(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);task,source=self.source(root,'good',selected=3)
+            state=dict(tasks={},next_detector_job=10)
+            config=dict(campaign='bounded',compact_source_authority=True,
+                compact_detector_requests=True,detector_group_size=2,
+                worker_template='transfer_input_files = @DIRECTORY@/request.json,/frozen/tools.tar.gz\nqueue 1\n',
+                detector_seed_policy=dict(job_base=10,seed_base=281140001,stride=100))
+            before=(Path(task['directory'])/'source_authority.json.gz').read_bytes()
+            controller.detector_tasks(root,config,state,task,source_task_name='source_good')
+            requests=[controller.read(Path(t['directory'])/'request.json') for t in state['tasks'].values()]
+            self.assertEqual([(r['selected_skip'],r['selected_count']) for r in requests],[(0,2),(2,1)])
+            self.assertEqual([r['detector_seed'] for r in requests],[281140001,281140101])
+            for t,r in zip(state['tasks'].values(),requests):
+                self.assertNotIn('detector_source',r)
+                ref=r['detector_source_ref']
+                self.assertEqual(ref['encoding'],'gzip-source-authority-v1')
+                self.assertEqual(ref['sha256'],hashlib.sha256(before).hexdigest())
+                self.assertEqual(Path(ref['path']).read_bytes(),before)
+                self.assertIn(ref['path'],(Path(t['directory'])/'worker.sub').read_text())
+                self.assertEqual(json.loads(gzip.decompress(before))['selected_source'],source)
+
+    def test_compact_opt_in_requires_authority_and_real_input_transfer(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);task,_=self.source(root,'good')
+            for changes,expected in [({'compact_source_authority':False},'qualified compressed'),
+                    ({'compact_detector_requests':'yes'},'must be boolean'),
+                    ({'worker_template':'queue 1\n'},'transfer_input_files')]:
+                with self.subTest(changes=changes):
+                    state=dict(tasks={},next_detector_job=10)
+                    config=dict(campaign='bounded',compact_source_authority=True,
+                        compact_detector_requests=True,detector_group_size=5,
+                        worker_template='transfer_input_files = request.json\nqueue 1\n')
+                    config.update(changes)
+                    with self.assertRaisesRegex(ValueError,expected):
+                        controller.detector_tasks(root,config,state,task)
+                    self.assertEqual(state['tasks'],{})
+
+    def test_compact_request_rejects_changed_authority_before_creating_children(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);task,_=self.source(root,'bad',corrupt=True)
+            state=dict(tasks={},next_detector_job=10)
+            config=dict(campaign='bounded',compact_source_authority=True,
+                compact_detector_requests=True,worker_template='transfer_input_files = request.json\nqueue 1\n')
+            with self.assertRaisesRegex(ValueError,'authority changed'):
+                controller.detector_tasks(root,config,state,task)
+            self.assertEqual(state['tasks'],{})
+
     def test_compact_handoff_preserves_order_probabilities_and_zero_source(self):
         import run_shift_smart_sm_controller as controller
         with tempfile.TemporaryDirectory() as directory:

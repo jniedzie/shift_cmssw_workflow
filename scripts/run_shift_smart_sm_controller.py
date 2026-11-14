@@ -184,6 +184,19 @@ def make_task(root, config, name, request, kind, stratum):
         if type(priority) is not int:
             raise ValueError('Worker stage priority must be an integer')
         text = text.replace('@PRIORITY@',str(priority))
+    reference = request.get('detector_source_ref')
+    if reference is not None:
+        path = reference['path']
+        if not Path(path).is_absolute() or any(c in path for c in ('\n', '\r', ',')):
+            raise ValueError('Invalid detector source transfer path')
+        pattern = r'(?mi)^(transfer_input_files\s*=[ \t]*)([^\n]*)$'
+        matches = list(re.finditer(pattern, text))
+        if len(matches) != 1:
+            raise ValueError('Compact detector requests require one transfer_input_files line')
+        match = matches[0]
+        inputs = [p.strip() for p in match.group(2).split(',') if p.strip()]
+        if path not in inputs:
+            text = text[:match.start(2)]+','.join(inputs+[path])+text[match.end(2):]
     if kind == 'quota':
         priority = config.get('stage_priorities',{}).get('quota',1000)
         if type(priority) is not int:
@@ -274,9 +287,19 @@ def validate_detector_seed_policy(config, state):
 def detector_tasks(root, config, state, source_task, source_task_name=None):
     validate_detector_seed_policy(config, state)
     result = read(Path(source_task['directory'])/'result.json')
+    compact_request = config.get('compact_detector_requests', False)
+    if type(compact_request) is not bool:
+        raise ValueError('Compact detector request policy must be boolean')
+    reference = None
+    if compact_request and not (config.get('compact_source_authority') and result.get('source_authority')):
+        raise ValueError('Compact detector requests require a qualified compressed source authority')
     if config.get('compact_source_authority') and result.get('source_authority'):
         from run_shift_qcd_production_source import read_source_authority
+        pin = result['source_authority']
         result = read_source_authority(source_task['directory'], result)
+        if compact_request:
+            reference = dict(path=str((Path(source_task['directory'])/'source_authority.json.gz').resolve()),
+                sha256=pin['sha256'], encoding='gzip-source-authority-v1')
     if result.get('source'):
         source_task['source_id'] = result['source'].get('source_id')
     source = result.get('selected_source')
@@ -319,9 +342,13 @@ def detector_tasks(root, config, state, source_task, source_task_name=None):
             stage='smart_sm_detector', cohort_id=config['campaign'],
             argv=['python3', '@TOOLS@/scripts/run_shift_smart_sm_detector.py', 'request.json'],
             application_timeout_seconds=45000, result_path='report.json',
-            return_files=[], failure_return_files=['evidence.tar.gz'], status_fields={}, detector_source=source,
+            return_files=[], failure_return_files=['evidence.tar.gz'], status_fields={},
             selected_skip=start, selected_count=min(stride, count-start), detector_job=job,
             reservation_bytes=reservation)
+        if reference is None:
+            request['detector_source'] = source
+        else:
+            request['detector_source_ref'] = reference
         if config.get('detector_seed_policy') is not None:
             request['detector_seed'] = first_seed+child_index*seed_stride
         name='detector_'+str(job).zfill(7)
