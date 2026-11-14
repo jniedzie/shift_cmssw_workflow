@@ -565,11 +565,16 @@ def refresh_quota(root, config, ads):
     admit physics jobs or share a writable ledger with another controller.
     """
     from run_shift_smart_sm_controller import make_task, observe, save as save_ledger
-    directory = Path(config['parent_state'])
+    directory = Path(config.get('quota_state', config['parent_state']))
     if directory != root/'quota':
         raise ValueError('Publisher quota authority must be its own private quota directory')
     directory.mkdir(exist_ok=True)
-    parent_config = read(config['parent_config'])
+    quota_config = config.get('quota_config', config['parent_config'])
+    if config.get('quota_config') and not config.get('quota_config_sha256'):
+        raise ValueError('Publisher private quota configuration requires its frozen SHA-256')
+    if config.get('quota_config_sha256') and digest(quota_config) != config['quota_config_sha256']:
+        raise ValueError('Publisher private quota configuration changed')
+    parent_config = read(quota_config)
     path = directory/'ledger.json'
     parent = read(path) if path.exists() else dict(tasks={})
     tasks = list(parent['tasks'].values())
@@ -801,7 +806,10 @@ def poll(root, config, state):
             'Iwd','DAGManJobId','Owner','GlobalJobId','NumJobStarts','HoldReason'],timeout=45)
         refresh_quota(root,config,ads)
     parent=read(Path(config['parent_state'])/'ledger.json')
-    observations = [t for t in parent['tasks'].values()
+    quota_directory = Path(config.get('quota_state', config['parent_state']))
+    separate_quota = quota_directory != Path(config['parent_state'])
+    quota_parent = read(quota_directory/'ledger.json') if separate_quota else parent
+    observations = [t for t in quota_parent['tasks'].values()
                     if t['kind'] == 'quota' and t['phase'] == 'done']
     if config.get('peer_storage_authority'):
         observations=[t for t in observations if read_response_pin(dict(
@@ -828,7 +836,23 @@ def poll(root, config, state):
                     if t.get('finished_epoch', 0) > quota['checked_epoch'])
     free = quota['free_bytes'] - parent_since - own_since
     parent_config = read(config['parent_config'])
-    if config.get('refresh_quota') is True and 'reserved_science_bytes' not in parent_config:
+    if separate_quota:
+        # Quota observation may outlive science admission. Its private ledger
+        # must never replace the real science ledger in resource accounting.
+        if (not config.get('refresh_quota') or quota_directory != root/'quota'
+                or not config.get('parent_config_sha256')
+                or digest(config['parent_config']) != config['parent_config_sha256']
+                or type(parent_config.get('own_reservation_bytes')) is not int
+                or parent_config['own_reservation_bytes'] <= 0):
+            raise ValueError('Separate publisher quota requires its full pinned scientific parent')
+        science = [t for t in parent['tasks'].values() if t['kind'] in ('source', 'detector')]
+        if not science or any(t.get('native_exit_code') != 0
+                or not re.fullmatch(r'[0-9a-f]{64}', t.get('result_sha256', ''))
+                or type(t.get('published_bytes')) is not int or t['published_bytes'] < 0
+                for t in science if t['phase'] == 'done'):
+            raise ValueError('Scientific parent lacks native completed-work accounting')
+    if (config.get('refresh_quota') is True and not separate_quota
+            and 'reserved_science_bytes' not in parent_config):
         raise ValueError('Private quota publication requires an explicit full science write reservation')
     science_reserve, science_future = science_write_reservation(parent_config,state,quota['checked_epoch'])
     parent_committed = sum(t.get('published_bytes', 0) for t in parent['tasks'].values() if t['phase'] == 'done')

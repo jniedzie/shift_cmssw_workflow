@@ -696,6 +696,92 @@ class PublisherQuotaTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'source write bounds'):
             science_write_reservation(config,state,30)
 
+    def test_private_quota_refresh_preserves_a_separate_finished_science_ledger(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import run_shift_smart_sm_controller as native
+        parent=self.root/'science';parent.mkdir()
+        ledger=parent/'ledger.json';ledger.write_text(json.dumps(dict(tasks=dict(
+            done=dict(kind='source',phase='done',published_bytes=400)))))
+        before=ledger.read_bytes()
+        policy=self.root/'science_config.json';policy.write_text(json.dumps(dict(own_reservation_bytes=500)))
+        config=dict(self.config,parent_state=str(parent),parent_config=str(policy),
+            quota_state=str(self.root/'quota'),quota_config=str(self.parent_config),
+            quota_config_sha256=post.digest(self.parent_config))
+        task=dict(kind='quota',phase='ready',directory=str(self.root/'job'),request_sha256='a'*64)
+        with patch.object(native,'make_task',return_value=task) as make, \
+             patch.object(controller,'run_condor',return_value='123.0 - 123.0\n'):
+            controller.refresh_quota(self.root,config,[])
+        self.assertEqual(make.call_args.args[0],self.root/'quota')
+        self.assertEqual(make.call_args.args[1],dict(worker_template='queue 1\n'))
+        self.assertEqual(ledger.read_bytes(),before)
+        self.parent_config.write_text('{}')
+        with self.assertRaisesRegex(ValueError,'quota configuration changed'):
+            controller.refresh_quota(self.root,config,[])
+
+    def test_separate_fresh_quota_never_replaces_real_science_accounting_or_its_full_allocation(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        for allocation in (509,510):
+            with self.subTest(allocation=allocation),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);parent=root/'science';parent.mkdir();private=root/'quota';private.mkdir()
+                result=private/'result.json';result.write_text(json.dumps(dict(
+                    complete=True,checked_epoch=time.time(),free_bytes=10000)))
+                quota=dict(kind='quota',phase='done',directory=str(private),result_sha256=post.digest(result),
+                    native_exit_code=0,finished_epoch=time.time(),published_bytes=0)
+                (private/'ledger.json').write_text(json.dumps(dict(tasks=dict(quota=quota))))
+                (parent/'ledger.json').write_text(json.dumps(dict(tasks=dict(
+                    source=dict(kind='source',phase='done',published_bytes=400,
+                        native_exit_code=0,result_sha256='a'*64),
+                    pending=dict(kind='detector',phase='submitted',bound_bytes=100)))))
+                parent_policy=root/'parent_config.json';parent_policy.write_text(json.dumps(dict(
+                    own_reservation_bytes=allocation,external_future_reservation_bytes=0,
+                    safety_floor_bytes=0,account_worker_ceiling=100)))
+                config=dict(campaign='separate',parent_state=str(parent),parent_config=str(parent_policy),
+                    parent_config_sha256=post.digest(parent_policy),quota_state=str(private),refresh_quota=True,
+                    worker_publication_bound_bytes=10,maximum_publication_bytes=1000)
+                job=root/'group';job.mkdir();(job/'worker.sub').write_text('queue 1\n')
+                state=dict(tasks=dict(group=dict(phase='ready',kind='source_group',stratum='qcd_1to2',
+                    events=1,source_ids=['group'],directory=str(job),publication_bound_bytes=10)),
+                    latest={},sources={},nanos={})
+                with patch.object(controller,'query',return_value=[]), \
+                     patch.object(controller,'publication_history',return_value={}), \
+                     patch.object(controller,'refresh_quota'), \
+                     patch.object(controller,'source_cache'),patch.object(controller,'nano_cache'), \
+                     patch.object(controller,'closed_sources',return_value={}), \
+                     patch.object(controller,'run_condor',return_value='123.0 - 123.0\n') as submit:
+                    controller.poll(root,config,state)
+                self.assertEqual(submit.call_count,int(allocation==510))
+                self.assertEqual(state['tasks']['group']['phase'],'submitted' if allocation==510 else 'ready')
+
+    def test_separate_quota_rejects_changed_parent_and_missing_native_science_proof(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        for failure in ('changed_config','quota_only_parent','nonzero_science'):
+            with self.subTest(failure=failure),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);parent=root/'science';parent.mkdir();private=root/'quota';private.mkdir()
+                result=private/'result.json';result.write_text(json.dumps(dict(
+                    complete=True,checked_epoch=time.time(),free_bytes=10000)))
+                quota=dict(kind='quota',phase='done',directory=str(private),result_sha256=post.digest(result),
+                    native_exit_code=0,finished_epoch=time.time(),published_bytes=0)
+                (private/'ledger.json').write_text(json.dumps(dict(tasks=dict(quota=quota))))
+                science=dict(source=dict(kind='source',phase='done',published_bytes=40,
+                    native_exit_code=0,result_sha256='a'*64))
+                if failure=='quota_only_parent':science={}
+                if failure=='nonzero_science':science['source']['native_exit_code']=1
+                (parent/'ledger.json').write_text(json.dumps(dict(tasks=science)))
+                policy=root/'parent_config.json';policy.write_text(json.dumps(dict(own_reservation_bytes=500)))
+                config=dict(campaign='separate',parent_state=str(parent),parent_config=str(policy),
+                    parent_config_sha256=post.digest(policy),quota_state=str(private),refresh_quota=True,
+                    worker_publication_bound_bytes=10,maximum_publication_bytes=1000)
+                if failure=='changed_config':policy.write_text('{}')
+                with patch.object(controller,'query',return_value=[]), \
+                     patch.object(controller,'publication_history',return_value={}), \
+                     patch.object(controller,'refresh_quota'),patch.object(controller,'source_cache'), \
+                     patch.object(controller,'nano_cache'),patch.object(controller,'closed_sources',return_value={}), \
+                     patch.object(controller,'run_condor') as submit, self.assertRaises(ValueError):
+                    controller.poll(root,config,dict(tasks={},latest={},sources={},nanos={}))
+                submit.assert_not_called()
+
     def test_worker_bounds_follow_actual_bin_and_interim_request(self):
         from run_shift_sm_postprocessing_controller import worker_publication_bound
         config=dict(worker_publication_bound_bytes=100,
