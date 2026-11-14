@@ -497,10 +497,10 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 directory=str(quota),result_sha256=post.digest(quota/'result.json'),native_exit_code=0,
                 finished_epoch=time.time(),published_bytes=0))))
             policy=root/'policy.json';post.save(policy,dict(own_reservation_bytes=10**11,
-                external_future_reservation_bytes=0,safety_floor_bytes=0,account_worker_ceiling=10000))
+                external_future_reservation_bytes=0,safety_floor_bytes=0,account_worker_ceiling=2000))
             config=dict(campaign='large-publication',parent_state=str(parent),parent_config=str(policy),
                 submission_journal=True,maximum_starts_per_poll=64,maximum_group_workers=10000,
-                maximum_publication_bytes=10**10,worker_publication_bound_bytes=100)
+                maximum_publication_bytes=10**10,worker_publication_bound_bytes=100,maximum_idle_workers=1800)
             state=dict(tasks={},latest=dict(qcd_1to2=['old']),nanos={},sources={})
             for index in range(16000):
                 state['sources'][str(index)]=dict(normalization=dict(source_id=str(index),
@@ -522,7 +522,9 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                 original_save(path,value)
             def native(*args,**kwargs):
                 cluster=next(clusters);return f'{cluster}.0 - {cluster}.0\n'
-            with patch.object(controller,'query',return_value=[]) as query, \
+            peers=[dict(ClusterId=30000+i,JobStatus=2 if i<1344 else 1,JobUniverse=5)
+                   for i in range(1344+855)]
+            with patch.object(controller,'query',return_value=peers) as query, \
                     patch.object(controller,'publication_history',return_value={}), \
                     patch.object(controller,'source_cache'),patch.object(controller,'nano_cache'), \
                     patch.object(controller,'closed_sources',return_value={}), \
@@ -530,7 +532,7 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
                     patch.object(main_controller,'run_condor',side_effect=native) as submit:
                 controller.poll(root,config,state)
                 self.assertEqual(submit.call_count,64)
-                query.return_value=[dict(ClusterId=t['cluster'],JobStatus=2,JobUniverse=5)
+                query.return_value=peers+[dict(ClusterId=t['cluster'],JobStatus=1,JobUniverse=5)
                     for t in state['tasks'].values() if t['phase']=='submitted']
                 controller.poll(root,config,state)
                 self.assertEqual(submit.call_count,100)
@@ -539,6 +541,29 @@ class OrdinaryPublisherPollTest(unittest.TestCase):
             self.assertEqual(sum(t['phase']=='submitted' for t in restored['tasks'].values()),100)
             self.assertEqual(restored['sources'],state['sources'])
             self.assertFalse((root/'ledger.json').exists())
+            heartbeat=post.read(root/'heartbeat.json')
+            self.assertEqual(heartbeat['account_running_workers'],1344)
+            self.assertEqual(heartbeat['account_idle_workers'],855+64)
+            directory=root/'blocked';directory.mkdir();post.save(directory/'request.json',dict(event=[1,2,3]))
+            (directory/'worker.sub').write_text('queue 1\n')
+            state['tasks']['blocked']=dict(kind='source_group',phase='ready',events=1,stratum='qcd_1to2',
+                directory=str(directory),source_ids=['blocked'],publication_bound_bytes=100,
+                request_sha256=post.digest(directory/'request.json'))
+            own=[dict(ClusterId=t['cluster'],JobStatus=1,JobUniverse=5)
+                 for t in state['tasks'].values() if t['phase']=='submitted']
+            for limit,ads,reason in [(955,peers+own,'idle_worker_limit'),
+                    (1800,[dict(ClusterId=40000+i,JobStatus=2,JobUniverse=5) for i in range(2000)]+own,
+                     'running_worker_limit')]:
+                config['maximum_idle_workers']=limit
+                with patch.object(controller,'query',return_value=ads), \
+                        patch.object(controller,'publication_history',return_value={}), \
+                        patch.object(controller,'source_cache'),patch.object(controller,'nano_cache'), \
+                        patch.object(controller,'closed_sources',return_value={}), \
+                        patch.object(main_controller,'run_condor') as submit:
+                    controller.poll(root,config,state)
+                submit.assert_not_called()
+                self.assertEqual(post.read(root/'heartbeat.json')['admission_wait_reason'],reason)
+                self.assertEqual(state['tasks']['blocked']['phase'],'ready')
 
     def test_compact_receipt_keeps_all_parsed_histogram_and_normalization_values(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -758,19 +783,22 @@ class PublisherQuotaTest(unittest.TestCase):
         self.parent_config.write_text(json.dumps(dict(worker_template='queue 1\n')))
         self.config=dict(campaign='night',parent_state=str(self.root/'quota'),parent_config=str(self.parent_config))
 
-    def test_quota_uses_normal_native_stage_and_does_not_duplicate_pending_worker(self):
+    def test_quota_runs_with_full_science_caps_and_never_duplicates_pending_worker(self):
         import run_shift_sm_postprocessing_controller as controller
         import run_shift_smart_sm_controller as native
         task=dict(kind='quota',phase='ready',directory=str(self.root/'job'),request_sha256='a'*64)
+        self.config.update(account_worker_ceiling=2000,maximum_idle_workers=1800)
+        full=[dict(ClusterId=i+1000,JobUniverse=5,JobStatus=2 if i<2000 else 1)
+              for i in range(3800)]
         with patch.object(native,'make_task',return_value=task) as make, \
              patch.object(controller,'run_condor',return_value='123.0 - 123.0\n') as submit:
-            controller.refresh_quota(self.root,self.config,[])
+            controller.refresh_quota(self.root,self.config,full)
             request=make.call_args.args[3]
             self.assertEqual(request['stage'],'smart_sm_quota')
             self.assertEqual(request['reservation_bytes'],0)
             self.assertEqual(submit.call_count,1)
             with patch.object(native,'observe'):
-                controller.refresh_quota(self.root,self.config,[])
+                controller.refresh_quota(self.root,self.config,full)
             self.assertEqual(make.call_count,1);self.assertEqual(submit.call_count,1)
         ledger=json.loads((self.root/'quota/ledger.json').read_text())
         self.assertEqual(ledger['tasks']['quota_00000']['cluster'],123)

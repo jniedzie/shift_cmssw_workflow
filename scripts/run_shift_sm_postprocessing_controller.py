@@ -909,7 +909,17 @@ def poll(root, config, state):
         science_future-=evidence
         parent_future=parent_in_flight+science_future
     floor = external + parent_config['safety_floor_bytes']
-    account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
+    idle_limit = config.get('maximum_idle_workers',parent_config.get('maximum_idle_workers'))
+    running_limit = config.get('account_worker_ceiling',parent_config['account_worker_ceiling'])
+    if (type(running_limit) is not int or running_limit < 1
+            or idle_limit is not None and (type(idle_limit) is not int or idle_limit < 1)):
+        raise ValueError('Account running and idle limits must be positive integers')
+    # Explicit separate limits preserve queue headroom for independent useful
+    # work. Older policies without an idle limit retain their previous behavior.
+    statuses = (2,6,7) if idle_limit is not None else (1,2,6,7)
+    account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in statuses for a in ads)
+    account_idle = sum(a.get('JobUniverse') == 5 and a['JobStatus'] == 1 for a in ads)
+    admission_wait = None
     submission_batch = None
     for name, task in sorted(state['tasks'].items(), key=lambda item: item[1]['events']):
         if task['phase'] != 'ready':
@@ -921,12 +931,19 @@ def poll(root, config, state):
             continue
         bound = task.get('publication_bound_bytes',config['worker_publication_bound_bytes'])
         if spent + reserved + bound > config['maximum_publication_bytes']:
+            admission_wait = 'publication_budget'
             break
         if parent_committed + parent_in_flight + science_reserve + spent + reserved + bound > parent_config['own_reservation_bytes']:
+            admission_wait = 'science_allocation'
             break
         if free - reserved - bound < floor + parent_future:
+            admission_wait = 'storage'
             break
-        if account_workers + submitted >= parent_config['account_worker_ceiling']:
+        if account_workers + submitted >= running_limit:
+            admission_wait = 'running_worker_limit'
+            break
+        if idle_limit is not None and account_idle + submitted >= idle_limit:
+            admission_wait = 'idle_worker_limit'
             break
         # A small canary uses the exact real publication route; independent
         # bins are released together once that result has passed.
@@ -955,7 +972,9 @@ def poll(root, config, state):
     waiting = any(t['phase'] == 'ready' for t in state['tasks'].values()) and not any(
         t['phase'] in ('submitted', 'submitting') for t in state['tasks'].values())
     save(root / 'heartbeat.json', dict(checked_epoch=time.time(), submitted_this_poll=submitted,
-        phase='waiting_for_storage' if waiting else 'running',
+        phase='waiting_for_'+(admission_wait or 'admission') if waiting else 'running',
+        admission_wait_reason=admission_wait,account_running_workers=account_workers,
+        account_idle_workers=account_idle,account_worker_ceiling=running_limit,maximum_idle_workers=idle_limit,
         publication_budget_remaining_bytes=config['maximum_publication_bytes'] - spent - reserved,
         ready_sources={s: len(v) for s, v in groups.items()},
         tasks={phase: sum(t['phase'] == phase for t in state['tasks'].values())
