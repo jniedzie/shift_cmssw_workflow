@@ -224,6 +224,62 @@ class SupplyAndRetryTests(unittest.TestCase):
                 self.assertEqual(child['detector_source'],request['detector_source'])
             finally:os.chdir(here)
 
+    def test_compact_CPU_retry_entry_reads_staged_authority_and_keeps_slice_and_seed(self):
+        import run_shift_smart_sm_controller as controller
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            here=os.getcwd()
+            try:
+                os.chdir(directory)
+                source=dict(gen='/synthetic',weights=[1.,.2],selected_indices=[0,1],
+                            sampling_probabilities=[1.,.5],event_ids=[[1,1,1],[1,1,2]])
+                data=gzip.compress(json.dumps(dict(complete=True,primary_preflight=dict(complete=True),
+                                                   selected_source=source)).encode())
+                Path('source_authority.json.gz').write_bytes(data)
+                reference=dict(path='/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/test/source_authority.json.gz',
+                    sha256=hashlib.sha256(data).hexdigest(),encoding='gzip-source-authority-v1')
+                request=dict(detector_source_ref=reference,selected_skip=1,selected_count=1,
+                             detector_job=7700001,detector_seed=281140101)
+                child=controller.cpu_retry_request(request)
+                Path('request.json').write_text(json.dumps(child))
+                with patch('subprocess.run') as run:exec(compile(child['argv'][2],'<retry>','exec'),{})
+                self.assertEqual(json.loads(Path('selected_source.json').read_text()),
+                                 dict(source,gen_path_resolved=True))
+                argv=run.call_args.args[0]
+                for flag,value in [('--skip','1'),('--count','1'),('--seed','281140101')]:
+                    self.assertEqual(argv[argv.index(flag)+1],value)
+                self.assertEqual(child['detector_source_ref'],reference)
+            finally:os.chdir(here)
+
+    def test_compact_timeout_recovery_resolves_the_same_source_before_fingerprinting(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory);original=root/'original';original.mkdir()
+            descriptor=dict(gen='/synthetic/GEN.root',weights=[1.]*5,
+                            selected_indices=list(range(5)),sampling_probabilities=[.5]*5)
+            request=dict(detector_source_ref=dict(path='/persistent/source_authority.json.gz',
+                sha256='a'*64,encoding='gzip-source-authority-v1'),selected_skip=0,selected_count=5,
+                detector_job=7700000,detector_seed=281140001)
+            controller.save(original/'request.json',request);checksum=controller.sha(original/'request.json')
+            fingerprint=hashlib.sha256((json.dumps(dict(descriptor,gen_path_resolved=True),indent=2)+'\n').encode()).hexdigest()
+            controller.save(original/'result.json',dict(error="TimeoutError('SIM made no event progress for 3600 seconds')",
+                request_sha256=checksum,source_descriptor_sha256=fingerprint,source_skip=0,events=5,
+                current_tier='SIM',source_indices=list(range(5)),validated_tier_events=dict(NANO=0)))
+            (original/'events.log').write_text('005 (123.000.000) event\nNormal termination (return value 1)\n...\n')
+            task=dict(kind='detector',phase='failed',directory=str(original),cluster=123,
+                      request_sha256=checksum,stratum='dy_low')
+            state=dict(tasks=dict(parent=task),next_detector_job=7700001)
+            config=dict(reviewed_SIM_timeout_retry=True,
+                        worker_template='transfer_input_files = @DIRECTORY@/request.json\nqueue 1\n')
+            ad=dict(ClusterId=123,ProcId=0,JobStatus=5,ExitCode=1,RemoteUserCpu=6300,Iwd=str(original))
+            with patch('shift_eos_storage.detector_source',return_value=descriptor) as load:
+                retry_stalled_sim(root,config,state,[ad]);load.assert_called_once_with(request)
+            child=controller.read(Path(state['tasks']['cpu_retry_parent']['directory'])/'request.json')
+            self.assertEqual(child['detector_source_ref'],request['detector_source_ref'])
+            self.assertEqual(child['detector_seed'],281140001)
+            self.assertEqual((child['selected_skip'],child['selected_count']),(0,5))
+            self.assertEqual(state['next_detector_job'],7700001)
+
     def test_reviewed_native_SIM_timeout_keeps_event_order_seed_and_failure(self):
         with tempfile.TemporaryDirectory() as directory:
             root=Path(directory);original=root/'original';original.mkdir()
@@ -402,6 +458,65 @@ class ControllerRecoveryTests(unittest.TestCase):
                     with self.assertRaises(type(error)):controller.run_controller(root,{})
                 self.assertEqual(poll.call_count,1)
                 self.assertTrue((root/'controller_failure.json').exists())
+
+
+class GroupedDetectorPilotTests(unittest.TestCase):
+    def fixture(self, root):
+        import run_shift_smart_sm_controller as controller
+        source=dict(selected_indices=list(range(5)),event_ids=[[11,1,i+1] for i in range(5)],
+                    weights=[1.]*5,sampling_probabilities=[1.,.5,1.,.25,1.])
+        request=dict(selected_skip=0,selected_count=5,detector_source=source)
+        directory=root/'pilot';directory.mkdir()
+        controller.save(directory/'request.json',request);digest=controller.sha(directory/'request.json')
+        result=dict(complete=True,exit_code=0,request_sha256=digest,events=5,
+            validated_tier_events=dict(NANO=5),source_indices=list(range(5)),
+            sampling_probabilities=source['sampling_probabilities'],nano_sha256='a'*64,
+            nano_readback_sha256='a'*64,nano=dict(events=5,event_ids=source['event_ids'],
+                                               sampling_corrected_sumw=9.))
+        controller.save(directory/'result.json',result)
+        controller.save(directory/'status.json',dict(complete=True,exit_code=0))
+        state=dict(tasks=dict(pilot=dict(kind='detector',phase='done',stratum='dy_low',
+            directory=str(directory),cluster=123,request_sha256=digest,selected_events=5),
+            source=dict(kind='source',phase='ready',stratum='dy_low')))
+        config=dict(production=dict(dy_low={},jpsi_low={}),detector_group_size=5,
+                    detector_canary_tasks=dict(dy_low='pilot',jpsi_low='not_created_yet'))
+        return config,state,result
+
+    def test_qualified_bin_opens_without_blocking_other_sources_or_requiring_other_pilots(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            config,state,_=self.fixture(Path(directory))
+            with patch.object(controller,'native_exit',return_value=0):
+                self.assertEqual(controller.detector_pilot_qualifications(config,state),
+                                 dict(dy_low=True,jpsi_low=False))
+            self.assertEqual(state['tasks']['source']['phase'],'ready')
+
+    def test_counts_identities_weights_and_native_exit_are_required(self):
+        import run_shift_smart_sm_controller as controller
+        mutations=[lambda r:r.update(events=1),lambda r:r['nano'].update(events=1),
+            lambda r:r['nano'].update(event_ids=[[99,1,i] for i in range(5)]),
+            lambda r:r['nano'].update(sampling_corrected_sumw=5.),
+            lambda r:r.update(nano_readback_sha256='b'*64)]
+        for mutate in mutations:
+            with self.subTest(mutate=mutate),tempfile.TemporaryDirectory() as directory:
+                config,state,result=self.fixture(Path(directory));mutate(result)
+                controller.save(Path(directory)/'pilot/result.json',result)
+                with patch.object(controller,'native_exit',return_value=0):
+                    self.assertFalse(controller.detector_pilot_qualifications(config,state)['dy_low'])
+                self.assertIn('pilot_qualification_error',state['tasks']['pilot'])
+                self.assertEqual(state['tasks']['source']['phase'],'ready')
+        with tempfile.TemporaryDirectory() as directory:
+            config,state,_=self.fixture(Path(directory))
+            with patch.object(controller,'native_exit',return_value=1):
+                self.assertFalse(controller.detector_pilot_qualifications(config,state)['dy_low'])
+
+    def test_pilot_policy_is_opt_in_and_requires_complete_bin_coverage(self):
+        import run_shift_smart_sm_controller as controller
+        with patch.object(controller,'read',side_effect=AssertionError('Unneeded I/O')):
+            self.assertEqual(controller.detector_pilot_qualifications({},dict(tasks={})),{})
+        with self.assertRaisesRegex(ValueError,'every production bin'):
+            controller.detector_pilot_qualifications(dict(production=dict(a={},b={}),
+                detector_canary_tasks=dict(a='pilot')),dict(tasks={}))
 
 
 class CompactFiniteSourceTests(unittest.TestCase):

@@ -15,6 +15,7 @@ import gzip
 import hashlib
 import heapq
 import json
+import math
 import os
 from pathlib import Path
 import pwd
@@ -581,6 +582,63 @@ def detector_canary_qualified(pin):
         and result.get('request_sha256') == pin['request_sha256'])
 
 
+def detector_pilot_qualifications(config, state):
+    """Gate each bin's detector expansion without blocking source preparation."""
+    mapping = config.get('detector_canary_tasks')
+    if mapping is None:
+        return {}
+    if (not isinstance(mapping, dict) or not mapping
+            or any(not isinstance(st, str) or not isinstance(name, str) for st,name in mapping.items())
+            or ('production' in config and set(mapping) != set(config['production']))):
+        raise ValueError('Detector pilot task map must cover every production bin')
+    count = config.get('detector_group_size', 5)
+    if type(count) is not int or count < 1:
+        raise ValueError('Detector pilot needs a positive group size')
+    qualified = {}
+    for stratum, name in mapping.items():
+        task = state['tasks'].get(name)
+        qualified[stratum] = False
+        if task is None or task['phase'] != 'done':
+            continue
+        try:
+            if task['kind'] != 'detector' or task['stratum'] != stratum:
+                raise ValueError('Pilot task belongs to a different stage or bin')
+            directory = Path(task['directory'])
+            request, result, status = (read(directory/file) for file in
+                                      ('request.json','result.json','status.json'))
+            if (native_exit(directory/'events.log',task['cluster']) != 0
+                    or status.get('complete') is not True or status.get('exit_code') != 0
+                    or result.get('complete') is not True or result.get('exit_code') != 0
+                    or sha(directory/'request.json') != task['request_sha256']
+                    or (task.get('result_sha256') is not None
+                        and sha(directory/'result.json') != task['result_sha256'])
+                    or result.get('request_sha256') != task['request_sha256']
+                    or request.get('selected_count') != count or task.get('selected_events') != count
+                    or result.get('events') != count or result.get('nano',{}).get('events') != count
+                    or result.get('validated_tier_events',{}).get('NANO') != count):
+                raise ValueError('Grouped pilot lacks exact native/count closure')
+            from shift_eos_storage import detector_source
+            source = detector_source(request)
+            start = request['selected_skip']
+            indices = source['selected_indices'][start:start+count]
+            identities = [source['event_ids'][i] for i in indices]
+            probabilities = source['sampling_probabilities'][start:start+count]
+            weights = [source['weights'][i] for i in indices]
+            if (len(indices) != count or result['nano']['event_ids'] != identities
+                    or result.get('source_indices') != indices
+                    or result.get('sampling_probabilities') != probabilities
+                    or not math.isclose(result['nano']['sampling_corrected_sumw'],
+                        math.fsum(w/p for w,p in zip(weights,probabilities)), rel_tol=2e-9)
+                    or result.get('nano_sha256') != result.get('nano_readback_sha256')
+                    or not isinstance(result.get('nano_sha256'),str)
+                    or len(result['nano_sha256']) != 64):
+                raise ValueError('Grouped pilot changed source identities, W/p or Nano readback')
+            qualified[stratum] = True
+        except (ValueError, KeyError, TypeError, ArithmeticError, FileNotFoundError, EOFError) as error:
+            task['pilot_qualification_error'] = str(error)
+    return qualified
+
+
 def source_task(root, config, state, stratum, index):
     request = copy.deepcopy(config['source_templates'][stratum])
     row = request['source_request']
@@ -685,7 +743,8 @@ def retry_stalled_sim(root,config,state,ads):
                 or live[0].get('RemoteUserCpu',0)<3600 or live[0]['Iwd']!=str(directory)
                 or not native_exit_hold(directory/'events.log',task['cluster'],live[0])):continue
         request=read(directory/'request.json')
-        descriptor=dict(request['detector_source'],gen_path_resolved=True)
+        from shift_eos_storage import detector_source
+        descriptor=dict(detector_source(request),gen_path_resolved=True)
         start,count=request['selected_skip'],request['selected_count']
         fingerprint=hashlib.sha256((json.dumps(descriptor,indent=2)+'\n').encode()).hexdigest()
         if (sha(directory/'request.json')!=task['request_sha256']
@@ -714,9 +773,10 @@ def cpu_retry_request(request):
     code="""# Code style: AI-code. AI-generated same-seed CPU-only recovery entry.
 import json,sys,subprocess
 from pathlib import Path
+from shift_eos_storage import detector_source
 r=json.loads(Path('request.json').read_text())
 seed_arguments=['--seed',str(r['detector_seed'])] if 'detector_seed' in r else []
-Path('selected_source.json').write_text(json.dumps(dict(r['detector_source'],gen_path_resolved=True),indent=2)+'\\n')
+Path('selected_source.json').write_text(json.dumps(dict(detector_source(r),gen_path_resolved=True),indent=2)+'\\n')
 subprocess.run([sys.executable,'@TOOLS@/scripts/run_shift_gen_to_nano.py','selected_source.json',
  '--skip',str(r['selected_skip']),'--count',str(r['selected_count']),'--job',str(r['detector_job']),
  '--templates','@TOOLS@/templates','--publish','--remove-consumed-intermediates',
@@ -836,6 +896,13 @@ def step(root, config, state):
         if family not in fresh_detector_families:
             raise ValueError('Detector qualification has no combined family canary: '+family)
         fresh_detector_families[family] = fresh_detector_families[family] or qualified
+    pilot_qualifications = detector_pilot_qualifications(config,state)
+    pilot_errors = {st:state['tasks'][name]['pilot_qualification_error']
+        for st,name in config.get('detector_canary_tasks',{}).items()
+        if name in state['tasks'] and state['tasks'][name].get('pilot_qualification_error')}
+    if pilot_errors:
+        save(root/'detector_pilot_attention_required.json',dict(checked_epoch=time.time(),
+            errors=pilot_errors, action='Review scientific/count/weight failure; bin detector expansion blocked; source preparation and independent bins continue.'))
     quota_tasks = [t for t in state['tasks'].values() if t['kind'] == 'quota']
     done_quotas = [t for t in quota_tasks if t['phase'] == 'done']
     quota = read(Path(done_quotas[-1]['directory'])/'result.json') if done_quotas else {}
@@ -931,6 +998,10 @@ def step(root, config, state):
         parent = state['tasks'].get(task.get('parent_source_task'))
         if per_source and parent is not None and parent['phase'] != 'done':
             continue
+        if (task['kind']=='detector' and task['stratum'] in pilot_qualifications
+                and name != config['detector_canary_tasks'][task['stratum']]
+                and not pilot_qualifications[task['stratum']]):
+            continue
         if task['kind'] != 'quota':
             if not quota_fresh:
                 continue
@@ -990,6 +1061,7 @@ def step(root, config, state):
         failed_by_stage=dict(Counter(t['kind'] for t in state['tasks'].values() if t['phase']=='failed')),
         failed_bins=sorted(failures), combined_family_checks=families, quota_fresh=quota_fresh,
         fresh_GEN_to_Nano_checks=fresh_detector_families,
+        grouped_detector_pilot_checks=pilot_qualifications,
         account_running_workers=running, submitted_this_poll=admitted)
     if detector_qualifications:
         record['external_detector_qualification_checks'] = detector_qualifications
