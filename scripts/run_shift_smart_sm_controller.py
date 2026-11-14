@@ -1022,8 +1022,16 @@ def step(root, config, state):
     if not finite_sources:
         advance_gen_supply(root,config,state,admission_failures)
     workers = [ad for ad in ads if ad.get('JobUniverse')==5 and ad['JobStatus'] in (1,2,6,7)]
-    running = sum(ad['JobStatus']==2 for ad in workers)
+    # Queued work is governed separately by maximum_idle_workers. Counting it
+    # against the running limit can prevent the quota refresh needed to admit it.
+    running = sum(ad['JobStatus'] in (2,6,7) for ad in workers)
     idle = sum(ad['JobStatus']==1 for ad in workers)
+    quota_limit = config.get('maximum_quota_workers', 1)
+    if type(quota_limit) is not int or not 0 <= quota_limit <= 4:
+        raise ValueError('Maximum quota workers must be an integer between zero and four')
+    existing_quotas = sum(t['kind']=='quota' and t['phase'] in ('submitted','submitting')
+                          for t in state['tasks'].values())
+    admitted_quotas = 0
     admitted = 0
     submission_batch = None
     storage_blocks=Counter()
@@ -1066,9 +1074,16 @@ def step(root, config, state):
             if quota['free_bytes'] < required or quota['free_files'] < 30000:
                 storage_blocks['shared_storage_floor']+=1
                 continue
-        if (len(workers)+admitted >= config['account_worker_ceiling']
-                or idle+admitted >= config['maximum_idle_workers']
-                or admitted >= config['maximum_starts_per_poll']):
+        if admitted >= config['maximum_starts_per_poll']:
+            break
+        quota_service = (task['kind']=='quota' and config['account_worker_ceiling'] > 0
+                         and existing_quotas+admitted_quotas < quota_limit)
+        if (not quota_service and (running+admitted >= config['account_worker_ceiling']
+                                   or idle+admitted >= config['maximum_idle_workers'])):
+            # A bounded quota read must remain admissible when science capacity
+            # is full. Its unchanged priority and short native worker still apply.
+            if task['kind']=='quota':
+                continue
             break
         description = Path(task.get('submit_description', str(Path(task['directory'])/'worker.sub')))
         if 'submit_description' in task and sha(description) != task.get('submit_description_sha256'):
@@ -1088,6 +1103,7 @@ def step(root, config, state):
             task.update(phase='submitted', cluster=int(match[1]), submitted_epoch=time.time())
             save(root/'ledger.json', state)
         admitted += 1
+        admitted_quotas += task['kind']=='quota'
     if journal:
         finish_submission_batch(root, state, submission_batch)
     else:
