@@ -69,6 +69,145 @@ def sha(path):
     return digest.hexdigest()
 
 
+def submission_journal_enabled(config):
+    value = config.get('submission_journal', False)
+    if type(value) is not bool:
+        raise ValueError('Submission journal policy must be boolean')
+    return value
+
+
+def submission_attention(root, name, reason):
+    record = dict(epoch=time.time(), task_name=name, reason=reason,
+                  action='Native submission is uncertain; preserve its intent and never replay it')
+    save(Path(root)/'submission_attention_required.json', record)
+    raise RuntimeError(record['action']+': '+name+': '+reason)
+
+
+def submission_identity(config, name, task):
+    directory = Path(task['directory'])
+    description = Path(task.get('submit_description', directory/'worker.sub'))
+    if sha(directory/'request.json') != task['request_sha256']:
+        raise ValueError('Submission request changed: '+name)
+    checksum = sha(description)
+    if task.get('submit_description_sha256', checksum) != checksum:
+        raise ValueError('Submission description changed: '+name)
+    return dict(task_name=name, campaign=config['campaign'], directory=str(directory),
+                owner=pwd.getpwuid(os.getuid()).pw_name,
+                request_sha256=task['request_sha256'], submit_description_sha256=checksum)
+
+
+def begin_submission_batch(root, config, state):
+    """One full checkpoint makes every new request durable before admission."""
+    path = Path(root)/'submission_batch.json'
+    if path.exists() and read(path).get('phase') != 'checkpointed':
+        raise RuntimeError('Previous submission batch needs reconciliation')
+    save(Path(root)/'ledger.json', state)
+    batch = dict(schema='shift-SM-submission-batch-v1', campaign=config['campaign'],
+                 generation=state.get('submission_journal_generation', 0)+1,
+                 phase='open', tasks=[], started_epoch=time.time())
+    save(path, batch)
+    return batch
+
+
+def submit_journal_task(root, config, state, batch, name, task, description):
+    """Persist a small intent and exact native receipt, without rewriting the ledger."""
+    if len(batch['tasks']) >= config['maximum_starts_per_poll']:
+        raise ValueError('Submission batch exceeds its configured finite limit')
+    identity = submission_identity(config, name, task)
+    directory = Path(task['directory'])
+    intent, receipt = directory/'native_submission_intent.json', directory/'native_submission_receipt.json'
+    if intent.exists() or receipt.exists():
+        submission_attention(root, name, 'Existing native intent/receipt cannot be overwritten')
+    save(intent, dict(identity, generation=batch['generation'], intent_epoch=time.time()))
+    batch['tasks'].append(name)
+    save(Path(root)/'submission_batch.json', batch)
+    task.update(phase='submitting', intent_epoch=time.time())
+    output = run_condor(['/usr/bin/condor_submit', '-terse', str(description)],
+                        cwd=task['directory'], timeout=45)
+    match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
+    if not match:
+        submission_attention(root, name, 'Unknown native submission result: '+output)
+    cluster = int(match[1])
+    epoch = time.time()
+    save(receipt, dict(identity, generation=batch['generation'], cluster=cluster,
+                       proc=0, submitted_epoch=epoch, native_stdout=output))
+    task.update(phase='submitted', cluster=cluster, submitted_epoch=epoch)
+
+
+def finish_submission_batch(root, state, batch):
+    """Checkpoint once, then mark the small batch index as safely absorbed."""
+    if batch is not None:
+        state['submission_journal_generation'] = batch['generation']
+    save(Path(root)/'ledger.json', state)
+    if batch is not None:
+        save(Path(root)/'submission_batch.json', dict(batch, phase='checkpointed',
+             checkpoint_epoch=time.time()))
+
+
+def reconcile_submission_batch(root, config, state):
+    """Adopt receipted native jobs after death; never infer that an intent was unsubmitted."""
+    if not submission_journal_enabled(config):
+        return
+    path = Path(root)/'submission_batch.json'
+    if not path.exists():
+        return
+    batch = read(path)
+    if batch.get('phase') == 'checkpointed':
+        return
+    names = batch.get('tasks')
+    if (batch.get('campaign') != config['campaign'] or batch.get('phase') != 'open'
+            or not isinstance(names, list) or len(set(names)) != len(names)
+            or len(names) > config['maximum_starts_per_poll']):
+        submission_attention(root, 'batch', 'Invalid pending submission batch')
+    generation = state.get('submission_journal_generation', 0)
+    if batch.get('generation') not in (generation, generation+1):
+        submission_attention(root, 'batch', 'Submission generation differs from its ledger')
+    ads = None
+    for name in names:
+        if name not in state['tasks']:
+            submission_attention(root, name, 'Batch task is absent from the durable ledger')
+        task = state['tasks'][name]
+        identity = submission_identity(config, name, task)
+        directory = Path(task['directory'])
+        ipath, rpath = directory/'native_submission_intent.json', directory/'native_submission_receipt.json'
+        if not ipath.exists() or not rpath.exists():
+            submission_attention(root, name, 'Native intent has no complete submission receipt')
+        intent, receipt = read(ipath), read(rpath)
+        if any(intent.get(k) != v or receipt.get(k) != v for k, v in identity.items()):
+            submission_attention(root, name, 'Native submission identity or ownership differs')
+        if intent.get('generation') != batch['generation'] or receipt.get('generation') != batch['generation']:
+            submission_attention(root, name, 'Native receipt belongs to another batch')
+        cluster = receipt.get('cluster')
+        native = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', receipt.get('native_stdout', ''))
+        if (type(cluster) is not int or receipt.get('proc') != 0 or not native
+                or int(native[1]) != cluster):
+            submission_attention(root, name, 'Native cluster receipt is invalid')
+        if task.get('cluster') == cluster and task['phase'] in ('submitted','done','failed'):
+            continue
+        if task['phase'] != 'ready':
+            submission_attention(root, name, 'Ledger task already has another submission')
+        if ads is None:
+            ads = query('Owner == '+json.dumps(identity['owner']),
+                        ['ClusterId','ProcId','Owner','Iwd','Args','JobStatus'], timeout=45)
+        live = [a for a in ads if a.get('ClusterId') == cluster and a.get('ProcId') == 0]
+        if not live:
+            history = json.loads(run_condor(['/usr/bin/condor_history', str(cluster)+'.0',
+                '-limit','1','-json','-attributes','ClusterId,ProcId,Owner,Iwd,Args,JobStatus'], timeout=45))
+            log = directory/'events.log'
+            if (len(history) != 1 or not log.exists() or not re.search(
+                    r'(?:^|\n)(?:000|001|005|009|012) \('+str(cluster)+r'\.000\.', log.read_text(errors='replace'))):
+                submission_attention(root, name, 'No exact native queue or history/event proof')
+            live = history
+        if (len(live) != 1 or live[0].get('ClusterId') != cluster or live[0].get('ProcId') != 0
+                or live[0].get('Owner') != identity['owner'] or live[0].get('Iwd') != identity['directory']
+                or identity['request_sha256'] not in live[0].get('Args', '').split()):
+            submission_attention(root, name, 'Native job does not match the frozen request and owner')
+        task.update(phase='submitted', cluster=cluster,
+                    submitted_epoch=receipt['submitted_epoch'], intent_epoch=intent['intent_epoch'],
+                    recovered_from_submission_journal=True)
+    finish_submission_batch(root, state, batch)
+
+
 def native_exit(path, cluster):
     if not path.exists():
         return None
@@ -647,6 +786,7 @@ def postprocessing_charge(config):
 
 def step(root, config, state):
     validate_detector_seed_policy(config, state)
+    journal = submission_journal_enabled(config)
     finite_sources = validate_source_worklist(config, state)
     per_source = config.get('per_source_quarantine') is True
     # One account query; no full status-tree scan for each completed event.
@@ -781,6 +921,7 @@ def step(root, config, state):
     running = sum(ad['JobStatus']==2 for ad in workers)
     idle = sum(ad['JobStatus']==1 for ad in workers)
     admitted = 0
+    submission_batch = None
     storage_blocks=Counter()
     extra_spent, extra_reserved = postprocessing_charge(config)
     for name, task in admission_order(state['tasks'],config.get('source_prefetch_per_bin',2),
@@ -824,17 +965,25 @@ def step(root, config, state):
         description = Path(task.get('submit_description', str(Path(task['directory'])/'worker.sub')))
         if 'submit_description' in task and sha(description) != task.get('submit_description_sha256'):
             raise ValueError('Reviewed replacement submit description changed')
-        task.update(phase='submitting', intent_epoch=time.time())
-        save(root/'ledger.json', state)
-        output = run_condor(['/usr/bin/condor_submit', '-terse',
-            str(description)], cwd=task['directory'], timeout=45)
-        match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
-        if not match:
-            raise RuntimeError('Unknown native submit result: '+output)
-        task.update(phase='submitted', cluster=int(match[1]), submitted_epoch=time.time())
-        save(root/'ledger.json', state)
+        if journal:
+            if submission_batch is None:
+                submission_batch = begin_submission_batch(root, config, state)
+            submit_journal_task(root, config, state, submission_batch, name, task, description)
+        else:
+            task.update(phase='submitting', intent_epoch=time.time())
+            save(root/'ledger.json', state)
+            output = run_condor(['/usr/bin/condor_submit', '-terse',
+                str(description)], cwd=task['directory'], timeout=45)
+            match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
+            if not match:
+                raise RuntimeError('Unknown native submit result: '+output)
+            task.update(phase='submitted', cluster=int(match[1]), submitted_epoch=time.time())
+            save(root/'ledger.json', state)
         admitted += 1
-    save(root/'ledger.json', state)
+    if journal:
+        finish_submission_batch(root, state, submission_batch)
+    else:
+        save(root/'ledger.json', state)
     record = dict(checked_epoch=time.time(), phase='running',
         task_counts=dict(Counter(t['phase'] for t in state['tasks'].values())),
         completed_by_stage=dict(Counter(t['kind'] for t in state['tasks'].values() if t['phase']=='done')),
@@ -1027,6 +1176,7 @@ def run_controller(root,config,once=False):
         try:
             if state is None:
                 state=read(root/'ledger.json')
+                reconcile_submission_batch(root, config, state)
                 if any(t['phase']=='submitting' for t in state['tasks'].values()):
                     raise RuntimeError('Uncertain persisted submission needs native review')
             record=step(root,config,state)
