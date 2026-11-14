@@ -518,6 +518,19 @@ class GroupedDetectorPilotTests(unittest.TestCase):
             controller.detector_pilot_qualifications(dict(production=dict(a={},b={}),
                 detector_canary_tasks=dict(a='pilot')),dict(tasks={}))
 
+    def test_reviewed_same_input_CPU_replacement_can_complete_the_grouped_pilot(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as directory:
+            config,state,result=self.fixture(Path(directory));parent=state['tasks']['pilot']
+            child=copy.deepcopy(parent);child.update(cluster=124,retry_level=1,reviewed_retry_of=123)
+            state['tasks']['cpu_retry_pilot']=child
+            parent.update(phase='replaced',replacement_tasks=['cpu_retry_pilot'])
+            with patch.object(controller,'native_exit',return_value=0):
+                self.assertTrue(controller.detector_pilot_qualifications(config,state)['dy_low'])
+            child['reviewed_retry_of']=999
+            with patch.object(controller,'native_exit',return_value=0):
+                self.assertFalse(controller.detector_pilot_qualifications(config,state)['dy_low'])
+
 
 class CompactFiniteSourceTests(unittest.TestCase):
     def source(self, root, name, selected=2, corrupt=False):

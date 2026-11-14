@@ -597,10 +597,28 @@ def detector_pilot_qualifications(config, state):
     qualified = {}
     for stratum, name in mapping.items():
         task = state['tasks'].get(name)
+        original = task
         qualified[stratum] = False
-        if task is None or task['phase'] != 'done':
+        if task is None:
             continue
         try:
+            seen = {name}
+            while task['phase'] == 'replaced':
+                children = task.get('replacement_tasks', [])
+                if len(children) != 1 or children[0] in seen:
+                    raise ValueError('Grouped pilot has an ambiguous replacement graph')
+                child = state['tasks'].get(children[0])
+                if (child is None or child.get('retry_level') != 1
+                        or child.get('reviewed_retry_of') != task.get('cluster')):
+                    raise ValueError('Grouped pilot replacement is not a reviewed CPU recovery')
+                old_request, new_request = (read(Path(t['directory'])/'request.json') for t in (task,child))
+                if any(old_request.get(key) != new_request.get(key) for key in
+                       ('detector_job','detector_seed','selected_skip','selected_count',
+                        'detector_source','detector_source_ref')):
+                    raise ValueError('Grouped pilot recovery changed its original inputs or seed')
+                seen.add(children[0]);task = child
+            if task['phase'] != 'done':
+                continue
             if task['kind'] != 'detector' or task['stratum'] != stratum:
                 raise ValueError('Pilot task belongs to a different stage or bin')
             directory = Path(task['directory'])
@@ -635,7 +653,7 @@ def detector_pilot_qualifications(config, state):
                 raise ValueError('Grouped pilot changed source identities, W/p or Nano readback')
             qualified[stratum] = True
         except (ValueError, KeyError, TypeError, ArithmeticError, FileNotFoundError, EOFError) as error:
-            task['pilot_qualification_error'] = str(error)
+            original['pilot_qualification_error'] = str(error)
     return qualified
 
 
@@ -759,7 +777,8 @@ def retry_stalled_sim(root,config,state,ads):
             raise ValueError('SIM timeout recovery lost native input/no-publication proof')
         child=cpu_retry_request(request);child_name='cpu_retry_'+name
         state['tasks'][child_name]=make_task(root,config,child_name,child,'detector',task['stratum'])
-        state['tasks'][child_name].update(retry_level=1,reviewed_retry_of=task['cluster'])
+        state['tasks'][child_name].update(retry_level=1,reviewed_retry_of=task['cluster'],
+            selected_events=request['selected_count'], parent_source_task=task.get('parent_source_task'))
         children=[child_name]
         state.setdefault('reviewed_cpu_retries',{})[name]=dict(original_task=copy.deepcopy(task),
             native_failure_result_sha256=sha(result_path),replacement_tasks=children,
