@@ -17,6 +17,8 @@ from run_shift_sm_postprocessing import (read, save, exposure, selected_rows, di
                                         read_response_pin, response_sampling_contract)
 from shift_condor_native import query, run_condor, NativeCondorError
 from monitor_shift_sm_response_benchmark import wait_for_lock
+from run_shift_smart_sm_controller import (submission_journal_enabled, begin_submission_batch,
+    submit_journal_task, finish_submission_batch, reconcile_submission_batch)
 
 
 def descriptor_hashes(source):
@@ -437,6 +439,10 @@ def snapshot(root, config, stratum, sources, publication_status=None):
                 histogram_runtime=config['histogram_runtime'],
                 publish_merged_nano=config.get('publish_merged_nano', True),
                 maximum_publication_bytes=worker_publication_bound(config,stratum))
+    if config.get('compact_metadata') is not None:
+        if type(config['compact_metadata']) is not bool:
+            raise ValueError('Compact metadata policy must be boolean')
+        body['compact_metadata'] = config['compact_metadata']
     if config.get('merged_nano_only_when_bin_complete') is True:
         expected = complete_bin_source_ids(config,stratum)
         observed = [row['source_id'] for row in normalizations]
@@ -467,7 +473,7 @@ def snapshot(root, config, stratum, sources, publication_status=None):
     body.update(sample_directory=config['output_base'] + '/' + sample + '/' + config['campaign'],
                 snapshot_name='ntuple_ready_' + timestamp + '_' + checksum[:12])
     directory.mkdir(parents=True, exist_ok=False)
-    save(directory / 'request.json', body)
+    save(directory / 'request.json', body, compact=body.get('compact_metadata',False))
     text = config['worker_template'].replace('@DIRECTORY@', str(directory))
     text = text.replace('@REQUEST_SHA@', digest(directory / 'request.json'))
     (directory / 'worker.sub').write_text(text)
@@ -658,6 +664,11 @@ def publication_history(tasks, live):
 
 
 def poll(root, config, state):
+    journal = submission_journal_enabled(config)
+    if journal:
+        if type(config.get('maximum_starts_per_poll')) is not int or not 1 <= config['maximum_starts_per_poll'] <= 64:
+            raise ValueError('Journaled publication requires a finite batch of 1 to 64 starts')
+        reconcile_submission_batch(root, config, state, state_filename='state.json')
     ads = query('Owner == "jniedzie"', ['ClusterId', 'ProcId', 'JobStatus', 'JobUniverse',
                 'Iwd', 'DAGManJobId', 'Owner', 'GlobalJobId', 'NumJobStarts', 'HoldReason'], timeout=45)
     live = {a['ClusterId']: a for a in ads}
@@ -742,7 +753,8 @@ def poll(root, config, state):
                     task['publication_bound_bytes']=max(67108864,4194304*task['events']+16777216)
                     state['tasks'][Path(task['directory']).name]=task
                     group_tasks[sid]=task
-                    save(root/'state.json',state)
+                    if not journal:
+                        save(root/'state.json',state)
                 if task['phase']=='done':
                     result=Path(task['directory'])/'result.json'
                     if digest(result)!=task['result_sha256']:raise ValueError('Qualified group receipt changed')
@@ -789,7 +801,8 @@ def poll(root, config, state):
         task = snapshot(root,config,stratum,sources,publication_status=settled if final_settled else None)
         if task:
             state['tasks'][Path(task['directory']).name] = task
-            save(root / 'state.json', state)
+            if not journal:
+                save(root / 'state.json', state)
     # This is an extension of the registered SM production, not another GEN or
     # detector production. Keep its extra writes bounded and protect both the
     # parent's full allocation and all of the parent's external reservations.
@@ -886,7 +899,8 @@ def poll(root, config, state):
         parent_future=parent_in_flight+science_future
     floor = external + parent_config['safety_floor_bytes']
     account_workers = sum(a.get('JobUniverse') == 5 and a['JobStatus'] in (1, 2, 6, 7) for a in ads)
-    for task in sorted(state['tasks'].values(), key=lambda t: t['events']):
+    submission_batch = None
+    for name, task in sorted(state['tasks'].items(), key=lambda item: item[1]['events']):
         if task['phase'] != 'ready':
             continue
         if not qualified and task is not state['tasks'][config['qualification_task']]:
@@ -908,15 +922,23 @@ def poll(root, config, state):
         if (not state['latest'] and not (qualified and config.get('qualification_task'))
                 and any(t['phase'] == 'submitted' for t in state['tasks'].values())):
             break
-        task['phase'] = 'submitting'
-        save(root / 'state.json', state)
-        answer = run_condor(['/usr/bin/condor_submit', '-terse',
-                            str(Path(task['directory']) / 'worker.sub')], cwd=task['directory'], timeout=45)
-        match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', answer)
-        if not match:
-            raise ValueError('Uncertain native submit result')
-        task.update(phase='submitted', cluster=int(match[1]), submitted_epoch=time.time())
-        save(root / 'state.json', state)
+        if journal:
+            if submitted >= config['maximum_starts_per_poll']:
+                break
+            if submission_batch is None:
+                submission_batch = begin_submission_batch(root, config, state, state_filename='state.json')
+            submit_journal_task(root, config, state, submission_batch, name, task,
+                                Path(task['directory'])/'worker.sub')
+        else:
+            task['phase'] = 'submitting'
+            save(root / 'state.json', state)
+            answer = run_condor(['/usr/bin/condor_submit', '-terse',
+                                str(Path(task['directory']) / 'worker.sub')], cwd=task['directory'], timeout=45)
+            match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', answer)
+            if not match:
+                raise ValueError('Uncertain native submit result')
+            task.update(phase='submitted', cluster=int(match[1]), submitted_epoch=time.time())
+            save(root / 'state.json', state)
         reserved += bound
         submitted += 1
     waiting = any(t['phase'] == 'ready' for t in state['tasks'].values()) and not any(
@@ -930,7 +952,10 @@ def poll(root, config, state):
         EOS_free_bytes=free, protected_parent_remaining_bytes=parent_remaining,
         protected_external_and_floor_bytes=floor,
         protected_science_allocation_bytes=science_reserve,protected_science_future_bytes=science_future))
-    save(root / 'state.json', state)
+    if journal:
+        finish_submission_batch(root, state, submission_batch, state_filename='state.json')
+    else:
+        save(root / 'state.json', state)
 
 
 def validate_deployment_inputs(deployment, config, helpers_directory):
@@ -944,7 +969,7 @@ def validate_deployment_inputs(deployment, config, helpers_directory):
         pinned[path.resolve()] = checksum
     required = ['run_shift_sm_postprocessing', 'shift_condor_native',
                 'shift_event_weights', 'shift_nano_integrity']
-    if config.get('refresh_quota'):
+    if config.get('refresh_quota') or submission_journal_enabled(config):
         required.append('run_shift_smart_sm_controller')
     if config.get('compact_source_authority'):
         required.append('run_shift_qcd_production_source')

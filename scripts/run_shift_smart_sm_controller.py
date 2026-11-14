@@ -47,7 +47,8 @@ def read(path):
 def save(path, value):
     path = Path(path)
     temporary = path.with_suffix('.tmp')
-    data = (json.dumps(value, indent=2, allow_nan=False)+'\n').encode()
+    data = ((json.dumps(value, separators=(',', ':'), allow_nan=False) if path.name == 'state.json'
+             else json.dumps(value, indent=2, allow_nan=False))+'\n').encode()
     while True:
         try:
             with temporary.open('wb') as stream:
@@ -97,15 +98,22 @@ def submission_identity(config, name, task):
                 request_sha256=task['request_sha256'], submit_description_sha256=checksum)
 
 
-def begin_submission_batch(root, config, state):
+def submission_state_path(root, state_filename):
+    if (not isinstance(state_filename, str) or state_filename in ('', '.', '..')
+            or Path(state_filename).name != state_filename):
+        raise ValueError('Submission checkpoint must be a filename within its state directory')
+    return Path(root)/state_filename
+
+
+def begin_submission_batch(root, config, state, state_filename='ledger.json'):
     """One full checkpoint makes every new request durable before admission."""
     path = Path(root)/'submission_batch.json'
     if path.exists() and read(path).get('phase') != 'checkpointed':
         raise RuntimeError('Previous submission batch needs reconciliation')
-    save(Path(root)/'ledger.json', state)
+    save(submission_state_path(root, state_filename), state)
     batch = dict(schema='shift-SM-submission-batch-v1', campaign=config['campaign'],
                  generation=state.get('submission_journal_generation', 0)+1,
-                 phase='open', tasks=[], started_epoch=time.time())
+                 phase='open', tasks=[], started_epoch=time.time(), state_filename=state_filename)
     save(path, batch)
     return batch
 
@@ -135,17 +143,19 @@ def submit_journal_task(root, config, state, batch, name, task, description):
     task.update(phase='submitted', cluster=cluster, submitted_epoch=epoch)
 
 
-def finish_submission_batch(root, state, batch):
+def finish_submission_batch(root, state, batch, state_filename='ledger.json'):
     """Checkpoint once, then mark the small batch index as safely absorbed."""
     if batch is not None:
         state['submission_journal_generation'] = batch['generation']
-    save(Path(root)/'ledger.json', state)
+    if batch is not None and batch.get('state_filename', 'ledger.json') != state_filename:
+        raise ValueError('Submission batch checkpoint filename changed')
+    save(submission_state_path(root, state_filename), state)
     if batch is not None:
         save(Path(root)/'submission_batch.json', dict(batch, phase='checkpointed',
              checkpoint_epoch=time.time()))
 
 
-def reconcile_submission_batch(root, config, state):
+def reconcile_submission_batch(root, config, state, state_filename='ledger.json'):
     """Adopt receipted native jobs after death; never infer that an intent was unsubmitted."""
     if not submission_journal_enabled(config):
         return
@@ -157,6 +167,7 @@ def reconcile_submission_batch(root, config, state):
         return
     names = batch.get('tasks')
     if (batch.get('campaign') != config['campaign'] or batch.get('phase') != 'open'
+            or batch.get('state_filename', 'ledger.json') != state_filename
             or not isinstance(names, list) or len(set(names)) != len(names)
             or len(names) > config['maximum_starts_per_poll']):
         submission_attention(root, 'batch', 'Invalid pending submission batch')
@@ -206,7 +217,7 @@ def reconcile_submission_batch(root, config, state):
         task.update(phase='submitted', cluster=cluster,
                     submitted_epoch=receipt['submitted_epoch'], intent_epoch=intent['intent_epoch'],
                     recovered_from_submission_journal=True)
-    finish_submission_batch(root, state, batch)
+    finish_submission_batch(root, state, batch, state_filename=state_filename)
 
 
 def native_exit(path, cluster):

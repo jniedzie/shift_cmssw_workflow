@@ -148,5 +148,29 @@ class SubmissionJournalTest(unittest.TestCase):
                 controller.finish_submission_batch(root,state,batch)
             self.assertEqual(len(full),2)
 
+    def test_publisher_checkpoint_adopts_exact_receipt_without_touching_source_ledger(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config,state=self.fixture(root)
+            original_ledger=(root/'ledger.json').read_bytes()
+            batch=controller.begin_submission_batch(root,config,state,state_filename='state.json')
+            with patch.object(controller,'run_condor',return_value='41.0 - 41.0\n'):
+                self.submit(root,config,state,batch)
+            restored=controller.read(root/'state.json')
+            with patch.object(controller,'query',return_value=[self.ad(restored['tasks']['0'])]):
+                controller.reconcile_submission_batch(root,config,restored,state_filename='state.json')
+            self.assertTrue(restored['tasks']['0']['recovered_from_submission_journal'])
+            self.assertEqual((root/'ledger.json').read_bytes(),original_ledger)
+            self.assertNotIn(b'\n ',(root/'state.json').read_bytes())
+
+    def test_wrong_checkpoint_cannot_adopt_or_escape_its_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config,state=self.fixture(root)
+            for filename in ('../ledger.json','/tmp/ledger.json','.', ''):
+                with self.subTest(filename=filename),self.assertRaises(ValueError):
+                    controller.begin_submission_batch(root,config,state,state_filename=filename)
+            controller.begin_submission_batch(root,config,state,state_filename='state.json')
+            with self.assertRaisesRegex(RuntimeError,'Invalid pending submission batch'):
+                controller.reconcile_submission_batch(root,config,state)
+
 
 if __name__=='__main__':unittest.main()

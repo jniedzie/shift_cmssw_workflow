@@ -60,9 +60,11 @@ def read(path):
             time.sleep(10)
 
 
-def save(path, value):
+def save(path, value, compact=False):
     path = Path(path)
-    data = (json.dumps(value,separators=(',', ':'),allow_nan=False) if path.name=='state.json'
+    if type(compact) is not bool:
+        raise ValueError('Compact metadata policy must be boolean')
+    data = (json.dumps(value,separators=(',', ':'),allow_nan=False) if compact or path.name=='state.json'
             else json.dumps(value,indent=2,allow_nan=False)) + '\n'
     while True:
         try:
@@ -677,9 +679,9 @@ def aggregate_histogram_groups(request_path, request, maximum_open_files, merge_
         full_original_exposure=metadata,published=published,merged_nano_published=False,
         merged_nano_available_in_source_groups=True,source_group_histograms=request['histogram_groups'],
         original_nano_retired=False,checked_epoch=time.time())
-    save('receipt.json',result)
+    save('receipt.json',result,compact=request.get('compact_metadata',False))
     publish('receipt.json',request['sample_directory']+'/metadata/postprocessing/'+request['snapshot_name'])
-    save('result.json',result)
+    save('result.json',result,compact=request.get('compact_metadata',False))
 
 
 def run(request_path, maximum_open_files=50, merge_timeout=3600):
@@ -857,9 +859,9 @@ def run(request_path, maximum_open_files=50, merge_timeout=3600):
         receipt.update(decay_proposal_annotation=proposal_metadata, histogram_weight_branch=weight_branch)
     if response_metadata is not None:
         receipt.update(response_sampling_annotation=response_metadata,histogram_weight_branch=weight_branch)
-    save(work / 'receipt.json', receipt)
+    save(work / 'receipt.json', receipt, compact=request.get('compact_metadata',False))
     publish(work / 'receipt.json', request['sample_directory'] + '/metadata/postprocessing/' + request['snapshot_name'])
-    save(work / 'result.json', receipt)
+    save(work / 'result.json', receipt, compact=request.get('compact_metadata',False))
 
 
 if __name__ == '__main__':

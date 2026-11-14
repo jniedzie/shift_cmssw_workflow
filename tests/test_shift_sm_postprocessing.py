@@ -487,6 +487,73 @@ class PublisherDeploymentTest(unittest.TestCase):
 
 
 class OrdinaryPublisherPollTest(unittest.TestCase):
+    def test_large_publisher_two_bounded_batches_only_checkpoint_four_times(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);parent=root/'parent';parent.mkdir();quota=parent/'quota';quota.mkdir()
+            post.save(quota/'result.json',dict(complete=True,checked_epoch=time.time(),free_bytes=10**12))
+            post.save(parent/'ledger.json',dict(tasks=dict(quota=dict(kind='quota',phase='done',
+                directory=str(quota),result_sha256=post.digest(quota/'result.json'),native_exit_code=0,
+                finished_epoch=time.time(),published_bytes=0))))
+            policy=root/'policy.json';post.save(policy,dict(own_reservation_bytes=10**11,
+                external_future_reservation_bytes=0,safety_floor_bytes=0,account_worker_ceiling=10000))
+            config=dict(campaign='large-publication',parent_state=str(parent),parent_config=str(policy),
+                submission_journal=True,maximum_starts_per_poll=64,maximum_group_workers=10000,
+                maximum_publication_bytes=10**10,worker_publication_bound_bytes=100)
+            state=dict(tasks={},latest=dict(qcd_1to2=['old']),nanos={},sources={})
+            for index in range(16000):
+                state['sources'][str(index)]=dict(normalization=dict(source_id=str(index),
+                    full_source_trials=1000,gen_sha256='a'*64),selected=dict(event_ids=[[1,index,1]],
+                    weights=[1.],sampling_probabilities=[.1],selected_indices=[0]))
+            for index in range(4000):
+                state['tasks']['closed'+str(index)]=dict(kind='source_group',phase='done',events=1,
+                    stratum='qcd_1to2',source_ids=[str(index)],published_bytes=100)
+            for index in range(100):
+                directory=root/str(index);directory.mkdir()
+                post.save(directory/'request.json',dict(original_id=[1,index,1],weight=1.,p=.1))
+                (directory/'worker.sub').write_text('queue 1\n')
+                state['tasks'][str(index)]=dict(kind='source_group',phase='ready',events=1,
+                    stratum='qcd_1to2',directory=str(directory),source_ids=[str(index)],
+                    request_sha256=post.digest(directory/'request.json'),publication_bound_bytes=100)
+            original_save=main_controller.save;checkpoints=[];clusters=iter(range(1000,1100))
+            def save(path,value):
+                if Path(path)==root/'state.json':checkpoints.append(1)
+                original_save(path,value)
+            def native(*args,**kwargs):
+                cluster=next(clusters);return f'{cluster}.0 - {cluster}.0\n'
+            with patch.object(controller,'query',return_value=[]) as query, \
+                    patch.object(controller,'publication_history',return_value={}), \
+                    patch.object(controller,'source_cache'),patch.object(controller,'nano_cache'), \
+                    patch.object(controller,'closed_sources',return_value={}), \
+                    patch.object(main_controller,'save',side_effect=save), \
+                    patch.object(main_controller,'run_condor',side_effect=native) as submit:
+                controller.poll(root,config,state)
+                self.assertEqual(submit.call_count,64)
+                query.return_value=[dict(ClusterId=t['cluster'],JobStatus=2,JobUniverse=5)
+                    for t in state['tasks'].values() if t['phase']=='submitted']
+                controller.poll(root,config,state)
+                self.assertEqual(submit.call_count,100)
+            self.assertEqual(len(checkpoints),4)
+            restored=post.read(root/'state.json')
+            self.assertEqual(sum(t['phase']=='submitted' for t in restored['tasks'].values()),100)
+            self.assertEqual(restored['sources'],state['sources'])
+            self.assertFalse((root/'ledger.json').exists())
+
+    def test_compact_receipt_keeps_all_parsed_histogram_and_normalization_values(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary)
+            result=dict(events=2,sumw=5.,sumw2=13.,source_ids=['first','second'],
+                full_original_exposure=dict(full_source_sumw=1000,original_sources=[dict(source_id='first')]),
+                histograms=dict(mass=dict(contents=[0.,2.,3.],errors=[0.,2.,3.]),
+                    logMass=dict(contents=[0.,2.,3.],errors=[0.,2.,3.])))
+            post.save(root/'pretty.json',result)
+            post.save(root/'compact.json',result,compact=True)
+            self.assertEqual(post.read(root/'pretty.json'),post.read(root/'compact.json'))
+            self.assertLess((root/'compact.json').stat().st_size,(root/'pretty.json').stat().st_size)
+            with self.assertRaisesRegex(ValueError,'boolean'):
+                post.save(root/'invalid.json',result,compact=1)
+
     def check_real_ordinary_path(self, inventory_mode, hourly=False, final=False):
         import run_shift_sm_postprocessing_controller as controller
         with tempfile.TemporaryDirectory() as directory:
