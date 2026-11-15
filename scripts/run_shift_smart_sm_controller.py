@@ -288,37 +288,102 @@ def publication_charge(evidence, reserved):
     return amount
 
 
+MISSING_TERMINAL_ERROR = 'Absent worker without native terminal event'
+
+
+def qualify_late_detector_completion(task, evidence):
+    """Bind delayed success to the original mask and actual Nano readback."""
+    directory = Path(task['directory'])
+    request = read(directory/'request.json')
+    count = request['selected_count']
+    if (sha(directory/'request.json') != task['request_sha256']
+            or type(count) is not int or count < 1
+            or task.get('selected_events') != count
+            or evidence.get('exit_code') != 0 or evidence.get('events') != count
+            or evidence.get('nano', {}).get('events') != count
+            or evidence.get('validated_tier_events', {}).get('NANO') != count
+            or not isinstance(evidence.get('nano_path'), str)
+            or not evidence['nano_path'].startswith('/eos/')
+            or type(evidence.get('nano_bytes')) is not int or evidence['nano_bytes'] < 1):
+        raise ValueError('Delayed detector completion lacks its exact original count/publication')
+    from shift_eos_storage import detector_source
+    source = detector_source(request)
+    start = request['selected_skip']
+    indices = source['selected_indices'][start:start+count]
+    identities = [source['event_ids'][i] for i in indices]
+    probabilities = source['sampling_probabilities'][start:start+count]
+    weights = [source['weights'][i] for i in indices]
+    checksum = evidence.get('nano_sha256')
+    if (len(indices) != count or len(probabilities) != count
+            or any(not math.isfinite(p) or not 0 < p <= 1 for p in probabilities)
+            or evidence['nano'].get('event_ids') != identities
+            or evidence.get('source_indices') != indices
+            or evidence.get('sampling_probabilities') != probabilities
+            or not math.isclose(evidence['nano']['sampling_corrected_sumw'],
+                math.fsum(w/p for w,p in zip(weights, probabilities)), rel_tol=2e-9)
+            or not isinstance(checksum, str) or not re.fullmatch('[0-9a-f]{64}', checksum)
+            or evidence.get('nano_readback_sha256') != checksum):
+        raise ValueError('Delayed Nano differs from its original identities, W/p or readback')
+
+
 def observe(task, ads):
     """Credit success only after exact native closure and returned evidence."""
-    if task['phase'] in ('done', 'failed', 'ready','replaced'):
+    late = (task['phase'] == 'failed' and task.get('kind') == 'detector'
+            and task.get('error') == MISSING_TERMINAL_ERROR)
+    if task['phase'] in ('done', 'ready','replaced') or (task['phase'] == 'failed' and not late):
         return
     if task['phase'] == 'submitting':
         raise RuntimeError('Uncertain submission needs native review: '+task['directory'])
+    if late:
+        task.setdefault('late_native_failure_observation', dict(
+            phase=task['phase'], error=task['error'], missing_since=task.get('missing_since'),
+            cluster=task['cluster'], request_sha256=task['request_sha256']))
     directory = Path(task['directory'])
     live = [ad for ad in ads if ad['ClusterId'] == task['cluster'] and ad['ProcId'] == 0]
     if live:
         if len(live) != 1 or live[0]['Iwd'] != str(directory):
             raise ValueError('Queued worker lost its persistent directory')
+        task.pop('missing_since', None)
         task['execution_seen'] = task.get('execution_seen', False) or live[0].get('NumJobStarts', 0) > 0
         if live[0]['JobStatus'] == 5:
             task.update(phase='failed', error=live[0].get('HoldReason', 'Held worker'))
         return
     terminal = native_exit(directory/'events.log', task['cluster'])
     if terminal is None:
+        if late:
+            return
         task.setdefault('missing_since', time.time())
         if time.time()-task['missing_since'] > 600:
-            task.update(phase='failed', error='Absent worker without native terminal event')
+            task.update(phase='failed', error=MISSING_TERMINAL_ERROR)
         return
     status, result = directory/'status.json', directory/'result.json'
     if not status.exists() or not result.exists():
+        if late:
+            return
         task.update(phase='failed', error='Native exit without returned stage receipts')
         return
     receipt, evidence = read(status), read(result)
     if (terminal != 0 or receipt.get('complete') is not True or receipt.get('exit_code') != 0
             or evidence.get('request_sha256') != task['request_sha256']
             or evidence.get('complete') is not True):
+        if late:
+            return
         task.update(phase='failed', error=evidence.get('error', 'Native/receipt completion mismatch'))
         return
+    if late:
+        try:
+            qualify_late_detector_completion(task, evidence)
+        except (ValueError, KeyError, TypeError, ArithmeticError, FileNotFoundError, EOFError) as error:
+            task['late_completion_review_required'] = str(error)
+            return
+        task['late_native_completion'] = dict(
+            original_failed_observation=task.pop('late_native_failure_observation'),
+            checked_epoch=time.time(), native_event_log_sha256=sha(directory/'events.log'),
+            status_sha256=sha(status), result_sha256=sha(result),
+            nano_sha256=evidence['nano_sha256'], no_replay=True)
+        task.pop('error', None)
+        task.pop('late_completion_review_required', None)
+        task.pop('missing_since', None)
     task.update(phase='done', result_sha256=sha(result), native_exit_code=terminal,
                 finished_epoch=time.time(),
                 published_bytes=publication_charge(evidence, task['bound_bytes']))

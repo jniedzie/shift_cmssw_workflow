@@ -978,5 +978,138 @@ class BoundedWatchdogRestartTests(unittest.TestCase):
                     controller.watchdog_role(bad)
 
 
+class LateNativeCompletionTests(unittest.TestCase):
+    def fixture(self, root):
+        import run_shift_smart_sm_controller as controller
+        _, state, result = GroupedDetectorPilotTests().fixture(root)
+        task = state['tasks']['pilot']
+        task.update(phase='failed', error=controller.MISSING_TERMINAL_ERROR,
+                    missing_since=1., bound_bytes=8388608)
+        directory = Path(task['directory'])
+        (directory/'events.log').write_text(
+            '005 (123.000.000) event\nNormal termination (return value 0)\n...\n')
+        result.update(nano_path='/eos/cms/store/group/test/nano.root', nano_bytes=1000,
+                      published_storage_bytes=2000)
+        controller.save(directory/'result.json', result)
+        return task, result
+
+    def test_live_worker_clears_old_absence_before_its_next_gap(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as temporary:
+            task = dict(directory=temporary, phase='submitted', cluster=123, missing_since=1.)
+            live = dict(ClusterId=123, ProcId=0, Iwd=temporary, JobStatus=2, NumJobStarts=1)
+            with patch.object(controller.time, 'time', return_value=1200.):
+                observe(task, [live])
+            self.assertNotIn('missing_since', task)
+            with patch.object(controller.time, 'time', return_value=1300.):
+                observe(task, [])
+            self.assertEqual(task['phase'], 'submitted')
+            self.assertEqual(task['missing_since'], 1300.)
+            with patch.object(controller.time, 'time', return_value=1800.):
+                observe(task, [])
+            self.assertEqual(task['phase'], 'submitted')
+
+    def test_exact_live_directory_is_checked_before_clearing_absence(self):
+        task = dict(directory='/persistent/original', phase='submitted', cluster=123, missing_since=1.)
+        with self.assertRaisesRegex(ValueError, 'persistent directory'):
+            observe(task, [dict(ClusterId=123, ProcId=0, Iwd='/wrong', JobStatus=2)])
+        self.assertEqual(task['missing_since'], 1.)
+
+    def test_delayed_success_adopts_original_once_without_scheduler_actions(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as temporary:
+            task, _ = self.fixture(Path(temporary))
+            original = copy.deepcopy(task)
+            with patch.object(controller, 'run_condor') as scheduler:
+                observe(task, [])
+                self.assertEqual(task['phase'], 'done')
+                proof = copy.deepcopy(task['late_native_completion'])
+                observe(task, [])
+            scheduler.assert_not_called()
+            self.assertEqual(task['cluster'], original['cluster'])
+            self.assertEqual(task['request_sha256'], original['request_sha256'])
+            self.assertEqual(task['selected_events'], original['selected_events'])
+            self.assertEqual(task['published_bytes'], 2000)
+            self.assertEqual(task['native_exit_code'], 0)
+            self.assertEqual(task['late_native_completion'], proof)
+            self.assertEqual(proof['original_failed_observation']['error'], controller.MISSING_TERMINAL_ERROR)
+            self.assertEqual(proof['original_failed_observation']['missing_since'], 1.)
+            self.assertTrue(proof['no_replay'])
+            self.assertNotIn('error', task)
+
+    def test_late_success_requires_original_request_counts_identities_weights_and_readback(self):
+        import run_shift_smart_sm_controller as controller
+        changes = [
+            lambda result: result.update(request_sha256='b'*64),
+            lambda result: result.update(events=4),
+            lambda result: result['nano']['event_ids'][0].__setitem__(0, 999),
+            lambda result: result['nano'].update(sampling_corrected_sumw=8.),
+            lambda result: result.update(sampling_probabilities=[1.]*5),
+            lambda result: result.update(nano_readback_sha256='b'*64),
+            lambda result: result.update(nano_path='scratch/nano.root'),
+        ]
+        for change in changes:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                task, result = self.fixture(Path(temporary))
+                change(result)
+                controller.save(Path(task['directory'])/'result.json', result)
+                observe(task, [])
+                self.assertEqual(task['phase'], 'failed')
+                self.assertNotIn('late_native_completion', task)
+                self.assertNotIn('published_bytes', task)
+        with tempfile.TemporaryDirectory() as temporary:
+            task, _ = self.fixture(Path(temporary))
+            (Path(task['directory'])/'request.json').write_text('changed original request')
+            observe(task, [])
+            self.assertEqual(task['phase'], 'failed')
+
+    def test_native_failure_scientific_failure_and_unknown_producers_stay_quarantined(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as temporary:
+            task, _ = self.fixture(Path(temporary))
+            (Path(task['directory'])/'events.log').write_text(
+                '005 (123.000.000) event\nNormal termination (return value 1)\n...\n')
+            observe(task, [])
+            self.assertEqual(task['phase'], 'failed')
+        for change in [dict(error='Scientific energy-momentum guard failed'), dict(kind='source')]:
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                task, _ = self.fixture(Path(temporary))
+                task.update(change)
+                observe(task, [])
+                self.assertEqual(task['phase'], 'failed')
+                self.assertNotIn('late_native_completion', task)
+        with tempfile.TemporaryDirectory() as temporary:
+            task, result = self.fixture(Path(temporary))
+            result.pop('nano')
+            controller.save(Path(task['directory'])/'result.json', result)
+            observe(task, [])
+            self.assertEqual(task['phase'], 'failed')
+
+    def test_missing_late_receipts_remain_eligible_for_exact_later_adoption(self):
+        import run_shift_smart_sm_controller as controller
+        with tempfile.TemporaryDirectory() as temporary:
+            task, _ = self.fixture(Path(temporary))
+            path = Path(task['directory'])/'status.json'
+            original = path.read_bytes()
+            path.unlink()
+            observe(task, [])
+            self.assertEqual(task['phase'], 'failed')
+            self.assertEqual(task['error'], controller.MISSING_TERMINAL_ERROR)
+            path.write_bytes(original)
+            observe(task, [])
+            self.assertEqual(task['phase'], 'done')
+
+    def test_original_unknown_observation_survives_a_later_live_ad(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            task, _ = self.fixture(Path(temporary))
+            observe(task, [dict(ClusterId=123, ProcId=0, Iwd=task['directory'],
+                                JobStatus=2, NumJobStarts=1)])
+            self.assertEqual(task['phase'], 'failed')
+            self.assertNotIn('missing_since', task)
+            observe(task, [])
+            self.assertEqual(task['phase'], 'done')
+            self.assertEqual(task['late_native_completion']['original_failed_observation']['missing_since'], 1.)
+
+
 if __name__ == '__main__':
     unittest.main()
