@@ -162,6 +162,46 @@ class SubmissionJournalTest(unittest.TestCase):
             self.assertEqual((root/'ledger.json').read_bytes(),original_ledger)
             self.assertNotIn(b'\n ',(root/'state.json').read_bytes())
 
+    def test_submit_time_priority_updates_prepared_jobs_without_rewriting_inputs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);config,state=self.fixture(root)
+            task=state['tasks']['0'];description=Path(task['directory'])/'worker.sub'
+            original_description=description.read_bytes()
+            original_request=(Path(task['directory'])/'request.json').read_bytes()
+            config.update(apply_stage_priorities_at_submission=True,
+                          stage_priorities={'quota':5000})
+            batch=controller.begin_submission_batch(root,config,state)
+            with patch.object(controller,'run_condor',return_value='41.0 - 41.0\n') as native:
+                self.submit(root,config,state,batch)
+            argv=native.call_args.args[0]
+            self.assertEqual(argv,['/usr/bin/condor_submit','-terse','-append',
+                                   'priority = 5000',str(description)])
+            self.assertEqual(description.read_bytes(),original_description)
+            self.assertEqual((Path(task['directory'])/'request.json').read_bytes(),original_request)
+            intent=controller.read(Path(task['directory'])/'native_submission_intent.json')
+            receipt=controller.read(Path(task['directory'])/'native_submission_receipt.json')
+            self.assertEqual(intent['native_submit_argv'],argv)
+            self.assertEqual(receipt['native_submit_argv'],argv)
+            self.assertEqual(controller.worker_submit_argv({},task,description),
+                             ['/usr/bin/condor_submit','-terse',str(description)])
+
+    def test_bad_submit_time_priority_stops_before_any_native_intent(self):
+        for invalid in (True,1.5,'2500',None):
+            with self.subTest(invalid=invalid),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);config,state=self.fixture(root)
+                config.update(apply_stage_priorities_at_submission=True,
+                              stage_priorities={'quota':invalid})
+                batch=controller.begin_submission_batch(root,config,state)
+                with patch.object(controller,'run_condor') as native:
+                    with self.assertRaisesRegex(ValueError,'priority must be an integer'):
+                        self.submit(root,config,state,batch)
+                native.assert_not_called()
+                self.assertFalse((Path(state['tasks']['0']['directory'])/
+                                  'native_submission_intent.json').exists())
+        with self.assertRaisesRegex(ValueError,'policy must be boolean'):
+            controller.worker_submit_argv({'apply_stage_priorities_at_submission':1},
+                                          {'kind':'quota'},Path('/prepared/worker.sub'))
+
     def test_wrong_checkpoint_cannot_adopt_or_escape_its_directory(self):
         with tempfile.TemporaryDirectory() as temporary:
             root=Path(temporary);config,state=self.fixture(root)

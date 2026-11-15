@@ -118,6 +118,20 @@ def begin_submission_batch(root, config, state, state_filename='ledger.json'):
     return batch
 
 
+def worker_submit_argv(config, task, description):
+    """Optionally update scheduling priority without rewriting frozen submit files."""
+    enabled = config.get('apply_stage_priorities_at_submission', False)
+    if type(enabled) is not bool:
+        raise ValueError('Submission priority policy must be boolean')
+    argv = ['/usr/bin/condor_submit', '-terse']
+    if enabled:
+        priority = config.get('stage_priorities', {}).get(task['kind'])
+        if type(priority) is not int:
+            raise ValueError('Explicit submission stage priority must be an integer')
+        argv.extend(['-append', 'priority = '+str(priority)])
+    return argv+[str(description)]
+
+
 def submit_journal_task(root, config, state, batch, name, task, description):
     """Persist a small intent and exact native receipt, without rewriting the ledger."""
     if len(batch['tasks']) >= config['maximum_starts_per_poll']:
@@ -127,19 +141,21 @@ def submit_journal_task(root, config, state, batch, name, task, description):
     intent, receipt = directory/'native_submission_intent.json', directory/'native_submission_receipt.json'
     if intent.exists() or receipt.exists():
         submission_attention(root, name, 'Existing native intent/receipt cannot be overwritten')
-    save(intent, dict(identity, generation=batch['generation'], intent_epoch=time.time()))
+    submit_argv = worker_submit_argv(config, task, description)
+    save(intent, dict(identity, generation=batch['generation'], intent_epoch=time.time(),
+                      native_submit_argv=submit_argv))
     batch['tasks'].append(name)
     save(Path(root)/'submission_batch.json', batch)
     task.update(phase='submitting', intent_epoch=time.time())
-    output = run_condor(['/usr/bin/condor_submit', '-terse', str(description)],
-                        cwd=task['directory'], timeout=45)
+    output = run_condor(submit_argv, cwd=task['directory'], timeout=45)
     match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
     if not match:
         submission_attention(root, name, 'Unknown native submission result: '+output)
     cluster = int(match[1])
     epoch = time.time()
     save(receipt, dict(identity, generation=batch['generation'], cluster=cluster,
-                       proc=0, submitted_epoch=epoch, native_stdout=output))
+                       proc=0, submitted_epoch=epoch, native_stdout=output,
+                       native_submit_argv=submit_argv))
     task.update(phase='submitted', cluster=cluster, submitted_epoch=epoch)
 
 
@@ -1095,8 +1111,8 @@ def step(root, config, state):
         else:
             task.update(phase='submitting', intent_epoch=time.time())
             save(root/'ledger.json', state)
-            output = run_condor(['/usr/bin/condor_submit', '-terse',
-                str(description)], cwd=task['directory'], timeout=45)
+            output = run_condor(worker_submit_argv(config, task, description),
+                cwd=task['directory'], timeout=45)
             match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', output)
             if not match:
                 raise RuntimeError('Unknown native submit result: '+output)
