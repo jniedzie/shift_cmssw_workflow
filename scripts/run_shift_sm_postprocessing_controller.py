@@ -18,7 +18,7 @@ from run_shift_sm_postprocessing import (read, save, exposure, selected_rows, di
 from shift_condor_native import query, run_condor, NativeCondorError
 from monitor_shift_sm_response_benchmark import wait_for_lock
 from run_shift_smart_sm_controller import (submission_journal_enabled, begin_submission_batch,
-    submit_journal_task, finish_submission_batch, reconcile_submission_batch)
+    submit_journal_task, finish_submission_batch, reconcile_submission_batch, worker_submit_argv)
 
 
 def descriptor_hashes(source):
@@ -961,6 +961,8 @@ def poll(root, config, state):
         if (not state['latest'] and not (qualified and config.get('qualification_task'))
                 and any(t['phase'] == 'submitted' for t in state['tasks'].values())):
             break
+        if config.get('apply_stage_priorities_at_submission') is True:
+            task.setdefault('kind', 'aggregate')
         if journal:
             if submitted >= config['maximum_starts_per_poll']:
                 break
@@ -971,8 +973,8 @@ def poll(root, config, state):
         else:
             task['phase'] = 'submitting'
             save(root / 'state.json', state)
-            answer = run_condor(['/usr/bin/condor_submit', '-terse',
-                                str(Path(task['directory']) / 'worker.sub')], cwd=task['directory'], timeout=45)
+            answer = run_condor(worker_submit_argv(config,task,Path(task['directory'])/'worker.sub'),
+                                cwd=task['directory'], timeout=45)
             match = re.fullmatch(r'(\d+)\.0 - \d+\.0\s*', answer)
             if not match:
                 raise ValueError('Uncertain native submit result')
