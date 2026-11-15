@@ -14,7 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tea_shift_cmssw/utils'))
 from run_shift_sm_postprocessing import exposure, selected_rows, hadd_command, validate_dimuon_histograms
-from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update, snapshot
+from run_shift_sm_postprocessing_controller import closed_sources, meaningful_update, snapshot, publication_order
 from run_shift_smart_sm_controller import postprocessing_charge
 from run_shift_smart_sm_source import accepted_class_authority
 import run_shift_smart_sm_controller as main_controller
@@ -22,6 +22,27 @@ import run_shift_sm_postprocessing as post
 from test_shift_production_selection import native_proposal_fixture
 from shift_production_selection import bind_source, selected_decay_proposals, proposal_source_exposure
 from run_shift_sm_postprocessing_controller import compact_source, response_closed_source
+
+
+class PublicationOrderTest(unittest.TestCase):
+    def test_default_keeps_small_jobs_first(self):
+        tasks = {'large': dict(stratum='dy_20toinf', events=90),
+                 'small': dict(stratum='jpsi_0to1', events=10)}
+        self.assertEqual([name for name, _ in publication_order(tasks)], ['small', 'large'])
+
+    def test_requested_complete_bin_precedes_other_groups_and_preserves_inputs(self):
+        tasks = {'dy_group': dict(stratum='dy_20toinf', events=90),
+                 'other': dict(stratum='jpsi_0to1', events=10),
+                 'dy_snapshot': dict(stratum='dy_20toinf', events=8500)}
+        original = copy.deepcopy(tasks)
+        self.assertEqual([name for name, _ in publication_order(tasks, ['dy_20toinf'])],
+                         ['dy_group', 'dy_snapshot', 'other'])
+        self.assertEqual(tasks, original)
+
+    def test_invalid_or_repeated_preferences_are_rejected(self):
+        for preference in ['dy_20toinf', ['dy_20toinf', 'dy_20toinf'], [None], ['']]:
+            with self.subTest(preference=preference), self.assertRaises(ValueError):
+                publication_order({}, preference)
 
 
 class ResponsePublicationTest(unittest.TestCase):

@@ -564,6 +564,17 @@ def science_write_reservation(parent_config, state, quota_epoch):
     return total, total-credit
 
 
+def publication_order(tasks, preferred_strata=()):
+    """Finish an explicitly requested bin before other ready publication work."""
+    if (not isinstance(preferred_strata, (list, tuple))
+            or any(not isinstance(name, str) or not name for name in preferred_strata)
+            or len(set(preferred_strata)) != len(preferred_strata)):
+        raise ValueError('Preferred publication strata must be distinct nonempty names')
+    ranks = {name: index for index, name in enumerate(preferred_strata)}
+    return sorted(tasks.items(), key=lambda item: (
+        ranks.get(item[1]['stratum'], len(ranks)), item[1]['events']))
+
+
 def refresh_quota(root, config, ads):
     """Own a quota-only ledger for a new response publisher, never an old campaign.
 
@@ -921,7 +932,7 @@ def poll(root, config, state):
     account_idle = sum(a.get('JobUniverse') == 5 and a['JobStatus'] == 1 for a in ads)
     admission_wait = None
     submission_batch = None
-    for name, task in sorted(state['tasks'].items(), key=lambda item: item[1]['events']):
+    for name, task in publication_order(state['tasks'], config.get('preferred_publication_strata', ())):
         if task['phase'] != 'ready':
             continue
         if not qualified and task is not state['tasks'][config['qualification_task']]:
