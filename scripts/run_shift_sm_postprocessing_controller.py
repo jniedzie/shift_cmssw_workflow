@@ -458,7 +458,10 @@ def snapshot(root, config, stratum, sources, publication_status=None):
         body['histogram_groups']=[source['histogram_group'] for source in sources if source['nano_inputs']]
         body['zero_selected_source_ids']=[source['normalization']['source_id'] for source in sources if not source['nano_inputs']]
         body['publish_merged_nano']=False
-        body['maximum_publication_bytes']=67108864
+        cumulative_bound = config.get('cumulative_histogram_publication_bound_bytes', 67108864)
+        if type(cumulative_bound) is not int or cumulative_bound <= 0:
+            raise ValueError('Cumulative histogram reservation must be a positive integer')
+        body['maximum_publication_bytes'] = cumulative_bound
     baseline_ids = []
     if baseline_enabled and body.get('histogram_groups') is not None:
         baseline_ids = append_baseline_publication(body,baseline)
@@ -782,7 +785,8 @@ def poll(root, config, state):
         groups={st:src for st,src in ready.items() if set(state['latest'].get(st,[]))<=
             {row['normalization']['source_id'] for row in src}}
     busy = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] in ('ready', 'submitted', 'submitting')}
-    failed = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] == 'failed'}
+    failed = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] == 'failed'
+        and t.get('audit_only_retired_failure') is not True}
     # At most one immutable snapshot per bin at a time; meaningful changes only.
     for stratum, sources in groups.items():
         if stratum in busy or stratum in failed:

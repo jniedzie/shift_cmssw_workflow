@@ -308,6 +308,40 @@ class ResponsePublicationTest(unittest.TestCase):
         self.assertEqual(request['nano_inputs'], source['nano_inputs'])
         self.assertEqual(request['normalization_sources'], [self.normalization])
 
+    def test_cumulative_bound_changes_only_reservation_and_preserves_source_group_bound(self):
+        source = self.discover()
+        source['histogram_group'] = dict(source_ids=['response'], events=2,
+            histogram=dict(path='/eos/synthetic/group.root', sha256='c'*64))
+        config = dict(campaign='grouped', histogram_runtime=dict(path='runtime', sha256='a'*64),
+            worker_publication_bound_bytes=67108864, output_base='/eos/synthetic',
+            worker_template='', grouped_response_publication=True)
+        first = snapshot(self.root, config, 'qcd_20toinf', [source])
+        request = post.read(Path(first['directory'])/'request.json')
+        self.assertEqual(first['publication_bound_bytes'], 67108864)
+        self.assertFalse(request['publish_merged_nano'])
+        larger = snapshot(self.root, dict(config, cumulative_histogram_publication_bound_bytes=536870912),
+                          'qcd_20toinf', [source])
+        changed = post.read(Path(larger['directory'])/'request.json')
+        self.assertEqual(larger['publication_bound_bytes'], 536870912)
+        for key in ('normalization_sources', 'selected_sources', 'nano_inputs', 'histogram_groups',
+                    'zero_selected_source_ids', 'histogram_runtime', 'publish_merged_nano'):
+            self.assertEqual(changed[key], request[key], key)
+        group = snapshot(self.root, dict(config, source_group_only=True,
+            cumulative_histogram_publication_bound_bytes=536870912), 'qcd_20toinf', [source])
+        self.assertEqual(group['publication_bound_bytes'], 67108864)
+        self.assertTrue(post.read(Path(group['directory'])/'request.json')['source_group_only'])
+
+    def test_cumulative_bound_rejects_boolean_noninteger_and_nonpositive_values(self):
+        source = self.discover()
+        source['histogram_group'] = dict(source_ids=['response'])
+        config = dict(campaign='grouped', histogram_runtime=dict(path='runtime', sha256='a'*64),
+            worker_publication_bound_bytes=67108864, output_base='/eos/synthetic',
+            worker_template='', grouped_response_publication=True)
+        for bound in (True, False, 0, -1, 1.5, '536870912'):
+            with self.subTest(bound=bound), self.assertRaisesRegex(ValueError, 'positive integer'):
+                snapshot(self.root, dict(config, cumulative_histogram_publication_bound_bytes=bound),
+                         'qcd_20toinf', [source])
+
 
 class ResponseDiscoveryControllerTest(unittest.TestCase):
     def setUp(self):
@@ -508,6 +542,45 @@ class PublisherDeploymentTest(unittest.TestCase):
 
 
 class OrdinaryPublisherPollTest(unittest.TestCase):
+    def test_reviewed_failure_unblocks_only_snapshot_and_retains_all_128MiB_claims(self):
+        import run_shift_sm_postprocessing_controller as controller
+        import time
+        for flags in ((True, True), (True, False), (None, None), (1, 1), ('yes', 'yes')):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                parent = root/'parent'
+                quota = parent/'quota'
+                quota.mkdir(parents=True)
+                post.save(quota/'result.json', dict(complete=True, checked_epoch=time.time(), free_bytes=10**12))
+                post.save(parent/'ledger.json', dict(tasks=dict(quota=dict(kind='quota', phase='done',
+                    directory=str(quota), result_sha256=post.digest(quota/'result.json'),
+                    native_exit_code=0, finished_epoch=time.time(), published_bytes=0))))
+                policy = root/'policy.json'
+                post.save(policy, dict(own_reservation_bytes=10**11,
+                    external_future_reservation_bytes=0, safety_floor_bytes=0, account_worker_ceiling=2000))
+                bound = 67108864
+                config = dict(parent_state=str(parent), parent_config=str(policy),
+                    maximum_publication_bytes=2*bound, worker_publication_bound_bytes=bound)
+                failed = {str(index): dict(kind='aggregate', phase='failed', stratum='qcd_1to2', events=1,
+                    publication_bound_bytes=bound, audit_only_retired_failure=flag)
+                    for index, flag in enumerate(flags)}
+                original = copy.deepcopy(failed)
+                state = dict(tasks=failed, latest=dict(qcd_1to2=[]), sources={}, nanos={})
+                proposal = dict(directory=str(root/'next'), kind='aggregate', phase='ready',
+                    stratum='qcd_1to2', source_ids=['new'], events=1, publication_bound_bytes=bound)
+                with patch.object(controller, 'query', return_value=[]), \
+                     patch.object(controller, 'publication_history', return_value={}), \
+                     patch.object(controller, 'source_cache'), patch.object(controller, 'nano_cache'), \
+                     patch.object(controller, 'closed_sources', return_value={'qcd_1to2': [
+                         dict(normalization=dict(source_id='new'))]}), \
+                     patch.object(controller, 'snapshot', return_value=proposal) as make, \
+                     patch.object(controller, 'run_condor') as submit:
+                    controller.poll(root, config, state)
+                self.assertEqual(make.call_count, int(all(flag is True for flag in flags)))
+                submit.assert_not_called()
+                self.assertEqual({key: state['tasks'][key] for key in original}, original)
+                self.assertEqual(post.read(root/'heartbeat.json')['publication_budget_remaining_bytes'], 0)
+
     def test_large_publisher_two_bounded_batches_only_checkpoint_four_times(self):
         import run_shift_sm_postprocessing_controller as controller
         import time
