@@ -877,6 +877,101 @@ class PublisherQuotaTest(unittest.TestCase):
         self.parent_config.write_text(json.dumps(dict(worker_template='queue 1\n')))
         self.config=dict(campaign='night',parent_state=str(self.root/'quota'),parent_config=str(self.parent_config))
 
+    def terminal_fixture(self, include_independent_worker=False):
+        import time
+        parent = self.root/'terminal_parent'
+        quota = parent/'quota'
+        quota.mkdir(parents=True)
+        post.save(quota/'result.json', dict(complete=True, checked_epoch=time.time(), free_bytes=10**12))
+        post.save(parent/'ledger.json', dict(tasks=dict(quota=dict(kind='quota', phase='done',
+            directory=str(quota), result_sha256=post.digest(quota/'result.json'), native_exit_code=0,
+            finished_epoch=time.time(), published_bytes=0))))
+        policy = self.root/'terminal_policy.json'
+        post.save(policy, dict(own_reservation_bytes=10**11, external_future_reservation_bytes=0,
+            safety_floor_bytes=0, account_worker_ceiling=100))
+        directory = self.root/'terminal_worker'
+        directory.mkdir()
+        post.save(directory/'request.json', dict(original_id=[1, 2, 3], weight=1., p=1.))
+        bound = 536870912
+        task = dict(kind='aggregate', phase='submitted', cluster=20, stratum='qcd_2to5', events=1,
+            directory=str(directory), source_ids=['original'], publication_bound_bytes=bound,
+            request_sha256=post.digest(directory/'request.json'))
+        state = dict(tasks=dict(terminal=task), latest={}, sources={}, nanos={})
+        if include_independent_worker:
+            ready = self.root/'independent'
+            ready.mkdir()
+            (ready/'worker.sub').write_text('queue 1\n')
+            state['tasks']['independent'] = dict(kind='source_group', phase='ready', stratum='qcd_5to10',
+                events=1, directory=str(ready), source_ids=['independent'], publication_bound_bytes=67108864)
+        config = dict(parent_state=str(parent), parent_config=str(policy),
+            worker_publication_bound_bytes=67108864, maximum_publication_bytes=bound+67108864)
+        terminal = dict(ClusterId=20, ProcId=0, Iwd=str(directory), JobStatus=3,
+            ExitCode=0, ExitBySignal=False, RemoveReason='SYSTEM_PERIODIC_REMOVE: runtime exceeded')
+        return config, state, terminal
+
+    def test_native_removal_without_returned_files_keeps_claim_and_independent_admission(self):
+        import run_shift_sm_postprocessing_controller as controller
+        config, state, terminal = self.terminal_fixture(include_independent_worker=True)
+        task = state['tasks']['terminal']
+        original_request = (Path(task['directory'])/'request.json').read_bytes()
+        with patch.object(controller, 'query', return_value=[]), \
+             patch.object(controller, 'publication_history', return_value={20: terminal}), \
+             patch.object(controller, 'run_condor', return_value='123.0 - 123.0\n') as submit:
+            controller.poll(self.root, config, state)
+        self.assertEqual(task['phase'], 'failed')
+        self.assertIn('SYSTEM_PERIODIC_REMOVE', task['error'])
+        self.assertEqual(task['native'], [terminal])
+        self.assertEqual(task['publication_bound_bytes'], 536870912)
+        self.assertEqual((Path(task['directory'])/'request.json').read_bytes(), original_request)
+        self.assertFalse((Path(task['directory'])/'result.json').exists())
+        self.assertEqual(state['latest'], {})
+        self.assertEqual(state['tasks']['independent']['phase'], 'submitted')
+        self.assertEqual(submit.call_count, 1)
+        self.assertEqual(post.read(self.root/'heartbeat.json')['publication_budget_remaining_bytes'], 0)
+        self.assertIn('terminal', post.read(self.root/'worker_attention_required.json')['failed_workers'])
+
+    def test_unknown_absence_and_native_success_wait_for_returned_receipt_without_replay(self):
+        import run_shift_sm_postprocessing_controller as controller
+        config, state, terminal = self.terminal_fixture()
+        terminal = dict(terminal, JobStatus=4)
+        terminal.pop('RemoveReason')
+        with patch.object(controller, 'query', return_value=[]), \
+             patch.object(controller, 'publication_history', return_value={}) as history, \
+             patch.object(controller, 'run_condor') as submit:
+            controller.poll(self.root, config, state)
+            self.assertEqual(state['tasks']['terminal']['phase'], 'submitted')
+            history.return_value = {20: terminal}
+            controller.poll(self.root, config, state)
+            self.assertEqual(state['tasks']['terminal']['phase'], 'submitted')
+            task = state['tasks']['terminal']
+            post.save(Path(task['directory'])/'result.json', dict(complete=True,
+                request_sha256=task['request_sha256'], events=1, published=dict(histogram=dict(bytes=11))))
+            controller.poll(self.root, config, state)
+        submit.assert_not_called()
+        self.assertEqual(task['phase'], 'done')
+        self.assertEqual(state['latest'], {'qcd_2to5': ['original']})
+
+    def test_removed_terminal_must_match_exact_original_worker(self):
+        import run_shift_sm_postprocessing_controller as controller
+        config, state, terminal = self.terminal_fixture()
+        for changed in (dict(ClusterId=21), dict(ProcId=1), dict(Iwd=str(self.root/'other'))):
+            with self.subTest(changed=changed), \
+                 patch.object(controller, 'query', return_value=[]), \
+                 patch.object(controller, 'publication_history', return_value={20: dict(terminal, **changed)}), \
+                 self.assertRaisesRegex(ValueError, 'differs from frozen task'):
+                controller.poll(self.root, config, state)
+            self.assertEqual(state['tasks']['terminal']['phase'], 'submitted')
+
+    def test_native_history_keeps_scheduler_removal_evidence(self):
+        import run_shift_sm_postprocessing_controller as controller
+        _, state, terminal = self.terminal_fixture()
+        with patch.object(controller, 'run_condor', return_value=json.dumps([terminal])) as native:
+            self.assertEqual(controller.publication_history(state['tasks'], {}), {20: terminal})
+        argv = native.call_args.args[0]
+        attributes = argv[argv.index('-attributes')+1].split(',')
+        for name in ('JobStatus', 'RemoveReason', 'CompletionDate', 'EnteredCurrentStatus'):
+            self.assertIn(name, attributes)
+
     def test_quota_runs_with_full_science_caps_and_never_duplicates_pending_worker(self):
         import run_shift_sm_postprocessing_controller as controller
         import run_shift_smart_sm_controller as native

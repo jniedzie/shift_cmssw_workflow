@@ -668,7 +668,9 @@ def publication_history(tasks, live):
     if not ids:return {}
     constraint='Owner == "jniedzie" && member(ClusterId,{'+','.join(map(str,ids))+'})'
     rows=json.loads(run_condor(['/usr/bin/condor_history','-constraint',constraint,
-        '-limit',str(len(ids)),'-json','-attributes','ClusterId,ProcId,Iwd,ExitCode,ExitBySignal'],timeout=45) or '[]')
+        '-limit',str(len(ids)),'-json','-attributes',
+        'ClusterId,ProcId,Iwd,JobStatus,ExitCode,ExitBySignal,RemoveReason,CompletionDate,EnteredCurrentStatus'],
+        timeout=45) or '[]')
     result={}
     for row in rows:
         if row.get('ClusterId') not in ids or row.get('ProcId')!=0 or row['ClusterId'] in result:
@@ -699,18 +701,29 @@ def poll(root, config, state):
             if live[task['cluster']]['JobStatus'] == 5:
                 task.update(phase='failed', error='Native worker is held; no automatic retry')
             continue
-        result = Path(task['directory']) / 'result.json'
-        if not result.exists():
-            raise ValueError('Absent worker lacks returned result: ' + name)
         terminal=terminals.get(task['cluster'])
         if terminal is None:
             # Fresh queue absence can precede history publication. Keep this
             # response pending, never treat missing evidence as a failed event.
             continue
-        if (terminal.get('Iwd')!=task['directory'] or terminal.get('ExitCode')!=0
-                or terminal.get('ExitBySignal')):
+        if terminal.get('Iwd') != task['directory']:
+            raise ValueError('Native terminal worker directory differs from frozen task: ' + name)
+        if terminal.get('JobStatus') == 3:
+            if terminal.get('ClusterId') != task['cluster'] or terminal.get('ProcId') != 0:
+                raise ValueError('Native removed worker identity differs from frozen task: ' + name)
+            task.update(phase='failed', native=[terminal],
+                error='Native worker removed; outputs require review; no automatic retry: '
+                      + str(terminal.get('RemoveReason', 'unspecified removal')))
+            continue
+        exit_code = terminal.get('ExitCode')
+        if (type(exit_code) is int and exit_code != 0) or terminal.get('ExitBySignal') is True:
             task.update(phase='failed',error='Native terminal failure retained',native=[terminal])
             continue
+        if type(exit_code) is not int or exit_code != 0 or terminal.get('ExitBySignal') is not False:
+            continue  # Incomplete native terminal evidence is not success or a physical rejection.
+        result = Path(task['directory']) / 'result.json'
+        if not result.exists():
+            continue  # Native completion and returned-file delivery are asynchronous.
         receipt = read(result)
         if (not receipt['complete'] or receipt['request_sha256'] != task['request_sha256']
                 or receipt['events'] != task['events']):
