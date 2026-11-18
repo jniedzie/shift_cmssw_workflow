@@ -1,6 +1,55 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## QCD two-muon enrichment before reconstruction (9 November)
+
+New QCD source preparation uses `shift_qcd_gen_filter.py` through
+`run_shift_smart_sm_source.prepared_selection`. Keep the original low-pT QCD
+prescription and pThat bins. Raw uncensored GEN is an internal intermediate:
+place the collision in the jaw and complete natural decays before applying
+muon enrichment. Do not silently replace the final muon-enriched production
+with unfiltered detector input. The raw normalization record stays unchanged;
+the final production profile is explicitly `shift-qcd-two-muon-material-v1`.
+
+The provisional filter requires two muons with compatible projected detector
+crossings on the same pair. Defaults: at most500cm radial station miss,
+at most2known parent interaction lengths, and known muon column-loss/total-
+momentum ratio at most1. Same-sign pairs remain eligible for the all-category
+plots. There is no muon-pT cut or additional material-survival weight. Unknown
+paths compatible with the known requirements remain protected; missing data
+cannot override a known same-pair failure. Geant4 determines real parent
+absorption, energy loss and daughter kinematics. These thresholds are predictors,
+not exact detector acceptance or a measured physical survival probability.
+
+Reconstruct every filter-passing raw MC event. Rejected-event controls have a
+prospective budget of0.25per primary event, bounded by probabilities1e-5and0.01
+and quantized on an exact52-bit hash grid. The complete GEN census alone fixes
+this probability before SIM. A fixed1%control floor was rejected because it
+would still spend most reconstruction on controls. Store exact selected IDs,
+probabilities and nativeW/p once; zero-admission cohorts still retain exposure.
+Original generation trial counts and pass/fail native-weight sums give the
+primary filter's cross-section. Its efficiency is not an extra multiplier on
+histograms; controls separately estimate what the filter misses after reco.
+
+The selected descriptor contains the explicit QCD contract
+`shift-qcd-gen-filter-selection-v1`, enabling unchanged physical parent transport
+and the10nm unsupported-flight guard. Shared BSM selection is unchanged. Raw
+source reuse needs `first_sim_source: true`; existing frozen selections cannot
+be reopened. Send the selected descriptor directly to the generic detector
+worker. Do not apply the old per-source response benchmark sampler afterwards.
+Freeze the filter, source entry and complete imported helper closure together,
+including the scanner and CSC geometry helper. Filter counters are retained
+as provenance through ordinary and grouped histogram publication, with the
+original denominator and rate used once.
+
+Current bounded evidence and native/packaging qualifications:
+`../validation/qcd_two_muon_filter_20261109_v1/README.md`. This implementation
+and retrospective check do not authorize restarting the stopped November7bulk
+campaign. Qualify a useful small fresh response and complete storage/throughput
+forecasts before any long production. In status reports distinguish raw MC
+events from events normalized to lumi, observed outcomes from forecasts, and
+unprocessed responses from physical rejections.
+
 ## Preparing the smart-selection comparison
 
 The October30 QCD comparison is a preparation, not an authorized submission.
@@ -1052,6 +1101,30 @@ New frozen detector-DAG/scoring deployments must version their storage contract,
 package the resolver dependencies and publish to the new dated process-bin
 tiers. The retained legacy manifest/publication contracts remain unchanged for
 auditing; relocating their payloads does not authorize regeneration or cleanup.
+
+### Group backup storage
+
+The user authorized `/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw`
+as additional storage on 6 November. Existing content must remain untouched.
+Keep the same process/campaign/tier structure for data and use `support/` for
+retained support material. The usual data and support bases each have a
+`group_backup` link to the corresponding group location.
+
+Use `root://eoscms.cern.ch/` for transfers to `/eos/cms/...`; the old
+`root://eosuser.cern.ch/` endpoint does not follow cross-instance links. ROOT
+opening the ordinary `/eos/user/...` link on lxplus was qualified and resolves
+to EOS CMS. Frozen batch inputs must retain their working endpoint until an
+explicit replacement reader is qualified. Do not move live inputs merely
+because a local link works.
+
+The initial relocation preserves the September QCD 1--5 GeV AODSIM,
+DIGI_RAW_HLT and unmerged Nano tiers under `support/legacy_references/`.
+GEN, metadata and merged Nano remain in place. Each of the 2,607 retained files
+has independent SHA-256 readback and a metadata receipt. Current workers and
+publication retain their existing paths; freeing these duplicate user-EOS
+copies does not change sampling, exposure or the registered future-write bounds.
+See workspace `validation/sm_weekend_20261106_v1/backup_storage/` for the exact
+file map, reader qualification, quota observations and retirement receipt.
 
 ## Standing production-retention policy
 

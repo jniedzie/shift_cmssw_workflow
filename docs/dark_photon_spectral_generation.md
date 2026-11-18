@@ -59,6 +59,31 @@ LAB flight, because their boost spectra differ.
 interpolation; GEN uses the declared DarkCast input consistently for lifetime
 and dimuon branching.
 
+The November 9 comparison found a production-coverage gap: the published
+[SensCalc prescription](https://arxiv.org/html/2409.11096v2) includes DY from
+1.5 GeV, alongside the other mechanisms. The current samples below 2 GeV omit
+that component. Add separately normalized physical components at the same mass,
+epsilon and proper lifetime; do not replace radiation with DY or average their
+cross sections by trial counts. Combined histogram publication still needs its
+own qualification. `senscalc_dy_component_rates` in the existing aggregator
+prepares the separate rates, GEN denominators and histogram scales; it does not
+publish samples. `prepare_senscalc_dy_histograms` prepares a local histogram-only
+sum and checks ordinary-reader normalization; the original Nanos remain separate.
+The explicit `pbc_bc1_benchmark` definition describes this implementation's source
+and width conventions. New standard pointlike FR contracts keep that definition
+and per-event theory weights in hash-pinned sidecars. Source accounting replays
+them and the exporter retains them. Existing frozen contracts stay unchanged.
+Preserve the correlated FR lower/central/upper scenarios;
+their different mass dependence is a theory uncertainty, not a fitted correction.
+FR table truncation near 2 GeV does not establish zero physical radiation above
+that mass. The current source-only comparison and remaining gates are recorded
+in [SHIFT_BSM.md](../../SHIFT_BSM.md). New production waits for model qualification;
+then prioritize effective passing statistics near the sensitivity boundary.
+The current DY rates are LO. CMS uses an NNLO interpretation; do not import its
+K factors at another collision energy. Pythia freezes NNPDF31 NNLO scales below
+1.65 GeV, which limits the low-mass scale-variation check. Preserve the approved
+production recipe until a qualified change has been explained and agreed.
+
 Use `python3 scripts/dark_photon_senscalc.py --help` for the build, settings and
 sample commands. Preserve the upstream archive, license and runtime receipt.
 See [the production prescription](https://arxiv.org/abs/2504.06828) and the
