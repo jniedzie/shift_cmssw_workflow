@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import tarfile
+import struct
 import tempfile
 import unittest
 
@@ -91,6 +92,39 @@ class DataCollectorTest(unittest.TestCase):
                                                 '    (1) Normal termination (return value 0)\n...\n')
             self.assertTrue(collector.native_success(directory, 123, 4))
             self.assertFalse(collector.native_success(directory, 123, 5))
+
+    def publication_fixture(self):
+        census = dict(header_only=True, all_headers_is_real_data=True,
+                      events=[dict(source_entry=i, run=369943, luminosityBlock=356,
+                                   event=2**63+i) for i in range(40)])
+        digest = hashlib.sha256(b''.join(struct.pack('>IIQ', 369943, 356, 2**63+i)
+                                        for i in range(20))).hexdigest()
+        base = dict(schema='shift-data-staged-publication-inputs-v1',
+                    dataset='/ZeroBias/Run2023D-v1/RAW', era='Run2023D', run=369943,
+                    expected_unique_events=20, expected_identity_sha256=digest,
+                    inputs=[dict(expected_event_count=20)])
+        row = dict(path='fixture.root', origin_uri='condor:123.4', root_uuid='fixture',
+                   sha256='fixture-sha', bytes=1, producer_receipt=dict(path='result.json', sha256='x'),
+                   expected_event_count=10, source_offset=20, native_exit_verified=True,
+                   archive_sha256='private-collector-evidence')
+        return base, dict(ready=[row]), census
+
+    def test_publication_inventory_credits_only_owned_unique_originals(self):
+        base, staged, census = self.publication_fixture()
+        inventory = collector.build_publication_inventory(base, staged, census)
+        expected = hashlib.sha256(b''.join(struct.pack('>IIQ', 369943, 356, 2**63+i)
+                                          for i in range(30))).hexdigest()
+        self.assertEqual(inventory['expected_unique_events'], 30)
+        self.assertEqual(inventory['expected_identity_sha256'], expected)
+        self.assertNotIn('archive_sha256', inventory['inputs'][-1])
+
+    def test_publication_inventory_rejects_overlap_and_relabelled_prior_events(self):
+        for offsets in ([20, 20], [20, 25], [10]):
+            with self.subTest(offsets=offsets):
+                base, staged, census = self.publication_fixture()
+                staged['ready'] = [dict(staged['ready'][0], source_offset=offset) for offset in offsets]
+                with self.assertRaisesRegex(ValueError, 'ownership'):
+                    collector.build_publication_inventory(base, staged, census)
 
 
 if __name__ == '__main__':

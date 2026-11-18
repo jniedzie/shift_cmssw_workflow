@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import struct
 import tarfile
 import time
 
@@ -136,13 +137,63 @@ def collect(plan_path, submission_paths, output_path):
     return result
 
 
+def build_publication_inventory(base, staged, census):
+    if not (base.get('schema') == 'shift-data-staged-publication-inputs-v1'
+            and base.get('dataset') == '/ZeroBias/Run2023D-v1/RAW'
+            and base.get('era') == 'Run2023D' and base.get('run') == 369943
+            and base.get('expected_unique_events') == 20
+            and sum(row['expected_event_count'] for row in base['inputs']) == 20
+            and census.get('header_only') is True
+            and census.get('all_headers_is_real_data') is True):
+        raise ValueError('Require the qualified first20 data inventory and real-data census')
+    headers = {row['source_entry']: (row['run'], row['luminosityBlock'], row['event'])
+               for row in census['events']}
+    def digest(entries):
+        identities = sorted(headers[entry] for entry in entries)
+        if len(set(identities)) != len(entries):
+            raise ValueError('Publication census contains duplicate event identities')
+        return hashlib.sha256(b''.join(struct.pack('>IIQ', *row) for row in identities)).hexdigest()
+    entries = set(range(20))
+    if digest(entries) != base['expected_identity_sha256']:
+        raise ValueError('The qualified first20 inventory has a different identity ledger')
+    rows = list(base['inputs'])
+    keys = ('path', 'origin_uri', 'root_uuid', 'sha256', 'bytes',
+            'producer_receipt', 'expected_event_count')
+    for row in sorted(staged['ready'], key=lambda item: item['source_offset']):
+        offset, count = row['source_offset'], row['expected_event_count']
+        if (type(offset) is not int or type(count) is not int or count <= 0
+                or offset < 20 or offset + count > 1000
+                or row.get('native_exit_verified') is not True):
+            raise ValueError('Invalid or unverified canonical data ownership')
+        new_entries = set(range(offset, offset + count))
+        if entries & new_entries:
+            raise ValueError('Overlapping canonical data ownership')
+        entries.update(new_entries)
+        rows.append({key: row[key] for key in keys})
+    return dict(base, inputs=rows, expected_unique_events=len(entries),
+                expected_identity_sha256=digest(entries))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', type=Path, required=True)
     parser.add_argument('--submission', type=Path, action='append', required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--base-inventory', type=Path)
+    parser.add_argument('--census', type=Path)
+    parser.add_argument('--publication-inventory', type=Path)
     args = parser.parse_args()
-    collect(args.plan, args.submission, args.output)
+    requested = (args.base_inventory, args.census, args.publication_inventory)
+    if any(requested) and not all(requested):
+        parser.error('Publication inventory requires the base inventory, census and output path')
+    staged = collect(args.plan, args.submission, args.output)
+    if all(requested):
+        plan = json.loads(args.plan.read_text())
+        if sha256(args.census) != plan['source_census_sha256']:
+            raise ValueError('The original data header census changed')
+        inventory = build_publication_inventory(json.loads(args.base_inventory.read_text()),
+                                                staged, json.loads(args.census.read_text()))
+        save(args.publication_inventory, inventory)
 
 
 if __name__ == '__main__':
