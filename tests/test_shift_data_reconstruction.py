@@ -1,7 +1,9 @@
 # Code style: AI-code.
 """AI-generated failure-mode tests for bounded data reconstruction preparation."""
 
+import hashlib
 import importlib.util
+import tempfile
 from pathlib import Path
 import unittest
 
@@ -46,6 +48,20 @@ class DataReconstructionContractTest(unittest.TestCase):
                               {"369943": [[True, 5]]}, {"369943": [[1.0, 5]]}):
             with self.subTest(certification=certification), self.assertRaises(ValueError):
                 self.request(certification=certification)
+
+    def test_profile_mutation_is_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            profile = Path(directory) / "profile.py"
+            profile.write_text("# frozen profile\n")
+            pin = hashlib.sha256(profile.read_bytes()).hexdigest()
+            MODULE.validate_profile(profile, pin)
+            profile.write_text("# altered profile\n")
+            with self.assertRaises(ValueError):
+                MODULE.validate_profile(profile, pin)
+
+    def test_unpinned_profile_is_rejected(self):
+        with self.assertRaises(ValueError):
+            MODULE.validate_profile(Path("missing_profile.py"), "")
 
     def test_wrong_tier_or_campaign_is_rejected(self):
         for dataset in ("/ZeroBias/Run2023D-v1/AOD", "/MC/Run3Summer23/GEN-SIM",

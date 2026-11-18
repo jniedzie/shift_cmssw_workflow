@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
 
@@ -43,12 +44,18 @@ def validate_request(dataset, inputs, global_tag, era, max_events, certification
             previous = bounds[1]
 
 
-def customise_data(process, certification_file):
-    """Attach the current detector-only SHIFT baseline to cmsDriver data RECO."""
+def validate_profile(path, expected_sha256):
+    if not re.fullmatch(r"[a-f0-9]{64}", expected_sha256):
+        raise ValueError("reconstruction profile requires an explicit SHA-256 pin")
+    if hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected_sha256:
+        raise ValueError("reconstruction profile differs from its qualified SHA-256 pin")
+
+
+def customise_data(process, certification_file, reconstruction_profile, profile_sha256):
+    """Attach an explicit qualified SHIFT reconstruction profile to data RECO."""
     import FWCore.ParameterSet.Config as cms
     from FWCore.PythonUtilities.LumiList import LumiList
     from PhysicsTools.ShiftMuonSegments.shiftMuonSegments_customise import (
-        customise,
         customiseRecoForShiftMuons,
         customiseTraversingShiftMuonReco,
     )
@@ -66,9 +73,12 @@ def customise_data(process, certification_file):
     process = customiseTraversingShiftMuonReco(
         process, trackerMode="none", enableDTMeasurement=True,
     )
-    process = customise(process, augmentDTHits=True, augmentTrackerHits=False,
-                        useExtendedTiming=False, enableHcalDiagnostics=False,
-                        enableZDCDiagnostics=False)
+    validate_profile(reconstruction_profile, profile_sha256)
+    profile = runpy.run_path(reconstruction_profile)
+    apply_profile = profile.get("customise_shift_data_profile")
+    if not callable(apply_profile):
+        raise ValueError("qualified profile lacks customise_shift_data_profile(process)")
+    process = apply_profile(process)
     process.shiftMuonTable.produceHitTruthAssociation = cms.bool(False)
     process.shiftMuonTable.produceMomentumClosureDiagnostics = cms.bool(False)
     process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(False)
@@ -99,10 +109,13 @@ def main():
     parser.add_argument("--era", required=True)
     parser.add_argument("--max-events", type=int, default=10)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--reconstruction-profile", type=Path, required=True)
+    parser.add_argument("--profile-sha256", required=True)
     args = parser.parse_args()
     certification = json.loads(args.certification.read_text())
     validate_request(args.dataset, args.inputs, args.global_tag, args.era,
                      args.max_events, certification)
+    validate_profile(args.reconstruction_profile, args.profile_sha256)
     if not os.environ.get("CMSSW_BASE") or shutil.which("cmsDriver.py") is None:
         parser.error("initialize the existing CMSSW runtime before preparing data reconstruction")
     os.umask(0o077)
@@ -112,12 +125,15 @@ def main():
     shutil.copyfile(Path(__file__).resolve(), helper)
     frozen_certification = directory / "certification.json"
     shutil.copyfile(args.certification, frozen_certification)
+    frozen_profile = directory / "reconstruction_profile.py"
+    shutil.copyfile(args.reconstruction_profile, frozen_profile)
     config = directory / "reconstruct_cfg.py"
     output = directory / "restricted_nano.root"
     customisation = (
         "import runpy; process = runpy.run_path("
         + repr(str(helper)) + ")['customise_data'](process, "
-        + repr(str(frozen_certification)) + ")"
+        + repr(str(frozen_certification)) + ", " + repr(str(frozen_profile))
+        + ", " + repr(args.profile_sha256) + ")"
     )
     command = [
         "cmsDriver.py", "shift_data", "--data", "--step", "RAW2DIGI,L1Reco,RECO,PAT,NANO",
@@ -142,7 +158,9 @@ def main():
         "duplicate_policy": "checkAllFilesOpened; fixed file order; global publication dedup required",
         "physics_output": "restricted intermediate only; no analysis publication",
         "input_kind": "collision-data",
-        "reconstruction_scope": "CMS detector geometry; extended LSS transport not qualified",
+        "reconstruction_scope": "explicit hash-pinned reconstruction profile; full data integration required",
+        "reconstruction_profile": str(args.reconstruction_profile.resolve()),
+        "reconstruction_profile_sha256": args.profile_sha256,
         "command": command,
     }
     (directory / "preparation.json").write_text(json.dumps(proof, indent=2) + "\n")
