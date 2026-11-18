@@ -51,7 +51,7 @@ def validate_profile(path, expected_sha256):
         raise ValueError("reconstruction profile differs from its qualified SHA-256 pin")
 
 
-def customise_data(process, certification_file, reconstruction_profile, profile_sha256):
+def customise_data(process, certification_file, reconstruction_profile, profile_sha256, geometry_file_tag=None):
     """Attach an explicit qualified SHIFT reconstruction profile to data RECO."""
     import FWCore.ParameterSet.Config as cms
     from FWCore.PythonUtilities.LumiList import LumiList
@@ -79,6 +79,15 @@ def customise_data(process, certification_file, reconstruction_profile, profile_
     if not callable(apply_profile):
         raise ValueError("qualified profile lacks customise_shift_data_profile(process)")
     process = apply_profile(process)
+    if geometry_file_tag is not None:
+        if geometry_file_tag != "Geometry_133DD4hep2_Extended2023_mc":
+            raise ValueError("data geometry override must use the qualified Extended2023 payload")
+        process.GlobalTag.toGet.append(cms.PSet(
+            record=cms.string("GeometryFileRcd"),
+            label=cms.untracked.string("Extended"),
+            tag=cms.string(geometry_file_tag),
+            connect=cms.string("frontier://FrontierProd/CMS_CONDITIONS"),
+        ))
     process.shiftMuonTable.produceHitTruthAssociation = cms.bool(False)
     process.shiftMuonTable.produceMomentumClosureDiagnostics = cms.bool(False)
     process.shiftMuonTable.directionalRefitLogGeometryMaterialComparison = cms.bool(False)
@@ -111,6 +120,8 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--reconstruction-profile", type=Path, required=True)
     parser.add_argument("--profile-sha256", required=True)
+    parser.add_argument("--geometry-file-tag", choices=["Geometry_133DD4hep2_Extended2023_mc"],
+                        help="supply only the qualified ideal geometry record missing from the data GlobalTag")
     args = parser.parse_args()
     certification = json.loads(args.certification.read_text())
     validate_request(args.dataset, args.inputs, args.global_tag, args.era,
@@ -133,7 +144,7 @@ def main():
         "import runpy; process = runpy.run_path("
         + repr(str(helper)) + ")['customise_data'](process, "
         + repr(str(frozen_certification)) + ", " + repr(str(frozen_profile))
-        + ", " + repr(args.profile_sha256) + ")"
+        + ", " + repr(args.profile_sha256) + ", " + repr(args.geometry_file_tag) + ")"
     )
     command = [
         "cmsDriver.py", "shift_data", "--data", "--step", "RAW2DIGI,L1Reco,RECO,PAT,NANO",
@@ -161,6 +172,7 @@ def main():
         "reconstruction_scope": "explicit hash-pinned reconstruction profile; full data integration required",
         "reconstruction_profile": str(args.reconstruction_profile.resolve()),
         "reconstruction_profile_sha256": args.profile_sha256,
+        "geometry_file_tag": args.geometry_file_tag,
         "command": command,
     }
     (directory / "preparation.json").write_text(json.dumps(proof, indent=2) + "\n")
