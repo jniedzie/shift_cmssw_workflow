@@ -169,6 +169,16 @@ class DataCollectorTest(unittest.TestCase):
         self.assertEqual(inventory['event_budget'], 10000)
         self.assertEqual(inventory['datasets'], ['/Muon0/Run2023D-v1/RAW'])
 
+    def test_large_cohort_budget_preserves_completed_subset_ownership(self):
+        staged, census = self.cohort_fixture()
+        small = collector.build_cohort_publication_inventory(staged, census, 100000)
+        large = collector.build_cohort_publication_inventory(staged, census, 1000000)
+        self.assertEqual(large, dict(small, event_budget=1000000))
+        for budget in (True, 1000001):
+            with self.subTest(budget=budget):
+                with self.assertRaisesRegex(ValueError, 'bounded event budget'):
+                    collector.build_cohort_publication_inventory(staged, census, budget)
+
     def test_new_cohort_rejects_overlapping_or_relabelled_responses(self):
         staged, census = self.cohort_fixture()
         staged['ready'].append(dict(staged['ready'][0], path='second.root'))

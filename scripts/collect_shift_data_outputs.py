@@ -188,7 +188,7 @@ def build_cohort_publication_inventory(staged, census, event_budget):
     if (census.get('schema') != 'shift-data-input-header-census-v2'
             or census.get('header_only') is not True or census.get('all_headers_is_real_data') is not True
             or census.get('era') != 'Run2023D' or type(event_budget) is not int
-            or not 0 < event_budget <= 100000):
+            or not 0 < event_budget <= 1000000):
         raise ValueError('Require a supported real-data header census and bounded event budget')
     headers = {row['globalcohort_entry']: row for row in census['events']}
     original_ids = {(row['run'], row['luminosityBlock'], row['event']) for row in census['events']}
