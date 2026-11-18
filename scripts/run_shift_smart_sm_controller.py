@@ -843,11 +843,7 @@ def closed_tasks(tasks):
         children=task.get('replacement_tasks',[])
         return task['phase']=='replaced' and bool(children) and all(
             closed(child,ancestors|{name}) for child in children)
-    # Failed attempts are immutable audit/storage records, not new work.
-    # Their original source/detector slots and replacement graph still close
-    # normally, and their full write claims remain in the resource ledger.
-    return all(closed(name,set()) for name,task in tasks.items()
-               if task.get('kind') != 'failed_attempt')
+    return all(closed(name,set()) for name in tasks)
 
 
 def retry_stalled_sim(root,config,state,ads):
