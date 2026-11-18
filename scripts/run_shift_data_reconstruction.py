@@ -27,7 +27,8 @@ def save(path, value):
 
 
 def validate_request(request):
-    if request.get('schema') != 'shift-data-reconstruction-job-v1':
+    schema = request.get('schema')
+    if schema not in ('shift-data-reconstruction-job-v1', 'shift-data-reconstruction-job-v2'):
         raise ValueError('Unknown data worker request schema')
     directory = Path(request['directory'])
     if not directory.is_absolute() or len(directory.parts) < 2 or directory.parts[1] not in ('afs', 'eos'):
@@ -38,17 +39,30 @@ def validate_request(request):
     rows = []
     for identity in identities:
         row = tuple(identity[name] for name in ('run', 'luminosityBlock', 'event'))
-        if any(type(value) is not int or value <= 0 for value in row):
+        if any(type(value) is not int or not 0 < value < 2**bits
+               for value, bits in zip(row, (32, 32, 64))):
             raise ValueError('Invalid original data identity')
-        if row[2] > 2**64 - 1:
-            raise ValueError('Original event number exceeds unsigned 64-bit range')
         rows.append(row)
     if len(set(rows)) != len(rows):
         raise ValueError('A worker cannot own duplicate originals')
     if type(request['source_offset']) is not int or request['source_offset'] < 0:
         raise ValueError('Invalid original source offset')
-    if not str(request['batch_name']).startswith('DATA_Run2023D_ZeroBias_SHIFTReco_20261118_'):
-        raise ValueError('Data jobs must identify DATA and the period')
+    if schema == 'shift-data-reconstruction-job-v1':
+        if not str(request['batch_name']).startswith('DATA_Run2023D_ZeroBias_SHIFTReco_20261118_'):
+            raise ValueError('Legacy data jobs must identify their qualified ZeroBias period')
+    else:
+        dataset = re.fullmatch(r'/([A-Za-z0-9_]+)/(Run2023D)-(v[0-9]+)/RAW',
+                               request.get('dataset', ''))
+        if not dataset or request.get('era') != dataset.group(2):
+            raise ValueError('Data jobs require an explicit supported RAW dataset and era')
+        primary, era, version = dataset.groups()
+        source = request.get('source_url', '')
+        expected = f'/store/data/{era}/{primary}/RAW/{version}/'
+        if not (source.startswith('root://') and expected in source and source.endswith('.root')):
+            raise ValueError('The RAW source differs from the declared dataset')
+        if not re.fullmatch(rf'DATA_{era}_{primary}_SHIFTReco_[0-9]{{8}}_[A-Za-z0-9_]+',
+                            request['batch_name']):
+            raise ValueError('Data jobs must identify DATA, era and primary dataset')
     return rows
 
 
@@ -106,6 +120,7 @@ def write_config(payload, work, request):
     code += 'import FWCore.ParameterSet.Config as cms\n'
     code += 'process = runpy.run_path(' + repr(str(payload / 'reconstruct_cfg.py')) + ')["process"]\n'
     code += 'owned = json.loads(Path(' + repr(str(work / 'request.json')) + ').read_text())\n'
+    code += 'process.source.fileNames = cms.untracked.vstring(owned["source_url"])\n'
     code += 'process.maxEvents.input = cms.untracked.int32(len(owned["events"]))\n'
     code += 'process.source.skipEvents = cms.untracked.uint32(0)\n'
     code += 'process.source.eventsToProcess = cms.untracked.VEventRange(*["{run}:{luminosityBlock}:{event}".format(**row) for row in owned["events"]])\n'
@@ -158,6 +173,9 @@ def main():
                   request_sha256=args.request_sha256, job_name=request['job_name'],
                   batch_name=request['batch_name'], original_events=len(expected),
                   input_origin='collision-data', candidate_branches_read=False)
+    if request['schema'] == 'shift-data-reconstruction-job-v2':
+        result.update(dataset=request['dataset'], era=request['era'], source_url=request['source_url'],
+                      original_runs=sorted({identity[0] for identity in expected}))
     termination = dict(requested=False, child=None)
     def terminate(signum, frame):
         termination['requested'] = True

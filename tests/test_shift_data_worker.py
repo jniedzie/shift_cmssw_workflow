@@ -34,6 +34,28 @@ class DataWorkerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             WORKER.validate_request(request)
 
+    def muon_request(self):
+        request = self.request()
+        request.update(schema='shift-data-reconstruction-job-v2',
+                       dataset='/Muon0/Run2023D-v1/RAW', era='Run2023D',
+                       source_url='root://eoscms.cern.ch//store/data/Run2023D/Muon0/RAW/v1/fixture.root',
+                       batch_name='DATA_Run2023D_Muon0_SHIFTReco_20261118_benchmark100')
+        return request
+
+    def test_explicit_muon_dataset_preserves_owned_unsigned_identity(self):
+        self.assertEqual(WORKER.validate_request(self.muon_request()), [(369943, 356, 2**63+7)])
+
+    def test_dataset_source_and_batch_must_agree(self):
+        changes = (dict(source_url='root://eoscms.cern.ch//store/data/Run2023D/ZeroBias/RAW/v1/fixture.root'),
+                   dict(dataset='/Muon0/Run2023D-v2/RAW'),
+                   dict(era='Run2023C'),
+                   dict(batch_name='DATA_Run2023D_ZeroBias_SHIFTReco_20261118_benchmark100'))
+        for change in changes:
+            request = self.muon_request()
+            request.update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                WORKER.validate_request(request)
+
     def test_bad_or_out_of_range_identities_are_rejected(self):
         for value in (True, -1, 2**64, 1.5):
             request = self.request()

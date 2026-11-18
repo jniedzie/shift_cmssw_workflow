@@ -52,6 +52,11 @@ def stage_output(directory, request_sha256, audit=audit_identities):
             and result.get('original_events') == len(expected)
             and result.get('candidate_branches_read') is False):
         raise ValueError('The returned producer is not a completed data response')
+    if request['schema'] == 'shift-data-reconstruction-job-v2':
+        provenance = dict(dataset=request['dataset'], era=request['era'], source_url=request['source_url'],
+                          original_runs=sorted({identity[0] for identity in expected}))
+        if any(result.get(key) != value for key, value in provenance.items()):
+            raise ValueError('The returned producer changed its data source provenance')
     archive_path = directory / 'return_payload.tar.gz'
     root_path = directory / 'restricted_nano.root'
     with tarfile.open(archive_path) as archive:
@@ -90,13 +95,17 @@ def stage_output(directory, request_sha256, audit=audit_identities):
     if (identity['root_uuid'] != result['output']['root_uuid']
             or identity != result['identity_audit']):
         raise ValueError('Independent identity readback differs from producer')
-    return dict(path=str(root_path), origin_uri=request['source_url'],
+    staged = dict(path=str(root_path), origin_uri=request['source_url'],
                 root_uuid=identity['root_uuid'], sha256=sha256(root_path),
                 bytes=root_path.stat().st_size,
                 producer_receipt=dict(path=str(result_path), sha256=sha256(result_path)),
                 expected_event_count=len(expected), request_sha256=request_sha256,
                 source_offset=request['source_offset'],
                 archive_sha256=sha256(archive_path), native_exit_verified=True)
+    if request['schema'] == 'shift-data-reconstruction-job-v2':
+        staged.update(dataset=request['dataset'], era=request['era'],
+                      original_runs=sorted({identity[0] for identity in expected}))
+    return staged
 
 
 def collect(plan_path, submission_paths, output_path):
@@ -174,6 +183,48 @@ def build_publication_inventory(base, staged, census):
                 expected_identity_sha256=digest(entries))
 
 
+def build_cohort_publication_inventory(staged, census, event_budget):
+    """Bind one completed canonical subset to its full original header census."""
+    if (census.get('schema') != 'shift-data-input-header-census-v2'
+            or census.get('header_only') is not True or census.get('all_headers_is_real_data') is not True
+            or census.get('era') != 'Run2023D' or type(event_budget) is not int
+            or not 0 < event_budget <= 100000):
+        raise ValueError('Require a supported real-data header census and bounded event budget')
+    headers = {row['globalcohort_entry']: row for row in census['events']}
+    original_ids = {(row['run'], row['luminosityBlock'], row['event']) for row in census['events']}
+    if (len(headers) != len(census['events']) or len(headers) != census.get('unique_originals')
+            or len(original_ids) != len(headers) or set(headers) != set(range(len(headers)))
+            or len(headers) > event_budget):
+        raise ValueError('The original header census has duplicate or excess ownership')
+    identities, entries, rows, datasets, runs = [], set(), [], set(), set()
+    keys = ('path', 'origin_uri', 'root_uuid', 'sha256', 'bytes',
+            'producer_receipt', 'expected_event_count')
+    for row in sorted(staged['ready'], key=lambda item: item['source_offset']):
+        offset, count = row['source_offset'], row['expected_event_count']
+        if (type(offset) is not int or type(count) is not int or count <= 0 or offset < 0
+                or row.get('native_exit_verified') is not True or row.get('era') != census['era']):
+            raise ValueError('Invalid or unverified canonical data ownership')
+        selected = set(range(offset, offset + count))
+        if entries & selected or not selected <= headers.keys():
+            raise ValueError('Overlapping or unknown canonical data ownership')
+        originals = [headers[index] for index in sorted(selected)]
+        if (any(item['source_dataset'] != row['dataset'] or item['source_url'] != row['origin_uri']
+                for item in originals)
+                or sorted({item['run'] for item in originals}) != row.get('original_runs')):
+            raise ValueError('Canonical data provenance differs from original headers')
+        entries.update(selected)
+        identities.extend((item['run'], item['luminosityBlock'], item['event']) for item in originals)
+        datasets.add(row['dataset'])
+        runs.update(row['original_runs'])
+        rows.append({key: row[key] for key in keys})
+    if not rows or len(identities) != len(set(identities)):
+        raise ValueError('Publication needs completed unique canonical originals')
+    digest = hashlib.sha256(b''.join(struct.pack('>IIQ', *item) for item in sorted(identities))).hexdigest()
+    return dict(schema='shift-data-staged-publication-inputs-v2', datasets=sorted(datasets),
+                era=census['era'], runs=sorted(runs), event_budget=event_budget,
+                expected_unique_events=len(identities), expected_identity_sha256=digest, inputs=rows)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--plan', type=Path, required=True)
@@ -183,16 +234,18 @@ def main():
     parser.add_argument('--census', type=Path)
     parser.add_argument('--publication-inventory', type=Path)
     args = parser.parse_args()
-    requested = (args.base_inventory, args.census, args.publication_inventory)
-    if any(requested) and not all(requested):
-        parser.error('Publication inventory requires the base inventory, census and output path')
+    if bool(args.census) != bool(args.publication_inventory) or (args.base_inventory and not args.census):
+        parser.error('Publication inventory requires the census and output path; a legacy base is optional')
     staged = collect(args.plan, args.submission, args.output)
-    if all(requested):
+    if args.census:
         plan = json.loads(args.plan.read_text())
         if sha256(args.census) != plan['source_census_sha256']:
             raise ValueError('The original data header census changed')
-        inventory = build_publication_inventory(json.loads(args.base_inventory.read_text()),
-                                                staged, json.loads(args.census.read_text()))
+        census = json.loads(args.census.read_text())
+        if args.base_inventory:
+            inventory = build_publication_inventory(json.loads(args.base_inventory.read_text()), staged, census)
+        else:
+            inventory = build_cohort_publication_inventory(staged, census, plan['event_budget'])
         save(args.publication_inventory, inventory)
 
 

@@ -15,11 +15,15 @@ import collect_shift_data_outputs as collector
 
 
 class DataCollectorTest(unittest.TestCase):
-    def fixture(self, directory, *, mismatch=False):
+    def fixture(self, directory, *, mismatch=False, version2=False):
         request = dict(schema='shift-data-reconstruction-job-v1', directory='/afs/example/job',
                        events=[dict(run=369943, luminosityBlock=356, event=2**63+1)],
                        source_offset=20, source_url='root://example/input.root',
                        batch_name='DATA_Run2023D_ZeroBias_SHIFTReco_20261118_test')
+        if version2:
+            request.update(schema='shift-data-reconstruction-job-v2', dataset='/Muon0/Run2023D-v1/RAW',
+                           era='Run2023D', batch_name='DATA_Run2023D_Muon0_SHIFTReco_20261118_test',
+                           source_url='root://example//store/data/Run2023D/Muon0/RAW/v1/fixture.root')
         path = directory / 'request.json'
         path.write_text(json.dumps(request))
         digest = collector.sha256(path)
@@ -31,6 +35,9 @@ class DataCollectorTest(unittest.TestCase):
                       native=dict(exit_code=0), original_events=1, candidate_branches_read=False,
                       output=dict(sha256=hashlib.sha256(payload).hexdigest(), bytes=len(payload),
                                   root_uuid='fixture'), identity_audit=identity)
+        if version2:
+            result.update(dataset=request['dataset'], era=request['era'], source_url=request['source_url'],
+                          original_runs=[369943])
         (directory / 'result.json').write_text(json.dumps(result))
         with tarfile.open(directory / 'return_payload.tar.gz', 'w:gz') as archive:
             for name, data in [('result.json', b'{}' if mismatch else json.dumps(result).encode()),
@@ -48,6 +55,19 @@ class DataCollectorTest(unittest.TestCase):
             second = collector.stage_output(directory, digest, audit=lambda path, ids: identity)
             self.assertEqual(first, second)
             self.assertEqual(first['expected_event_count'], 1)
+
+    def test_new_dataset_provenance_binds_to_native_request(self):
+        with tempfile.TemporaryDirectory() as task:
+            directory = Path(task)
+            digest, identity = self.fixture(directory, version2=True)
+            staged = collector.stage_output(directory, digest, audit=lambda path, ids: identity)
+            self.assertEqual(staged['dataset'], '/Muon0/Run2023D-v1/RAW')
+            self.assertEqual(staged['original_runs'], [369943])
+            result = json.loads((directory / 'result.json').read_text())
+            result['dataset'] = '/Muon1/Run2023D-v1/RAW'
+            (directory / 'result.json').write_text(json.dumps(result))
+            with self.assertRaisesRegex(ValueError, 'source provenance'):
+                collector.stage_output(directory, digest, audit=lambda path, ids: identity)
 
     def test_archive_cannot_relabel_another_producer(self):
         with tempfile.TemporaryDirectory() as task:
@@ -125,6 +145,39 @@ class DataCollectorTest(unittest.TestCase):
                 staged['ready'] = [dict(staged['ready'][0], source_offset=offset) for offset in offsets]
                 with self.assertRaisesRegex(ValueError, 'ownership'):
                     collector.build_publication_inventory(base, staged, census)
+
+    def cohort_fixture(self):
+        dataset = '/Muon0/Run2023D-v1/RAW'
+        url = 'root://example//store/data/Run2023D/Muon0/RAW/v1/fixture.root'
+        census = dict(schema='shift-data-input-header-census-v2', header_only=True,
+                      all_headers_is_real_data=True, era='Run2023D', unique_originals=100,
+                      events=[dict(globalcohort_entry=i, run=369943, luminosityBlock=99,
+                                   event=2**63+i, source_dataset=dataset, source_url=url) for i in range(100)])
+        row = dict(path='fixture.root', origin_uri=url, root_uuid='fixture', sha256='fixture-sha', bytes=1,
+                   producer_receipt=dict(path='result.json', sha256='x'), expected_event_count=10,
+                   source_offset=20, native_exit_verified=True, dataset=dataset, era='Run2023D',
+                   original_runs=[369943])
+        return dict(ready=[row]), census
+
+    def test_new_cohort_inventory_uses_exact_completed_header_subset(self):
+        staged, census = self.cohort_fixture()
+        inventory = collector.build_cohort_publication_inventory(staged, census, 10000)
+        expected = hashlib.sha256(b''.join(struct.pack('>IIQ', 369943, 99, 2**63+i)
+                                          for i in range(20, 30))).hexdigest()
+        self.assertEqual(inventory['expected_identity_sha256'], expected)
+        self.assertEqual(inventory['expected_unique_events'], 10)
+        self.assertEqual(inventory['event_budget'], 10000)
+        self.assertEqual(inventory['datasets'], ['/Muon0/Run2023D-v1/RAW'])
+
+    def test_new_cohort_rejects_overlapping_or_relabelled_responses(self):
+        staged, census = self.cohort_fixture()
+        staged['ready'].append(dict(staged['ready'][0], path='second.root'))
+        with self.assertRaisesRegex(ValueError, 'Overlapping'):
+            collector.build_cohort_publication_inventory(staged, census, 10000)
+        staged, census = self.cohort_fixture()
+        staged['ready'][0]['dataset'] = '/Muon1/Run2023D-v1/RAW'
+        with self.assertRaisesRegex(ValueError, 'provenance'):
+            collector.build_cohort_publication_inventory(staged, census, 10000)
 
 
 if __name__ == '__main__':
