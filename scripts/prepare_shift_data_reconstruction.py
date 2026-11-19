@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 # Code style: AI-code.
-"""AI-generated preparation of a bounded, restricted Run-3 RAW reconstruction.
+"""AI-generated preparation of restricted, full-lumisection Run-3 data.
 
 Run inside an initialized CMSSW runtime. This prepares a config; it never runs
 cmsRun, rebuilds CMSSW, submits jobs or publishes reconstructed observables.
+Finite event limits are reserved for explicitly requested diagnostic pilots.
 """
 
 import argparse
@@ -17,7 +18,8 @@ import shutil
 import subprocess
 
 
-def validate_request(dataset, inputs, global_tag, era, max_events, certification):
+def validate_request(dataset, inputs, global_tag, era, max_events, certification,
+                     full_lumisections=False):
     if not re.fullmatch(r"/[^/]+/Run2023[BCD]-[^/]+/RAW", dataset):
         raise ValueError("pilot requires one explicit 2023 B/C/D RAW dataset")
     if not inputs or len(inputs) != len(set(inputs)):
@@ -28,7 +30,10 @@ def validate_request(dataset, inputs, global_tag, era, max_events, certification
         raise ValueError("provide a concrete Run-3 data GlobalTag, not auto or MC conditions")
     if era != "Run3_2023":
         raise ValueError("this bounded pilot supports the installed Run3_2023 era only")
-    if type(max_events) is not int or not 1 <= max_events <= 1000:
+    if full_lumisections:
+        if type(max_events) is not int or max_events != -1:
+            raise ValueError("full-lumisection preparation cannot truncate by event count")
+    elif type(max_events) is not int or not 1 <= max_events <= 1000:
         raise ValueError("pilot max-events must be between 1 and 1000")
     if not isinstance(certification, dict) or not certification:
         raise ValueError("certification must be a nonempty run/lumisection JSON object")
@@ -49,6 +54,33 @@ def validate_profile(path, expected_sha256):
         raise ValueError("reconstruction profile requires an explicit SHA-256 pin")
     if hashlib.sha256(Path(path).read_bytes()).hexdigest() != expected_sha256:
         raise ValueError("reconstruction profile differs from its qualified SHA-256 pin")
+
+
+def processing_scope(dataset, inputs, certification_path, max_events=None,
+                     event_limited_pilot=False, contract_path=None, contract_sha256=None):
+    """Require a frozen whole-LS cohort, or an explicit uncredited pilot."""
+    certification = json.loads(Path(certification_path).read_text())
+    if event_limited_pilot:
+        if contract_path is not None or contract_sha256 is not None:
+            raise ValueError("a diagnostic event-limited pilot cannot claim a full-lumisection contract")
+        return 10 if max_events is None else max_events, certification, None
+    if contract_path is None or contract_sha256 is None:
+        raise ValueError("new data cohorts require a full-lumisection contract; use --event-limited-pilot for diagnostics")
+    if max_events is not None:
+        raise ValueError("event limits require --event-limited-pilot; full lumisections use their complete owned inventory")
+    # This dependency is needed only while preparing a new cohort. Frozen
+    # runpy helpers that apply the reconstruction profile do not import it.
+    from prepare_shift_data_lumisections import load_contract
+    selected = load_contract(Path(contract_path), contract_sha256, dataset, inputs)
+    contract = json.loads(Path(contract_path).read_text())
+    actual = hashlib.sha256(Path(certification_path).read_bytes()).hexdigest()
+    if contract['certification']['sha256'] != actual:
+        raise ValueError("data preparation certification differs from the full-lumisection contract")
+    for run, ranges in selected.items():
+        for low, high in ranges:
+            if not any(a <= low <= high <= b for a, b in certification.get(run, [])):
+                raise ValueError("the selected full lumisections are outside certification")
+    return -1, selected, dict(path=str(Path(contract_path).resolve()), sha256=contract_sha256)
 
 
 def customise_data(process, certification_file, reconstruction_profile, profile_sha256, geometry_file_tag=None):
@@ -116,16 +148,26 @@ def main():
     parser.add_argument("--certification", type=Path, required=True)
     parser.add_argument("--global-tag", required=True)
     parser.add_argument("--era", required=True)
-    parser.add_argument("--max-events", type=int, default=10)
+    parser.add_argument("--max-events", type=int,
+                        help="finite count for an explicit diagnostic pilot only")
+    parser.add_argument("--event-limited-pilot", action="store_true",
+                        help="explicit diagnostic exception; earns no full-lumisection credit")
+    parser.add_argument("--full-lumisection-contract", type=Path)
+    parser.add_argument("--contract-sha256")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--reconstruction-profile", type=Path, required=True)
     parser.add_argument("--profile-sha256", required=True)
     parser.add_argument("--geometry-file-tag", choices=["Geometry_133DD4hep2_Extended2023_mc"],
                         help="supply only the qualified ideal geometry record missing from the data GlobalTag")
     args = parser.parse_args()
-    certification = json.loads(args.certification.read_text())
+    try:
+        max_events, certification, contract = processing_scope(
+            args.dataset, args.inputs, args.certification, args.max_events,
+            args.event_limited_pilot, args.full_lumisection_contract, args.contract_sha256)
+    except ValueError as error:
+        parser.error(str(error))
     validate_request(args.dataset, args.inputs, args.global_tag, args.era,
-                     args.max_events, certification)
+                     max_events, certification, full_lumisections=contract is not None)
     validate_profile(args.reconstruction_profile, args.profile_sha256)
     if not os.environ.get("CMSSW_BASE") or shutil.which("cmsDriver.py") is None:
         parser.error("initialize the existing CMSSW runtime before preparing data reconstruction")
@@ -135,7 +177,9 @@ def main():
     helper = directory / "data_reconstruction_helpers.py"
     shutil.copyfile(Path(__file__).resolve(), helper)
     frozen_certification = directory / "certification.json"
-    shutil.copyfile(args.certification, frozen_certification)
+    frozen_certification.write_text(json.dumps(certification, indent=2) + "\n")
+    if contract is not None:
+        shutil.copyfile(args.full_lumisection_contract, directory / "full_lumisection_contract.json")
     frozen_profile = directory / "reconstruction_profile.py"
     shutil.copyfile(args.reconstruction_profile, frozen_profile)
     config = directory / "reconstruct_cfg.py"
@@ -152,7 +196,7 @@ def main():
         "--geometry", "DB:Extended", "--datatier", "NANOAOD", "--eventcontent", "NANOAOD",
         "--filein", ",".join(args.inputs), "--fileout", "file:" + str(output),
         "--python_filename", str(config), "--nThreads", "1", "--nStreams", "1",
-        "--no_exec", "-n", str(args.max_events), "--customise_commands", customisation,
+        "--no_exec", "-n", str(max_events), "--customise_commands", customisation,
     ]
     # Configuration diagnostics remain inside the restricted directory too.
     with (directory / "preparation.log").open("x") as log:
@@ -160,7 +204,11 @@ def main():
     proof = {
         "schema_version": 1, "stage": "configuration_prepared_only",
         "dataset": args.dataset, "input_files": args.inputs, "era": args.era,
-        "global_tag": args.global_tag, "max_events": args.max_events,
+        "global_tag": args.global_tag, "max_events": max_events,
+        "processing_scope": "full_lumisection_cohort" if contract else "event_limited_diagnostic_pilot",
+        "full_lumisection_contract": contract,
+        "luminosity_credit": "only after all required cohort shards verify" if contract else "none",
+        "source_certification_sha256": hashlib.sha256(args.certification.read_bytes()).hexdigest(),
         "cmssw_version": os.environ.get("CMSSW_VERSION"),
         "cmssw_base": os.environ["CMSSW_BASE"],
         "certification_sha256": hashlib.sha256(frozen_certification.read_bytes()).hexdigest(),

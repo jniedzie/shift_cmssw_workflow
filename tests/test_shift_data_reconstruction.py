@@ -37,6 +37,45 @@ class DataReconstructionContractTest(unittest.TestCase):
             with self.subTest(events=events), self.assertRaises(ValueError):
                 self.request(max_events=events)
 
+    def test_unbounded_count_requires_explicit_full_lumisection_scope(self):
+        self.request(max_events=-1, full_lumisections=True)
+        for count in (10, 1000, True):
+            with self.subTest(count=count), self.assertRaises(ValueError):
+                self.request(max_events=count, full_lumisections=True)
+
+    def test_default_preparation_requires_full_lumisection_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            golden = Path(directory) / "golden.json"
+            golden.write_text('{"369943":[[356,359]]}')
+            for count in (None, 10):
+                with self.subTest(count=count), self.assertRaisesRegex(ValueError, "full-lumisection contract"):
+                    MODULE.processing_scope("/ZeroBias/Run2023D-v1/RAW", ["/store/input.root"],
+                                            golden, max_events=count)
+
+    def test_event_limited_pilot_is_explicit_and_cannot_claim_lumi_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            golden = Path(directory) / "golden.json"
+            golden.write_text('{"369943":[[356,359]]}')
+            count, mask, contract = MODULE.processing_scope(
+                "/ZeroBias/Run2023D-v1/RAW", ["/store/input.root"], golden,
+                event_limited_pilot=True)
+            self.assertEqual(count, 10)
+            self.assertEqual(mask, {"369943": [[356, 359]]})
+            self.assertIsNone(contract)
+            with self.assertRaisesRegex(ValueError, "cannot claim"):
+                MODULE.processing_scope("/ZeroBias/Run2023D-v1/RAW", ["/store/input.root"],
+                                        golden, event_limited_pilot=True,
+                                        contract_path=Path("contract.json"), contract_sha256="a" * 64)
+
+    def test_event_cap_cannot_silently_truncate_full_lumisection_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            golden = Path(directory) / "golden.json"
+            golden.write_text('{"369943":[[356,359]]}')
+            with self.assertRaisesRegex(ValueError, "event limits require"):
+                MODULE.processing_scope("/ZeroBias/Run2023D-v1/RAW", ["/store/input.root"],
+                                        golden, max_events=100,
+                                        contract_path=Path("contract.json"), contract_sha256="a" * 64)
+
     def test_duplicate_or_missing_file_ownership_is_rejected(self):
         for files in ([], ["file:a.root", "file:a.root"]):
             with self.subTest(files=files), self.assertRaises(ValueError):
