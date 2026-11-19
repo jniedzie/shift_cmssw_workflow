@@ -2,6 +2,7 @@
 """AI-generated checks for data ownership and sanitized worker metrics."""
 import copy
 import importlib.util
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -9,8 +10,11 @@ import sys
 import os
 import subprocess
 import tarfile
+import time
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).parents[1] / 'scripts'))
+import shift_data_attempts
 
 SPEC = importlib.util.spec_from_file_location(
     'data_worker', Path(__file__).parents[1] / 'scripts/run_shift_data_reconstruction.py')
@@ -123,6 +127,216 @@ class DataWorkerTest(unittest.TestCase):
 
     def test_completed_archive_is_readable(self):
         self.run_archive_finish(fail_tar=False)
+
+
+class ReviewedTimeoutRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.task = Path(self.temporary.name)
+        self.persistent = self.task / 'persistent'
+        self.work = self.task / 'scratch'
+        self.persistent.mkdir()
+        self.work.mkdir()
+        self.request_sha = 'a' * 64
+        self.request = dict(directory=str(self.persistent), source_offset=0,
+                            native_timeout_seconds=9000, job_max_runtime_seconds=14400)
+        self.guard = dict(request_sha256=self.request_sha, recovery_count=0,
+                          started_utc=time.time() - 10000)
+        self.previous = dict(request_sha256=self.request_sha, complete=False,
+                             exit_code=124, native=dict(exit_code=124),
+                             operational_interruption=False, exception_categories=[])
+        self.write_first_attempt()
+        self.receipt_path = self.task / 'reviewed_timeout.json'
+        self.native_job = dict(cluster_id=123, proc_id=0,
+                               job_start_date=int(time.time()) - 10000,
+                               max_runtime_seconds=86400)
+        self.ad = self.task / 'job.ad'
+        self.write_ad()
+        self.write_review()
+        self.claims = mock.Mock()
+        self.claims.reserve.return_value = self.task / 'retry_slot.json'
+        self.remote = mock.Mock()
+        self.remote.restore_completed.return_value = None
+        self.environment = mock.patch.dict(os.environ, _CONDOR_JOB_AD=str(self.ad))
+        self.environment.start()
+        self.addCleanup(self.environment.stop)
+        self.modules = mock.patch.dict(sys.modules, shift_data_storage_claims=self.claims,
+                                       shift_data_remote_output=self.remote)
+        self.modules.start()
+        self.addCleanup(self.modules.stop)
+
+    def write_ad(self):
+        self.ad.write_text('\n'.join(f'{attribute} = {self.native_job[name]}' for attribute, name in
+                           (('ClusterId', 'cluster_id'), ('ProcId', 'proc_id'),
+                            ('JobStartDate', 'job_start_date'), ('MaxRuntime', 'max_runtime_seconds'))) + '\n')
+
+    def write_first_attempt(self):
+        (self.persistent / 'attempt_started.json').write_text(json.dumps(self.guard))
+        (self.persistent / 'result.json').write_text(json.dumps(self.previous))
+        with tarfile.open(self.persistent / 'return_payload.tar.gz', 'w:gz') as archive:
+            archive.add(self.persistent / 'result.json', arcname='result.json')
+        self.snapshot = shift_data_attempts.snapshot_previous(self.persistent, self.work)
+
+    def write_review(self, **changes):
+        self.receipt = dict(schema='shift-data-timeout-recovery-v1', request_sha256=self.request_sha,
+                            directory=str(self.persistent), native_job=self.native_job,
+                            previous_archive_sha256=shift_data_attempts.sha256(self.snapshot / 'return_payload.tar.gz'),
+                            original_guard_sha256=shift_data_attempts.sha256(self.snapshot / 'attempt_started.json'),
+                            previous_result_sha256=shift_data_attempts.sha256(self.snapshot / 'result.json'),
+                            original_timeout_seconds=9000, effective_timeout_seconds=18000,
+                            maximum_retries=1, review=dict(reason='Reviewed native CPU timeout; unchanged inputs and physics.'))
+        self.receipt.update(changes)
+        self.receipt_path.write_text(json.dumps(self.receipt))
+        self.receipt_sha = shift_data_attempts.sha256(self.receipt_path)
+
+    def begin(self, receipt_sha=None):
+        return shift_data_attempts.begin_attempt(
+            self.persistent, self.work, self.request, self.request_sha, [], mock.Mock(),
+            self.receipt_path, receipt_sha or self.receipt_sha)
+
+    def test_reviewed_retry_retains_request_and_reserves_original_owned_storage(self):
+        original = copy.deepcopy(self.request)
+        result = self.begin()
+        self.assertEqual(result['action'], 'retry_reviewed_timeout')
+        self.assertEqual(result['recovery_count'], 1)
+        self.assertEqual(result['timeout_recovery']['effective_timeout_seconds'], 18000)
+        self.assertFalse(result['timeout_recovery']['new_independent_exposure'])
+        self.assertEqual(self.request, original)
+        self.claims.reserve.assert_called_once_with('retry', self.request, self.request_sha)
+
+    def test_receipt_hash_and_original_evidence_are_required(self):
+        with self.assertRaises(ValueError):
+            self.begin('b' * 64)
+        for change in (dict(request_sha256='b' * 64), dict(directory=str(self.work)),
+                       dict(previous_archive_sha256='b' * 64), dict(original_guard_sha256='b' * 64),
+                       dict(previous_result_sha256='b' * 64)):
+            self.write_review(**change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.begin()
+        self.claims.reserve.assert_not_called()
+
+    def test_non_timeout_and_completed_native_attempts_are_never_replayed(self):
+        for changes in (dict(exit_code=1, native=dict(exit_code=1)),
+                        dict(complete=True, exit_code=0, native=dict(exit_code=0)),
+                        dict(operational_interruption=True), dict(exception_categories=['FatalError'])):
+            previous = copy.deepcopy(self.previous)
+            previous.update(changes)
+            (self.snapshot / 'result.json').write_text(json.dumps(previous))
+            self.write_review()
+            with self.subTest(changes=changes), self.assertRaises(FileExistsError):
+                self.begin()
+        self.claims.reserve.assert_not_called()
+
+    def test_second_retry_is_rejected_even_with_a_new_reviewed_receipt(self):
+        self.guard['recovery_count'] = 1
+        for path in (self.persistent / 'attempt_started.json', self.snapshot / 'attempt_started.json'):
+            path.write_text(json.dumps(self.guard))
+        self.write_review()
+        with self.assertRaises(FileExistsError):
+            self.begin()
+        self.claims.reserve.assert_not_called()
+
+    def test_completed_reviewed_retry_is_adopted_from_private_remote_root_after_eviction(self):
+        root = self.work / 'restricted_nano.root'
+        root.write_bytes(b'verified remote ROOT')
+        output = dict(bytes=root.stat().st_size, sha256=shift_data_attempts.sha256(root))
+        root.unlink()
+        self.previous.update(complete=True, exit_code=0, native=dict(exit_code=0), output=output,
+                             timeout_recovery=dict(sha256=self.receipt_sha, effective_timeout_seconds=18000))
+        self.guard['recovery_count'] = 1
+        self.write_first_attempt()
+        def restore(request, previous, destination):
+            destination.write_bytes(b'verified remote ROOT')
+            return destination
+        self.remote.restore_completed.side_effect = restore
+        audit = mock.Mock(return_value=dict(root_uuid='verified-fixture'))
+        result = shift_data_attempts.begin_attempt(
+            self.persistent, self.work, self.request, self.request_sha, [], audit,
+            self.receipt_path, self.receipt_sha)
+        self.assertEqual(result['action'], 'adopt')
+        self.assertEqual(result['result']['timeout_recovery']['sha256'], self.receipt_sha)
+        self.assertFalse(result['result']['recovery']['new_independent_exposure'])
+        self.remote.restore_completed.assert_called_once_with(self.request, self.previous, root)
+        audit.assert_called_once_with(root, [])
+        self.claims.reserve.assert_not_called()
+
+    def test_original_native_clock_and_ownership_are_enforced(self):
+        self.native_job['job_start_date'] = int(time.time()) - 70000
+        self.write_ad()
+        self.write_review()
+        with self.assertRaises(FileExistsError):
+            self.begin()
+        self.native_job['job_start_date'] = int(time.time()) - 10000
+        self.write_review()
+        self.write_ad()
+        self.ad.write_text(self.ad.read_text().replace('ClusterId = 123', 'ClusterId = 456'))
+        with self.assertRaises(ValueError):
+            self.begin()
+        self.claims.reserve.assert_not_called()
+
+    def test_ordinary_timeout_stays_quarantined_without_an_explicit_review(self):
+        with self.assertRaises(FileExistsError):
+            shift_data_attempts.begin_attempt(
+                self.persistent, self.work, self.request, self.request_sha, [], mock.Mock())
+        self.claims.reserve.assert_not_called()
+
+    def run_replacement_worker(self, native_timeout):
+        payload = self.task / 'payload'
+        payload.mkdir()
+        (payload / 'original_helper.py').write_text('# synthetic frozen helper\n')
+        self.request.update(schema='shift-data-reconstruction-job-v1', job_name='owned_fixture',
+                            batch_name='DATA_Run2023D_ZeroBias_SHIFTReco_20261118_test',
+                            events=[dict(run=1, luminosityBlock=2, event=3)],
+                            payload_files={'original_helper.py': shift_data_attempts.sha256(payload / 'original_helper.py')})
+        request_path = self.persistent / 'request.json'
+        request_path.write_text(json.dumps(self.request))
+        self.request_sha = shift_data_attempts.sha256(request_path)
+        self.guard['request_sha256'] = self.request_sha
+        self.previous['request_sha256'] = self.request_sha
+        self.write_first_attempt()
+        self.write_review()
+        child = mock.Mock()
+        child.wait.side_effect = ([subprocess.TimeoutExpired('cmsRun', 18000), -9]
+                                  if native_timeout else [0])
+        def configuration(payload, work, request):
+            (work / 'restricted_nano.root').write_bytes(b'synthetic ROOT')
+            return work / 'execute_cfg.py'
+        original_cwd, original_path = Path.cwd(), list(sys.path)
+        try:
+            os.chdir(self.work)
+            argv = ['data-worker', str(request_path), self.request_sha, '--payload', str(payload),
+                    '--timeout-recovery', str(self.receipt_path),
+                    '--timeout-recovery-sha256', self.receipt_sha]
+            with mock.patch.object(sys, 'argv', argv), \
+                    mock.patch.object(WORKER, 'validate_request', return_value=[(1, 2, 3)]), \
+                    mock.patch.object(WORKER, 'write_config', side_effect=configuration), \
+                    mock.patch.object(WORKER, 'audit_identities', return_value=dict(root_uuid='fixture')) as audit, \
+                    mock.patch.object(WORKER.subprocess, 'Popen', return_value=child), \
+                    self.assertRaises(SystemExit) as exit_context:
+                WORKER.main()
+            self.assertEqual(exit_context.exception.code, 124 if native_timeout else 0)
+            self.assertEqual(child.wait.call_args_list[0], mock.call(timeout=18000))
+            result = json.loads((self.work / 'result.json').read_text())
+            guard = json.loads((self.persistent / 'attempt_started.json').read_text())
+            self.assertEqual(result['timeout_recovery']['sha256'], self.receipt_sha)
+            self.assertEqual(guard['recovery_count'], 1)
+            self.assertEqual(guard['recovery']['timeout_recovery'], result['timeout_recovery'])
+            self.assertEqual(shift_data_attempts.sha256(request_path), self.request_sha)
+            if native_timeout:
+                audit.assert_not_called()
+                child.kill.assert_called_once_with()
+            else:
+                audit.assert_called_once_with(self.work / 'restricted_nano.root', [(1, 2, 3)])
+        finally:
+            os.chdir(original_cwd)
+            sys.path[:] = original_path
+
+    def test_replacement_worker_uses_reviewed_limit_and_preserves_original_request(self):
+        self.run_replacement_worker(native_timeout=False)
+
+    def test_exhausted_replacement_keeps_its_review_and_failure_evidence(self):
+        self.run_replacement_worker(native_timeout=True)
 
 
 if __name__ == '__main__':

@@ -10,6 +10,7 @@ import re
 import resource
 import signal
 import subprocess
+import sys
 import time
 import xml.etree.ElementTree as ET
 
@@ -137,7 +138,13 @@ def main():
     parser.add_argument('request', type=Path)
     parser.add_argument('request_sha256')
     parser.add_argument('--payload', type=Path, required=True)
+    parser.add_argument('--timeout-recovery', type=Path)
+    parser.add_argument('--timeout-recovery-sha256')
     args = parser.parse_args()
+    if (args.timeout_recovery is None) != (args.timeout_recovery_sha256 is None):
+        parser.error('Timeout recovery requires both the receipt and its SHA-256')
+    if args.timeout_recovery is not None:
+        args.timeout_recovery = args.timeout_recovery.resolve()
     os.umask(0o077)
     work = Path.cwd().resolve()
     if sha256(args.request) != args.request_sha256:
@@ -150,9 +157,13 @@ def main():
     for name, digest in request['payload_files'].items():
         if sha256(args.payload / name) != digest:
             raise ValueError('Frozen worker helper or configuration changed: ' + name)
+    # Reviewed recovery runs outside the unchanged payload; storage admission
+    # still uses the exact original helper whose bytes were checked above.
+    sys.path.insert(0, str(args.payload.resolve()))
     os.chdir(persistent)
     guard = persistent / 'attempt_started.json'
-    recovery = begin_attempt(persistent, work, request, args.request_sha256, expected, audit_identities)
+    recovery = begin_attempt(persistent, work, request, args.request_sha256, expected, audit_identities,
+                             args.timeout_recovery, args.timeout_recovery_sha256)
     if recovery['action'] == 'adopt':
         result = recovery['result']
         save(work / 'result.json', result)
@@ -173,6 +184,10 @@ def main():
                   request_sha256=args.request_sha256, job_name=request['job_name'],
                   batch_name=request['batch_name'], original_events=len(expected),
                   input_origin='collision-data', candidate_branches_read=False)
+    native_timeout = request.get('native_timeout_seconds', 900)
+    if 'timeout_recovery' in recovery:
+        result['timeout_recovery'] = recovery['timeout_recovery']
+        native_timeout = recovery['timeout_recovery']['effective_timeout_seconds']
     if request['schema'] == 'shift-data-reconstruction-job-v2':
         result.update(dataset=request['dataset'], era=request['era'], source_url=request['source_url'],
                       original_runs=sorted({identity[0] for identity in expected}))
@@ -195,7 +210,7 @@ def main():
                 native = subprocess.Popen(['cmsRun', '-j', str(work / 'FrameworkJobReport.xml'), str(config)],
                                           cwd=work, stdout=log, stderr=subprocess.STDOUT)
                 termination['child'] = native
-                native_code = native.wait(timeout=request.get('native_timeout_seconds', 900))
+                native_code = native.wait(timeout=native_timeout)
             except subprocess.TimeoutExpired:
                 native.kill()
                 native.wait()
