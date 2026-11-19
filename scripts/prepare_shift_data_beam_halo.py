@@ -9,6 +9,7 @@ import argparse
 import collections
 import copy
 import datetime
+from itertools import groupby
 import json
 import os
 from pathlib import Path
@@ -25,9 +26,46 @@ CONTRACT_FIELDS = ('representation', 'policy', 'policy_sha256', 'lumimask', 'dat
                    'aod_datasets', 'original_events', 'original_identity_sha256',
                    'selected_events', 'selected_identity_sha256', 'lumisections',
                    'qualification', 'pins', 'worker_science', 'worker_settings')
+SINGLE_LS_CONTRACT = 'shift-data-beam-halo-exposure-contract-v1'
+PACKED_LS_CONTRACT = 'shift-data-beam-halo-exposure-contract-v2'
 
 
-def build_halo_plan(aod_census, raw_census, max_events_per_job=10):
+def lumi_portions(rows):
+    by_lumi = collections.defaultdict(list)
+    for row in rows:
+        original = identity(row)
+        by_lumi[original[:2]].append(original)
+    return [dict(run=run, luminosityBlock=lumi, selected_events=len(ids),
+                 identity_sha256=identity_digest(ids))
+            for (run, lumi), ids in sorted(by_lumi.items())]
+
+
+def worker_chunks(rows, limit, pack_lumisections):
+    """Keep packed lumisections whole, with one RAW file per reconstruction job."""
+    chunks = []
+    open_packs = {}
+    for _, section in groupby(rows, key=lambda row: identity(row)[:2]):
+        section = list(section)
+        sources = {row['source_index'] for row in section}
+        if pack_lumisections and len(sources) == 1 and len(section) <= limit:
+            source = section[0]['source_index']
+            current = open_packs.get(source)
+            if current is None or len(current) + len(section) > limit:
+                current = []
+                chunks.append(current)
+                open_packs[source] = current
+            current.extend(section)
+        else:
+            for _, members in groupby(section, key=lambda row: row['source_index']):
+                members = list(members)
+                chunks.extend(members[i:i+limit] for i in range(0, len(members), limit))
+    if pack_lumisections:
+        for chunk in chunks:
+            chunk.sort(key=lambda row: row['source_entry'])
+    return chunks
+
+
+def build_halo_plan(aod_census, raw_census, max_events_per_job=10, pack_lumisections=False):
     require(type(max_events_per_job) is int and 1 <= max_events_per_job <= 100,
             'Halo worker size must be between one and 100 selected originals')
     mapping = validate_raw_mapping(aod_census, raw_census)
@@ -38,16 +76,33 @@ def build_halo_plan(aod_census, raw_census, max_events_per_job=10):
     selected = sorted(mapping['events'], key=lambda row: (
         row['run'], row['luminosityBlock'], row['source_index'], row['source_entry']))
     require(len(selected) <= 1000000, 'Selected cohort exceeds the ordinary collector event budget')
-    events = []
-    for offset, row in enumerate(selected):
+    for row in selected:
         index, entry = row['source_index'], row['source_entry']
         require(type(index) is int and 0 <= index < len(raw_census['sources']), 'Unknown selected RAW source')
         source = raw_census['sources'][index]
         require(type(entry) is int and 0 <= entry < source['events_tree_entries']
                 and row['source_dataset'] == source['dataset'] and row['source_url'] == source['source_url'],
                 'Selected RAW source ownership changed')
-        events.append(dict(row, globalcohort_entry=offset,
-                           original_globalcohort_entry=row['globalcohort_entry']))
+    events, jobs = [], []
+    by_lumi = collections.defaultdict(list)
+    for chunk in worker_chunks(selected, max_events_per_job, pack_lumisections):
+        offset = len(events)
+        rows = [dict(row, globalcohort_entry=offset+i,
+                     original_globalcohort_entry=row['globalcohort_entry'])
+                for i, row in enumerate(chunk)]
+        events.extend(rows)
+        portions = lumi_portions(rows)
+        first = portions[0]
+        run, lumi, source_index = first['run'], first['luminosityBlock'], rows[0]['source_index']
+        job = dict(name=f'r{run:06d}_ls{lumi:06d}_s{source_index:04d}_o{offset:09d}',
+                   run=run, luminosityBlock=lumi, source_index=source_index,
+                   source_offset=offset, expected_event_count=len(rows), events=rows,
+                   identity_sha256=identity_digest([identity(row) for row in rows]))
+        if pack_lumisections:
+            job['lumisections'] = portions
+        jobs.append(job)
+        for portion in portions:
+            by_lumi[portion['run'], portion['luminosityBlock']].append(job['name'])
     selected_census = dict(schema='shift-data-input-header-census-v2', era='Run2023D',
         representation='halo_selected_responses', header_only=True, all_headers_is_real_data=True,
         candidate_branches_read=False, product_handles_requested=False,
@@ -59,26 +114,6 @@ def build_halo_plan(aod_census, raw_census, max_events_per_job=10):
         processed_identity_sha256=digest([list(identity(row)) for row in events]),
         policy_sha256=aod_census['policy_sha256'],
         luminosity_credit='none; selected response projection is not the full original denominator')
-    jobs = []
-    by_lumi = collections.defaultdict(list)
-    offset = 0
-    while offset < len(events):
-        first = events[offset]
-        key = first['run'], first['luminosityBlock'], first['source_index']
-        end = offset+1
-        while end < len(events) and end-offset < max_events_per_job:
-            row = events[end]
-            if (row['run'], row['luminosityBlock'], row['source_index']) != key:
-                break
-            end += 1
-        rows = events[offset:end]
-        job = dict(name=f'r{key[0]:06d}_ls{key[1]:06d}_s{key[2]:04d}_o{offset:09d}',
-                   run=key[0], luminosityBlock=key[1], source_index=key[2],
-                   source_offset=offset, expected_event_count=len(rows), events=rows,
-                   identity_sha256=identity_digest([identity(row) for row in rows]))
-        jobs.append(job)
-        by_lumi[key[:2]].append(job['name'])
-        offset = end
     original_by_lumi, selected_by_lumi = collections.defaultdict(list), collections.defaultdict(list)
     for row in raw_rows:
         original_by_lumi[identity(row)[:2]].append(identity(row))
@@ -126,11 +161,19 @@ def worker_request(template, job, selected_census, directory, cohort_sha256, sel
     return request
 
 
+def cohort_digest(contract):
+    fields = CONTRACT_FIELDS
+    if contract['schema'] == PACKED_LS_CONTRACT:
+        fields += ('schema',)
+    return digest({key: contract[key] for key in fields})
+
+
 def validate_contract(contract, verify_files=True):
-    require(contract.get('schema') == 'shift-data-beam-halo-exposure-contract-v1'
+    require(contract.get('schema') in (SINGLE_LS_CONTRACT, PACKED_LS_CONTRACT)
             and contract.get('preparation_only') is True
             and contract.get('representation') == 'halo_selected_responses', 'Require separate halo exposure contract')
-    require(contract['cohort_sha256'] == digest({key: contract[key] for key in CONTRACT_FIELDS})
+    packed = contract['schema'] == PACKED_LS_CONTRACT
+    require(contract['cohort_sha256'] == cohort_digest(contract)
             and contract['policy_sha256'] == digest(contract['policy']), 'Halo exposure contract binding changed')
     qualification = contract['qualification']
     require(qualification == dict(all_original_AOD_files_scanned_to_eof=True,
@@ -148,8 +191,10 @@ def validate_contract(contract, verify_files=True):
                 and census['unique_originals'] == len(census['events']) == contract['selected_events']
                 and census['expected_identity_sha256'] == contract['selected_identity_sha256'],
                 'Selected response census differs from exposure contract')
+        ports = {(row['run'], row['luminosityBlock']): row for row in lumi_portions(census['events'])}
     jobs = {}
     offsets = set()
+    owners = collections.defaultdict(dict)
     for job in contract['jobs']:
         require(job['name'] not in jobs and re.fullmatch(r'[0-9a-f]{64}', job['request_sha256'])
                 and Path(job['request_path']).is_absolute()
@@ -159,6 +204,19 @@ def validate_contract(contract, verify_files=True):
         require(not offsets & span, 'Overlapping selected response offsets')
         offsets.update(span)
         jobs[job['name']] = job
+        anchor = job['run'], job['luminosityBlock']
+        if packed:
+            portions = job['lumisections']
+            section_keys = [(row['run'], row['luminosityBlock']) for row in portions]
+            require(section_keys == sorted(set(section_keys)) and section_keys and section_keys[0] == anchor
+                    and all(type(row['selected_events']) is int and row['selected_events'] > 0
+                            and re.fullmatch(r'[0-9a-f]{64}', row['identity_sha256']) for row in portions)
+                    and sum(row['selected_events'] for row in portions) == job['expected_event_count'],
+                    'Invalid packed worker lumisection ownership')
+            for key, portion in zip(section_keys, portions):
+                owners[key][job['name']] = portion['selected_events']
+        else:
+            owners[anchor][job['name']] = job['expected_event_count']
         if verify_files:
             require(sha256(job['request_path']) == job['request_sha256'], 'Frozen halo worker request changed')
             request = json.loads(Path(job['request_path']).read_text())
@@ -173,9 +231,15 @@ def validate_contract(contract, verify_files=True):
                     and request['input_census_sha256'] == contract['pins']['selected_census']['sha256']
                     and request['beam_halo_cohort_sha256'] == contract['cohort_sha256'],
                     'Halo worker science or selected census binding changed')
+            if packed:
+                entries = [row['source_entry'] for row in selected_rows]
+                require(entries == sorted(set(entries)) and
+                        all(row['source_index'] == job['source_index'] for row in selected_rows)
+                        and lumi_portions(selected_rows) == portions,
+                        'Packed worker differs from exact RAW entries or selected identities per lumisection')
     require(offsets == set(range(contract['selected_events'])), 'Selected worker union is incomplete')
     selected = selected_lumisections(contract['lumimask'])
-    observed, referenced = set(), []
+    observed = set()
     for row in contract['lumisections']:
         key = row['run'], row['luminosityBlock']
         require(key in selected and key not in observed and row['unknown_events'] == 0
@@ -184,12 +248,18 @@ def validate_contract(contract, verify_files=True):
                 'Invalid full original lumisection accounting')
         observed.add(key)
         names = row['job_names']
-        require(len(names) == len(set(names)) and all(name in jobs for name in names)
-                and all((jobs[name]['run'], jobs[name]['luminosityBlock']) == key for name in names)
-                and sum(jobs[name]['expected_event_count'] for name in names) == row['selected_events'],
+        require(len(names) == len(set(names)) and set(names) == set(owners[key])
+                and sum(owners[key].values()) == row['selected_events'],
                 'Lumisection selected response workers differ')
-        referenced.extend(names)
-    require(observed == selected and len(referenced) == len(jobs) and set(referenced) == set(jobs)
+        if packed:
+            require(len(names) <= 1 or all(len(jobs[name]['lumisections']) == 1 for name in names),
+                    'A packed worker must own every selected response of each included lumisection')
+            if verify_files:
+                expected = ports.get(key, dict(selected_events=0, identity_sha256=identity_digest([])))
+                require(row['selected_events'] == expected['selected_events']
+                        and row['selected_identity_sha256'] == expected['identity_sha256'],
+                        'Packed lumisection selected identities changed')
+    require(observed == selected and set(owners) == selected
             and sum(row['original_events'] for row in contract['lumisections']) == contract['original_events']
             and sum(row['selected_events'] for row in contract['lumisections']) == contract['selected_events'],
             'Full lumisection exposure union differs')
@@ -228,7 +298,7 @@ def metadata_path(explicit, census, digest_field, path_field=None):
 
 
 def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=None,
-            raw_catalog_path=None, certification_path=None, max_events_per_job=10,
+            raw_catalog_path=None, certification_path=None, max_events_per_job=10, pack_lumisections=False,
             campaign_date='20261119', settings=None):
     aod_path, raw_path, template_path, directory = map(Path, (aod_path, raw_path, template_path, directory))
     directory = directory.resolve()
@@ -247,7 +317,7 @@ def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=No
     require(checked['flag_census_closed'] and checked['original_identity_sha256'] == aod['original_identity_sha256']
             and checked['selected_identity_sha256'] == aod['selected_identity_sha256'], 'AOD flag census failed readback')
     build_full_lumi_plan(json.loads(raw_catalog_path.read_text()), raw, cert)
-    plan = build_halo_plan(aod, raw, max_events_per_job)
+    plan = build_halo_plan(aod, raw, max_events_per_job, pack_lumisections=pack_lumisections)
     template = json.loads(template_path.read_text())
     science = {key: copy.deepcopy(template[key]) for key in SCIENCE_FIELDS}
     settings = copy.deepcopy(settings or {})
@@ -270,12 +340,12 @@ def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=No
     contract = {key: copy.deepcopy(plan[key]) for key in ('policy', 'policy_sha256', 'lumimask', 'datasets',
                   'aod_datasets', 'original_events', 'original_identity_sha256', 'selected_events',
                   'selected_identity_sha256', 'lumisections')}
-    contract.update(schema='shift-data-beam-halo-exposure-contract-v1', preparation_only=True,
+    contract.update(schema=PACKED_LS_CONTRACT if pack_lumisections else SINGLE_LS_CONTRACT, preparation_only=True,
                     representation='halo_selected_responses', pins=pins, worker_science=science,
                     worker_settings=settings, qualification=dict(all_original_AOD_files_scanned_to_eof=True,
                     all_original_RAW_files_scanned_to_eof=True, flag_census_closed=True,
                     exact_AOD_RAW_identity_match=True, event_limit_applied=False))
-    contract['cohort_sha256'] = digest({key: contract[key] for key in CONTRACT_FIELDS})
+    contract['cohort_sha256'] = cohort_digest(contract)
     references = []
     for job in plan['jobs']:
         work = directory / job['name']
@@ -284,9 +354,12 @@ def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=No
                                  pins['selected_census']['sha256'], campaign_date, settings)
         request_path = work / 'request.json'
         write_json(request_path, request)
-        references.append({key: job[key] for key in ('name', 'run', 'luminosityBlock', 'source_index',
-                           'source_offset', 'expected_event_count', 'identity_sha256')}
-                          | dict(directory=str(work), request_path=str(request_path), request_sha256=sha256(request_path)))
+        reference = {key: job[key] for key in ('name', 'run', 'luminosityBlock', 'source_index',
+                     'source_offset', 'expected_event_count', 'identity_sha256')}
+        if pack_lumisections:
+            reference['lumisections'] = job['lumisections']
+        references.append(reference | dict(directory=str(work), request_path=str(request_path),
+                                           request_sha256=sha256(request_path)))
     contract['jobs'] = references
     validate_contract(contract)
     require(all(sha256(value['path']) == value['sha256'] for value in pins.values()), 'Preparation input changed')
@@ -307,6 +380,8 @@ def main():
     for name in ('aod-catalog', 'raw-catalog', 'certification', 'afs-allocation'):
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--max-events-per-job', type=int, default=10)
+    parser.add_argument('--pack-lumisections', action='store_true',
+                        help='Pack whole selected lumisections sharing a RAW file into one worker.')
     parser.add_argument('--campaign-date', default=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d'))
     parser.add_argument('--native-timeout-seconds', type=int)
     parser.add_argument('--job-max-runtime-seconds', type=int)
@@ -320,7 +395,7 @@ def main():
     result = prepare(args.aod_census, args.raw_census, args.worker_template, args.output_dir,
                      aod_catalog_path=args.aod_catalog, raw_catalog_path=args.raw_catalog,
                      certification_path=args.certification, max_events_per_job=args.max_events_per_job,
-                     campaign_date=args.campaign_date, settings=settings)
+                     pack_lumisections=args.pack_lumisections, campaign_date=args.campaign_date, settings=settings)
     print(json.dumps(dict(prepared_only=True, submitted=False, original_events=result['original_events'],
                           selected_events=result['selected_events'], jobs=len(result['jobs']),
                           contract=str(args.output_dir.resolve()/'beam_halo_exposure_contract.json'))))

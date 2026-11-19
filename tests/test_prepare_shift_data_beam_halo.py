@@ -28,13 +28,7 @@ class HaloPreparationTest(unittest.TestCase):
         self.aod_catalog = self.catalog('AOD')
         for name, value in [('raw_catalog', self.raw_catalog), ('aod_catalog', self.aod_catalog), ('certification', self.mask)]:
             self.write(name+'.json', value)
-        cert_sha = halo.sha256(self.directory/'certification.json')
-        self.raw = raw_scan.scan_catalog(self.raw_catalog, self.mask, self.reader(False),
-            catalog_sha256=halo.sha256(self.directory/'raw_catalog.json'), certification_sha256=cert_sha)
-        self.aod = aod_scan.scan_catalog(self.aod_catalog, self.mask, self.reader(True),
-            catalog_sha256=halo.sha256(self.directory/'aod_catalog.json'), certification_sha256=cert_sha)
-        self.write('raw.json', self.raw)
-        self.write('aod.json', self.aod)
+        self.scan_inputs()
         self.template = dict(schema='shift-data-reconstruction-job-v2', payload_files={'bootstrap.sh': 'c'*64},
             runtime_url='root://example//runtime.tar.gz', runtime_sha256='d'*64, table_sha256='e'*64,
             native_timeout_seconds=900, job_max_runtime_seconds=3600, source_file_adler32='oldvalue',
@@ -43,6 +37,15 @@ class HaloPreparationTest(unittest.TestCase):
             remote_storage_prefix='/old', transport_qualification_pause_seconds=999,
             operational_canary=True, paired_group='old', recovery_policy={'old':True}, storage_claim='old')
         self.write('template.json', self.template)
+
+    def scan_inputs(self):
+        cert_sha = halo.sha256(self.directory/'certification.json')
+        self.raw = raw_scan.scan_catalog(self.raw_catalog, self.mask, self.reader(False),
+            catalog_sha256=halo.sha256(self.directory/'raw_catalog.json'), certification_sha256=cert_sha)
+        self.aod = aod_scan.scan_catalog(self.aod_catalog, self.mask, self.reader(True),
+            catalog_sha256=halo.sha256(self.directory/'aod_catalog.json'), certification_sha256=cert_sha)
+        self.write('raw.json', self.raw)
+        self.write('aod.json', self.aod)
 
     def write(self, name, value):
         path = self.directory/name
@@ -176,6 +179,34 @@ class HaloPreparationTest(unittest.TestCase):
         self.prepare()
         with self.assertRaisesRegex(ValueError,'new absolute persistent'):
             self.prepare()
+
+    def test_whole_lumisection_packing_keeps_raw_order_and_closes_together(self):
+        self.rows = [[(11, 50, True), (10, 30, True), (10, 10, False),
+                      (10, 20, True), (11, 40, False), (12, 60, False)], [(10, 5, False)]]
+        self.scan_inputs()
+        contract = self.prepare(max_events_per_job=3, pack_lumisections=True)
+        self.assertEqual(contract['schema'], halo.PACKED_LS_CONTRACT)
+        self.assertEqual(len(contract['jobs']), 1)
+        job, = contract['jobs']
+        self.assertEqual([section['selected_events'] for section in job['lumisections']], [2,1])
+        request = json.loads(Path(job['request_path']).read_text())
+        self.assertEqual([event['event'] for event in request['events']], [50,30,20])
+        self.assertEqual(halo.completed_lumisections(contract, set())['closed_lumimask'],
+                         {'369943': [[12,12]]})
+        completed = halo.completed_lumisections(contract, {job['request_sha256']})
+        self.assertEqual(completed['closed_lumimask'], self.mask)
+        self.assertEqual((completed['closed_original_events'], completed['closed_selected_events']), (7,3))
+        bad = copy.deepcopy(contract)
+        bad['jobs'][0]['lumisections'][0]['identity_sha256'] = '0'*64
+        with self.assertRaisesRegex(ValueError, 'Packed worker differs'):
+            halo.completed_lumisections(bad, {job['request_sha256']})
+
+    def test_mixed_source_and_oversized_lumisections_keep_single_section_workers(self):
+        self.rows[0].extend((11, event, True) for event in (70, 80, 90))
+        self.scan_inputs()
+        contract = self.prepare(max_events_per_job=3, pack_lumisections=True)
+        self.assertEqual([job['expected_event_count'] for job in contract['jobs']], [2,1,3,1])
+        self.assertTrue(all(len(job['lumisections']) == 1 for job in contract['jobs']))
 
 
 if __name__ == '__main__':
