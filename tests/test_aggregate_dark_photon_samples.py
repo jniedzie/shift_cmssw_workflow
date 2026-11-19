@@ -42,6 +42,36 @@ def population(run=10, events=2, trials=100, rate=2., error=.1):
 
 
 class DYNormalizationAggregation(unittest.TestCase):
+    def test_audited_m5_authority_bridge_preserves_sources_domain_and_common_error(self):
+        samples=[self.apply(population(10)),self.apply(population(20))]
+        for sample,name,authority,error,cap in zip(samples,
+                ('msht20-nnlo','msht20-nnlo-v2'),
+                ('18fac0c030160c00d8fd50a3ce145a5e435546a5b3426d6caa4942af1c2384e5',
+                 'c238aaeb64640dab129cf26b101f293ddcd34357d04d852fe50dffbd3587af5c'),
+                (.2,.3),(.001,.1)):
+            rate=sample['rate'];rate.update(mass_gev=5.,epsilon=.001,sampling_epsilon=.01)
+            recipe=rate['dy_prescription'];recipe.update(name=name,epsilon_upper_bound=cap,
+                beam_energy_GeV=6800.,weak_current='hypercharge',shower_and_MPI='CP5')
+            recipe['authority']['sha256']=authority
+            recipe['normalization']['common_numerical_error']=error
+            rate['dy_normalization_uncertainty'].update(absolute_k_error=error,relative_error=error/2.,
+                authority=copy.deepcopy(recipe['authority']),correlation_key='dy-nnlo-numerical:'+authority+':5')
+        originals=copy.deepcopy(samples)
+        result=combined_rate(samples,point='m5_prompt',campaign='test')
+        self.assertEqual(samples,originals)
+        self.assertEqual([p['record'] for p in result['per_population']],[p['rate'] for p in originals])
+        self.assertEqual(result['full_gen']['accepted_events'],4)
+        self.assertEqual(result['dy_prescription']['epsilon_upper_bound'],.001)
+        self.assertEqual(result['dy_normalization_uncertainty']['absolute_k_error'],.3)
+        self.assertEqual(result['physical_selected_cross_sections_pb'][0]['value_pb'],4.)
+        for key,value in [('beam_energy_GeV',7000.),('weak_current','photon'),
+                          ('hard_pdf',dict(set='another',member=0)),('epsilon_upper_bound',.0001)]:
+            changed=copy.deepcopy(samples);changed[1]['rate']['dy_prescription'][key]=value
+            with self.subTest(key=key),self.assertRaisesRegex(ValueError,'physical DY recipes'):
+                combined_rate(changed,point='m5_prompt',campaign='reject')
+        with self.assertRaisesRegex(ValueError,'identical physics'):
+            combined_rate(samples,point='m5_other',campaign='reject')
+
     @staticmethod
     def apply(sample):
         import dark_photon_dy_prescription as helper

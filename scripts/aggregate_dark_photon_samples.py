@@ -290,6 +290,57 @@ def source_rate_record(contract, audit, *, source_directory, **kwargs):
             sys.modules[name] = previous
 
 
+def align_m5_dy_authorities(populations, point):
+    """Bridge the audited m5 prompt overlap without widening the v1 domain.
+
+    The two pinned tables have exactly the same hard process and central K at
+    this point. Keep the larger numerical error once, common to every source.
+    Original records remain in per_population; no source weights are changed.
+    """
+    authorities = {
+        '18fac0c030160c00d8fd50a3ce145a5e435546a5b3426d6caa4942af1c2384e5',
+        'c238aaeb64640dab129cf26b101f293ddcd34357d04d852fe50dffbd3587af5c'}
+    rates = [p['rate'] for p in populations]
+    hashes = {r.get('dy_prescription', {}).get('authority', {}).get('sha256') for r in rates}
+    if point != 'm5_prompt' or hashes != authorities:
+        return populations, None
+    for rate in rates:
+        validated_dy_normalization(rate)
+        if (rate['mass_gev'] != 5. or rate['epsilon'] != .001 or
+                rate['sampling_epsilon'] != .01 or rate['dy_normalization_applications'] != 1):
+            raise ValueError('DY authority bridge is qualified only at the audited m5 prompt point')
+    original = next(r for r in rates if r['dy_prescription']['name'] == 'msht20-nnlo')
+    base = original['dy_prescription']
+    physical_keys = ('schema', 'hard_pdf', 'generator_order', 'shower_and_MPI',
+                     'positive_pdf_policy', 'pdf_inputs', 'native_pdf_settings',
+                     'beam_energy_GeV', 'weak_current')
+    norm_keys = ('order', 'reference', 'mass_gev', 'factor', 'theory_uncertainties')
+    for rate in rates:
+        recipe = rate['dy_prescription']
+        if (any(recipe.get(k) != base.get(k) for k in physical_keys) or
+                any(recipe['normalization'].get(k) != base['normalization'].get(k) for k in norm_keys) or
+                rate['epsilon'] > recipe['epsilon_upper_bound']):
+            raise ValueError('Different physical DY recipes cannot use the metadata bridge')
+    recipe = copy.deepcopy(base)
+    error = max(r['dy_prescription']['normalization']['common_numerical_error'] for r in rates)
+    recipe['normalization']['common_numerical_error'] = error
+    recipe['normalization']['error_scope'] = 'Conservative v1/v2 common numerical envelope; applied once'
+    uncertainty = copy.deepcopy(original['dy_normalization_uncertainty'])
+    uncertainty.update(absolute_k_error=error, relative_error=error/recipe['normalization']['factor'],
+                       correlation_scope='Common v1/v2 envelope at this physical point; never averaged down')
+    aligned = []
+    for population in populations:
+        rate = copy.deepcopy(population['rate'])
+        rate.update(dy_prescription=copy.deepcopy(recipe), dy_normalization_uncertainty=copy.deepcopy(uncertainty))
+        aligned.append(dict(population, rate=rate))
+    bridge = dict(schema='shift-m5-dy-authority-equivalence-v1',
+                  authority_sha256s=sorted(authorities), maximum_epsilon=base['epsilon_upper_bound'],
+                  unchanged_central_factor=recipe['normalization']['factor'],
+                  common_absolute_k_error=error, original_source_records_preserved=True,
+                  physical_point=dict(mass_gev=5., epsilon=.001, sampling_epsilon=.01))
+    return aligned, bridge
+
+
 def combined_rate(populations, *, point, campaign):
     """Average identical-proposal estimates by their phase-space trial counts.
 
@@ -298,6 +349,8 @@ def combined_rate(populations, *, point, campaign):
     Different proposals require a separate reviewed combination prescription.
     """
     populations = unique_populations(populations)
+    originals = populations
+    populations, authority_bridge = align_m5_dy_authorities(populations, point)
     first = populations[0]['rate']
     meson = first.get('mechanism') in ('eta-etaprime-radiative', 'meson-radiative')
     reference = first.get('mechanism') in ('senscalc-meson-fragmentation','senscalc-meson-fragmentation-bremsstrahlung')
@@ -373,7 +426,7 @@ def combined_rate(populations, *, point, campaign):
             event_ids_sha256=hashlib.sha256(json.dumps(identities, separators=(',', ':')).encode()).hexdigest(),
             selection='none; all independent GEN populations including outside-envelope decays'),
         per_population=[dict(source=population['source'], gen_sha256=population['parent']['gen_sha256'],
-            record=population['rate'], duplicate_views=population.get('duplicate_views', [])) for population in populations],
+            record=population['rate'], duplicate_views=population.get('duplicate_views', [])) for population in originals],
         parent_gen_ledger_count=len(populations), normalization_ready=False, physics_valid=False,
         production_rate_validated=False)
     if meson:
@@ -412,6 +465,8 @@ def combined_rate(populations, *, point, campaign):
             result[key]=[dict(value_pb=math.fsum(w*x['value_pb'] for w,x in zip(fractions,values)),
                 error_pb=math.sqrt(math.fsum((w*x['error_pb'])**2 for w,x in zip(fractions,values))))]
         validated_dy_normalization(result)
+    if authority_bridge is not None:
+        result['dy_authority_equivalence_bridge'] = authority_bridge
     return result
 
 
