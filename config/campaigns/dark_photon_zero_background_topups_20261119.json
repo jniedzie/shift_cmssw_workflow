@@ -1,0 +1,452 @@
+{
+  "schema": "shift-dp-existing-anchor-topups-v1",
+  "campaign": "20261119_dp_zero_background_topups",
+  "provenance": "AI-generated production plan; existing physical hypotheses only",
+  "user_authorization": "2026-11-19: top up sparse samples influencing zero-background contour jumps",
+  "reference_signal_fit_cutoff_utc": "2026-11-19T07:58:32.982904+00:00",
+  "signal_model": "Pinned SensCalc/PBC meson and fragmentation/bremsstrahlung benchmark, with source-specific MSHT20 DY prescription",
+  "reconstruction": "Reuse qualified released runtime, selection and histogram archive; no detector, lifetime, rate or admission change",
+  "statistics": {
+    "target": "Effective weighted raw MC passing-event statistics, not events normalized to lumi",
+    "proposal": "Measured response forecasts; ready compatible samples and qualified work from the previous 324-bank production credited before these 467 new banks",
+    "forecasts_are_uncertain": true
+  },
+  "existing_work_credited": {
+    "island_topup_banks": 324,
+    "qualified_banks": 317,
+    "selected_originals": 70467,
+    "failed_banks_stay_quarantined": 7
+  },
+  "new_work": {
+    "submitted_banks": 467,
+    "physical_hypotheses": 10,
+    "fixed_source_collisions": 25998000,
+    "expected_conditional_GEN_before_execution": 519686.78618113906,
+    "expectations_are_not_completed_detector_or_passing_event_counts": true
+  },
+  "shared_storage": {
+    "total_DP_allocation_bytes": 7000000000000,
+    "nonadditive": true,
+    "old_selected_census": 70467,
+    "group_protected_free_bytes": 57050000000000,
+    "AFS_admission_floor_bytes": 5000000000,
+    "bulk": "EOS group storage; worker-local temporary files",
+    "first_phase_selected_hard_ceiling": 350000,
+    "phi_phase_selected_hard_ceiling": 350000,
+    "combined_selected_hard_ceiling": 450000,
+    "combined_phi_admission_rule": "70467 + min(350000, sum(verified frozen first-phase selected counts) +2499 per unknown first-phase bank) + all reserved phi selected originals <=450000",
+    "unknown_and_failed_peer_banks_keep_full_2499_bound": true,
+    "credits_for_failed_source_removal": false,
+    "pending_claims_remain_reserved": true,
+    "phi_admission_uses_locked_immutable_peer_proofs": true,
+    "additional_storage_allocation_bytes": 0
+  },
+  "points": [
+    {
+      "point": "m0p212_lab_5m",
+      "mass_gev": 0.212,
+      "epsilon": 7.7943853055941e-06,
+      "proper_ctau_mm": 5.6247961640062565,
+      "mean_lab_flight_m": 4.638695638126686,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 8,
+      "source_collisions_per_bank": 100000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 2.999936006023102,
+      "forecast_neff": 50.99891210239274,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_limit_brackets_20261112/adopted_sources/m0p212_lab_5m/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/group_production/cohorts/bracket_m0p212_lab_5m/waves/w000/production/plan.json",
+      "source_plan_sha256": "8e51f32a27111652a9760feb1748e3b031d7be2f98f791e891eaf4bb92a816e6",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 888.9211011761811,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p3_lab_0p505m",
+      "mass_gev": 0.3,
+      "epsilon": 1.4163595198402827e-05,
+      "proper_ctau_mm": 0.7083480291547303,
+      "mean_lab_flight_m": 0.5046005021942256,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 9,
+      "source_collisions_per_bank": 89000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 5.281883305751768,
+      "forecast_neff": 52.81883305751768,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_rgrid_20261113/adopted_sources/bracket_rgrid_20261113_c011_senscalc/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/production_native/cohorts/bracket_rgrid_20261113_c011_senscalc/waves/w000/production/plan.json",
+      "source_plan_sha256": "179d4721fbb9b24dc13636aad70260fd37564870f8991fd72dbbf0341b4ee776",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 712.3624001557031,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p4_lab_1p69m",
+      "mass_gev": 0.4,
+      "epsilon": 6.9604052603663954e-06,
+      "proper_ctau_mm": 1.9304402442800248,
+      "mean_lab_flight_m": 1.6887868488949047,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 37,
+      "source_collisions_per_bank": 79000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 1.3475385111147082,
+      "forecast_neff": 51.206463422358915,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_rgrid_20261113/adopted_sources/bracket_rgrid_20261113_c013_senscalc/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/production_native/cohorts/bracket_rgrid_20261113_c013_senscalc/waves/w000/production/plan.json",
+      "source_plan_sha256": "678025a8a06c6da70b0601350b0bf8e3caa7be9e38cabe63d191b097012184fd",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 874.8195412413572,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p5_lab_0p0579m",
+      "mass_gev": 0.5,
+      "epsilon": 5.512647908124098e-05,
+      "proper_ctau_mm": 0.02142315794847083,
+      "mean_lab_flight_m": 0.05788575490392712,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 40,
+      "source_collisions_per_bank": 69000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 1.2232884473420158,
+      "forecast_neff": 50.15482634102265,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_rgrid_20261113/adopted_sources/bracket_rgrid_20261113_c016_senscalc/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/production_native/cohorts/bracket_rgrid_20261113_c016_senscalc/waves/w000/production/plan.json",
+      "source_plan_sha256": "b97558a11b56a406c720bc2e227f6ef497e8b5af69f73888d222180b5f67bffb",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 2702.017837106922,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p783_lab_0p1m",
+      "mass_gev": 0.783,
+      "epsilon": 1.2974166656712168e-05,
+      "proper_ctau_mm": 0.02895309081770679,
+      "mean_lab_flight_m": 0.09692346470376675,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 99,
+      "source_collisions_per_bank": 50000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 100,
+      "ready_neff": 1.0,
+      "forecast_neff": 100.0,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_limit_brackets_20261112/adopted_sources/m0p783_lab_0p1m/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/group_production/cohorts/bracket_m0p783_lab_0p1m/waves/w000/production/plan.json",
+      "source_plan_sha256": "2251be0f87dbe23d79dca64714587fef8a85dd5854e054a93054b8b8e750d17c",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 3453.86268532143,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m1p8_lab_0p01m",
+      "mass_gev": 1.8,
+      "epsilon": 5.727473596218738e-05,
+      "proper_ctau_mm": 0.003106379979452251,
+      "mean_lab_flight_m": 0.010024788293157331,
+      "mechanism_to_top_up": "dy",
+      "additional_banks": 4,
+      "source_collisions_per_bank": null,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 6.991482532632487,
+      "forecast_neff": 61.31446127134413,
+      "qualified_GEN_inputs": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/group_production/cohorts/map_m1p8_lab_0p01m/waves/w000/preparation/runs/m1p8_lab_0p01m/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/group_production/cohorts/map_m1p8_lab_0p01m/waves/w000/production/plan.json",
+      "source_plan_sha256": "79d8908ff496db3b72a1700c2ea10d51003519cc73449fae2a59d8b63ebbaccc",
+      "dy_prescription": "msht20-nnlo",
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 3219.181190371728,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m2_lab_0p01m",
+      "mass_gev": 2.0,
+      "epsilon": 1.6058363046387025e-05,
+      "proper_ctau_mm": 0.03762927615642578,
+      "mean_lab_flight_m": 0.01,
+      "mechanism_to_top_up": "dy",
+      "additional_banks": 4,
+      "source_collisions_per_bank": null,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 6.981040415634907,
+      "forecast_neff": 53.521309853200954,
+      "qualified_GEN_inputs": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/production/cohorts/m2_lab_0p01m/waves/w000/preparation/runs/m2_lab_0p01m/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_presentation_20261111/production/cohorts/m2_lab_0p01m/waves/w000/production/plan.json",
+      "source_plan_sha256": "a8f6abaffef2a0c9259ee33848787b17940f315b838fbff56fed17e05a4ccf35",
+      "dy_prescription": "msht20-nnlo",
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 265.7505278185466,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p4_lab_0p258m",
+      "mass_gev": 0.4,
+      "epsilon": 1.7818637466537972e-05,
+      "proper_ctau_mm": 0.2945618048522987,
+      "mean_lab_flight_m": 0.258,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 16,
+      "source_collisions_per_bank": 79000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 20.22060875749811,
+      "forecast_neff": 50.551521893745274,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_rgrid_20261113/adopted_sources/bracket_rgrid_20261113_c014_senscalc/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/production_native/cohorts/bracket_rgrid_20261113_c014_senscalc/waves/w000/production/plan.json",
+      "source_plan_sha256": "cb580fb690558f4fdfedc15b02c16f124bc08618602be142bcc2b57f25042bfb",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 874.8195412413572,
+      "previous_cohort_banks_credited": 28,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m0p7_lab_0p151m",
+      "mass_gev": 0.7,
+      "epsilon": 1.7939675559909726e-05,
+      "proper_ctau_mm": 0.052018462390140456,
+      "mean_lab_flight_m": 0.151,
+      "mechanism_to_top_up": "senscalc",
+      "additional_banks": 26,
+      "source_collisions_per_bank": 50000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 8.7838887787384,
+      "forecast_neff": 50.19365016421943,
+      "qualified_GEN_inputs": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_rgrid_20261113/adopted_sources/bracket_rgrid_20261113_c017_senscalc/gen",
+      "conditions_sha256": "9a8869b7f37380a09729564aa6474b62a081d2c24baacb0a7c909dfd4a668318",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/production_native/cohorts/bracket_rgrid_20261113_c017_senscalc/waves/w000/production/plan.json",
+      "source_plan_sha256": "29027f64cbf305d8f7ed2790ea7e1908cae69e1747e715e5c521c3b6041e9479",
+      "dy_prescription": null,
+      "production_phase": "zero_background_anchors",
+      "mean_beta_gamma_reference": 2905.589575970925,
+      "previous_cohort_banks_credited": 13,
+      "previously_queued_work_subtracted": true
+    },
+    {
+      "point": "m1p02_lab_0p01m",
+      "mass_gev": 1.02,
+      "epsilon": 2.8936481662325834e-05,
+      "proper_ctau_mm": 0.002044710088423094,
+      "mean_lab_flight_m": 0.01,
+      "mean_beta_gamma_reference": 4902.337639415531,
+      "mechanism_to_top_up": "senscalc",
+      "production_phase": "phi_legacy_anchor",
+      "additional_banks": 224,
+      "source_collisions_per_bank": 50000,
+      "conditional_GEN_target_per_bank": 1000,
+      "maximum_conditional_GEN_per_bank": 2499,
+      "target_neff": 50,
+      "ready_neff": 4.1848471522171335,
+      "forecast_neff": 50.13611000009154,
+      "previous_cohort_banks_credited": 0,
+      "previously_queued_work_subtracted": true,
+      "qualified_GEN_inputs": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_response_cm_20261104/sources/m1p02_lab_0p01m/gen",
+      "conditions_sha256": "81ddf18486f01be98e73ac5d8539b621649f185e44829d306244bb9dc14818d5",
+      "source_plan": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_response_cm_20261104/sources/m1p02_lab_0p01m/production/plan.json",
+      "source_plan_sha256": "2008d921efe821bcd9d47f61062e2faf522f4865e655a0362cd45d3b92f7c7b1",
+      "dy_prescription": null,
+      "retained_baseline": {
+        "independent_populations": 21,
+        "original_GEN": 19909,
+        "source_collisions": 1020000,
+        "sigma_mumu_pb": 29.150432363604583,
+        "original_GEN_hashes_preserved": true,
+        "qualification": {
+          "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/publication_v12/legacy_retention_certificate.json",
+          "sha256": "774b51f4fa02e553854f42492ab6fe4475cd15c554dfd7cf7448e44609442320"
+        }
+      }
+    }
+  ],
+  "not_added": [
+    {
+      "points": [
+        "m0p25_prompt",
+        "m0p3_prompt",
+        "m0p3_lab_0p077m",
+        "m0p5_lab_0p379m",
+        "m0p7_lab_0p0231m"
+      ],
+      "reason": "The complete existing source exposure already forecasts the target passing statistics; do not duplicate these queued banks."
+    }
+  ],
+  "interpolation_gap": "These topups improve existing hypotheses, including the 1.02 GeV anchor. They add no new mass or epsilon support. Refit the points and inspect interpolation cells before attributing remaining contour structure to physics.",
+  "submitted_phases": [
+    {
+      "phase": "zero_background_anchors",
+      "parent_cluster": 13554795,
+      "submitted_utc": "2026-11-19T09:17:13.773244+00:00",
+      "banks": 243,
+      "points": 9,
+      "cohort_prefix": "bracket_zero_bg_20261119_",
+      "fixed_source_collisions": 14798000,
+      "expected_conditional_GEN_before_execution": 301078.1587301587,
+      "conditional_GEN_hard_ceiling": 607257,
+      "selected_originals_hard_ceiling": 350000,
+      "response_lanes": 2,
+      "maximum_workers_per_response": 40,
+      "request": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/request.json",
+        "sha256": "ade88c7bdb603c8e3ba5d0d26f1eddac0d6cb6dbb71ea6b9a778c90b68a37e43"
+      },
+      "controller_closure": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/parent_closure.json",
+        "sha256": "bcf2676cffb089de25f21634c19795c07b2fa0ee4a8c90808f09b4e93c3b9bab"
+      },
+      "code_archive": {
+        "url": "root://eoscms.cern.ch//eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_zero_bg_topups_20261119/orchestration/code_1b116b10f3331a95.tar.gz",
+        "sha256": "1b116b10f3331a95909a126b0119728dd444f9f18b236abc2ed84a9bbd2cf9ab",
+        "bytes": 1543811,
+        "includes_credentials_or_event_payloads": false
+      },
+      "bulk_EOS_prefix": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_zero_bg_topups_20261119",
+      "submission_receipt": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/submission.json",
+        "sha256": "f2a1ff5c5932769131f4c76cc797b9530f6bc5ac12a29938254b872a6a981fb4"
+      },
+      "qualification": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/followup_qualification.json",
+        "sha256": "20dc6c0fe46a95a719e522eb320190ab4643c5f08b2e0eb7c635c7fb2519177f"
+      }
+    },
+    {
+      "phase": "phi_legacy_anchor",
+      "parent_cluster": 13555738,
+      "submitted_utc": "2026-11-19T09:51:38.096000+00:00",
+      "banks": 224,
+      "points": 1,
+      "cohort_prefix": "bracket_phi_20261119_",
+      "fixed_source_collisions": 11200000,
+      "expected_conditional_GEN_before_execution": 218608.62745098036,
+      "conditional_GEN_hard_ceiling": 559776,
+      "selected_originals_hard_ceiling": 350000,
+      "response_lanes": 1,
+      "maximum_workers_per_response": 40,
+      "request": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_phi_topups_20261119/request.json",
+        "sha256": "772ac0d926e0c9ea4e97b3cb273d23a4b9db1032c4b0ee0577280dee42bf4182"
+      },
+      "controller_closure": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_phi_topups_20261119/parent_closure.json",
+        "sha256": "49c0bbecb10e6d1e55b35efd9de077deef5eb9c24b0c985a10b5e5c68806fdf6"
+      },
+      "code_archive": {
+        "url": "root://eoscms.cern.ch//eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_phi_topups_20261119/orchestration/code_0cecfa4dbaaa99e7.tar.gz",
+        "sha256": "0cecfa4dbaaa99e7de930d1f061027d5f0786f18942beaac2e2da45833143632",
+        "bytes": 1578123,
+        "includes_credentials_or_event_payloads": false
+      },
+      "bulk_EOS_prefix": "/eos/cms/store/group/phys_exotica/xtracks/jeremi/shift_cmssw/support/dp_phi_topups_20261119",
+      "submission_receipt": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_phi_topups_20261119/submission.json",
+        "sha256": "b8532073d31a3331be04432ce16d1342b9cdc4552f912fb8ac12b12f7736edf5"
+      },
+      "qualification": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_phi_topups_20261119/followup_qualification.json",
+        "sha256": "c0a0742ae8fd2e1787c1325810e6454c451edcde884c65d7aad2001f6ead9088"
+      }
+    }
+  ],
+  "actual_source_progress_at_audit": {
+    "first_phase": {
+      "audit_cutoff_utc": "2026-11-19T09:53:25.564426+00:00",
+      "parent_cluster": 13554795,
+      "banks": 243,
+      "GEN_passed_banks": 238,
+      "GEN_failed_quarantined_banks": 5,
+      "original_GEN": 293561,
+      "prepared_banks": 40,
+      "prepared_originals": 49417,
+      "prepared_selected_originals": 10806,
+      "evidence": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/workload_forecast.json",
+        "sha256": "cafd1cc9f32e80a7820c343104196150a4e0a569079f117476b2a7039873c25b"
+      },
+      "terminal_invalid_GEN_retirements": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_topups_20261119/failed_GEN_retired.json",
+        "sha256": "423a2d0426004b1df8c018c6457975938104b9db4b99004f069ecd2a3fd1125f"
+      }
+    },
+    "phi_phase": {
+      "audit_cutoff_utc": "2026-11-19T09:59:38.859508+00:00",
+      "parent_cluster": 13555738,
+      "banks": 224,
+      "source_counts": {
+        "started": 224,
+        "finished": 218,
+        "passed": 218,
+        "GEN_events": 215444
+      },
+      "native_held_GEN_ids": [],
+      "full_original_GEN_preflight": 979,
+      "preflight_converted_original_GEN": 979,
+      "evidence": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/zero_bg_phi_topups_20261119/source_health_final_audit.json",
+        "sha256": "28a91448a625a33f484876c282434c006e39a0a345f7ba984320d381cd20c58a"
+      },
+      "native_queue_audit_cutoff_utc": "2026-11-19T09:58:32.582096+00:00",
+      "GEN_unfinished_banks": 6
+    },
+    "scope": "These are dated source/preparation audits, not a claim of completed detector responses or newly published histograms"
+  },
+  "publication_requirements": {
+    "retain_every_compatible_old_original_GEN": true,
+    "phi_baseline_populations": 21,
+    "phi_all_SIM_requires_exact_active_publisher": {
+      "configuration": {
+        "path": "/afs/cern.ch/work/j/jniedzie/private/shift_cmssw/validation/bsm_full_range_20261112/publication_v12/config.json",
+        "sha256": "131fdd73ec99a8c258d4360fa916ee3a73423235e35fbe3e55f633ed9da4609f"
+      },
+      "catalog_must_include_all21_old_GEN_hashes": true
+    },
+    "bulk_requires_first_new_canary_through_cumulative_latest": true,
+    "first_new_canary_must_preserve_its_points_old_GEN_hashes": true,
+    "grouped_Nano_events_per_file": 2000,
+    "main_logMass_all_seven_dimuon_categories_required": true
+  },
+  "concurrency": {
+    "shared_maximum_detector_workers": 1000,
+    "old_reserved_pool": 880,
+    "first_phase_response_workers": 80,
+    "phi_phase_response_workers": 40,
+    "shared_maximum_DP_jobs_ahead_of_SM": 100,
+    "operational_GEN_PREP_preflight_publication_priority": 5000,
+    "one_shared_priority_guard": true
+  }
+}

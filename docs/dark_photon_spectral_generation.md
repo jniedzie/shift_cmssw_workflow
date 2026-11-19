@@ -6,6 +6,24 @@ now follows the pinned SensCalc-associated production prescription. The earlier
 1% omitted-meson requirement is superseded. Keep the detailed meson-current
 model as an explicit alternative, rather than adding its rates to the benchmark.
 
+The November 19 statistics top-ups are recorded in
+`config/campaigns/dark_photon_zero_background_topups_20261119.json`.
+They add independent source banks at ten existing hypotheses, retaining each
+point's physical epsilon, proper lifetime, source prescription and reconstruction.
+The 1.8 and 2 GeV additions use their original `msht20-nnlo` DY prescription;
+other components and existing samples remain included. Existing queued banks
+are credited before allocating more. Targets refer to effective weighted raw MC
+passing statistics, not events normalized to lumi, and remain forecasts.
+
+Each finite worklist requires real cumulative histogram publication with its
+original sources retained before bulk detector admission. The separate 1.02 GeV
+worklist also waits for publisher V12 to retain all 21 legacy source banks before
+any new detector job starts. Requests, qualified source-code archives and storage
+bounds are pinned in the plan. Operational state and exact job identities stay
+in the current handoff in [SHIFT_BSM.md](../../SHIFT_BSM.md). These top-ups test
+sparse-MC effects; they do not justify smoothing away resonance structure or
+interpolating outside the generated grid.
+
 `scripts/dark_photon_senscalc.py` builds the published modified PYTHIA privately
 and samples its eta/eta-prime radiative and rho/omega/phi fragmentation channels.
 Its `settings` command reads the existing eta/eta-prime source card and retains
