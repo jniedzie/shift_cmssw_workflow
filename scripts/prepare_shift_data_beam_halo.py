@@ -9,16 +9,18 @@ import argparse
 import collections
 import copy
 import datetime
+import hashlib
 from itertools import groupby
 import json
 import os
 from pathlib import Path
 import re
+import tarfile
 
 from audit_shift_data_luminosity import identity, identity_digest, lumimask, pin, require, sha256, write_json
 from prepare_shift_data_lumisections import build_full_lumi_plan, canonical_lfn, selected_lumisections
 from run_shift_data_reconstruction import validate_request
-from scan_shift_data_beam_halo import digest, merge_shards, validate_raw_mapping
+from scan_shift_data_beam_halo import assemble, digest, merge_shards, validate_raw_mapping
 
 
 SCIENCE_FIELDS = ('payload_files', 'runtime_url', 'runtime_sha256', 'table_sha256')
@@ -135,8 +137,44 @@ def build_halo_plan(aod_census, raw_census, max_events_per_job=10, pack_lumisect
                 selected_events=len(events), selected_identity_sha256=mapping['selected_identity_sha256'])
 
 
+def csc_tight_census(catalog, checked_loose_census):
+    """Use both CSC bits from the verified complete AOD census."""
+    require(checked_loose_census['flag_census_closed'] is True,
+            'CSC tight needs a complete AOD flag census')
+    policy = dict(checked_loose_census['policy'], name='Run3-CSC-tight-AOD-v1',
+                  predicate='CSCTightHaloId() == true')
+    sources = copy.deepcopy(checked_loose_census['sources'])
+    counters = {source['source_index']: collections.Counter() for source in sources}
+    observations = []
+    for row in checked_loose_census['events']:
+        for occurrence in row['occurrences']:
+            halo = occurrence['halo']
+            tight = halo.get('CSC_tight')
+            require(type(tight) is bool and type(halo.get('CSC_loose')) is bool
+                    and halo['decision'] == ('selected' if halo['CSC_loose'] else 'rejected')
+                    and (not tight or halo['CSC_loose']),
+                    'Missing or inconsistent CSC tight AOD decision')
+            decision = 'selected' if tight else 'rejected'
+            index = occurrence['source_index']
+            counters[index][decision] += 1
+            observations.append(dict(run=row['run'], luminosityBlock=row['luminosityBlock'],
+                                     event=row['event'], source_index=index,
+                                     source_entry=occurrence['source_entry'],
+                                     halo=dict(halo, decision=decision)))
+    for source in sources:
+        counts = counters[source['source_index']]
+        source.update({key: counts[key] for key in ('selected', 'rejected', 'unknown')})
+    projected = assemble(catalog, sources, observations, policy,
+                         checked_loose_census['full_lumisection_catalog_sha256'],
+                         checked_loose_census['certification_sha256'])
+    require(projected['flag_census_closed']
+            and projected['original_identity_sha256'] == checked_loose_census['original_identity_sha256'],
+            'CSC tight projection has conflicting flags or changed original identities')
+    return projected
+
+
 def worker_request(template, job, selected_census, directory, cohort_sha256, selected_census_sha256,
-                   campaign_date, settings):
+                   campaign_date, settings, csc_tight=False):
     request = copy.deepcopy(template)
     require(request.get('schema') == 'shift-data-reconstruction-job-v2', 'Require qualified version-two worker template')
     for key in tuple(request):
@@ -146,8 +184,9 @@ def worker_request(template, job, selected_census, directory, cohort_sha256, sel
             request.pop(key)
     source = selected_census['sources'][job['source_index']]
     primary = source['dataset'].split('/')[1]
+    halo_name = 'CSCTight' if csc_tight else 'halo'
     request.update(directory=str(directory), job_name=job['name'], dataset=source['dataset'], era='Run2023D',
-                   batch_name=f'DATA_Run2023D_{primary}_SHIFTReco_{campaign_date}_halo_{cohort_sha256[:8]}',
+                   batch_name=f'DATA_Run2023D_{primary}_SHIFTReco_{campaign_date}_{halo_name}_{cohort_sha256[:8]}',
                    source_url=source['source_url'], source_offset=job['source_offset'],
                    events=[{key: row[key] for key in ('run', 'luminosityBlock', 'event')} for row in job['events']],
                    representation='halo_selected_responses', input_census_sha256=selected_census_sha256,
@@ -189,7 +228,8 @@ def validate_contract(contract, verify_files=True):
         census = json.loads(Path(contract['pins']['selected_census']['path']).read_text())
         require(census['representation'] == 'halo_selected_responses'
                 and census['unique_originals'] == len(census['events']) == contract['selected_events']
-                and census['expected_identity_sha256'] == contract['selected_identity_sha256'],
+                and census['expected_identity_sha256'] == contract['selected_identity_sha256']
+                and census['policy_sha256'] == contract['policy_sha256'],
                 'Selected response census differs from exposure contract')
         ports = {(row['run'], row['luminosityBlock']): row for row in lumi_portions(census['events'])}
     jobs = {}
@@ -229,7 +269,8 @@ def validate_contract(contract, verify_files=True):
                             and request['source_url'] == row['source_url'] for row in selected_rows)
                     and all(request[key] == contract['worker_science'][key] for key in SCIENCE_FIELDS)
                     and request['input_census_sha256'] == contract['pins']['selected_census']['sha256']
-                    and request['beam_halo_cohort_sha256'] == contract['cohort_sha256'],
+                    and request['beam_halo_cohort_sha256'] == contract['cohort_sha256']
+                    and request['beam_halo_policy_sha256'] == contract['policy_sha256'],
                     'Halo worker science or selected census binding changed')
             if packed:
                 entries = [row['source_entry'] for row in selected_rows]
@@ -297,34 +338,65 @@ def metadata_path(explicit, census, digest_field, path_field=None):
     return path.resolve()
 
 
+def census_sources(aod_path, raw_path, archive_path):
+    references = dict(aod_census=pin(aod_path), raw_census=pin(raw_path))
+    if archive_path is None:
+        return references, references.copy()
+    archive = pin(archive_path)
+    with tarfile.open(archive_path, 'r:gz') as bundle:
+        for key, member_name in (('aod_census', 'aod.census.json'),
+                                 ('raw_census', 'raw.census.json')):
+            member = bundle.getmember(member_name)
+            require(member.isfile() and member.size == references[key]['bytes']
+                    and sum(entry.name == member_name for entry in bundle.getmembers()) == 1,
+                    'Archived census member has changed or is ambiguous')
+            member_hash = hashlib.sha256()
+            with bundle.extractfile(member) as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b''):
+                    member_hash.update(block)
+            require(member_hash.hexdigest() == references[key]['sha256'],
+                    'Archived census differs from planner input')
+            references[key] = dict(archive, member=member_name, member_bytes=member.size,
+                                   member_sha256=member_hash.hexdigest())
+    return references, dict(original_scan_archive=archive)
+
+
 def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=None,
             raw_catalog_path=None, certification_path=None, max_events_per_job=10, pack_lumisections=False,
-            campaign_date='20261119', settings=None):
+            campaign_date='20261119', settings=None, csc_tight=False, scan_archive_path=None):
     aod_path, raw_path, template_path, directory = map(Path, (aod_path, raw_path, template_path, directory))
     directory = directory.resolve()
     require(directory.parts[1] in ('afs', 'eos') and not directory.exists(),
             'Require a new absolute persistent halo preparation directory')
     require(re.fullmatch(r'[0-9]{8}', campaign_date), 'Require YYYYMMDD campaign date')
+    source_references, pins = census_sources(aod_path, raw_path, scan_archive_path)
     aod, raw = json.loads(aod_path.read_text()), json.loads(raw_path.read_text())
+    require(sha256(aod_path) == source_references['aod_census'].get(
+                'member_sha256', source_references['aod_census']['sha256'])
+            and sha256(raw_path) == source_references['raw_census'].get(
+                'member_sha256', source_references['raw_census']['sha256']),
+            'Original census used for preparation changed')
     aod_catalog_path = metadata_path(aod_catalog_path, aod, 'full_lumisection_catalog_sha256')
     raw_catalog_path = metadata_path(raw_catalog_path, raw, 'full_lumisection_catalog_sha256', 'full_lumisection_catalog_path')
     certification_path = metadata_path(certification_path, raw, 'certification_sha256', 'certification_path')
     require(aod['certification_sha256'] == raw['certification_sha256'], 'AOD/RAW certification differs')
     cert = json.loads(certification_path.read_text())
-    checked = merge_shards(json.loads(aod_catalog_path.read_text()), cert, [aod],
+    aod_catalog = json.loads(aod_catalog_path.read_text())
+    checked = merge_shards(aod_catalog, cert, [aod],
                           catalog_sha256=sha256(aod_catalog_path), certification_sha256=sha256(certification_path),
                           process=aod['policy']['label'][2])
     require(checked['flag_census_closed'] and checked['original_identity_sha256'] == aod['original_identity_sha256']
             and checked['selected_identity_sha256'] == aod['selected_identity_sha256'], 'AOD flag census failed readback')
     build_full_lumi_plan(json.loads(raw_catalog_path.read_text()), raw, cert)
-    plan = build_halo_plan(aod, raw, max_events_per_job, pack_lumisections=pack_lumisections)
+    flags = csc_tight_census(aod_catalog, checked) if csc_tight else aod
+    plan = build_halo_plan(flags, raw, max_events_per_job, pack_lumisections=pack_lumisections)
     template = json.loads(template_path.read_text())
     science = {key: copy.deepcopy(template[key]) for key in SCIENCE_FIELDS}
     settings = copy.deepcopy(settings or {})
     require(set(settings) <= {'afs_allocation', 'native_timeout_seconds', 'job_max_runtime_seconds'},
             'Only explicit operational settings may replace worker template values')
-    pins = dict(aod_census=pin(aod_path), raw_census=pin(raw_path), worker_template=pin(template_path),
-                aod_catalog=pin(aod_catalog_path), raw_catalog=pin(raw_catalog_path), certification=pin(certification_path))
+    pins.update(worker_template=pin(template_path), aod_catalog=pin(aod_catalog_path),
+                raw_catalog=pin(raw_catalog_path), certification=pin(certification_path))
     if 'afs_allocation' in settings:
         allocation = settings['afs_allocation']
         require(sha256(allocation['path']) == allocation['sha256'], 'New AFS allocation changed')
@@ -333,8 +405,8 @@ def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=No
         require(key not in settings or type(settings[key]) is int and settings[key] > 0, 'Invalid worker time setting')
     directory.mkdir(mode=0o700, parents=True)
     census_path = directory / 'selected_header_census.json'
-    selected_census = dict(plan['selected_census'], original_raw_census=pins['raw_census'],
-                           original_aod_flag_census=pins['aod_census'])
+    selected_census = dict(plan['selected_census'], original_raw_census=source_references['raw_census'],
+                           original_aod_flag_census=source_references['aod_census'])
     write_json(census_path, selected_census)
     pins['selected_census'] = pin(census_path)
     contract = {key: copy.deepcopy(plan[key]) for key in ('policy', 'policy_sha256', 'lumimask', 'datasets',
@@ -351,7 +423,7 @@ def prepare(aod_path, raw_path, template_path, directory, *, aod_catalog_path=No
         work = directory / job['name']
         work.mkdir(mode=0o700)
         request = worker_request(template, job, selected_census, work, contract['cohort_sha256'],
-                                 pins['selected_census']['sha256'], campaign_date, settings)
+                                 pins['selected_census']['sha256'], campaign_date, settings, csc_tight=csc_tight)
         request_path = work / 'request.json'
         write_json(request_path, request)
         reference = {key: job[key] for key in ('name', 'run', 'luminosityBlock', 'source_index',
@@ -377,11 +449,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ('aod-census', 'raw-census', 'worker-template', 'output-dir'):
         parser.add_argument('--'+name, type=Path, required=True)
-    for name in ('aod-catalog', 'raw-catalog', 'certification', 'afs-allocation'):
+    for name in ('aod-catalog', 'raw-catalog', 'certification', 'afs-allocation', 'scan-archive'):
         parser.add_argument('--'+name, type=Path)
     parser.add_argument('--max-events-per-job', type=int, default=10)
     parser.add_argument('--pack-lumisections', action='store_true',
                         help='Pack whole selected lumisections sharing a RAW file into one worker.')
+    parser.add_argument('--csc-tight', action='store_true',
+                        help='Select the traditional CSC-tight flag stored in the verified AOD census.')
     parser.add_argument('--campaign-date', default=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d'))
     parser.add_argument('--native-timeout-seconds', type=int)
     parser.add_argument('--job-max-runtime-seconds', type=int)
@@ -395,7 +469,8 @@ def main():
     result = prepare(args.aod_census, args.raw_census, args.worker_template, args.output_dir,
                      aod_catalog_path=args.aod_catalog, raw_catalog_path=args.raw_catalog,
                      certification_path=args.certification, max_events_per_job=args.max_events_per_job,
-                     pack_lumisections=args.pack_lumisections, campaign_date=args.campaign_date, settings=settings)
+                     pack_lumisections=args.pack_lumisections, campaign_date=args.campaign_date, settings=settings,
+                     csc_tight=args.csc_tight, scan_archive_path=args.scan_archive)
     print(json.dumps(dict(prepared_only=True, submitted=False, original_events=result['original_events'],
                           selected_events=result['selected_events'], jobs=len(result['jobs']),
                           contract=str(args.output_dir.resolve()/'beam_halo_exposure_contract.json'))))

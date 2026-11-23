@@ -4,6 +4,7 @@ import copy
 import json
 from pathlib import Path
 import sys
+import tarfile
 import tempfile
 import unittest
 
@@ -73,7 +74,8 @@ class HaloPreparationTest(unittest.TestCase):
                 for lumi, number, flag in self.rows[index]:
                     row = dict(run=369943,luminosityBlock=lumi,event=number,is_real_data=True)
                     if aod:
-                        row['halo'] = dict(decision='selected' if flag else 'rejected')
+                        row['halo'] = dict(decision='selected' if flag else 'rejected',
+                                           CSC_loose=flag, CSC_tight=flag and index == 0 and number in (20, 50))
                     yield row
             return metadata, headers()
         return read
@@ -117,6 +119,34 @@ class HaloPreparationTest(unittest.TestCase):
         bad['flag_census_closed'] = False
         with self.assertRaisesRegex(ValueError,'partial AOD flags'):
             halo.build_halo_plan(bad,self.raw)
+
+    def test_csc_tight_uses_archived_bits_and_preserves_entire_lumisection_scope(self):
+        archive = self.directory/'census.tar.gz'
+        with tarfile.open(archive, 'w:gz') as bundle:
+            bundle.add(self.directory/'aod.json', arcname='aod.census.json')
+            bundle.add(self.directory/'raw.json', arcname='raw.census.json')
+        contract = self.prepare(csc_tight=True, scan_archive_path=archive, pack_lumisections=True)
+        self.assertEqual(contract['policy']['predicate'], 'CSCTightHaloId() == true')
+        self.assertEqual(contract['original_identity_sha256'], self.aod['original_identity_sha256'])
+        self.assertEqual([row['selected_events'] for row in contract['lumisections']], [1, 1, 0])
+        self.assertEqual([row['rejected_events'] for row in contract['lumisections']], [3, 1, 1])
+        for name in ('aod.json', 'raw.json'):
+            (self.directory/name).unlink()
+        jobs = {job['request_sha256'] for job in contract['jobs']}
+        self.assertEqual(halo.completed_lumisections(contract, jobs)['closed_lumimask'], self.mask)
+        archive.write_bytes(b'changed')
+        with self.assertRaisesRegex(ValueError, 'metadata changed'):
+            halo.completed_lumisections(contract, jobs)
+
+    def test_missing_or_conflicting_csc_tight_flags_block_preparation(self):
+        self.aod['events'][0]['occurrences'][0]['halo'].pop('CSC_tight')
+        self.write('aod.json', self.aod)
+        with self.assertRaisesRegex(ValueError, 'Missing or inconsistent CSC tight'):
+            self.prepare(csc_tight=True)
+        self.rows[1].append((10, 20, True))
+        self.scan_inputs()
+        with self.assertRaisesRegex(ValueError, 'conflicting flags'):
+            self.prepare(csc_tight=True)
 
     def test_request_preserves_science_and_strips_old_transport_allocation_and_checksum(self):
         allocation = self.write('new_allocation.json',{'purpose':'synthetic new allocation'})
