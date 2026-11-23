@@ -978,6 +978,28 @@ class BoundedWatchdogRestartTests(unittest.TestCase):
                     controller.watchdog_role(bad)
 
 
+class PreservedFailedAttemptClosureTests(unittest.TestCase):
+    def test_audit_attempts_do_not_prevent_successful_science_closure_or_lose_claims(self):
+        import run_shift_smart_sm_controller as controller
+        tasks = dict(source=dict(kind='source', phase='done'),
+                     detector=dict(kind='detector', phase='done'),
+                     audit=dict(kind='failed_attempt', phase='failed', bound_bytes=41943040,
+                                original_source_id='source', error='Preserved original failure'))
+        before = copy.deepcopy(tasks)
+        self.assertTrue(controller.closed_tasks(tasks))
+        self.assertEqual(tasks, before)
+        self.assertEqual(sum(t.get('bound_bytes', 0) for t in tasks.values()
+                             if t['phase'] == 'failed'), 41943040)
+        for kind in ['source', 'detector']:
+            unresolved = copy.deepcopy(tasks)
+            unresolved[kind]['phase'] = 'failed'
+            self.assertFalse(controller.closed_tasks(unresolved))
+        # A replacement cannot masquerade as completed by pointing to an audit record.
+        graph = dict(original=dict(kind='detector', phase='replaced', replacement_tasks=['audit']),
+                     audit=tasks['audit'])
+        self.assertFalse(controller.closed_tasks(graph))
+
+
 class LateNativeCompletionTests(unittest.TestCase):
     def fixture(self, root):
         import run_shift_smart_sm_controller as controller

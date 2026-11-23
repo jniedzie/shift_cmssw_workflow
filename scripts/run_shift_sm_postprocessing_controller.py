@@ -458,7 +458,10 @@ def snapshot(root, config, stratum, sources, publication_status=None):
         body['histogram_groups']=[source['histogram_group'] for source in sources if source['nano_inputs']]
         body['zero_selected_source_ids']=[source['normalization']['source_id'] for source in sources if not source['nano_inputs']]
         body['publish_merged_nano']=False
-        body['maximum_publication_bytes']=67108864
+        cumulative_bound = config.get('cumulative_histogram_publication_bound_bytes', 67108864)
+        if type(cumulative_bound) is not int or cumulative_bound <= 0:
+            raise ValueError('Cumulative histogram reservation must be a positive integer')
+        body['maximum_publication_bytes'] = cumulative_bound
     baseline_ids = []
     if baseline_enabled and body.get('histogram_groups') is not None:
         baseline_ids = append_baseline_publication(body,baseline)
@@ -665,7 +668,9 @@ def publication_history(tasks, live):
     if not ids:return {}
     constraint='Owner == "jniedzie" && member(ClusterId,{'+','.join(map(str,ids))+'})'
     rows=json.loads(run_condor(['/usr/bin/condor_history','-constraint',constraint,
-        '-limit',str(len(ids)),'-json','-attributes','ClusterId,ProcId,Iwd,ExitCode,ExitBySignal'],timeout=45) or '[]')
+        '-limit',str(len(ids)),'-json','-attributes',
+        'ClusterId,ProcId,Iwd,JobStatus,ExitCode,ExitBySignal,RemoveReason,CompletionDate,EnteredCurrentStatus'],
+        timeout=45) or '[]')
     result={}
     for row in rows:
         if row.get('ClusterId') not in ids or row.get('ProcId')!=0 or row['ClusterId'] in result:
@@ -696,18 +701,29 @@ def poll(root, config, state):
             if live[task['cluster']]['JobStatus'] == 5:
                 task.update(phase='failed', error='Native worker is held; no automatic retry')
             continue
-        result = Path(task['directory']) / 'result.json'
-        if not result.exists():
-            raise ValueError('Absent worker lacks returned result: ' + name)
         terminal=terminals.get(task['cluster'])
         if terminal is None:
             # Fresh queue absence can precede history publication. Keep this
             # response pending, never treat missing evidence as a failed event.
             continue
-        if (terminal.get('Iwd')!=task['directory'] or terminal.get('ExitCode')!=0
-                or terminal.get('ExitBySignal')):
+        if terminal.get('Iwd') != task['directory']:
+            raise ValueError('Native terminal worker directory differs from frozen task: ' + name)
+        if terminal.get('JobStatus') == 3:
+            if terminal.get('ClusterId') != task['cluster'] or terminal.get('ProcId') != 0:
+                raise ValueError('Native removed worker identity differs from frozen task: ' + name)
+            task.update(phase='failed', native=[terminal],
+                error='Native worker removed; outputs require review; no automatic retry: '
+                      + str(terminal.get('RemoveReason', 'unspecified removal')))
+            continue
+        exit_code = terminal.get('ExitCode')
+        if (type(exit_code) is int and exit_code != 0) or terminal.get('ExitBySignal') is True:
             task.update(phase='failed',error='Native terminal failure retained',native=[terminal])
             continue
+        if type(exit_code) is not int or exit_code != 0 or terminal.get('ExitBySignal') is not False:
+            continue  # Incomplete native terminal evidence is not success or a physical rejection.
+        result = Path(task['directory']) / 'result.json'
+        if not result.exists():
+            continue  # Native completion and returned-file delivery are asynchronous.
         receipt = read(result)
         if (not receipt['complete'] or receipt['request_sha256'] != task['request_sha256']
                 or receipt['events'] != task['events']):
@@ -782,7 +798,8 @@ def poll(root, config, state):
         groups={st:src for st,src in ready.items() if set(state['latest'].get(st,[]))<=
             {row['normalization']['source_id'] for row in src}}
     busy = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] in ('ready', 'submitted', 'submitting')}
-    failed = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] == 'failed'}
+    failed = {t['stratum'] for t in state['tasks'].values() if t.get('kind')!='source_group' and t['phase'] == 'failed'
+        and t.get('audit_only_retired_failure') is not True}
     # At most one immutable snapshot per bin at a time; meaningful changes only.
     for stratum, sources in groups.items():
         if stratum in busy or stratum in failed:
