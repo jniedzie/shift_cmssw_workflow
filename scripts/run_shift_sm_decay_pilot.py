@@ -22,6 +22,7 @@ from run_shift_sm_postprocessing import download
 from run_shift_source_preparation import (audit_completion, audit_genparticles,
     compare_graphs, dump, graph, metadata, product, require, sha, source_configuration)
 from run_shift_weighted_gen import publish
+from shift_eos_storage import is_support_path
 
 
 TOOLS = Path(__file__).resolve().parents[1]
@@ -68,7 +69,8 @@ def validate(request):
         count=request.get('decay_bank',{}).get('size',1)
         require(type(request['decay_seed']) is int and 1<=request['decay_seed']<=899999922-count+1,
                 'Native bank seeds need room for every member and the fixed completion offset')
-    require(request['publication_directory'].startswith('/eos/user/j/jniedzie/shift_cmssw_support/'),
+    destination=request['publication_directory']
+    require(destination.startswith('/eos/') and is_support_path(destination),
             'Conditional pilot outputs must not become ordinary plotter inputs')
 
 
@@ -146,8 +148,8 @@ def prepare(request,raw_input=None):
     timed=graph(event,'shiftEventTime');timing=compare_graphs(complete,timed,target,-target[2])
     truth=audit_genparticles(event,timed)
     require(metadata(local)==metadata('placed.root'),'Full original Run/Lumi accounting changed')
-    _,native=product(event,'generator','GenEventInfoProduct')
-    require(float(native.weight())==request['native_weight'],'Prepared GEN changed native weight')
+    _,generator_info=product(event,'generator','GenEventInfoProduct')
+    require(float(generator_info.weight())==request['native_weight'],'Prepared GEN changed native weight')
     particles={p['barcode']:p for p in complete['particles']}
     vertices={v['barcode']:v for v in complete['vertices']}
     daughters=[]

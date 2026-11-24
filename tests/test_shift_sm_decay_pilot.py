@@ -353,6 +353,77 @@ class FiniteDecayBankTest(unittest.TestCase):
             weight_authority(request,audit)
 
 
+class LegacyPreparationTest(unittest.TestCase):
+    def test_diagnostic_destinations_are_isolated_from_ordinary_publication(self):
+        from run_shift_sm_decay_pilot import validate
+        from shift_eos_storage import GROUP_ROOT, SUPPORT_ROOTS
+
+        source = dict(generator_profile='ordinary', decay_dependent_filter=False,
+                      full_source_trials=4, saved_events=1)
+        request = dict(diagnostic_only=True, new_GEN_exposure=0, arm='ordinary',
+                       event_id=[1, 1, 2], original_source=source, native_weight=.25,
+                       parent_barcodes=[7, 8], first_depth_one_distances_cm=[3., 3.])
+        for root in SUPPORT_ROOTS:
+            with self.subTest(root=root):
+                validate(dict(request, publication_directory=root+'/diagnostic_fixture'))
+        for path in (GROUP_ROOT+'/production/fixture', GROUP_ROOT+'/support/../production/fixture'):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, 'ordinary plotter'):
+                validate(dict(request, publication_directory=path))
+
+    def test_legacy_arms_keep_generator_weight_without_requesting_deferred_charm_audit(self):
+        import run_shift_sm_decay_pilot as pilot
+
+        event_id = [1, 1, 2]
+        source = dict(generator_profile='ordinary', saved_events=1, gen_sha256='a'*64)
+        pions = [dict(barcode=barcode, pdg=pdg, status=1, end_vertex=None,
+                      momentum=[0., 0., 3., 3.1], generated_mass=.13957)
+                 for barcode, pdg in [(7, 211), (8, -211)]]
+        initial = dict(particles=pions)
+        completed = dict(particles=[dict(pion, end_vertex=-pion['barcode']) for pion in pions],
+                         vertices=[dict(barcode=-pion['barcode'], outgoing=[]) for pion in pions])
+        class OneEvent(list):
+            def size(self):
+                return len(self)
+
+            def to(self, _):
+                pass
+
+        fwlite = types.SimpleNamespace(Events=lambda _: OneEvent([object()]))
+        generator_info = types.SimpleNamespace(weight=lambda: .25)
+        previous = Path.cwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                Path('raw.root').write_bytes(b'GEN fixture')
+                for arm in ('ordinary', 'mixture'):
+                    with self.subTest(arm=arm):
+                        request = dict(arm=arm, original_source=source, original_index=0,
+                                       event_id=event_id, native_weight=.25, target_position_cm=[0., 0., 1.],
+                                       parent_barcodes=[7, 8], first_depth_one_distances_cm=[3., 3.],
+                                       decay_seed=17)
+                        if Path('input.root').exists():
+                            Path('input.root').unlink()
+                        with patch.dict(sys.modules, {'DataFormats.FWLite': fwlite}), \
+                                patch.object(pilot, 'install_plugins'), \
+                                patch.object(pilot, 'sha', return_value='a'*64), \
+                                patch.object(pilot, 'graph', side_effect=[initial, initial, completed, completed]), \
+                                patch.object(pilot, 'product', return_value=(None, generator_info)), \
+                                patch.object(pilot, 'source_configuration', return_value=''), \
+                                patch.object(pilot, 'command'), patch.object(pilot, 'metadata', return_value={}), \
+                                patch.object(pilot, 'compare_graphs', return_value={}), \
+                                patch.object(pilot, 'audit_completion', return_value={}), \
+                                patch.object(pilot, 'audit_genparticles', return_value={}), \
+                                patch('audit_shift_material_scout.identity', return_value=event_id), \
+                                patch('shift_sm_decay_bank.audit_native_member') as native_audit:
+                            report = pilot.prepare(request, Path('raw.root'))
+                        native_audit.assert_not_called()
+                        self.assertNotIn('base_kernel', report)
+                        self.assertEqual(report['proposal_definition']['ordinary_fraction'],
+                                         1. if arm == 'ordinary' else .1)
+            finally:
+                os.chdir(previous)
+
+
 class PreparedPublicationTest(unittest.TestCase):
     def test_failed_produced_GEN_has_a_bounded_return_archive_without_hiding_the_first_error(self):
         import tarfile
