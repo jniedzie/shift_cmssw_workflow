@@ -580,13 +580,19 @@ def main():
                         help='SIM,DIGIHLT,RECO,NANO wall limits in seconds')
     parser.add_argument('--absolute-stage-timeouts', action='store_true',
                         help='Use the supplied limits for this slice without per-100-event scaling')
-    parser.add_argument('--remove-consumed-intermediates', action='store_true',
-                        help='Remove scratch GEN/SIM/DIGI/RECO only after its successor passes audit')
+    scratch_retention = parser.add_mutually_exclusive_group()
+    scratch_retention.add_argument('--remove-consumed-intermediates', action='store_true', default=None,
+                                   help='Remove audited scratch intermediates even in diagnostic runs')
+    scratch_retention.add_argument('--keep-consumed-intermediates', action='store_false',
+                                   dest='remove_consumed_intermediates',
+                                   help='Keep scratch intermediates for debugging')
     parser.add_argument('--config-timeout', type=int, default=600)
     parser.add_argument('--event-stall-timeout', type=int, default=1800)
     parser.add_argument('--first-event-stall-timeout', type=int,
                         help='Startup/first-record allowance; defaults to the normal event-stall timeout')
     args = parser.parse_args()
+    if args.remove_consumed_intermediates is None:
+        args.remove_consumed_intermediates = args.publish
     def terminate(signum, frame):
         raise TimeoutError('Worker stopped by signal ' + str(signum))
     signal.signal(signal.SIGTERM, terminate)
