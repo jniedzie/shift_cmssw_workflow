@@ -228,10 +228,14 @@ def prepare_worklist(args):
         spectral = previous['frozen_dependencies'].get('spectral_width_source')
         spectral_directory = None
         if spectral:
+            from run_dark_photon_spectral_gen import DARKCAST_OPTIONAL_DOCUMENTATION
+
             original = Path(path).parent / 'width_inputs'
             spectral_directory = source_dir / 'width_inputs'
             receipt = read(original / 'source_receipt.json')
             for name, expected in receipt['files'].items():
+                if name in DARKCAST_OPTIONAL_DOCUMENTATION and not (original / name).exists():
+                    continue
                 if digest(original / name) != expected:
                     raise ValueError('Qualified spectral width provider changed')
                 copy_checked(original / name, spectral_directory / name, files)

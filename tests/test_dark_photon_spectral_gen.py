@@ -109,6 +109,44 @@ class SpectralGenerationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "differs"):
                 freeze_spectral_inputs(package.parent, receipt, bad)
 
+    def test_absent_release_docs_do_not_block_pinned_physics_inputs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "source"
+            package = source / "darkcast"
+            package.mkdir(parents=True)
+            inputs = {
+                "darkcast/model.py": b"# pinned external model\n",
+                "darkcast/rate.dat": b"1 2\n",
+                "darkcast/AUTHORS.md": b"Authors\n",
+                "darkcast/README.md": b"Readme\n",
+            }
+            for name, body in inputs.items():
+                (source / name).write_bytes(body)
+            receipt = root / "source_receipt.json"
+            hashes = {name: hashlib.sha256(body).hexdigest() for name, body in inputs.items()}
+            receipt.write_text(json.dumps(dict(commit=PINNED_DARKCAST_COMMIT, files=hashes)))
+            complete = freeze_spectral_inputs(source, receipt, root / "complete")
+            self.assertEqual(complete["files_sha256"], hashes)
+            self.assertNotIn("omitted_release_documentation", complete)
+            (package / "AUTHORS.md").unlink()
+            (package / "README.md").unlink()
+
+            authority = freeze_spectral_inputs(source, receipt, root / "docs_absent")
+            self.assertEqual(authority["omitted_release_documentation"],
+                             ["darkcast/AUTHORS.md", "darkcast/README.md"])
+            self.assertEqual(authority["source_receipt_sha256"], complete["source_receipt_sha256"])
+            self.assertEqual(authority["files_sha256"],
+                             {name: hashes[name] for name in ("darkcast/model.py", "darkcast/rate.dat")})
+
+            (package / "README.md").write_text("Unexpected content")
+            with self.assertRaisesRegex(ValueError, "differs from its pinned receipt"):
+                freeze_spectral_inputs(source, receipt, root / "docs_changed")
+            (package / "README.md").unlink()
+            (package / "rate.dat").unlink()
+            with self.assertRaisesRegex(ValueError, "Incomplete pinned spectral source: darkcast/rate.dat"):
+                freeze_spectral_inputs(source, receipt, root / "physics_input_absent")
+
     def test_incomplete_channel_sum_does_not_become_total_width_authority(self):
         widths = {"e_e":1., "mu_mu":1., "tau_tau":0., "hadrons":2., "quarks":0., "neutrinos":0., "dark":0., "total":5.}
         model = SimpleNamespace(width=lambda state,mass,epsilon:widths[state])

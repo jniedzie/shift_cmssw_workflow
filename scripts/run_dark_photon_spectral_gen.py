@@ -107,6 +107,10 @@ def cross_section_correction(epsilon, sampling_epsilon, physical_br, native_br):
     return (epsilon / sampling_epsilon)**2 * physical_br / native_br
 
 
+# These describe the release. The pinned receipt still records their hashes.
+DARKCAST_OPTIONAL_DOCUMENTATION = frozenset({"darkcast/AUTHORS.md", "darkcast/README.md"})
+
+
 def freeze_spectral_inputs(package_directory, receipt_path, output):
     receipt = json.loads(receipt_path.read_text())
     if receipt.get("commit") != PINNED_DARKCAST_COMMIT:
@@ -126,13 +130,20 @@ def freeze_spectral_inputs(package_directory, receipt_path, output):
         if expected is None or actual != expected:
             raise ValueError("Spectral source differs from its pinned receipt: " + relative)
         files[relative] = actual
-    missing = [name for name in receipt["files"] if name.startswith("darkcast/") and name not in files]
-    if missing:
-        raise ValueError("Incomplete pinned spectral source: " + ", ".join(missing))
+    missing = {name for name in receipt["files"] if name.startswith("darkcast/") and name not in files}
+    omitted_documentation = {
+        name for name in missing & DARKCAST_OPTIONAL_DOCUMENTATION
+        if not (copied.parent / name).exists()
+    }
+    if missing - omitted_documentation:
+        raise ValueError("Incomplete pinned spectral source: " + ", ".join(sorted(missing - omitted_documentation)))
     shutil.copy2(receipt_path, output / "width_inputs" / "source_receipt.json")
-    return dict(provider="DarkCast 2.1", commit=PINNED_DARKCAST_COMMIT, files_sha256=files,
-                source_receipt_sha256=digest(receipt_path),
-                references=["https://arxiv.org/abs/1801.04847", "https://gitlab.com/darkcast/releases"])
+    authority = dict(provider="DarkCast 2.1", commit=PINNED_DARKCAST_COMMIT, files_sha256=files,
+                     source_receipt_sha256=digest(receipt_path),
+                     references=["https://arxiv.org/abs/1801.04847", "https://gitlab.com/darkcast/releases"])
+    if omitted_documentation:
+        authority["omitted_release_documentation"] = sorted(omitted_documentation)
+    return authority
 
 
 def physical_width_table(model, mass, epsilon, authority):
