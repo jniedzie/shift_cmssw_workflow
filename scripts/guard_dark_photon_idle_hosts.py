@@ -703,8 +703,10 @@ def step(config, sequence, previous=None):
         constraint = ('(DAGManJobId > 0 && regexp("/detector_worker[.]sh$", Cmd)) '
                       '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))')
     if config.get('maximum_prioritized_detector_workers') is not None:
+        managers = '{' + ','.join(map(str, sorted(config['priority_detector_managers']))) + '}'
         constraint += (' || (JobUniverse == 5 && regexp("/validation/bsm",Iwd) '
-                       '&& regexp("/detector_worker[.]sh$",Cmd))')
+                       '&& regexp("/detector_worker[.]sh$",Cmd))'
+                       f' || (JobUniverse == 7 && member(ClusterId,{managers}))')
     elif config.get('minimum_worker_priority') is not None:
         constraint += (' || (JobStatus == 1 && JobUniverse == 5 && DAGManJobId > 0 '
                        '&& regexp("/finalize_worker[.]sh$", Cmd))')
@@ -747,6 +749,12 @@ def step(config, sequence, previous=None):
                    priority_blocked=any(row['unraised_polls'] >= config.get('maximum_unprotected_polls',3)
                                         for row in pending_priority.values()),
                    pending_protection={})
+    if config.get('maximum_prioritized_detector_workers') is not None:
+        watched = set(config['priority_detector_managers'])
+        summary['priority_window_live'] = any(
+            ad.get('JobUniverse') == 7 and ad['ClusterId'] in watched
+            or ad.get('JobUniverse') == 5 and ad.get('DAGManJobId') in watched
+            for ad in ads)
     if config.get('infrastructure_recovery'):
         summary['infrastructure_recovery'] = recover_transfer_jobs(config,ads)
     if not changes:
@@ -873,6 +881,11 @@ def main():
                 save(root / 'state.json', result)
                 if result.get('infrastructure_recovery',{}).get('watched_productions_finished'):
                     save(root/'state.json',dict(result,complete=True,reason='Watched production and publication finished'))
+                    return
+                if (result.get('priority_window_live') is False
+                        and result['consecutive_native_failures'] == 0):
+                    save(root/'state.json', dict(result, complete=True,
+                        reason='No live managers or workers remain in the priority window'))
                     return
                 time.sleep(config['interval_seconds'])
             supervised = config.get('infrastructure_recovery') or config.get('maximum_prioritized_detector_workers')
