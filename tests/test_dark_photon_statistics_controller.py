@@ -1044,7 +1044,7 @@ class CanaryAndAdmission(unittest.TestCase):
             submit.assert_not_called()
             self.assertEqual(state['admission'], 'waiting_for_storage')
 
-    def test_missing_manager_history_stops_new_admission(self):
+    def test_delayed_native_history_keeps_wave_charged_and_other_slots_usable(self):
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
             config = self.config(directory)
@@ -1056,10 +1056,35 @@ class CanaryAndAdmission(unittest.TestCase):
                  patch.object(controller, 'jobs', return_value=[]), \
                  patch.object(controller, 'scheduler_arguments', return_value=[]), \
                  patch.object(controller, 'run_condor', return_value='[]'), \
-                 patch.object(controller, 'prepare_gen') as submit:
-                with self.assertRaisesRegex(RuntimeError, 'queue and history'):
+                 patch.object(controller, 'published_canary', return_value=True), \
+                 patch.object(controller, 'prepare_gen', return_value={'cluster': 456}) as submit:
+                controller.step(config, directory / 'config.json', state)
+            self.assertIn('native_terminal_pending_since', state['waves']['0'])
+            self.assertFalse(state['waves']['0'].get('terminal', False))
+            self.assertEqual(state['waves']['1']['gen_cluster'], 456)
+            submit.assert_called_once_with(config, directory / 'config.json', 1)
+
+    def test_held_child_is_reported_and_ready_admission_precedes_publication(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            config = self.config(directory)
+            stage = controller.wave_directory(config, 0) / 'gen_stage'
+            stage.mkdir(parents=True)
+            controller.new(stage / 'submission.json', dict(cluster=123))
+            state = dict(waves={'0': dict(gen_cluster=123)})
+            native = [dict(ClusterId=123, ProcId=0, JobStatus=2),
+                      dict(ClusterId=124, ProcId=1, DAGManJobId=123, JobStatus=5)]
+            with patch.object(controller, 'quota', return_value=dict(free_bytes=1000, free_files=100)), \
+                 patch.object(controller, 'jobs', return_value=native) as query, \
+                 patch.object(controller, 'published_canary', return_value=True), \
+                 patch.object(controller, 'prepare_gen', return_value={'cluster': 456}), \
+                 patch.object(controller, 'publish_ready_baselines', side_effect=OSError('publication input unavailable')):
+                with self.assertRaisesRegex(OSError, 'publication input unavailable'):
                     controller.step(config, directory / 'config.json', state)
-            submit.assert_not_called()
+            query.assert_called_once()
+            saved = controller.read(directory / 'state.json')
+            self.assertEqual(saved['waves']['1']['gen_cluster'], 456)
+            self.assertEqual(saved['failures']['held_wave_0']['held_children'], ['124.1'])
 
 
 class DagQueueLimits(unittest.TestCase):

@@ -8,6 +8,7 @@ The operational canary must publish before the controller admits bulk work.
 """
 import argparse
 import ast
+from collections import Counter, defaultdict
 import copy
 from datetime import datetime, timezone
 import errno
@@ -2020,6 +2021,13 @@ def adopt_reviewed_main_cleanup(config, state):
         save(Path(config['directory'])/'state.json', state)
 
 
+def publish_wave_outputs(config, state):
+    publish_ready_baselines(config, state)
+    if ((wave_directory(config, 0) / 'production' / 'plan.json').is_file()
+            or config.get('additional_previous_statistics')):
+        publish(config, state)
+
+
 def step(config, config_path, state):
     now = datetime.now(timezone.utc).isoformat()
     state.update(checked_utc=now, heartbeat=state.get('heartbeat', 0) + 1)
@@ -2031,8 +2039,7 @@ def step(config, config_path, state):
     observation = quota(config)
     state['quota'] = observation
     worklist = read(config['worklist'])
-    # Reconcile every admitted wave before admitting another one.
-    active = 0
+    stages = {}
     for index_text, entry in state.setdefault('waves', {}).items():
         if entry.get('terminal'):
             continue
@@ -2044,14 +2051,46 @@ def step(config, config_path, state):
             Path(entry['replacement_handoff_directory']) if entry.get('replacement_handoff_directory')
             else gen_stage_directory(config,index))
         receipt = read(stage / 'submission.json')
-        rows = jobs(config, 'ClusterId == ' + str(receipt['cluster']))
+        cluster = receipt['cluster']
+        if type(cluster) is not int or cluster <= 0 or cluster in stages:
+            raise ValueError('Invalid or repeated native wave manager')
+        stages[cluster] = index_text, entry, directory, stage, detector_stage
+
+    # Take one scheduler snapshot, including the children that do the work.
+    managers, children = defaultdict(list), defaultdict(list)
+    if stages:
+        clusters = '{' + ','.join(map(str, sorted(stages))) + '}'
+        for row in jobs(config, f'member(ClusterId,{clusters}) || member(DAGManJobId,{clusters})'):
+            if row['ClusterId'] in stages:
+                managers[row['ClusterId']].append(row)
+            if row.get('DAGManJobId') in stages:
+                children[row['DAGManJobId']].append(row)
+    active = 0
+    for cluster, (index_text, entry, directory, stage, detector_stage) in stages.items():
+        rows = managers[cluster]
+        payloads = children[cluster]
+        held = [f'{row["ClusterId"]}.{row["ProcId"]}' for row in payloads if row['JobStatus'] == 5]
         entry.update(stage='detector' if stage == detector_stage else 'handoff' if entry.get('replacement_handoff_directory') else 'GEN',
-                     cluster=receipt['cluster'], queue=rows)
-        if not rows:
+                     cluster=cluster, queue=rows,
+                     child_states=dict(Counter(str(row['JobStatus']) for row in payloads)),
+                     held_children=held)
+        held_key = 'held_wave_' + index_text
+        if held or any(row['JobStatus'] == 5 for row in rows):
+            state.setdefault('failures', {})[held_key] = copy.deepcopy(entry)
+        else:
+            state.setdefault('failures', {}).pop(held_key, None)
+        if not rows and not payloads:
             history = parse_ads(run_condor(['/usr/bin/condor_history', *scheduler_arguments(config),
-                str(receipt['cluster']) + '.0', '-limit', '1', '-json'], timeout=45))
-            if len(history) != 1:
-                raise RuntimeError('Missing manager in both queue and history')
+                str(cluster) + '.0', '-limit', '1', '-json'], timeout=45))
+            if len(history) > 1:
+                raise ValueError('Ambiguous native wave manager history')
+            if not history:
+                # Native history can lag queue removal. Keep ownership and its
+                # capacity charged while unrelated reserved slots stay usable.
+                entry['native_terminal_pending_since'] = entry.get('native_terminal_pending_since', now)
+                active += 1
+                continue
+            entry.pop('native_terminal_pending_since', None)
             if stage != detector_stage and (directory / 'handoff_complete.json').is_file():
                 active += 1
                 continue  # Next pass switches to the submitted detector manager.
@@ -2060,16 +2099,14 @@ def step(config, config_path, state):
             if not entry['successful']:
                 state.setdefault('failures', {})['wave_' + index_text] = copy.deepcopy(entry)
         else:
-            if any(row['JobStatus'] == 5 for row in rows):
-                state.setdefault('failures', {})['held_wave_' + index_text] = copy.deepcopy(entry)
+            entry.pop('native_terminal_pending_since', None)
             active += 1
-    publish_ready_baselines(config, state)
-    if ((wave_directory(config, 0) / 'production' / 'plan.json').is_file()
-            or config.get('additional_previous_statistics')):
-        publish(config, state)
     canary_ready = published_canary(config, state)
+    publication_checked = not canary_ready
+    if publication_checked:
+        publish_wave_outputs(config, state)
+        canary_ready = published_canary(config, state)
     state['canary_published'] = canary_ready
-    redistribute_detector_workers(config, state, worklist)
     for index in range(len(worklist['waves'])):
         if str(index) in state['waves']:
             continue
@@ -2099,6 +2136,9 @@ def step(config, config_path, state):
         active += 1
         # Persist immediately after each scheduler mutation, before more work.
         save(Path(config['directory']) / 'state.json', state)
+    if not publication_checked:
+        publish_wave_outputs(config, state)
+    redistribute_detector_workers(config, state, worklist)
     state['finished'] = (len(state['waves']) == len(worklist['waves']) and
                          all(row.get('terminal') for row in state['waves'].values()) and
                          not state.get('aggregates') and not state.get('unpublished_points'))
