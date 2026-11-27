@@ -26,6 +26,10 @@ def now():
     return datetime.now(timezone.utc).isoformat()
 
 
+class MissingPublicationInput(FileNotFoundError):
+    """A named source input was missing before any publication writes."""
+
+
 def sha(path):
     while True:
         try:
@@ -293,16 +297,18 @@ def adopt_completed(config,point,signature,attempt):
 
 def build_publication(config,point,sources,attempt,work,previous=None):
     import aggregate_dark_photon_samples as aggregate
-    from run_shift_sm_postprocessing import download
-    from shift_sample_paths import histogram_gen_normalization
-    from export_dark_photon_cross_sections import publish_file_rpc
     work=Path(work)
     populations=[]
-    for source in sources:
-        plan=read(checked(dict(path=source['plan_path'],sha256=source['plan_sha256'])))
-        row=next(row for row in plan['points'] if row['point']==point)
-        model={key:row[key] for key in aggregate.MODEL_FIELDS}
-        populations.append(aggregate.load_source(source,model,source['conditions_sha256']))
+    try:
+        for source in sources:
+            plan=read(checked(dict(path=source['plan_path'],sha256=source['plan_sha256'])))
+            row=next(row for row in plan['points'] if row['point']==point)
+            model={key:row[key] for key in aggregate.MODEL_FIELDS}
+            populations.append(aggregate.load_source(source,model,source['conditions_sha256']))
+    except FileNotFoundError as error:
+        if not error.filename:
+            raise
+        raise MissingPublicationInput(error.errno,error.strerror,error.filename) from error
     groups=components_for(populations)
     if groups is None:return None
     populations=[population for group in groups.values() for population in group]
@@ -316,6 +322,9 @@ def build_publication(config,point,sources,attempt,work,previous=None):
         minimum_eos_free_bytes=config['storage_quota']['minimum_free_bytes'],
         minimum_eos_free_files=config['storage_quota']['minimum_free_files']),
         config['maximum_publication_bytes'],config['output_base'])
+    from run_shift_sm_postprocessing import download
+    from shift_sample_paths import histogram_gen_normalization
+    from export_dark_photon_cross_sections import publish_file_rpc
     first=populations[0]['rate']
     rows=[next(row for row in read(population['source']['plan_path'])['points'] if row['point']==point)
         for population in populations]
@@ -399,7 +408,8 @@ def catalog(config,state,pending):
         quarantined_points=state['quarantined'],partial_production=True,
         no_legacy_DY_responses=True,
         all_ready_compatible_increments_included=not state['quarantined'] and
-            not any(row.get('status')=='operational_failure' for row in state['attempts'].values()) and
+            not any(row.get('status') in ('operational_failure','waiting_for_input','repair_required')
+                    for row in state['attempts'].values()) and
             not any(row.get('quarantined_source') for row in pending),
         plot_campaign=config.get('plot_campaign'),ordinary_campaign_alias_errors=state.get('alias_errors',{}))
 
@@ -462,13 +472,33 @@ def poll(config,state):
             continue
         if state['quarantined'].get(point,{}).get('input_signature')==signature:continue
         prior=state['attempts'].get(point)
+        retry_input=False
         if prior and prior['input_signature']==signature:
+            if prior['status']=='repair_required':
+                pending.append(dict(point=point,reason=prior['error'],repair_required=True))
+                continue
+            if prior['status']=='waiting_for_input':
+                try:
+                    available=Path(prior['missing_path']).exists()
+                except OSError:
+                    available=False
+                if not available:
+                    pending.append(dict(point=point,reason='Missing publication input',
+                                        path=prior['missing_path']))
+                    continue
+                retry_input=True
             try:
                 adopted=adopt_completed(config,point,signature,prior['number'])
                 if adopted is not None:
                     keep_all_originals(previous,adopted['original_GEN_sha256'])
+                    retained=config.get('retained_original_GEN_sha256',{}).get(point,[])
+                    keep_all_originals(dict(original_GEN_sha256=retained),adopted['original_GEN_sha256'])
                     state['published'][point]=adopted
                     prior.update(status='complete',adopted_after_interruption_utc=now())
+                    state.get('pending_components',{}).pop(point,None)
+                    if point in state['quarantined']:
+                        state.setdefault('resolved_quarantines',[]).append(
+                            dict(point=point,**state['quarantined'].pop(point)))
                     save(config['state_path'],state)
                     continue
             except (subprocess.CalledProcessError,subprocess.TimeoutExpired,ConnectionError,RuntimeError) as error:
@@ -477,11 +507,15 @@ def poll(config,state):
             except Exception as error:
                 state['quarantined'][point]=dict(input_signature=signature,error=repr(error),utc=now())
                 save(config['state_path'],state);continue
-        number=prior['number']+1 if prior and prior['input_signature']==signature else 0
-        if number>1:
-            state['quarantined'][point]=dict(input_signature=signature,error='Bounded publication attempts exhausted',utc=now())
-            save(config['state_path'],state);continue
+        number=0
         if prior and prior['input_signature']==signature:
+            number=prior['number'] if retry_input else prior['number']+1
+        if number>1:
+            prior.update(status='repair_required',utc=now(),
+                         error=prior.get('error','No verified output after two publication attempts'))
+            pending.append(dict(point=point,reason=prior['error'],repair_required=True))
+            save(config['state_path'],state);continue
+        if prior and prior['input_signature']==signature and not retry_input:
             state.setdefault('preserved_incomplete_attempts',[]).append(dict(point=point,**prior))
         state['attempts'][point]=dict(number=number,input_signature=signature,status='started',utc=now())
         save(config['state_path'],state)
@@ -499,6 +533,11 @@ def poll(config,state):
                 state.get('pending_components',{}).pop(point,None)
                 if point in state['quarantined']:
                     state.setdefault('resolved_quarantines',[]).append(dict(point=point,**state['quarantined'].pop(point)))
+        except MissingPublicationInput as error:
+            missing=os.fsdecode(error.filename)
+            state['attempts'][point].update(status='waiting_for_input',missing_path=missing,
+                                           error=repr(error),utc=now())
+            pending.append(dict(point=point,reason='Missing publication input',path=missing))
         except (subprocess.CalledProcessError,subprocess.TimeoutExpired,ConnectionError) as error:
             state['attempts'][point].update(status='operational_failure',error=repr(error),utc=now())
         except Exception as error:

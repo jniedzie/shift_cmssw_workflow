@@ -147,15 +147,46 @@ class PublicationOwnershipTests(unittest.TestCase):
                 publisher.poll(config,state)
             build.assert_not_called()
 
-    def test_known_publication_failure_gets_one_new_preserved_attempt_then_quarantines(self):
+    def test_known_publication_failure_preserves_previous_attempt_and_requests_repair(self):
         with tempfile.TemporaryDirectory() as temporary:
             config,state=self.fixture(Path(temporary));inputs=[source()]
             with patch.object(publisher,'discovered_sources',return_value=({'m5_prompt':inputs},[])),patch.object(publisher,'adopt_completed',return_value=None),patch.object(publisher,'build_publication',side_effect=subprocess.CalledProcessError(51,['xrdcp'])) as build:
                 publisher.poll(config,state);publisher.poll(config,state);result=publisher.poll(config,state)
             self.assertEqual(build.call_count,2)
             self.assertEqual(len(state['preserved_incomplete_attempts']),1)
-            self.assertIn('m5_prompt',state['quarantined'])
+            self.assertNotIn('m5_prompt',state['quarantined'])
+            self.assertEqual(state['attempts']['m5_prompt']['status'],'repair_required')
+            self.assertTrue(result['pending_signals'][0]['repair_required'])
             self.assertFalse(result['all_ready_compatible_increments_included'])
+
+    def test_named_source_input_retries_same_attempt_after_restoration(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            directory=Path(temporary);config,state=self.fixture(directory)
+            inputs=[source()]
+            original=directory/'retained_source.json'
+            failure=publisher.MissingPublicationInput(2,'No such file or directory',str(original))
+            ready=dict(name='m5_prompt',input_signature=publisher.input_signature(inputs),
+                       original_GEN_sha256=['retained'])
+            with patch.object(publisher,'discovered_sources',return_value=({'m5_prompt':inputs},[])),patch.object(publisher,'adopt_completed',return_value=None),patch.object(publisher,'build_publication',side_effect=[failure,ready]) as build:
+                publisher.poll(config,state)
+                waiting=publisher.poll(config,state)
+                self.assertEqual(build.call_count,1)
+                self.assertEqual(waiting['pending_signals'][0]['path'],str(original))
+                self.assertFalse(waiting['all_ready_compatible_increments_included'])
+                original.write_text('{}')
+                publisher.poll(config,state)
+            self.assertEqual(state['published']['m5_prompt'],ready)
+            self.assertEqual(state['attempts']['m5_prompt']['number'],0)
+            self.assertFalse(state['quarantined'])
+
+    def test_build_reports_an_exact_prewrite_source_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work=Path(temporary)
+            inputs=[source()]
+            inputs[0]['plan_path']=str(work/'source-plan.json')
+            with self.assertRaises(publisher.MissingPublicationInput) as caught:
+                publisher.build_publication({},'m5_prompt',inputs,0,work)
+            self.assertEqual(caught.exception.filename,inputs[0]['plan_path'])
 
     def test_interrupted_complete_publication_is_adopted_without_building_again(self):
         with tempfile.TemporaryDirectory() as temporary:
