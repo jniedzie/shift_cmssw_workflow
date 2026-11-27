@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 from datetime import datetime, timezone
 
 from dark_photon_material_selection import population, validate_nano, WEIGHT_BRANCH, merged_cutflow_sumw
@@ -75,7 +76,7 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
         return None
     from run_shift_sm_postprocessing import download, publish, transfer_env
     from shift_nano_integrity import validate_retirement_proof
-    from shift_condor_native import query
+    from shift_condor_native import NativeCondorError, query
     from run_dark_photon_statistics import save
     directory, scratch = Path(directory), Path(scratch)
     if (result.get('complete') is not True or result.get('request_sha256') != sha256(directory/'postprocessing_request.json')
@@ -104,8 +105,17 @@ def retire_main_nano_inputs(directory, row, source, request, result, settings, s
     if any(not isinstance(name,str) or not re.fullmatch(r'[A-Za-z0-9.-]+\.cern\.ch',name)
            for name in (schedd,pool)):
         raise ValueError('Nano retirement requires its explicit native scheduler and collector pool')
-    jobs = query('Iwd == '+json.dumps(str(directory))+' || ShiftDPStatisticsTask == '+json.dumps(str(directory)),
-                 ['ClusterId','ProcId','JobStatus','Cmd','Iwd'], schedd=schedd,pool=pool)
+    constraint = 'Iwd == '+json.dumps(str(directory))+' || ShiftDPStatisticsTask == '+json.dumps(str(directory))
+    for attempt in range(2):
+        try:
+            jobs = query(constraint, ['ClusterId','ProcId','JobStatus','Cmd','Iwd'],
+                         schedd=schedd, pool=pool, timeout=30)
+            break
+        except NativeCondorError as error:
+            if attempt:
+                raise
+            print('Retrying read-only Nano retirement scheduler check: '+str(error), file=sys.stderr, flush=True)
+            time.sleep(2)
     current = None
     if os.environ.get('_CONDOR_JOB_AD'):
         ad = Path(os.environ['_CONDOR_JOB_AD']).read_text()
@@ -302,6 +312,7 @@ def main_histogram_stage(directory,action,chunk_index=None,retry_policy=None):
         report['retry_policy'] = retry
     save(status,report)
     previous=Path.cwd()
+    point_published = False
     try:
         with tempfile.TemporaryDirectory(prefix='dp-main-'+action+'-',dir=os.environ.get('_CONDOR_SCRATCH_DIR','/tmp')) as scratch:
             os.chdir(scratch);scratch=Path(scratch)
@@ -336,6 +347,9 @@ def main_histogram_stage(directory,action,chunk_index=None,retry_policy=None):
             elif action=='finalize':
                 from run_shift_sm_postprocessing import run
                 from export_dark_photon_cross_sections import rate_record
+                retirement_enabled = settings.get('retire_primitive_nanos_after_grouping',False)
+                if type(retirement_enabled) is not bool:
+                    raise ValueError('Primitive Nano retirement must be an explicit boolean')
                 source=read(directory/'source.json');inputs=[]
                 for index,chunk in enumerate(row['chunks']):
                     receipt=read(directory/'statuses'/('chunk_'+str(index)+'.json'))
@@ -365,17 +379,29 @@ def main_histogram_stage(directory,action,chunk_index=None,retry_policy=None):
                 run(directory/'postprocessing_request.json')
                 result=read(scratch/'result.json')
                 if result.get('complete') is not True:raise ValueError('Main histogram publication did not finish')
-                if type(settings.get('retire_primitive_nanos_after_grouping',False)) is not bool:
-                    raise ValueError('Primitive Nano retirement must be an explicit boolean')
-                retirement=retire_main_nano_inputs(directory,row,source,request,result,settings,scratch)
-                if retirement is not None:
-                    result.update(original_nano_retired=True,primitive_nano_retirement=retirement)
                 report.update(complete=True,point=row['point'],events=row['events'],
                     final_output_base=row['final_output_base'],main_histograms=result)
-                save(directory/'completed_points'/(row['point']+'.json'),report)
+                point_receipt = directory/'completed_points'/(row['point']+'.json')
+                save(point_receipt,report)
+                point_published = True
+                if retirement_enabled:
+                    maintenance = dict(state='running',point_receipt_sha256=sha256(point_receipt))
+                    report['nano_retirement'] = maintenance
+                    save(status,report)
+                    try:
+                        receipt = retire_main_nano_inputs(directory,row,source,request,result,settings,scratch)
+                    except Exception as error:
+                        maintenance.update(state='needs_review',error=repr(error),
+                            retry_owner='production operator',
+                            retry_condition='Reconcile the exact retirement journal and retained outputs before retrying cleanup only')
+                        print('Published BSM point; Nano retirement needs review: '+repr(error), file=sys.stderr, flush=True)
+                    else:
+                        maintenance.update(state='complete',receipt=receipt)
             else:raise ValueError('Unknown main-histogram stage action')
     except BaseException as error:
-        report.update(complete=False,error=repr(error));raise
+        if not point_published:
+            report.update(complete=False,error=repr(error))
+        raise
     finally:
         os.chdir(previous);save(status,report)
 

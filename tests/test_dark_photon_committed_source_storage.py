@@ -122,6 +122,26 @@ class PeerStorageTest(unittest.TestCase):
         self.config['committed_direct_storage_peer']['reserved_bytes']=999
         with self.assertRaisesRegex(ValueError,'existing registration'):self.credit()
 
+    def test_independent_cleanup_status_only_credits_exact_verified_success(self):
+        point=self.stage/'completed_points/p.json'
+        self.report['main_histograms'].pop('primitive_nano_retirement')
+        self.write(point,self.report)
+        retirement=self.stage/'primitive_nano_retirement.json'
+        self.write(retirement,self.retirement)
+        status=self.stage/'statuses/finalizer.json'
+        status.parent.mkdir()
+        maintenance=dict(state='needs_review',point_receipt_sha256=self.pin(point)['sha256'],
+                         receipt=dict(self.pin(retirement),complete=True))
+        self.write(status,dict(complete=True,point='p',nano_retirement=maintenance))
+        self.assertEqual(self.credit(),0)
+        maintenance['state']='complete'
+        self.write(status,dict(complete=True,point='p',nano_retirement=maintenance))
+        self.assertEqual(self.credit(),30)
+        maintenance['point_receipt_sha256']='a'*64
+        self.write(status,dict(complete=True,point='p',nano_retirement=maintenance))
+        with self.assertRaisesRegex(ValueError,'not bound to the completed point'):
+            self.credit()
+
 class SMPreparationCreditTest(unittest.TestCase):
     def setUp(self):
         self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)

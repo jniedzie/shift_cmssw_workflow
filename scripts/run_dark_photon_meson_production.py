@@ -3160,9 +3160,21 @@ def committed_direct_peer_bytes(config, observed):
             point = row['point']
             if not storage_closed_primitive(directory,point,row.get('full_gen_events',row['events']),observed):
                 continue
-            report = storage_ledger(directory/'completed_points'/(point+'.json'))
+            point_receipt = directory/'completed_points'/(point+'.json')
+            point_payload = storage_payload(point_receipt)
+            report = json.loads(point_payload)
             marker = report.get('main_histograms',{})
             pin = marker.get('primitive_nano_retirement')
+            status_path = directory/'statuses/finalizer.json'
+            if pin is None and status_path.is_file() and status_path.stat().st_mtime <= observed:
+                finalizer = storage_ledger(status_path)
+                maintenance = finalizer.get('nano_retirement', {})
+                if maintenance.get('state') == 'complete':
+                    pin = maintenance['receipt']
+                    if (finalizer.get('complete') is not True or finalizer.get('point') != point
+                            or maintenance.get('point_receipt_sha256') != hashlib.sha256(point_payload).hexdigest()
+                            or pin.get('path') != str(directory/'primitive_nano_retirement.json')):
+                        raise ValueError('Direct Nano retirement is not bound to the completed point')
             if not pin or pin.get('complete') is not True:
                 continue
             retirement = storage_pinned_read(pin)

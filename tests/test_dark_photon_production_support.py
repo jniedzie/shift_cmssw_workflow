@@ -149,6 +149,50 @@ class MainHistogramHandoff(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'Preserve the existing attempt'):
                 main_histogram_stage(root,'finalize')
 
+    def test_published_point_survives_failed_nano_retirement(self):
+        from shift_condor_native import NativeCondorError
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)
+            self.stage(root)
+            (root/'completed_points').mkdir()
+            gen=root/'gen'
+            gen.mkdir()
+            plan=json.loads((root/'plan.json').read_text())
+            plan['campaign']='test'
+            row=plan['points'][0]
+            row.update(gen_directory=str(gen), final_output_base='/eos/result', run_number=7)
+            write(root/'plan.json',plan)
+            preflight=root/'primary_preflight/receipt.json'
+            authority=json.loads(preflight.read_text())
+            authority['original_plan_sha256']=sha256(root/'plan.json')
+            write(preflight,authority)
+            write(root/'source.json',dict(gen='gen.root',gen_sha256='gen',stratum='test'))
+            write(gen/'contract.json',dict(requested_events=2))
+            write(gen/'validation.json',{})
+            write(root/'main_histogrammer.json',dict(runtime={}, maximum_publication_bytes=1,
+                retire_primitive_nanos_after_grouping=True))
+            write(root/'statuses/chunk_0.json',dict(complete=True,chunk=0,job=5,events=1,
+                plan_sha256=sha256(root/'plan.json'),seal_sha256=sha256(root/'seal.json'),
+                primary_preflight_receipt_sha256=sha256(preflight),
+                payload=dict(nano_path='/eos/input',nano_readback_sha256='x',nano_bytes=1)))
+            point=root/'completed_points'/(row['point']+'.json')
+            def fail_retirement(*_):
+                self.assertTrue(json.loads(point.read_text())['complete'])
+                raise NativeCondorError('Collector has no record')
+            with patch('dark_photon_production_support.validate_main_detector_payload'), \
+                 patch('export_dark_photon_cross_sections.rate_record',
+                       return_value=dict(physical_selected_cross_sections_pb=[dict(value_pb=1.)])), \
+                 patch('run_shift_sm_postprocessing.run',
+                       side_effect=lambda _:write(Path('result.json'),dict(complete=True))), \
+                 patch('dark_photon_production_support.retire_main_nano_inputs',
+                       side_effect=fail_retirement):
+                main_histogram_stage(root,'finalize')
+            self.assertNotIn('nano_retirement',json.loads(point.read_text()))
+            status=json.loads((root/'statuses/finalizer.json').read_text())
+            self.assertTrue(status['complete'])
+            self.assertEqual(status['nano_retirement']['state'],'needs_review')
+            self.assertEqual(status['nano_retirement']['point_receipt_sha256'],sha256(point))
+
 
 class MainNanoRetirement(unittest.TestCase):
     def setUp(self):
@@ -247,6 +291,17 @@ class MainNanoRetirement(unittest.TestCase):
         self.settings['cleanup_condor_pool']=''
         with self.assertRaisesRegex(ValueError,'collector pool'):
             retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
+
+    def test_unknown_scheduler_state_retries_before_any_deletion(self):
+        from shift_condor_native import NativeCondorError
+        with patch('shift_condor_native.query',side_effect=NativeCondorError('temporary failure')) as query, \
+             patch('dark_photon_production_support.time.sleep'), \
+             patch('dark_photon_production_support.subprocess.run') as mutate:
+            with self.assertRaises(NativeCondorError):
+                retire_main_nano_inputs(self.root,self.row,self.source,self.request,self.result,self.settings,self.root)
+        self.assertEqual(query.call_count,2)
+        mutate.assert_not_called()
+        self.assertFalse((self.root/'primitive_nano_retirement.json').exists())
 
     def test_changed_grouped_readback_blocks_every_deletion(self):
         self.blobs[self.merged['path']]=b'corrupted replacement'
