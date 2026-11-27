@@ -29,18 +29,34 @@ class WorkerRedistribution(unittest.TestCase):
         controller.new(directory / 'submission.json', dict(cluster=100 + index))
         (directory / 'pipeline.dag').write_text(f'MAXJOBS DETECTOR {category}\nMAXJOBS FINALIZER 2\n')
         (directory / 'pipeline.dag.dagman.out').write_text(
-            '$CondorVersion: 25.0.14\nDAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False\n')
+            '11/25/26 05:52:36 ** $CondorVersion: 25.13.3 native $\n'
+            'DAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False\n')
         ad = dict(ClusterId=100 + index, ProcId=0, JobStatus=2, Iwd=str(directory),
-            JobUniverse=7, Cmd='/usr/bin/condor_dagman', DAGMan_MaxJobs=current,
-            DAGMan_MaxIdle=5, DAG_AdUpdateTime=0)
+            Owner='jniedzie', NumJobStarts=1, JobUniverse=7, Cmd='/usr/bin/condor_dagman',
+            DAGMan_MaxJobs=current, DAGMan_MaxIdle=5)
         self.state['waves'][str(index)] = dict(stage='detector', queue=[ad])
         return ad
 
-    def rebalance(self):
+    def rebalance(self, native_failure=None):
+        def exact_jobs(config, constraint):
+            return [state['queue'][0] for state in self.state['waves'].values()
+                    if state.get('queue') and f'ClusterId == {state["queue"][0]["ClusterId"]} &&' in constraint]
+        def rpc(argv, **_):
+            if native_failure is not None:
+                raise native_failure
+            return json.dumps({'DAGMan_MaxJobs': int(argv[-1]), 'DAGMan_MaxIdle':5})
         with patch.object(controller, 'persist_controller_state') as save, \
-             patch.object(controller, 'run_condor', return_value='Set attribute "DAGMan_MaxJobs" for 1 matching jobs.') as edit:
+             patch.object(controller, 'scheduler_arguments', return_value=[]), \
+             patch.object(controller, 'jobs', side_effect=exact_jobs), \
+             patch.object(controller, 'run_condor', side_effect=rpc) as edit:
             controller.redistribute_detector_workers(self.config, self.state, self.worklist)
         return save, edit
+
+    def native_log(self, ad):
+        with (Path(ad['Iwd']) / 'pipeline.dag.dagman.out').open('a') as output:
+            output.write('11/25/26 11:25:11 Setting DAGMan throttles:\n'
+                         f'11/25/26 11:25:11 \tMaximum Idle Jobs-------------: {ad["DAGMan_MaxIdle"]}\n'
+                         f'11/25/26 11:25:11 \tMaximum Submitted Nodes-------: {ad["DAGMan_MaxJobs"]}\n')
 
     def test_existing_four_waves_are_unchanged(self):
         for index in range(4): self.manager(index)
@@ -61,17 +77,22 @@ class WorkerRedistribution(unittest.TestCase):
         self.state['waves']['0'] = dict(terminal=True)
         self.manager(1); target = self.manager(2, 600, 150); self.manager(3, 600, 150)
         save, edit = self.rebalance()
-        self.assertEqual(edit.call_args.args[0][-2:], ['DAGMan_MaxJobs', '300'])
+        self.assertEqual(edit.call_args.args[0][-2:], ['102', '300'])
+        self.assertEqual(edit.call_args.args[0][:3], ['/usr/bin/python3', '-I', '-c'])
+        self.assertTrue(edit.call_args.kwargs['local_schedd'])
         self.assertEqual(save.call_count, 2)
-        self.assertIn('DAGMan_MaxIdle == 5', edit.call_args.args[0][-3])
         target['DAGMan_MaxJobs'] = 300
-        target['DAG_AdUpdateTime'] = controller.time.time() + 1
+        target['DAG_AdUpdateTime'] = controller.time.time() + 1  # Ad refresh alone proves nothing.
+        _, edit = self.rebalance(); edit.assert_not_called()
+        self.assertFalse(self.state['detector_worker_allocation']['2']['consumed'])
+        self.native_log(target)
         _, edit = self.rebalance(); edit.assert_not_called()
         self.assertTrue(self.state['detector_worker_allocation']['2']['consumed'])
         self.state['waves']['1']['terminal'] = True
         _, edit = self.rebalance()
         self.assertEqual(edit.call_args.args[0][-1], '450')
         target['DAGMan_MaxJobs'] = 450
+        self.native_log(target)
         self.state['waves']['3']['terminal'] = True
         _, edit = self.rebalance()
         self.assertEqual(edit.call_args.args[0][-1], '600')
@@ -86,6 +107,28 @@ class WorkerRedistribution(unittest.TestCase):
         log.write_text(log.read_text().replace('False', 'True'))
         with self.assertRaisesRegex(ValueError, 'preserve healthy'):
             self.rebalance()
+
+    def test_missing_rpc_reply_reserves_the_full_target_without_resending(self):
+        self.worklist = dict(waves=[{}])
+        self.manager(0,600,150)
+        _, edit = self.rebalance(native_failure=controller.NativeCondorError('lost reply'))
+        edit.assert_called_once()
+        _, edit = self.rebalance()
+        edit.assert_not_called()
+        allocation = self.state['detector_worker_allocation']['0']
+        self.assertIn('lost reply',allocation['needs_review'])
+        self.assertFalse(allocation['consumed'])
+        self.assertEqual(self.state['detector_worker_budget']['spare_workers'],0)
+
+    def test_older_manager_keeps_baseline_capacity_without_attempting_qedit(self):
+        self.worklist = dict(waves=[{}])
+        ad = self.manager(0,600,150)
+        log = Path(ad['Iwd']) / 'pipeline.dag.dagman.out'
+        log.write_text(log.read_text().replace('25.13.3','25.0.14'))
+        _, edit = self.rebalance()
+        edit.assert_not_called()
+        self.assertIn('supported native throttle',self.state['detector_worker_redistribution_status'])
+        self.assertEqual(self.state['detector_worker_budget']['committed_workers'],150)
 
     def test_expanded_budget_keeps_initial_reservations_and_a_1000_worker_bound(self):
         controller.validate_capacity(self.config)

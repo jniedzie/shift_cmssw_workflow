@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 
-from shift_condor_native import native_env, parse_ads, query, run_condor
+from shift_condor_native import NativeCondorError, native_env, parse_ads, query, run_condor
 
 
 def read(path):
@@ -142,7 +142,7 @@ def jobs(config, constraint):
     output = run_condor(['/usr/bin/condor_q', *arguments, '-constraint', constraint,
                          '-json', '-attributes',
                          'ClusterId,ProcId,DAGManJobId,JobStatus,Iwd,NumJobStarts,ExitCode,ExitBySignal,ShiftDPStatisticsTask,'
-                         'JobUniverse,Cmd,DAGMan_MaxJobs,DAGMan_MaxIdle,DAG_AdUpdateTime,'
+                         'JobUniverse,Cmd,Owner,DAGMan_MaxJobs,DAGMan_MaxIdle,'
                          'ShiftDPPointPreflightManifestSHA256'], timeout=45)
     return parse_ads(output)
 
@@ -1809,6 +1809,48 @@ def fresh_storage_admission(config, observation):
         own_completed_GEN_events=own_credit,meson_closed_bytes=meson_credit)
 
 
+def native_dag_node_limit(cluster, target, idle):
+    """Run the versioned scheduler binding in a disposable, bounded process."""
+    script = """
+import json, sys
+import htcondor2
+cluster, nodes = map(int, sys.argv[1:])
+if not hasattr(htcondor2.DAGMan, 'throttle'):
+    raise RuntimeError('Scheduler binding lacks DAGMan.throttle: ' + htcondor2.version())
+answer = htcondor2.DAGMan(cluster).throttle(max_nodes=nodes)
+if isinstance(answer, str):
+    raise RuntimeError('Native throttle refused: ' + answer)
+print(json.dumps({key: answer[key] for key in ('DAGMan_MaxJobs', 'DAGMan_MaxIdle')}))
+"""
+    output = run_condor(['/usr/bin/python3', '-I', '-c', script, str(cluster), str(target)],
+                        timeout=30, local_schedd=True)
+    reply = json.loads(output)
+    if reply != {'DAGMan_MaxJobs': target, 'DAGMan_MaxIdle': idle}:
+        raise ValueError('Native throttle response did not confirm the exact supported limit')
+    return reply
+
+
+def dag_throttle_log_readback(path, intent):
+    """Use DAGMan's first-hand log output after the recorded request location."""
+    with path.open('rb') as stream:
+        metadata = os.fstat(stream.fileno())
+        offset = intent['log_offset']
+        if metadata.st_ino != intent['log_inode'] or metadata.st_size < offset:
+            return None
+        # The actual manager can produce large logs. Only read a bounded tail.
+        stream.seek(max(offset, metadata.st_size - 131072))
+        text = stream.read(131072).decode(errors='replace')
+    _, separator, block = text.rpartition('Setting DAGMan throttles:')
+    if separator:
+        nodes = re.search(r'Maximum Submitted Nodes-+: (\d+)\s*$', block, re.M)
+        idle = re.search(r'Maximum Idle Jobs-+: (\d+)\s*$', block, re.M)
+        if nodes and idle and (int(nodes[1]), int(idle[1])) == (
+                intent['requested_max_jobs'], intent['maximum_idle']):
+            return dict(maximum_submitted_nodes=int(nodes[1]), maximum_idle_jobs=int(idle[1]),
+                        log_path=str(path))
+    return None
+
+
 def redistribute_detector_workers(config, state, worklist):
     """Reuse freed slots through DAGMan's supported live global throttle.
 
@@ -1818,6 +1860,9 @@ def redistribute_detector_workers(config, state, worklist):
     """
     policy = config.get('detector_worker_redistribution')
     if policy is None:
+        return
+    if scheduler_arguments(config):
+        state['detector_worker_redistribution_status'] = 'native throttle requires the owning scheduler host'
         return
     baseline = config.get('detector_workers_per_wave', 100)
     active = [(index, entry) for index, entry in state['waves'].items() if not entry.get('terminal')]
@@ -1843,58 +1888,89 @@ def redistribute_detector_workers(config, state, worklist):
         if (type(current) is not int or not 1 <= current <= policy['total_workers'] + 2 or
                 type(idle) is not int or not 1 <= idle <= config.get('dag_max_idle', baseline)):
             raise ValueError('Worker allocation requires bounded initialized native throttles')
-        with (directory / 'pipeline.dag.dagman.out').open() as stream:
+        log = directory / 'pipeline.dag.dagman.out'
+        with log.open() as stream:
             startup = stream.read(65536)
-        if ('$CondorVersion: 25.0.' not in startup or
-                'DAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False' not in startup):
+        version = re.search(r'^.*\*\* \$CondorVersion: (\d+)\.(\d+)\.(\d+) ', startup, re.M)
+        if 'DAGMAN_REMOVE_JOBS_AFTER_LIMIT_CHANGE setting: False' not in startup:
             raise ValueError('Live throttle contract must preserve healthy workers')
         categories = re.findall(r'^MAXJOBS DETECTOR (\d+)\s*$',
                                 (directory / 'pipeline.dag').read_text(), re.M)
         if len(categories) != 1:
             raise ValueError('Require one immutable detector category ceiling')
         ceiling = int(categories[0])
-        committed += max(0, min(ceiling, current) - baseline)
         old = observations.get(index)
+        reserved = current
         if ceiling > baseline:
-            allowed = {baseline} if old is None else {old['requested_max_jobs']}
-            if old is not None and 'native_edit_output' not in old:
-                allowed.add(old['previous_max_jobs'])  # Reconcile an ambiguous idempotent limit edit.
+            allowed = {baseline} if old is None else {old['requested_max_jobs'],old['previous_max_jobs']}
             if current not in allowed:
                 raise ValueError('Expandable manager has an unreviewed changed live throttle')
-        if old and current == old.get('requested_max_jobs'):
-            old.setdefault('edited_epoch', time.time())
-            old['consumed'] = (ad.get('DAG_AdUpdateTime', 0) > old['edited_epoch'])
-            old['manager_ad_update_epoch'] = ad.get('DAG_AdUpdateTime')
-            old['readback_max_jobs'] = current
-        managers.append((index, ad, ceiling, current))
+        if old is not None:
+            if (old['cluster'], old['directory']) != (ad['ClusterId'], ad['Iwd']):
+                raise ValueError('Throttle intent belongs to a different detector manager')
+            # An ambiguous RPC can already have raised the native limit.
+            reserved = max(current,old['requested_max_jobs'])
+            if old.get('native_reply') != {'DAGMan_MaxJobs': old['requested_max_jobs'],
+                                           'DAGMan_MaxIdle': old['maximum_idle']}:
+                old['consumed'] = False
+                old.setdefault('needs_review','No verified native throttle response')
+            elif old.get('manager_job_starts') != ad.get('NumJobStarts'):
+                old.update(consumed=False,needs_review='Detector manager restarted after the throttle request')
+            elif current == old['requested_max_jobs'] and not old['consumed']:
+                proof = dag_throttle_log_readback(log,old)
+                if proof is not None:
+                    old.update(consumed=True,manager_readback=proof)
+        committed += max(0, min(ceiling,reserved) - baseline)
+        if ((old is None or old['consumed'] and current == old['requested_max_jobs'])
+                and version and tuple(map(int,version.groups())) >= (25,10,1)):
+            managers.append((index, ad, ceiling, current, log))
+        elif version is None or tuple(map(int,version.groups())) < (25,10,1):
+            state['detector_worker_redistribution_status'] = 'a manager lacks a supported native throttle'
     if committed > policy['total_workers']:
         raise ValueError('Existing live allocations exceed the unchanged worker budget')
     available = policy['total_workers'] - committed
     state['detector_worker_budget'] = dict(total_workers=policy['total_workers'],
         committed_workers=committed, reserved_upcoming_waves=upcoming, spare_workers=available)
-    for index, ad, ceiling, current in sorted(managers, key=lambda item: int(item[0])):
+    for index, ad, ceiling, current, log in sorted(managers, key=lambda item: int(item[0])):
         increase = min(available, max(0, ceiling - current))
         if increase <= 0:
             continue
         target = current + increase
+        constraint = (f'ClusterId == {ad["ClusterId"]} && ProcId == 0 && JobStatus == 2'
+            ' && JobUniverse == 7 && Cmd == "/usr/bin/condor_dagman" && Iwd == ' + json.dumps(ad['Iwd']) +
+            ' && Owner == ' + json.dumps(ad['Owner']) +
+            f' && NumJobStarts == {ad["NumJobStarts"]}'
+            f' && DAGMan_MaxJobs == {current} && DAGMan_MaxIdle == {ad["DAGMan_MaxIdle"]}')
+        metadata = log.stat()
         intent = dict(cluster=ad['ClusterId'], directory=ad['Iwd'],
             previous_max_jobs=current, requested_max_jobs=target, maximum_idle=ad['DAGMan_MaxIdle'],
             immutable_detector_category_ceiling=ceiling, intent_utc=datetime.now(timezone.utc).isoformat(),
-            consumed=False)
+            log_inode=metadata.st_ino, log_offset=metadata.st_size,
+            manager_job_starts=ad['NumJobStarts'], consumed=False)
+        prior = observations.get(index)
         observations[index] = intent
         persist_controller_state(Path(config['directory']) / 'state.json', state)
-        constraint = (f'ClusterId == {ad["ClusterId"]} && ProcId == 0 && JobStatus == 2'
-            ' && JobUniverse == 7 && Cmd == "/usr/bin/condor_dagman" && Iwd == ' + json.dumps(ad['Iwd']) +
-            f' && DAGMan_MaxJobs == {current} && DAGMan_MaxIdle == {ad["DAGMan_MaxIdle"]}')
-        output = run_condor(['/usr/bin/condor_qedit', *scheduler_arguments(config), '-constraint', constraint,
-            'DAGMan_MaxJobs', str(target)], timeout=45)
-        if 'for 1 matching jobs.' not in output:
-            raise RuntimeError('Native scheduler did not confirm one exact manager limit edit')
-        intent.update(edited_epoch=time.time(), native_edit_output=output)
-        persist_controller_state(Path(config['directory']) / 'state.json', state)
+        try:
+            checked = jobs(config,constraint)
+        except (NativeCondorError,ValueError) as error:
+            checked = []
+            state['detector_worker_redistribution_status'] = repr(error)
+        if len(checked) != 1 or any(checked[0].get(key) != ad[key]
+                                  for key in ('ClusterId','ProcId','Iwd','Owner','NumJobStarts')):
+            if prior is None:
+                observations.pop(index)
+            else:
+                observations[index] = prior
+            persist_controller_state(Path(config['directory']) / 'state.json', state)
+            continue
+        try:
+            intent['native_reply'] = native_dag_node_limit(ad['ClusterId'],target,ad['DAGMan_MaxIdle'])
+        except (NativeCondorError,ValueError) as error:
+            intent['needs_review'] = repr(error)
         available -= increase
         state['detector_worker_budget'].update(committed_workers=policy['total_workers'] - available,
                                                spare_workers=available)
+        persist_controller_state(Path(config['directory']) / 'state.json', state)
 
 
 def validate_main_preflight_replacement(config, index, authority):
