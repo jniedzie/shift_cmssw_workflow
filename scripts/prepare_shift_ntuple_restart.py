@@ -352,7 +352,7 @@ executable = /usr/bin/python3
 arguments = {root}/run_shift_ntuple_controller.py {root}
 getenv = False
 notification = Never
-+JobBatchName = "{tag}_controller"
++JobBatchName = "controller_{tag}_ntuple"
 output = controller.out
 error = controller.err
 log = controller.log
@@ -364,7 +364,7 @@ queue 1
     (root / 'watchdog.sub').write_text(controller_sub.replace(
         f'arguments = {root}/run_shift_ntuple_controller.py {root}',
         f'arguments = {root}/run_shift_ntuple_controller.py {root} --watchdog').replace(
-        f'{tag}_controller', f'{tag}_watchdog').replace('controller.out','watchdog.out').replace(
+        f'controller_{tag}_ntuple', f'controller_{tag}_ntuple_watchdog').replace('controller.out','watchdog.out').replace(
         'controller.err','watchdog.err').replace('controller.log','watchdog.log'))
     print(json.dumps(dict(campaign=str(root),canaries=len(canaries),canary_events=sum(c['count'] for c in canaries),
                          bulk_jobs=manifest['jobs'],bootstrap_sha256=bootstrap_sha)))

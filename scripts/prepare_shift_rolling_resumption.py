@@ -94,6 +94,9 @@ def prepare(source, destination, scheduling_ceiling=None, initial_workers=None):
         # Use one actual core: the measured generator uses one core, and
         # another requested core would reserve idle capacity.
         text = re.sub(r'^request_cpus\s*=.*$', 'request_cpus = 1', text, flags=re.M)
+        batch = f"controller_{plan['tag']}_$(mode)" if name == 'control.sub' else plan['tag']
+        text = re.sub(r'^\+JobBatchName\s*=.*\n', '', text, flags=re.M)
+        text = f'+JobBatchName = "{batch}"\n' + text
         transfer = f'transfer_input_files = {destination}/manifest.json'
         if text.count(transfer) != 1:
             raise ValueError('Unsupported transferred-input description')
@@ -112,7 +115,7 @@ def prepare(source, destination, scheduling_ceiling=None, initial_workers=None):
                   readiness='PREPARED ONLY; predecessor and its workers must drain before submission')
     (destination/'schedule.json').write_text(json.dumps(report, indent=2)+'\n')
     subprocess.run(['condor_submit_dag', '-no_submit', '-maxjobs', str(initial),
-                    '-maxidle', str(initial), '-batch-name', plan['tag'],
+                    '-maxidle', str(initial), '-batch-name', 'controller_' + plan['tag'],
                     '-append', '+ShiftProductionController = true', str(destination/'production.dag')],
                    check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     frozen = {p.name: sha256(p) for p in destination.iterdir() if p.is_file()}

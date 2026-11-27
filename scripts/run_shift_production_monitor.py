@@ -86,7 +86,7 @@ def submit_audit(state, registry, registry_hash):
         'transfer_output_files = health_result.json', 'getenv = False',
         'request_cpus = 1', 'request_memory = 4000', 'request_disk = 10000000', 'priority = 100',
         '+MaxRuntime = 3600', '+ShiftHealthAudit = True',
-        f'+ShiftAuditNonce = "{nonce}"', '+JobBatchName = "shift_gen_health_monitor"',
+        f'+ShiftAuditNonce = "{nonce}"', f'+JobBatchName = "controller_{state.name}_gen_health_monitor"',
         'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
         'periodic_release = False', 'output = audit.out', 'error = audit.err',
         'log = audit.log', 'queue 1', ''])

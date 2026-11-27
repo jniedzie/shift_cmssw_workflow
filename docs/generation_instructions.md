@@ -1,6 +1,30 @@
 <!-- Code style: human-code. -->
 # Generation instructions
 
+## Condor worker and controller counts
+
+Run `python3 scripts/shift_condor_queue.py` from the workflow repository for
+current worker and controller counts on your schedd. Add `--controllers`
+to see each controller's job ID, state and parent DAG. Use `--dag JOB_ID`
+or `--dag BATCH_NAME` to see a manager's workflow steps and the queued jobs
+under its native DAG links. Add `--by-batch` to show the worker and controller
+batch names. The job table counts current records, including completed jobs
+still in the queue and output transfers.
+
+The default `condor_q` batch display combines a DAG manager and its workers
+under the manager's name. Its `TOTAL` can count workflow steps while `RUN`
+and `IDLE` count worker jobs. One step can submit hundreds of jobs. Use
+`condor_q -nobatch` for the native per-job view. An array submitted with
+late materialization can include work for which Condor has yet to create
+a job record. Check that deferred work with `condor_q -factory`.
+
+Set `JobBatchName` to `controller_...` on controller submit descriptions,
+and pass `-batch-name controller_...` when submitting DAG managers. Use a
+name that identifies the campaign, stage and date. Keep ownership checks on
+job IDs and native request identities. Check names with
+`condor_q -nobatch -af ClusterId ProcId JobStatus JobBatchName` because the
+default batch display folds DAG children under their manager.
+
 ## QCD two-muon enrichment before reconstruction (9 November)
 
 New QCD source preparation uses `shift_qcd_gen_filter.py` through
@@ -3394,6 +3418,69 @@ blocking the other points' finalizers and publication. Final collection still
 requires all original points; this option never drops an event or pretends the
 whole cohort is complete. The post-seal `point_preflights/manifest.json` pins
 each task and the original plan, seal, inventory, runtime and DAG.
+
+### Keeping BSM workers fed and publishing completed banks
+
+Measure the delay at the stage that owns it. Record ready work, native starts,
+idle age and job priorities per stage on the owning schedd. Check the live
+CPU, RAM, disk and wall-time requests against measurements from each worker
+type. CERN can assign two CPUs to a nominal one-CPU job because of its memory
+request. Confirm slot matching before raising a DAG or factory limit. A queue
+full of priority-zero workers can sit behind the owner's other campaigns even
+when a manager has idle capacity. Give short preparations, publication and
+resource checks enough priority and capacity to keep admitted work moving.
+Coordinate detector priorities across campaigns and check actual starts.
+Keep the resulting priority policy active for the admitted work. A guard
+whose deadline passes while banks are still open needs a live successor.
+Use authenticated local scheduler access for scheduler-universe jobs.
+Keep source-to-detector dispatchers short: once they record the exact
+detector DAG submission, the existing controller can reconcile its outcome.
+Waiting for a child DAG in a vanilla execute slot wastes worker capacity.
+
+Use the existing stage workers in independent, sealed source banks. After
+the deployment's real full-chain pilot, let each bank advance when its own
+prerequisites pass. Keep the complete original GEN preflight, selection and
+normalization per bank. Put completed banks into the cumulative publication
+using the existing identity and exposure checks. Carry unfinished banks in
+the status report separately. A missing SIM response from a bank can bias
+its normalization, so wait for or recover that bank's missing chunks before
+adding its exposure. Preserve the last verified `latest` during recovery.
+
+Budget detector slots, ready jobs and new starts separately across all live
+campaigns. Let a ready bank run while another bank's failed or long-running
+tail is being reconciled. Size the ready queue from measured starts and the
+start-to-refill delay. If many workers share one deployment and resource
+shape, use late materialization for its sealed itemdata. Check both the
+materialized jobs and remaining factory rows. Preserve exact task ownership,
+input pins and site limits before increasing concurrent or queued work.
+Measure throughput by completed and published banks as well as worker starts.
+
+Use the native live-throttle command on the owning schedd for DAGMan 25.10.1
+or later. Check the running manager's startup version. The login client's
+version can differ. Keep the binding in a short subprocess. Record the
+absolute requested limit before the command and require its exact reply and
+the subsequent manager log showing the applied settings. A changed ClassAd or
+a later update timestamp alone cannot verify consumption. Hold the requested
+capacity against the budget if a reply is lost. Continue safe work within the
+remaining capacity. [HTCondor live throttle documentation](https://htcondor.readthedocs.io/en/25.x/automated-workflows/dagman-interaction.html#editing-dag-throttles).
+
+Keep read-only queue and EOS errors retryable at a bounded rate. Classify a
+missing response only after checking that exact job, original request and
+durable outputs. Adopt valid outputs after a lost reply. Retrying a writer
+requires a verified previous attempt and known output state. Record a
+specific integrity or coverage failure against the affected point and its
+input signature, with a repair owner and next condition. A temporary service
+failure belongs in the operational retry status. Review unchanged temporary
+failures again once the source or service is available.
+
+Write successful histogram publication evidence before optional duplicate
+Nano retirement. Read the independent cleanup status in `statuses/finalizer.json`.
+If it needs review, the production operator reconciles the exact retirement
+journal and retained outputs, then arranges cleanup-only recovery. Preserve
+the published point and keep the storage claim until verified retirement is
+recorded. Test a real complete bank through the ordinary plotter and the
+admission of the next bank before leaving a larger queue unattended. Report
+how long the ready work can sustain the measured worker start rate.
 
 ### Native generator precision failures
 

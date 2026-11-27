@@ -77,6 +77,9 @@ class ProductionDagTest(unittest.TestCase):
         self.assertIn('getenv = False', text)
         self.assertIn('periodic_release = False', text)
         self.assertIn('ExitCode != 0', text)
+        self.assertIn('+JobBatchName = "state"', text)
+        control = submit_description(Path('/tmp/state'), 'a'*64, control=True)
+        self.assertIn('+JobBatchName = "controller_state_$(mode)"', control)
 
     def test_dag_items_do_not_use_condor_queue_variable(self):
         dag=build_dag(self.plan)

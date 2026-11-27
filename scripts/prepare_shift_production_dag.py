@@ -58,6 +58,8 @@ def build_dag(plan, batch_size=50):
 
 
 def submit_description(directory, manifest_sha, control=False, suite_tag=None):
+    tag = suite_tag or directory.name
+    batch = f'controller_{tag}_$(mode)' if control else tag
     return '\n'.join([
         'universe = vanilla', f'initialdir = {directory}',
         f'executable = {directory}/bootstrap.sh',
@@ -68,7 +70,7 @@ def submit_description(directory, manifest_sha, control=False, suite_tag=None):
         'request_cpus = 1', f'request_memory = {2000 if control else 4000}',
         'request_disk = 10000000', '+MaxRuntime = 50400',
         '+ShiftProductionSuite = true',
-        f'+ShiftSuiteTag = "{suite_tag or directory.name}"',
+        f'+ShiftSuiteTag = "{tag}"', f'+JobBatchName = "{batch}"',
         'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
         'periodic_release = False',
         'output = logs/$(Cluster).$(Process).out',
@@ -98,7 +100,7 @@ def prepare(directory, plan, bundle_url, bundle_sha):
     # CERN centrally bounds DAGMan scheduler jobs; workers use the account's
     # normal allocation. Never change schedds to evade a site-imposed limit.
     command = ['condor_submit_dag', '-no_submit', '-maxjobs', str(plan['max_workers']),
-               '-maxidle', str(plan['max_workers']), '-batch-name', plan['tag'],
+               '-maxidle', str(plan['max_workers']), '-batch-name', 'controller_' + plan['tag'],
                '-append', '+ShiftProductionController = true', str(directory/'production.dag')]
     subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     for name in ('worker.sub', 'control.sub'):
