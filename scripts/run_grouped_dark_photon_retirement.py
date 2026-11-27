@@ -541,7 +541,7 @@ def prepare_admission(output,controller,controller_seal,qualification,qualificat
         'getenv = False','should_transfer_files = NO','request_cpus = 1','request_memory = 1000MB','request_disk = 1000MB',
         '+JobFlavour = "nextweek"','+MaxRuntime = 604800','+SendCredential = True','+WantIOProxy = True','priority = 1000000',
         'Requirements = '+ ' && '.join('(TARGET.Machine != '+json.dumps(host)+')' for host in config['excluded_hosts']),
-        '+JobBatchName = "SHIFT_DP_qualification_admission"','+ShiftDPStatisticsTask = '+json.dumps(str(output)),
+        '+JobBatchName = "controller_SHIFT_DP_qualification_admission"','+ShiftDPStatisticsTask = '+json.dumps(str(output)),
         'output = '+str(output/'admission.$(ClusterId).$(ProcId).out'),'error = '+str(output/'admission.$(ClusterId).$(ProcId).err'),
         'log = '+str(output/'admission.events.log'),'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
         'on_exit_remove = (ExitBySignal == False) && (ExitCode == 0)','periodic_release = False','queue',''])

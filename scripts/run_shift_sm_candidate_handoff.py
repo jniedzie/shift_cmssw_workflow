@@ -249,7 +249,7 @@ def prepare(config, config_sha256):
         raise ValueError('Incomplete existing handoff requires review; never redraw or overwrite')
     directory, result = validate_preparation(config)
     frozen = validate_frozen(config)
-    batch = config['job_batch_name']
+    batch = config['job_batch_name'].removeprefix('controller_')
     if not re.fullmatch(r'[A-Za-z0-9_.-]+', batch):
         raise ValueError('Use a meaningful plain job batch name')
     eos = config['output_eos_directory'].rstrip('/')
@@ -414,7 +414,8 @@ def prepare(config, config_sha256):
         'universe = scheduler', 'executable = /usr/bin/python3',
         'arguments = -u '+str(watchdog/'monitor_shift_sm_response_benchmark.py')+' '+str(watchdog/'config.json'),
         'initialdir = '+str(watchdog), 'getenv = False', 'environment = "PYTHONDONTWRITEBYTECODE=1"',
-        '+SendCredential = True', '+MaxRuntime = 86400', '+JobBatchName = "'+batch+'_watchdog"',
+        '+SendCredential = True', '+MaxRuntime = 86400',
+        f'+JobBatchName = "{controller_batch_name(batch)}_watchdog"',
         'output = worker.out', 'error = worker.err', 'log = events.log',
         'on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)', 'periodic_release = False', 'queue 1', ''])
     (watchdog/'worker.sub').write_text(watchdog_submit)
@@ -488,27 +489,37 @@ def retire_returned_features(config, manifest):
     save(receipt, record)
 
 
+def controller_batch_name(batch):
+    return 'controller_' + batch.removeprefix('controller_')
+
+
 def submit_once(submit_path, batch, working, label, config_sha256):
     """Submit once; preserve uncertainty instead of producing duplicate jobs."""
     receipt_path, intent_path = working/(label+'_submission.json'), working/(label+'_intent.json')
     binding = dict(submit=pin(submit_path), working_directory=str(working),
-        job_batch_name=batch, configuration_sha256=config_sha256)
+        job_batch_name=controller_batch_name(batch), configuration_sha256=config_sha256)
+    legacy_binding = dict(binding, job_batch_name=batch.removeprefix('controller_'))
     if receipt_path.exists():
         receipt = read(receipt_path)
-        if receipt['binding'] != binding:
+        if receipt['binding'] not in (binding, legacy_binding):
             raise ValueError('Previous submission binding differs')
         return receipt
     if intent_path.exists():
         intent = read(intent_path)
-        if intent['binding'] != binding:
+        if intent['binding'] not in (binding, legacy_binding):
             raise ValueError('Previous submission intent differs')
         raise ValueError('Uncertain previous submission requires native queue/history review; not resubmitted')
-    ads = query('Iwd == '+json.dumps(str(working))+' && JobBatchName == '+json.dumps(batch),
+    names = ', '.join(json.dumps(record['job_batch_name']) for record in (binding, legacy_binding))
+    ads = query('Iwd == '+json.dumps(str(working))+' && member(JobBatchName, {'+names+'})',
         ['ClusterId','ProcId','Iwd','JobBatchName','GlobalJobId','JobStatus'], timeout=45)
     if ads:
         raise ValueError('A job already owns this handoff directory; no duplicate submission')
     save(intent_path, dict(binding=binding, intent_epoch=time.time()))
-    stdout = run_condor(['/usr/bin/condor_submit','-terse',str(submit_path)], cwd=working, timeout=60)
+    # Override the display label on older prepared descriptors without
+    # changing their sealed bytes.
+    stdout = run_condor(['/usr/bin/condor_submit', '-terse', '-append',
+        '+JobBatchName = ' + json.dumps(binding['job_batch_name']), str(submit_path)],
+        cwd=working, timeout=60)
     match = re.fullmatch(r'\s*(\d+)\.0\s*-\s*\1\.0\s*', stdout)
     if not match:
         raise ValueError('Unrecognized native submission response; preserved intent needs review')
@@ -516,7 +527,7 @@ def submit_once(submit_path, batch, working, label, config_sha256):
     ads = query('ClusterId == '+str(cluster),
         ['ClusterId','ProcId','Iwd','JobBatchName','GlobalJobId','JobStatus'], timeout=45)
     if (len(ads) != 1 or ads[0].get('ProcId') != 0 or ads[0].get('Iwd') != str(working)
-            or ads[0].get('JobBatchName') != batch):
+            or ads[0].get('JobBatchName') != binding['job_batch_name']):
         raise ValueError('Actual submitted identity, Iwd or batch name differs')
     receipt = dict(binding=binding, cluster_id=cluster, native_job=ads[0],
         submitted_epoch=time.time(), execution_verified=False)
@@ -533,7 +544,7 @@ def submit(config, manifest):
     manager = output/'response.dag.condor.sub'
     if not manager.exists():
         run_condor(['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','2000','-maxidle','2000',
-            '-autorescue','0','-notification','Never','-batch-name',config['job_batch_name'],
+            '-autorescue','0','-notification','Never','-batch-name',controller_batch_name(config['job_batch_name']),
             '-append','+MaxRuntime = 86400','-append','initialdir = '+str(output),
             '-append','+SendCredential = True',
             '-append','on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',
@@ -754,7 +765,7 @@ def submit_wave(config, manifest):
         run_condor(['/usr/bin/condor_submit_dag','-no_submit',
             '-maxjobs',str(config.get('initial_running_jobs',config.get('maximum_running_jobs',2000))),
             '-maxidle',str(config.get('initial_idle_jobs',config.get('maximum_idle_jobs',2000))),
-            '-autorescue','0','-notification','Never','-batch-name',config['job_batch_name'],
+            '-autorescue','0','-notification','Never','-batch-name',controller_batch_name(config['job_batch_name']),
             '-append','+MaxRuntime = '+str(maximum_runtime),'-append','initialdir = '+str(output),
             '-append','+SendCredential = True',
             '-append','on_exit_hold = (ExitBySignal == True) || (ExitCode != 0)',

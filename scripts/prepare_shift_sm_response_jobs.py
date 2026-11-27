@@ -367,7 +367,7 @@ def prepare(config, output):
         'DAGMAN_MAX_SUBMITS_PER_INTERVAL = 1', 'DAGMAN_USER_LOG_SCAN_INTERVAL = 1',
         'DAGMAN_SUBMIT_DELAY = 1', '']) )
     command=['/usr/bin/condor_submit_dag','-no_submit','-maxjobs','400','-maxidle','32',
-        '-autorescue','0','-notification','Never','-batch-name','SM_response_prospective_20261027_v1',
+        '-autorescue','0','-notification','Never','-batch-name','controller_SM_response_prospective_20261027_v1',
         '-append','+MaxRuntime = 172800','-append','initialdir = '+str(output),
         '-append','+SendCredential = True',str(dag_path)]
     manifest=dict(schema='shift-sm-prospective-native-DAG-v1', benchmark_plan=config['benchmark_plan'],

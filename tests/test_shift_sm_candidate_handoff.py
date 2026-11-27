@@ -350,7 +350,7 @@ class CandidateHandoffTest(unittest.TestCase):
     def test_submit_once_checks_real_iwd_and_does_not_repeat_submission(self):
         sub = self.root/'manager.sub'
         sub.write_text('queue 1\n')
-        ad = dict(ClusterId=123, ProcId=0, Iwd=str(self.root), JobBatchName='SM_test',
+        ad = dict(ClusterId=123, ProcId=0, Iwd=str(self.root), JobBatchName='controller_SM_test',
             GlobalJobId='schedd#123.0#1', JobStatus=1)
         with patch.object(handoff,'query',side_effect=[[],[ad]]), \
                 patch.object(handoff,'run_condor',return_value='123.0 - 123.0\n') as run:
@@ -359,6 +359,12 @@ class CandidateHandoffTest(unittest.TestCase):
         self.assertEqual(result, again)
         self.assertEqual(run.call_count, 1)
         self.assertEqual(run.call_args.kwargs['cwd'], self.root)
+        self.assertIn('+JobBatchName = "controller_SM_test"', run.call_args.args[0])
+
+        legacy = dict(result, binding=dict(result['binding'], job_batch_name='SM_test'))
+        handoff.save(self.root/'manager_submission.json', legacy)
+        with patch.object(handoff, 'run_condor', side_effect=AssertionError('Never resubmit')):
+            self.assertEqual(handoff.submit_once(sub, 'SM_test', self.root, 'manager', 'a'*64), legacy)
 
     def test_wrong_submitted_iwd_preserves_intent_and_blocks_retry(self):
         sub = self.root/'manager.sub'
@@ -501,7 +507,7 @@ class CandidateHandoffTest(unittest.TestCase):
         output = Path(config['output_directory'])
         manager = output/'response.dag.condor.sub'
         manager.write_text('initialdir = '+str(output)+'\nqueue 1\n')
-        ad = dict(ClusterId=123,ProcId=0,Iwd=str(output),JobBatchName=config['job_batch_name'],
+        ad = dict(ClusterId=123,ProcId=0,Iwd=str(output),JobBatchName='controller_'+config['job_batch_name'],
             GlobalJobId='schedd#123.0#1',JobStatus=1)
         with patch.object(handoff,'query',side_effect=[[],[],[ad]]), \
                 patch.object(handoff,'run_condor',return_value='123.0 - 123.0\n') as run:

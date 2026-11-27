@@ -230,7 +230,7 @@ def submission(config, directory, submit_file):
     return result
 
 
-def submit_dag(config, directory, cap):
+def submit_dag(config, directory, cap, stage='reco_histograms'):
     directory = Path(directory)
     max_idle = config.get('dag_max_idle', cap)
     if type(max_idle) is not int or not 1 <= max_idle <= cap:
@@ -242,7 +242,7 @@ def submit_dag(config, directory, cap):
         plan = directory / 'plan.json'
         campaign = read(plan)['campaign'] if plan.is_file() else config.get('campaign_prefix', directory.name)
         command = ['/usr/bin/condor_submit_dag', '-no_submit', '-maxjobs', str(cap),
-            '-batch-name', 'SHIFT_DP_' + campaign + '_reco_histograms',
+            '-batch-name', f'controller_SHIFT_DP_{campaign}_{stage}',
             '-maxidle', str(max_idle), '-append', 'initialdir = ' + str(directory),
             '-append', '+MaxRuntime = 604800',
             '-append', '+ShiftDPStatisticsTask = ' + json.dumps(str(directory))]
@@ -729,7 +729,7 @@ def prepare_gen(config, config_path, index):
             directory / 'prepare_gen.log')
     gen_cap = config.get('gen_workers_per_wave', 10) + 2
     gen_config = dict(config, dag_max_idle=min(config.get('dag_max_idle', gen_cap), gen_cap))
-    return submit_dag(gen_config, stage, gen_cap)
+    return submit_dag(gen_config, stage, gen_cap, stage='GEN')
 
 
 def production_budget(config, preparation):

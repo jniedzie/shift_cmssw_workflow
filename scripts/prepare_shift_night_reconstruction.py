@@ -129,7 +129,7 @@ periodic_release = False
         if role == 'watchdog':
             arguments += ' --watchdog'
         (destination / (role + '.sub')).write_text(common + f'''arguments = {arguments}
-+JobBatchName = "{plan['data']['tag']}_{role}"
++JobBatchName = "controller_{plan['data']['tag']}_{role}"
 output = {role}.out
 error = {role}.err
 log = {role}.events

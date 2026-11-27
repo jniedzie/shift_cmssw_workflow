@@ -763,6 +763,8 @@ class StreamTests(unittest.TestCase):
         self.assertTrue(result['stream_peer_writers_verified'])
         self.assertEqual(result['verified_nonpublishing_peer_controllers'], ['bsm_watchdog'])
         self.assertEqual(result['verified_BSM_writers'], 0)
+        renamed = ad | {'JobBatchName': 'controller_' + ad['JobBatchName']}
+        self.assertTrue(module.verify_stream_peer_writers(policy, quota, [renamed])['stream_peer_writers_verified'])
         # Exact matching remote operations are equally accountable.
         remote = quota | {'remote_account_peer_writer_rows': [ad]}
         self.assertTrue(module.verify_stream_peer_writers(policy, remote, [])['stream_peer_writers_verified'])

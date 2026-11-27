@@ -1152,7 +1152,7 @@ class DagQueueLimits(unittest.TestCase):
             self.assertEqual(arguments[arguments.index('-maxjobs') + 1], '12')
             self.assertEqual(arguments[arguments.index('-maxidle') + 1], '5')
             self.assertEqual(arguments[arguments.index('-batch-name') + 1],
-                             'SHIFT_DP_20261028_DP_m0p7_lab5m_reco_histograms')
+                             'controller_SHIFT_DP_20261028_DP_m0p7_lab5m_reco_histograms')
             self.assertEqual(native.call_args.kwargs['cwd'], directory)
 
     def test_invalid_ready_queue_limit_cannot_submit(self):

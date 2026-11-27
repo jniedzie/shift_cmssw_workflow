@@ -77,7 +77,7 @@ periodic_release = False
         suffix = ' --watchdog' if role == 'watchdog' else ''
         (destination / (role + '.sub')).write_text(common + f'''arguments = {destination}/run_shift_stream_controller.py {destination}{suffix}
 +ShiftStreamWatchdog = {str(role == 'watchdog').lower()}
-+JobBatchName = "{policy['tag']}_{role}"
++JobBatchName = "controller_{policy['tag']}_{role}"
 output = {role}.out
 error = {role}.err
 log = {role}.events

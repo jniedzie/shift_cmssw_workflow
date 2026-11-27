@@ -61,11 +61,13 @@ def install(directory, wrapper_sha256, verified_canary):
     ad = observed[0]
     wrapper = directory / 'finalize.sh'
     batch = ad['JobBatchName']
+    original_batch = batch.removeprefix('controller_')
+    receipt_batch = receipt.get('batch_name', batch).removeprefix('controller_')
     if (ad['ClusterId'] != cluster or ad['ProcId'] != 0 or ad['Owner'] != getpass.getuser()
             or ad['JobUniverse'] != 5 or ad['JobStatus'] not in (1, 2)
             or Path(ad['Iwd']) != directory or Path(ad['Cmd']) != wrapper
-            or not (batch.startswith('DATA_Run2023D_') and 'Finalize' in batch)
-            or batch != receipt.get('batch_name', batch) or sha256(wrapper) != wrapper_sha256):
+            or not (original_batch.startswith('DATA_Run2023D_') and 'Finalize' in original_batch)
+            or original_batch != receipt_batch or sha256(wrapper) != wrapper_sha256):
         raise ValueError('Publisher ownership, state or reviewed wrapper changed')
     arguments = shlex.split(ad.get('Arguments') or ad['Args'])
     worklist = directory / 'finalizer_worklist.json'

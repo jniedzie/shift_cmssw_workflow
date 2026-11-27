@@ -411,6 +411,17 @@ def accounted_publication_bindings(policy, capacity=None):
     return bindings
 
 
+def matches_peer_native_ad(ad, expected):
+    for key, value in expected.items():
+        observed = ad.get(key)
+        if key == 'JobBatchName' and isinstance(observed, str) and isinstance(value, str):
+            observed = observed.removeprefix('controller_')
+            value = value.removeprefix('controller_')
+        if observed != value:
+            return False
+    return True
+
+
 def verify_stream_peer_writers(policy, observation, ads):
     """Verify the native writers covered by the shared QCD allowance."""
     capacity = observation.get('external_storage_commitments', {}).get('stream_capacity')
@@ -445,8 +456,7 @@ def verify_stream_peer_writers(policy, observation, ads):
                          and (ad.get('ClusterId'), ad.get('ProcId')) ==
                              (binding['expected_native']['ClusterId'], binding['expected_native']['ProcId'])))]
         if peers:
-            if (not any(all(ad.get(key) == value for key, value in binding['expected_native'].items())
-                        for binding in peers)
+            if (not any(matches_peer_native_ad(ad, binding['expected_native']) for binding in peers)
                     or ad.get('ShiftStreamTask') or ad.get('ShiftBSMPoint')
                     or ad.get('ShiftSignalValidationOnly') is True or ad.get('DAGManJobId')
                     or peers[0]['name'] in verified_nonpublishing):
@@ -457,7 +467,7 @@ def verify_stream_peer_writers(policy, observation, ads):
             if ad.get('Iwd') == binding['expected_native']['Iwd']
             or ad.get('DAGManJobId') == binding['expected_native']['DAGManJobId']]
         publication = next((binding for binding in publication_peers
-            if all(ad.get(key) == value for key, value in binding['expected_native'].items())), None)
+            if matches_peer_native_ad(ad, binding['expected_native'])), None)
         if publication_peers and publication is None:
             return result | {'stream_peer_writer_error': 'Accounted publication worker DAG, point or launch changed'}
         directory = ad.get('Iwd') or ''
@@ -470,7 +480,7 @@ def verify_stream_peer_writers(policy, observation, ads):
             controller = ('supervisor' in batch.lower() or '/supervisor' in directory
                           or '--config ' in arguments or '--controller-config ' in arguments
                           or '--action controller' in arguments)
-            if controller and not any(all(ad.get(key) == value for key, value in binding['expected_native'].items())
+            if controller and not any(matches_peer_native_ad(ad, binding['expected_native'])
                                       for binding in bindings):
                 return result | {'stream_peer_writer_error': 'An unreviewed BSM controller is not bound to its pinned guard'}
             if not controller and any(directory == root or directory.startswith(root.rstrip('/') + '/')
