@@ -278,13 +278,14 @@ def prepare(configuration, output, scripts=None):
         minimum_floor = 50000000000 if fresh is not None else 90000000000
         if config.get('minimum_eos_free_bytes', 100000000000) < minimum_floor:
             raise ValueError('The unified-source storage floor is below the shared protected minimum')
-        if (type(config.get('detector_workers_per_point', 10)) is not int
-                or not 1 <= config.get('detector_workers_per_point', 10) <= 100
-                or type(config.get('dag_max_idle', 5)) is not int
-                or not 1 <= config.get('dag_max_idle', 5) <= 5):
-            raise ValueError('Unified source requires bounded workers and at most five ready nodes')
+        detector_workers = config.get('detector_workers_per_point', 10)
+        if type(detector_workers) is not int or not 1 <= detector_workers <= 100:
+            raise ValueError('Unified source detector workers must be between 1 and 100')
+        idle_limit = config.get('dag_max_idle', min(5, detector_workers + 2))
+        if type(idle_limit) is not int or not 1 <= idle_limit <= detector_workers + 2:
+            raise ValueError('Unified source ready queue must fit its submitted-node budget')
         config.setdefault('detector_workers_per_point', 10)
-        config.setdefault('dag_max_idle', 5)
+        config.setdefault('dag_max_idle', idle_limit)
     if mechanism in REFERENCE_MECHANISMS:
         from prepare_dark_photon_production import prior_gen_identities
         prior_gen_identities(config['prior_inventories'])

@@ -444,8 +444,8 @@ def detector_category_ceiling(args):
     ceiling = getattr(args, 'detector_category_ceiling', None)
     if ceiling is None:
         return args.detector_workers
-    if type(ceiling) is not int or not args.detector_workers <= ceiling <= 600:
-        raise ValueError('Detector category ceiling must cover the initial workers and be at most600')
+    if type(ceiling) is not int or not args.detector_workers <= ceiling <= 1000:
+        raise ValueError('Detector category ceiling must cover the initial workers and be at most 1000')
     return ceiling
 
 

@@ -96,6 +96,14 @@ class WorkerRedistribution(unittest.TestCase):
             self.config['detector_worker_redistribution']['total_workers'] = total
             with self.assertRaises(ValueError): controller.validate_capacity(self.config)
 
+    def test_ready_queue_scales_with_the_reviewed_worker_budget(self):
+        self.config['dag_max_idle'] = 75
+        controller.validate_capacity(self.config)
+        for invalid in (151, 0, True):
+            self.config['dag_max_idle'] = invalid
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(ValueError, 'ready queue'):
+                controller.validate_capacity(self.config)
+
     def test_future_category_option_does_not_change_default_or_initial_worker_count(self):
         import prepare_dark_photon_production as preparer
         args = SimpleNamespace(detector_workers=150)
@@ -103,7 +111,9 @@ class WorkerRedistribution(unittest.TestCase):
         args.detector_category_ceiling = 600
         self.assertEqual(preparer.detector_category_ceiling(args), 600)
         self.assertEqual(args.detector_workers, 150)
-        for invalid in (149, 601, True):
+        args.detector_category_ceiling = 1000
+        self.assertEqual(preparer.detector_category_ceiling(args), 1000)
+        for invalid in (149, 1001, True):
             args.detector_category_ceiling = invalid
             with self.assertRaises(ValueError): preparer.detector_category_ceiling(args)
 

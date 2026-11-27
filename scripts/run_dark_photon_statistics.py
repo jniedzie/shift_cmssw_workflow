@@ -100,13 +100,16 @@ def validate_capacity(config):
             not 1 <= workers <= 300 or not 1 <= waves <= 8 or workers * waves > 2400):
         raise ValueError('Reviewed capacity permits at most eight waves and 2400 detector workers')
     redistribution = config.get('detector_worker_redistribution')
+    submitted_limit = workers if redistribution else workers + 2
+    idle = config.get('dag_max_idle', submitted_limit)
+    if type(idle) is not int or not 1 <= idle <= submitted_limit:
+        raise ValueError('Detector ready queue must fit its initial submitted-node budget')
     if redistribution is not None:
         total = redistribution.get('total_workers')
         ceiling = redistribution.get('future_category_ceiling')
         if (type(total) is not int or not workers * waves <= total <= 1000 or
-                type(ceiling) is not int or not workers <= ceiling <= total or
-                config.get('dag_max_idle') != 5):
-            raise ValueError('Redistribution permits a 1000-worker budget with the five-job start queue')
+                type(ceiling) is not int or not workers <= ceiling <= total):
+            raise ValueError('Redistribution permits a 1000-worker budget')
     breakdown = config.get('fixed_publication_breakdown', {})
     if 'global_2400_inflight_detector_bound_bytes' in breakdown:
         if (breakdown['global_2400_inflight_detector_bound_bytes'] < workers * waves * 9900801
@@ -724,7 +727,9 @@ def prepare_gen(config, config_path, index):
             *config['dependencies'].keys(), '--prior-inventories', *config['prior_inventories'],
             '--workspace', config['workspace'], '--output', stage, '--gen-workers', str(config.get('gen_workers_per_wave',10))],
             directory / 'prepare_gen.log')
-    return submit_dag(config, stage, config.get('gen_workers_per_wave',10)+2)
+    gen_cap = config.get('gen_workers_per_wave', 10) + 2
+    gen_config = dict(config, dag_max_idle=min(config.get('dag_max_idle', gen_cap), gen_cap))
+    return submit_dag(gen_config, stage, gen_cap)
 
 
 def production_budget(config, preparation):
@@ -1836,7 +1841,7 @@ def redistribute_detector_workers(config, state, worklist):
             raise ValueError('Worker allocation manager differs from its native submission')
         current, idle = ad.get('DAGMan_MaxJobs'), ad.get('DAGMan_MaxIdle')
         if (type(current) is not int or not 1 <= current <= policy['total_workers'] + 2 or
-                type(idle) is not int or not 1 <= idle <= 5):
+                type(idle) is not int or not 1 <= idle <= config.get('dag_max_idle', baseline)):
             raise ValueError('Worker allocation requires bounded initialized native throttles')
         with (directory / 'pipeline.dag.dagman.out').open() as stream:
             startup = stream.read(65536)
