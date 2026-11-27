@@ -268,6 +268,50 @@ class IdleHostGuard(unittest.TestCase):
                 self.assertTrue(json.loads(Path(paths[0]).read_text())['complete'])
                 Path(paths[0]).unlink()
 
+    def test_capped_priority_refills_only_exact_detectors_when_a_slot_frees(self):
+        ready = self.priority_worker()
+        running = dict(ready, ClusterId=101, JobStatus=2, JobPrio=3000, DAGManJobId=51)
+        unknown_parent = dict(ready, ClusterId=99, DAGManJobId=52)
+        finalizer = dict(ready, ClusterId=98, Cmd=ready['Iwd']+'/finalize_worker.sh')
+        self.config.update(minimum_worker_priority=3000, maximum_prioritized_detector_workers=1,
+                           priority_detector_managers=[ready['DAGManJobId']])
+        with patch.object(guard.native,'query_account', side_effect=[
+                        [ready, running, unknown_parent, finalizer],
+                        [ready, unknown_parent, finalizer]]) as account, \
+             patch.object(guard.native,'run_condor', return_value='1 matching jobs.') as edit, \
+             patch.object(guard.native,'query', return_value=[dict(ready, JobPrio=3000)]):
+            guard.step(self.config, 1)
+            edit.assert_not_called()
+            guard.step(self.config, 2)
+        edit.assert_called_once()
+        self.assertIn('ClusterId == 100', edit.call_args.args[0][-3])
+        self.assertNotIn('ClusterId == 99', edit.call_args.args[0][-3])
+        self.assertNotIn('ClusterId == 98', edit.call_args.args[0][-3])
+        self.assertIn('regexp("/validation/bsm",Iwd)', account.call_args.args[1])
+
+    def test_scheduler_side_priority_uses_only_its_pinned_local_schedd(self):
+        schedd = 'bigbird26.cern.ch'
+        ready = dict(self.priority_worker(), GlobalJobId=schedd+'#100.0#123')
+        self.config.update(minimum_worker_priority=3000, maximum_prioritized_detector_workers=1,
+                           priority_local_schedd=schedd, priority_detector_managers=[ready['DAGManJobId']])
+        spool = self.directory/'native_spool'
+        spool.touch()
+        with patch.object(guard.native,'SCHEDD_ADDRESS_FILE',str(spool)), \
+             patch.object(guard.native,'SCHEDD_AD_FILE',str(spool)), \
+             patch.object(guard.native,'query_account') as account, \
+             patch.object(guard.native,'query',side_effect=[
+                 [dict(ready, GlobalJobId='unexpected#100.0#123')],
+                 [ready], [dict(ready, JobPrio=3000)]]) as query, \
+             patch.object(guard.native,'run_condor',return_value='1 matching jobs.') as edit:
+            with self.assertRaisesRegex(ValueError, 'outside the pinned'):
+                guard.step(self.config, 1)
+            edit.assert_not_called()
+            guard.step(self.config, 2)
+        account.assert_not_called()
+        self.assertNotIn('-name', edit.call_args.args[0])
+        self.assertIn(ready['GlobalJobId'], edit.call_args.args[0][-3])
+        self.assertIsNone(query.call_args.kwargs['schedd'])
+
     def test_finalizer_priority_uses_exact_worker_path_without_host_or_retry_scope(self):
         before=self.priority_worker()
         before['Cmd']=before['Iwd']+'/finalize_worker.sh'

@@ -8,6 +8,7 @@ queue and submitted-node ceilings reduce new starts without evicting payloads.
 """
 import argparse
 import ast
+from collections import Counter
 import datetime
 import errno
 import fcntl
@@ -28,7 +29,7 @@ ATTRIBUTES = ['ClusterId', 'ProcId', 'Owner', 'JobStatus', 'Iwd', 'Cmd',
               'EnteredCurrentStatus', 'JobCurrentStartDate']
 ATTRIBUTES += ['Args', 'Err', 'Out', 'ExitCode', 'ExitBySignal', 'JobStartDate',
                'MaxRuntime', 'TransferOutput', 'PeriodicRelease']
-ATTRIBUTES += ['JobPrio']
+ATTRIBUTES += ['JobPrio', 'GlobalJobId']
 
 
 def utc():
@@ -81,7 +82,23 @@ def validate_config(config):
     if any(not re.fullmatch(r'[A-Za-z0-9.-]+[.]cern[.]ch', host) for host in hosts):
         raise ValueError('Invalid failed execute machine')
     priority = config.get('minimum_worker_priority')
-    if priority is not None and (type(priority) is not int or not 0 <= priority <= 50):
+    priority_cap = config.get('maximum_prioritized_detector_workers')
+    local_schedd = config.get('priority_local_schedd')
+    if local_schedd is not None and (priority_cap is None
+            or not isinstance(local_schedd, str)
+            or not re.fullmatch(r'[A-Za-z0-9_.-]+', local_schedd)
+            or hosts or config.get('infrastructure_recovery')
+            or config.get('manager_idle_ceiling') or config.get('manager_job_ceilings')):
+        raise ValueError('Local scheduler mode is only for a bounded priority window')
+    if priority_cap is not None:
+        parents = config.get('priority_detector_managers')
+        if (type(priority_cap) is not int or not 1 <= priority_cap <= 100
+                or type(priority) is not int or not 1 <= priority <= 3000
+                or not isinstance(parents, list) or not parents
+                or any(type(value) is not int or value <= 0 for value in parents)
+                or len(set(parents)) != len(parents)):
+            raise ValueError('A bounded detector window requires exact managers, priority and worker limit')
+    elif priority is not None and (type(priority) is not int or not 0 <= priority <= 50):
         raise ValueError('Worker priority floor must be an integer between0 and50')
     if not 30 <= config['interval_seconds'] <= 300:
         raise ValueError('Guard poll interval is outside its reviewed bounds')
@@ -160,7 +177,30 @@ def raise_idle_worker_priority(config, ads, sequence, pending=None, previous=Non
     floor = config.get('minimum_worker_priority')
     if floor is None:
         return []
+    cap = config.get('maximum_prioritized_detector_workers')
+    if cap is not None:
+        managers = set(config['priority_detector_managers'])
+        # Count idle and running jobs from all BSM detector banks. A held or
+        # transferring job retains its place because it can return to running.
+        detectors = [ad for ad in ads if ad.get('Owner') == config['owner']
+                     and ad.get('JobUniverse') == 5
+                     and '/validation/bsm' in ad.get('Iwd', '')
+                     and ad.get('Cmd') == ad.get('Iwd', '') + '/detector_worker.sh'
+                     and ad.get('JobStatus') in (1, 2, 5, 6, 7)]
+        if any(type(ad.get('JobPrio')) is not int for ad in detectors):
+            raise ValueError('Detector priority is unknown; no priority edit')
+        spare = cap - sum(ad['JobPrio'] >= floor for ad in detectors)
+        if spare <= 0:
+            return []
+        remaining = Counter(ad.get('DAGManJobId') for ad in detectors)
+        # Prefer closing an existing bank. The same window refills as earlier
+        # jobs finish, without preempting any other job.
+        ads = sorted((ad for ad in detectors if ad.get('DAGManJobId') in managers
+                      and priority_eligible(config, ad) and ad['JobPrio'] < floor),
+                     key=lambda ad: (remaining[ad['DAGManJobId']], ad['ClusterId'], ad['ProcId']))[:spare]
     fields = ('ClusterId', 'ProcId', 'Owner', 'JobUniverse', 'Iwd', 'Cmd', 'DAGManJobId', 'JobPrio')
+    if config.get('priority_local_schedd'):
+        fields += ('GlobalJobId',)
     selected = []
     for ad in ads:
         if not priority_eligible(config, ad):
@@ -190,13 +230,14 @@ def raise_idle_worker_priority(config, ads, sequence, pending=None, previous=Non
     for ad in selected:
         groups.setdefault(ad['_queried_schedd'], []).append(ad)
     for schedd, rows in groups.items():
+        local = config.get('priority_local_schedd') == schedd
         for index in range(0, len(rows), 100):
             batch = rows[index:index+100]
             identities = ['('+' && '.join(name+' == '+json.dumps(ad[name]) for name in fields)+')'
                           for ad in batch]
             constraint = 'JobStatus == 1 && ('+' || '.join(identities)+')'
-            command = ['/usr/bin/condor_qedit', '-pool', config['condor_pool'], '-name', schedd,
-                       '-constraint', constraint, 'JobPrio', str(floor)]
+            scheduler = [] if local else ['-pool', config['condor_pool'], '-name', schedd]
+            command = ['/usr/bin/condor_qedit', *scheduler, '-constraint', constraint, 'JobPrio', str(floor)]
             action = dict(schedd=schedd, constraint=constraint, intent_utc=utc(), output=None, readback=[])
             receipt['actions'].append(action)
             save(path, receipt)
@@ -215,7 +256,8 @@ def raise_idle_worker_priority(config, ads, sequence, pending=None, previous=Non
             expected = {(ad['ClusterId'], ad['ProcId']): ad for ad in batch}
             for attempt in range(3):
                 after = native.query(identity_constraint, ATTRIBUTES,
-                                     pool=config['condor_pool'], schedd=schedd, timeout=50)
+                                     pool=None if local else config['condor_pool'],
+                                     schedd=None if local else schedd, timeout=50)
                 seen = set()
                 unresolved = []
                 action['readback'] = []
@@ -660,11 +702,26 @@ def step(config, sequence, previous=None):
     if config.get('infrastructure_recovery'):
         constraint = ('(DAGManJobId > 0 && regexp("/detector_worker[.]sh$", Cmd)) '
                       '|| (JobStatus == 2 && JobUniverse == 7 && regexp("/condor_dagman$", Cmd))')
-    if config.get('minimum_worker_priority') is not None:
+    if config.get('maximum_prioritized_detector_workers') is not None:
+        constraint += (' || (JobUniverse == 5 && regexp("/validation/bsm",Iwd) '
+                       '&& regexp("/detector_worker[.]sh$",Cmd))')
+    elif config.get('minimum_worker_priority') is not None:
         constraint += (' || (JobStatus == 1 && JobUniverse == 5 && DAGManJobId > 0 '
                        '&& regexp("/finalize_worker[.]sh$", Cmd))')
-    ads = native.query_account(config['owner'], constraint, ATTRIBUTES,
-                               pool=config['condor_pool'], timeout=50)
+    local = config.get('priority_local_schedd')
+    if local:
+        if not all(Path(name).is_file() for name in (native.SCHEDD_ADDRESS_FILE, native.SCHEDD_AD_FILE)):
+            raise ValueError('Local priority guard requires native schedd spool metadata')
+        owned = 'Owner == ' + json.dumps(config['owner']) + ' && (' + constraint + ')'
+        ads = native.query(owned, ATTRIBUTES, timeout=50)
+        for ad in ads:
+            prefix = f"{local}#{ad['ClusterId']}.{ad['ProcId']}#"
+            if not ad.get('GlobalJobId', '').startswith(prefix):
+                raise ValueError('Native job is outside the pinned local scheduler')
+            ad['_queried_schedd'] = local
+    else:
+        ads = native.query_account(config['owner'], constraint, ATTRIBUTES,
+                                   pool=config['condor_pool'], timeout=50)
     pending_priority = {}
     priority_receipts = raise_idle_worker_priority(config, ads, sequence, pending_priority, previous)
     manager_receipts = throttle_managers(config, ads, sequence)
@@ -818,7 +875,8 @@ def main():
                     save(root/'state.json',dict(result,complete=True,reason='Watched production and publication finished'))
                     return
                 time.sleep(config['interval_seconds'])
-            save(root / 'state.json', dict(result,checked_utc=utc(),complete=not bool(config.get('infrastructure_recovery')),error=None,
+            supervised = config.get('infrastructure_recovery') or config.get('maximum_prioritized_detector_workers')
+            save(root / 'state.json', dict(result,checked_utc=utc(),complete=not bool(supervised),error=None,
                                           reason='Guard runtime finished; preserve any pending or blocked production evidence'))
         except Exception as error:
             save(root / 'state.json', dict(result, checked_utc=utc(), complete=False,
